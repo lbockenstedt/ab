@@ -1,0 +1,4 @@
+.env
+__pycache__/
+venv/
+processed_issues.json

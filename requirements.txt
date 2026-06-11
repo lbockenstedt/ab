@@ -1,0 +1,8 @@
+PyGithub
+ollama
+gitpython
+python-dotenv
+fastapi
+uvicorn[standard]
+jinja2
+requests

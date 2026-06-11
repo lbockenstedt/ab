@@ -1,0 +1,156 @@
+import os, json, time, tempfile, threading, requests
+from datetime import datetime
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, Form
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import RedirectResponse
+from github import Github
+import ollama
+import git
+
+load_dotenv()
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+gh = Github(os.getenv("GITHUB_TOKEN"))
+
+state = {
+    "status": "Idle", "active_llm": "Unknown", "local_online": False,
+    "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
+    "processed": [], "force_cloud": False
+}
+STATE_FILE = "processed_issues.json"
+
+def load_config():
+    with open("config.json", "r") as f: return json.load(f)
+def load_processed():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f: return json.load(f)
+    return []
+def save_processed(processed):
+    with open(STATE_FILE, "w") as f: json.dump(processed, f)
+
+def trigger_infrastructure_update():
+    url = os.getenv("UPDATE_API_URL")
+    if not url or "your-netbox" in url: return "URL not configured"
+    try:
+        resp = requests.post(url, json={}, timeout=10)
+        return "SUCCESS: Sync Triggered" if resp.status_code == 200 else f"FAILED: {resp.status_code}"
+    except Exception as e: return f"ERROR: {str(e)}"
+
+def heartbeat_worker():
+    while True:
+        local_url = os.getenv("LOCAL_OLLAMA_URL")
+        try:
+            requests.get(f"{local_url}/api/tags", timeout=2)
+            state["local_online"] = True
+        except: state["local_online"] = False
+        time.sleep(5)
+
+def apply_ai_fix(repo_path, issue_body):
+    l_mod, c_mod = os.getenv("LOCAL_OLLAMA_MODEL"), os.getenv("CLOUD_OLLAMA_MODEL")
+    l_url, c_url = os.getenv("LOCAL_OLLAMA_URL"), os.getenv("CLOUD_OLLAMA_URL")
+    prompt = f"Issue: {issue_body}\n\nProvide the corrected code. Format exactly as:\nFILE: path/to/file\nCODE:\n\`\`\`\ncode\n\`\`\`"
+
+    if state["force_cloud"]:
+        try:
+            state["active_llm"] = f"Cloud ({c_url})"
+            return ollama.Client(host=c_url).chat(model=c_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
+        except Exception as e: raise Exception(f"Cloud LLM failed: {e}")
+
+    try:
+        state["active_llm"] = f"Local ({l_url})"
+        return ollama.Client(host=l_url).chat(model=l_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
+    except Exception as e:
+        try:
+            state["active_llm"] = f"Cloud ({c_url})"
+            return ollama.Client(host=c_url).chat(model=c_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
+        except Exception as e_c: raise Exception(f"Both LLMs failed: {e_c}")
+
+def parse_and_apply(content, repo_path):
+    parts = content.split("FILE: ")
+    for part in parts[1:]:
+        lines = part.split("\n")
+        filepath = lines[0].strip()
+        try:
+            code_block = part[part.find("```")+3 : part.rfind("```")]
+            with open(os.path.join(repo_path, filepath), "w") as f: f.write(code_block.strip())
+        except: pass
+
+def poller_worker():
+    global state
+    while True:
+        try:
+            load_dotenv(override=True)
+            config = load_config()
+            state["status"] = "Scanning"
+            state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            processed = load_processed()
+            gh_current = Github(os.getenv("GITHUB_TOKEN"))
+            for repo_name in config["monitored_repos"]:
+                state["current_task"] = f"Checking {repo_name}"
+                repo_obj = gh_current.get_repo(repo_name)
+                issues = repo_obj.get_issues(labels=["automated-fix"], state="open")
+                for issue in issues:
+                    issue_id = f"{repo_name}:{issue.number}"
+                    if issue_id in processed: continue
+                    state["current_task"] = f"Fixing {issue_id}"
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        path = os.path.join(tmp_dir, "repo")
+                        url = repo_obj.clone_url.replace("https://", f"https://{os.getenv('GITHUB_TOKEN')}@")
+                        repo_git = git.Repo.clone_from(url, path)
+                        fix_code = apply_ai_fix(path, issue.body)
+                        parse_and_apply(fix_code, path)
+                        repo_git.git.add(A=True)
+                        repo_git.index.commit(f"AI Fix #{issue.number}")
+                        if repo_name in config["trusted_repos"]: repo_git.remotes.origin.push()
+                        else:
+                            branch = f"ai-fix-issue-{issue.number}"
+                            repo_git.create_head(branch).checkout()
+                            repo_git.remotes.origin.push(branch)
+                            repo_obj.create_pull(title=f"AI Fix #{issue.number}", body="Auto-fix", head=branch, base=config["default_branch"])
+                    state["api_status"] = trigger_infrastructure_update()
+                    processed.append(issue_id)
+                    save_processed(processed)
+            state["processed"] = processed
+            state["status"] = "Idle"
+            state["current_task"] = "None"
+        except Exception as e: state["status"] = f"Error: {str(e)}"
+        time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 300)))
+
+@app.get("/")
+async def dashboard(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request, "view": "status", "state": state})
+
+@app.get("/settings")
+async def settings_page(request: Request):
+    load_dotenv(override=True)
+    env_settings = {k: os.getenv(k) for k in os.environ if not k.startswith("_")}
+    config = load_config()
+    return templates.TemplateResponse("index.html", {"request": request, "view": "settings", "settings": {**env_settings, **config}})
+
+@app.post("/save_settings")
+async def save_settings(request: Request):
+    form_data = await request.form()
+    data = dict(form_data)
+    config_data = {
+        "monitored_repos": [x.strip() for x in data.get("monitored_repos", "").split(",") if x.strip()],
+        "trusted_repos": [x.strip() for x in data.get("trusted_repos", "").split(",") if x.strip()],
+        "default_branch": data.get("default_branch", "main")
+    }
+    with open(".env", "w") as f:
+        for k, v in data.items():
+            if k not in config_data: f.write(f"{k}={v}\n")
+    with open("config.json", "w") as f: json.dump(config_data, f, indent=2)
+    return RedirectResponse(url="/settings", status_code=303)
+
+@app.post("/toggle_cloud")
+async def toggle_cloud():
+    state["force_cloud"] = not state["force_cloud"]
+    return RedirectResponse(url="/", status_code=303)
+
+threading.Thread(target=heartbeat_worker, daemon=True).start()
+threading.Thread(target=poller_worker, daemon=True).start()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
