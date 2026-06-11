@@ -21,16 +21,6 @@ load_dotenv()
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
-# Validate environment on startup
-REQUIRED_ENV = ["GITHUB_TOKEN", "LOCAL_OLLAMA_URL", "LOCAL_OLLAMA_MODEL"]
-missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
-if missing:
-    logger.error(f"MISSING CRITICAL ENVIRONMENT VARIABLES: {', '.join(missing)}. The bot will not function correctly.")
-else:
-    logger.info("Environment variables validated successfully.")
-
-gh = Github(os.getenv("GITHUB_TOKEN", ""))
-
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False,
     "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
@@ -39,11 +29,17 @@ state = {
 STATE_FILE = "processed_issues.json"
 
 def load_config():
-    with open("config.json", "r") as f: return json.load(f)
+    try:
+        with open("config.json", "r") as f: return json.load(f)
+    except: return {"monitored_repos": [], "trusted_repos": [], "default_branch": "main"}
+
 def load_processed():
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f: return json.load(f)
+        try:
+            with open(STATE_FILE, "r") as f: return json.load(f)
+        except: return []
     return []
+
 def save_processed(processed):
     with open(STATE_FILE, "w") as f: json.dump(processed, f)
 
@@ -59,8 +55,10 @@ def heartbeat_worker():
     while True:
         local_url = os.getenv("LOCAL_OLLAMA_URL")
         try:
-            requests.get(f"{local_url}/api/tags", timeout=2)
-            state["local_online"] = True
+            if local_url:
+                requests.get(f"{local_url}/api/tags", timeout=2)
+                state["local_online"] = True
+            else: state["local_online"] = False
         except: state["local_online"] = False
         time.sleep(5)
 
@@ -107,40 +105,61 @@ def poller_worker():
                 self_repo = git.Repo(os.getcwd())
                 self_repo.remotes.origin.pull()
             except: pass
+
             config = load_config()
             state["status"] = "Scanning"
             state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             processed = load_processed()
-            gh_current = Github(os.getenv("GITHUB_TOKEN", ""))
+
+            token = os.getenv("GITHUB_TOKEN")
+            if not token:
+                raise Exception("GITHUB_TOKEN is missing from .env")
+
+            gh_current = Github(token)
             bot_user = gh_current.get_user().login
+
             for repo_name in config["monitored_repos"]:
                 state["current_task"] = f"Checking {repo_name}"
                 repo_obj = gh_current.get_repo(repo_name)
                 is_owner = repo_obj.owner.login == bot_user
                 issues = repo_obj.get_issues(labels=["automated-fix"], state="open")
+
                 for issue in issues:
                     issue_id = f"{repo_name}:{issue.number}"
                     if issue_id in processed: continue
+
                     state["current_task"] = f"Fixing {issue_id}"
+                    logger.info(f"Processing issue {issue_id}")
+
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         path = os.path.join(tmp_dir, "repo")
-                        url = repo_obj.clone_url.replace("https://", f"https://{os.getenv('GITHUB_TOKEN', '')}@")
+                        url = repo_obj.clone_url.replace("https://", f"https://{token}@")
                         repo_git = git.Repo.clone_from(url, path)
+
                         fix_code = apply_ai_fix(path, issue.body)
                         parse_and_apply(fix_code, path)
+
                         repo_git.git.add(A=True)
                         commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
                         repo_git.index.commit(commit_msg)
+                        logger.info(f"Committed changes: {commit_msg}")
+
                         if repo_name in config["trusted_repos"] and is_owner:
+                            logger.info(f"Owner identified. Pushing directly to main for {repo_name}...")
                             repo_git.remotes.origin.push()
+                            logger.info("Direct push successful.")
                         else:
                             branch = f"ai-fix-issue-{issue.number}"
+                            logger.info(f"Pushing to new branch: {branch}")
                             repo_git.create_head(branch).checkout()
                             repo_git.remotes.origin.push(branch)
                             repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}", head=branch, base=config["default_branch"])
+                            logger.info(f"Pull Request created for {repo_name}")
+
                     state["api_status"] = trigger_infrastructure_update()
                     processed.append(issue_id)
                     save_processed(processed)
+
             state["processed"] = processed
             state["status"] = "Idle"
             state["current_task"] = "None"
@@ -162,26 +181,50 @@ async def get_logs(request: Request):
     except Exception as e: logs = f"Error reading logs: {e}"
     return templates.TemplateResponse("index.html", {"request": request, "view": "logs", "logs": logs, "state": state})
 
+DEFAULT_ENV = {
+    "GITHUB_TOKEN": "",
+    "LOCAL_OLLAMA_MODEL": "gemma4:31b-coding-mtp-bf16",
+    "CLOUD_OLLAMA_MODEL": "gemma4:31b-cloud",
+    "LOCAL_OLLAMA_URL": "http://172.16.1.100:11434",
+    "CLOUD_OLLAMA_URL": "",
+    "POLL_INTERVAL_SECONDS": "3600",
+    "UPDATE_API_URL": ""
+}
+
 @app.get("/settings")
 async def settings_page(request: Request):
     load_dotenv(override=True)
-    env_settings = {k: os.getenv(k) for k in os.environ if not k.startswith("_")}
+    # Start with defaults, then override with actual env vars
+    settings = DEFAULT_ENV.copy()
+    for k in DEFAULT_ENV:
+        val = os.getenv(k)
+        if val: settings[k] = val
+
     config = load_config()
-    return templates.TemplateResponse("index.html", {"request": request, "view": "settings", "settings": {**env_settings, **config}})
+    return templates.TemplateResponse("index.html", {"request": request, "view": "settings", "settings": {**settings, **config}})
 
 @app.post("/save_settings")
 async def save_settings(request: Request):
     form_data = await request.form()
     data = dict(form_data)
+
+    # Separate Config from Env
     config_data = {
         "monitored_repos": [x.strip() for x in data.get("monitored_repos", "").split(",") if x.strip()],
         "trusted_repos": [x.strip() for x in data.get("trusted_repos", "").split(",") if x.strip()],
         "default_branch": data.get("default_branch", "main")
     }
+
+    # Write updated .env
     with open(".env", "w") as f:
         for k, v in data.items():
-            if k not in config_data: f.write(f"{k}={v}\n")
-    with open("config.json", "w") as f: json.dump(config_data, f, indent=2)
+            if k not in config_data:
+                f.write(f"{k}={v}\n")
+
+    # Write updated config.json
+    with open("config.json", "w") as f:
+        json.dump(config_data, f, indent=2)
+
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/toggle_cloud")

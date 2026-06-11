@@ -4,22 +4,39 @@
     <title>BugFixer Dashboard</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2">
     <meta http-equiv="refresh" content="20">
+    <style>
+        .nav-tabs { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; }
+        .tab { padding: 10px 20px; text-decoration: none; color: black; border-radius: 5px; font-weight: bold; }
+        .tab.active { background: #007bff; color: white; }
+        .card { border: 1px solid #ccc; padding: 20px; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 800px; margin: auto; }
+        .setting-row { margin-bottom: 15px; display: flex; flex-direction: column; }
+        .setting-row label { font-weight: bold; margin-bottom: 5px; }
+        .setting-row input { padding: 8px; width: 100%; box-sizing: border-box; }
+        .btn-save { width: 100%; background: #007bff; color: white; padding: 12px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 1em; }
+        .btn-toggle { width: 100%; padding: 10px 20px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; color: white; }
+    </style>
 </head>
 <body style="background-color: #f4f4f9;">
     <h1 style="text-align: center;">🤖 BugFixer Control Panel</h1>
-    <div style="display: flex; gap: 10px; justify-content: center; margin-bottom: 20px;">
-        <a href="/" style="padding: 10px 20px; background: {{ '#007bff' if view == 'status' else '#ddd' }}; color: {{ 'white' if view == 'status' else 'black' }}; text-decoration: none; border-radius: 5px;">Dashboard</a>
-        <a href="/logs" style="padding: 10px 20px; background: {{ '#007bff' if view == 'logs' else '#ddd' }}; color: {{ 'white' if view == 'logs' else 'black' }}; text-decoration: none; border-radius: 5px;">Logs</a>
-        <a href="/settings" style="padding: 10px 20px; background: {{ '#007bff' if view == 'settings' else '#ddd' }}; color: {{ 'white' if view == 'settings' else 'black' }}; text-decoration: none; border-radius: 5px;">Settings</a>
+
+    <div class="nav-tabs">
+        <a href="/" class="tab {{ 'active' if view == 'status' else '' }}">Dashboard</a>
+        <a href="/logs" class="tab {{ 'active' if view == 'logs' else '' }}">Logs</a>
+        <a href="/settings" class="tab {{ 'active' if view == 'settings' else '' }}">Settings</a>
     </div>
+
     {% if view == 'status' %}
-    <div style="display: flex; gap: 20px; justify-content: center;">
-        <div style="flex: 1; border: 1px solid #ccc; padding: 20px; border-radius: 12px; background: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+    <div style="display: flex; justify-content: center;">
+        <div class="card">
             <h3 style="margin-top: 0;">⚡ System State</h3>
             <p><strong>Status:</strong> {{ state.status }}</p>
             <div style="display: flex; align-items: center; gap: 10px; margin: 10px 0;">
                 <strong>Local Model:</strong>
-                {% if state.local_online %}<span style="color: white; background: green; padding: 2px 8px; border-radius: 10px; font-size: 0.8em;">ONLINE</span>{% else %}<span style="color: white; background: red; padding: 2px 8px; border-radius: 10px; font-size: 0.8em;">OFFLINE</span>{% endif %}
+                {% if state.local_online %}
+                    <span style="color: white; background: green; padding: 2px 8px; border-radius: 10px; font-size: 0.8em;">ONLINE</span>
+                {% else %}
+                    <span style="color: white; background: red; padding: 2px 8px; border-radius: 10px; font-size: 0.8em;">OFFLINE</span>
+                {% endif %}
             </div>
             <p><strong>Active LLM:</strong> <span style="color: #007bff;">{{ state.active_llm }}</span></p>
             <p><strong>Last Run:</strong> {{ state.last_run }}</p>
@@ -28,49 +45,83 @@
             <hr>
             <div style="text-align: center; margin-top: 20px;">
                 <form action="/toggle_cloud" method="post">
-                    <button type="submit" style="background-color: {{ 'red' if state.force_cloud else 'green' }}; color: white; padding: 10px 20px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer;">
+                    <button type="submit" class="btn-toggle" style="background-color: {{ 'red' if state.force_cloud else 'green' }};">
                         {{ '⚠️ DISABLE Cloud Override' if state.force_cloud else '☁️ FORCE Cloud LLM' }}
                     </button>
                 </form>
+                <p style="font-size: 0.8em; color: #666; margin-top: 10px;">
+                    {{ 'Forcing Cloud LLM. Local will be ignored.' if state.force_cloud else 'Using Local-First logic (Failover to Cloud).' }}
+                </p>
             </div>
         </div>
     </div>
     <hr style="margin-top: 30px;">
     <h3 style="text-align: center;">Processed Issues</h3>
     <table style="width: 100%;">
-        <thead><tr><th style="text-align:left">Issue ID</th><th style="text-align:left">Action</th></tr></thead>
-        <tbody style="text-align: left;">
+        <thead><tr style="text-align:left"><th>Issue ID</th><th>Action</th></tr></thead>
+        <tbody>
             {% for item in state.processed %}
             <tr><td>{{ item }}</td><td>✅ Fixed & Synced</td></tr>
             {% endfor %}
         </tbody>
     </table>
     {% endif %}
+
     {% if view == 'logs' %}
     <div style="max-width: 900px; margin: auto; background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 12px; border: 1px solid #444; font-family: monospace; white-space: pre-wrap; overflow-x: auto;">
         <h3 style="color: white; text-align: center;">📜 System Logs (Last 100 Lines)</h3>
         <pre style="font-size: 0.85em; line-height: 1.4;">{{ logs }}</pre>
     </div>
     {% endif %}
+
     {% if view == 'settings' %}
-    <div style="max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 12px; border: 1px solid #ccc;">
+    <div class="card">
         <h3 style="text-align: center;">⚙️ Configuration</h3>
         <form action="/save_settings" method="post">
-            <div style="margin-bottom:10px;"><label>GitHub Token</label><br><input type="password" name="GITHUB_TOKEN" value="{{ settings.GITHUB_TOKEN }}" style="width:100%"></div>
-            <div style="margin-bottom:10px;"><label>Local Ollama URL</label><br><input type="text" name="LOCAL_OLLAMA_URL" value="{{ settings.LOCAL_OLLAMA_URL }}" style="width:100%"></div>
-            <div style="margin-bottom:10px;"><label>Local Model Name</label><br><input type="text" name="LOCAL_OLLAMA_MODEL" value="{{ settings.LOCAL_OLLAMA_MODEL }}" style="width:100%"></div>
-            <div style="margin-bottom:10px;"><label>Cloud Ollama URL</label><br><input type="text" name="CLOUD_OLLAMA_URL" value="{{ settings.CLOUD_OLLAMA_URL }}" style="width:100%"></div>
-            <div style="margin-bottom:10px;"><label>Cloud Model Name</label><br><input type="text" name="CLOUD_OLLAMA_MODEL" value="{{ settings.CLOUD_OLLAMA_MODEL }}" style="width:100%"></div>
-            <div style="margin-bottom:10px;"><label>Poll Interval (Sec)</label><br><input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" style="width:100%"></div>
-            <div style="margin-bottom:10px;"><label>Update API URL</label><br><input type="text" name="UPDATE_API_URL" value="{{ settings.UPDATE_API_URL }}" style="width:100%"></div>
+            <div class="setting-row">
+                <label>GitHub Token</label>
+                <input type="password" name="GITHUB_TOKEN" value="{{ settings.GITHUB_TOKEN }}">
+            </div>
+            <div class="setting-row">
+                <label>Local Ollama URL</label>
+                <input type="text" name="LOCAL_OLLAMA_URL" value="{{ settings.LOCAL_OLLAMA_URL }}">
+            </div>
+            <div class="setting-row">
+                <label>Local Model Name</label>
+                <input type="text" name="LOCAL_OLLAMA_MODEL" value="{{ settings.LOCAL_OLLAMA_MODEL }}">
+            </div>
+            <div class="setting-row">
+                <label>Cloud Ollama URL</label>
+                <input type="text" name="CLOUD_OLLAMA_URL" value="{{ settings.CLOUD_OLLAMA_URL }}">
+            </div>
+            <div class="setting-row">
+                <label>Cloud Model Name</label>
+                <input type="text" name="CLOUD_OLLAMA_MODEL" value="{{ settings.CLOUD_OLLAMA_MODEL }}">
+            </div>
+            <div class="setting-row">
+                <label>Poll Interval (Seconds)</label>
+                <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}">
+            </div>
+            <div class="setting-row">
+                <label>Update API URL</label>
+                <input type="text" name="UPDATE_API_URL" value="{{ settings.UPDATE_API_URL }}">
+            </div>
             <hr>
-            <div style="margin-bottom:10px;"><label>Monitored Repos (Comma Separated)</label><br><input type="text" name="monitored_repos" value="{{ settings.monitored_repos | join(', ') }}" style="width:100%"></div>
-            <div style="margin-bottom:10px;"><label>Trusted Repos (Comma Separated)</label><br><input type="text" name="trusted_repos" value="{{ settings.trusted_repos | join(', ') }}" style="width:100%"></div>
-            <div style="margin-bottom:10px;"><label>Default Branch</label><br><input type="text" name="default_branch" value="{{ settings.default_branch }}" style="width:100%"></div>
-            <button type="submit" style="width: 100%; background: #007bff; color: white; padding: 10px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold;">SAVE SETTINGS</button>
+            <div class="setting-row">
+                <label>Monitored Repos (Comma Separated)</label>
+                <input type="text" name="monitored_repos" value="{{ settings.monitored_repos | join(', ') }}">
+            </div>
+            <div class="setting-row">
+                <label>Trusted Repos (Comma Separated)</label>
+                <input type="text" name="trusted_repos" value="{{ settings.trusted_repos | join(', ') }}">
+            </div>
+            <div class="setting-row">
+                <label>Default Branch</label>
+                <input type="text" name="default_branch" value="{{ settings.default_branch }}">
+            </div>
+            <button type="submit" class="btn-save">SAVE SETTINGS</button>
         </form>
     </div>
     {% endif %}
-</body_
-</html_
-EOF
+</body>
+</html>
