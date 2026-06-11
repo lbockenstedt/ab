@@ -223,6 +223,10 @@
                             <label class="text-sm font-medium text-slate-400">Cloud Model</label>
                             <input type="text" name="CLOUD_OLLAMA_MODEL" value="{{ settings.CLOUD_OLLAMA_MODEL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-sky-500">
                         </div>
+                        <div class="space-y-2">
+                            <label class="text-sm font-medium text-slate-400">Ollama API Key</label>
+                            <input type="password" name="OLLAMA_API_KEY" value="{{ settings.OLLAMA_API_KEY }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-sky-500">
+                        </div>
                     </div>
 
                     <div class="space-y-2 pt-6 border-t border-slate-700">

@@ -92,22 +92,42 @@ def heartbeat_worker():
 def apply_ai_fix(repo_path, issue_body):
     l_mod, c_mod = os.getenv("LOCAL_OLLAMA_MODEL"), os.getenv("CLOUD_OLLAMA_MODEL")
     l_url, c_url = os.getenv("LOCAL_OLLAMA_URL"), os.getenv("CLOUD_OLLAMA_URL")
+    api_key = os.getenv("OLLAMA_API_KEY")
     prompt = f"Issue: {issue_body}\n\nProvide the corrected code. Format exactly as:\nFILE: path/to/file\nCODE:\n\`\`\`\ncode\n\`\`\`"
+
+    def call_llm(url, model):
+        # Use requests instead of ollama library to support API keys
+        endpoint = f"{url.rstrip('/')}/api/chat"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        try:
+            resp = requests.post(endpoint, json=payload, headers=headers, timeout=120)
+            resp.raise_for_status()
+            return resp.json()['message']['content']
+        except Exception as e:
+            raise Exception(f"LLM Request failed ({url}): {e}")
 
     if state["force_cloud"]:
         try:
             state["active_llm"] = f"Cloud ({c_url})"
-            return ollama.Client(host=c_url).chat(model=c_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
+            return call_llm(c_url, c_mod)
         except Exception as e: raise Exception(f"Cloud LLM failed: {e}")
 
     try:
         state["active_llm"] = f"Local ({l_url})"
-        return ollama.Client(host=l_url).chat(model=l_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
+        return call_llm(l_url, l_mod)
     except Exception as e:
         logger.warning(f"Local LLM failed: {e}. Falling back to Cloud...")
         try:
             state["active_llm"] = f"Cloud ({c_url})"
-            return ollama.Client(host=c_url).chat(model=c_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
+            return call_llm(c_url, c_mod)
         except Exception as e_c: raise Exception(f"Both LLMs failed: {e_c}")
 
 def parse_and_apply(content, repo_path):
@@ -144,53 +164,74 @@ def poller_worker():
 
             gh_current = Github(token)
             try:
+                logger.info("Attempting to authenticate with GitHub API...")
                 bot_user = gh_current.get_user().login
+                logger.info(f"Authenticated as GitHub user: {bot_user}")
             except GithubException as ge:
                 if ge.status == 401:
+                    logger.error("GitHub Authentication Failed: 401 Unauthorized. Please check your token.")
                     raise Exception("Invalid GitHub Token (401 Unauthorized)")
+                logger.error(f"GitHub API Error: {ge.status} - {ge.data}")
                 raise ge
+            except Exception as e:
+                logger.exception(f"Unexpected error during GitHub authentication: {e}")
+                raise e
 
             for repo_name in config["monitored_repos"]:
                 state["current_task"] = f"Checking {repo_name}"
-                repo_obj = gh_current.get_repo(repo_name)
-                is_owner = repo_obj.owner.login == bot_user
-                issues = repo_obj.get_issues(labels=["automated-fix"], state="open")
+                logger.info(f"Scanning repository: {repo_name}")
+                try:
+                    repo_obj = gh_current.get_repo(repo_name)
+                    is_owner = repo_obj.owner.login == bot_user
+                    logger.info(f"Repo {repo_name} found. Owner match: {is_owner}")
 
-                for issue in issues:
-                    issue_id = f"{repo_name}:{issue.number}"
-                    if issue_id in processed: continue
+                    issues = repo_obj.get_issues(labels=["automated-fix"], state="open")
+                    issue_count = issues.totalCount
+                    logger.info(f"Found {issue_count} open issues with 'automated-fix' label in {repo_name}")
 
-                    state["current_task"] = f"Fixing {issue_id}"
-                    logger.info(f"Processing issue {issue_id}")
+                    for issue in issues:
+                        issue_id = f"{repo_name}:{issue.number}"
+                        if issue_id in processed: continue
 
-                    with tempfile.TemporaryDirectory() as tmp_dir:
-                        path = os.path.join(tmp_dir, "repo")
-                        url = repo_obj.clone_url.replace("https://", f"https://{token}@")
-                        repo_git = git.Repo.clone_from(url, path)
+                        state["current_task"] = f"Fixing {issue_id}"
+                        logger.info(f"Processing issue {issue_id}: {issue.title}")
 
-                        fix_code = apply_ai_fix(path, issue.body)
-                        parse_and_apply(fix_code, path)
+                        with tempfile.TemporaryDirectory() as tmp_dir:
+                            path = os.path.join(tmp_dir, "repo")
+                            url = repo_obj.clone_url.replace("https://", f"https://{token}@")
+                            logger.info(f"Cloning {repo_name} to temporary directory...")
+                            repo_git = git.Repo.clone_from(url, path)
 
-                        repo_git.git.add(A=True)
-                        commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
-                        repo_git.index.commit(commit_msg)
-                        logger.info(f"Committed changes: {commit_msg}")
+                            fix_code = apply_ai_fix(path, issue.body)
+                            logger.info(f"AI generated fix for {issue_id}. Applying to files...")
+                            parse_and_apply(fix_code, path)
 
-                        if repo_name in config["trusted_repos"] and is_owner:
-                            logger.info(f"Owner identified. Pushing directly to main for {repo_name}...")
-                            repo_git.remotes.origin.push()
-                            logger.info("Direct push successful.")
-                        else:
-                            branch = f"ai-fix-issue-{issue.number}"
-                            logger.info(f"Pushing to new branch: {branch}")
-                            repo_git.create_head(branch).checkout()
-                            repo_git.remotes.origin.push(branch)
-                            repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}", head=branch, base=config["default_branch"])
-                            logger.info(f"Pull Request created for {repo_name}")
+                            repo_git.git.add(A=True)
+                            commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
+                            repo_git.index.commit(commit_msg)
+                            logger.info(f"Committed changes: {commit_msg}")
 
-                    state["api_status"] = trigger_infrastructure_update()
-                    processed.append(issue_id)
-                    save_processed(processed)
+                            if repo_name in config["trusted_repos"] and is_owner:
+                                logger.info(f"Trust verified. Pushing directly to main for {repo_name}...")
+                                repo_git.remotes.origin.push()
+                                logger.info("Direct push successful.")
+                            else:
+                                branch = f"ai-fix-issue-{issue.number}"
+                                logger.info(f"Pushing to new branch: {branch}")
+                                repo_git.create_head(branch).checkout()
+                                repo_git.remotes.origin.push(branch)
+                                repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}", head=branch, base=config["default_branch"])
+                                logger.info(f"Pull Request created for {repo_name}")
+
+                        state["api_status"] = trigger_infrastructure_update()
+                        processed.append(issue_id)
+                        save_processed(processed)
+                except GithubException as ge:
+                    logger.error(f"GitHub API Error while accessing {repo_name}: {ge.status} - {ge.data}")
+                    continue
+                except Exception as e:
+                    logger.exception(f"Unexpected error while processing {repo_name}: {e}")
+                    continue
 
             state["processed"] = processed
             state["status"] = "Idle"
@@ -219,6 +260,7 @@ DEFAULT_ENV = {
     "CLOUD_OLLAMA_MODEL": "gemma4:31b-cloud",
     "LOCAL_OLLAMA_URL": "http://172.16.1.100:11434",
     "CLOUD_OLLAMA_URL": "",
+    "OLLAMA_API_KEY": "",
     "POLL_INTERVAL_SECONDS": "3600",
     "UPDATE_API_URL": ""
 }
