@@ -1,9 +1,10 @@
-import os, json, time, tempfile, threading, requests, logging
+import os, json, time, tempfile, threading, requests, logging, traceback
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import RedirectResponse
+from fastapi.exceptions import RequestValidationError
 from github import Github, GithubException
 import ollama
 import git
@@ -19,13 +20,33 @@ log_file = os.path.join(LOG_DIR, "ai-fixer.log")
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.FileHandler(log_file), logging.StreamHandler()]
+    handlers=[
+        logging.FileHandler(log_file, mode='a'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger("BugFixer")
+logger.info(f"BugFixer started. Logging to: {log_file}")
 
 load_dotenv()
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
+
+# Use absolute path for templates to avoid 500 errors if CWD changes
+template_path = os.path.join(os.getcwd(), "templates")
+templates = Jinja2Templates(directory=template_path)
+
+# Global Exception Handler to capture 500s and log them to the file
+@app.middleware("http")
+async def catch_exceptions_mid(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"UNCAUGHT EXCEPTION: {e}\n{tb}")
+        return JSONResponse(
+            status_code=500,
+            content={"message": "Internal Server Error. Check ai-fixer.log for details.", "error": str(e)}
+        )
 
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False,
