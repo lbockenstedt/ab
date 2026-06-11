@@ -186,10 +186,11 @@ async def dashboard(request: Request):
 @app.get("/logs")
 async def get_logs(request: Request):
     try:
+        # Always use the dynamic log_file path defined at the top
         with open(log_file, "r") as f:
             lines = f.readlines()
             logs = "".join(lines[-100:])
-    except Exception as e: logs = f"Error reading logs: {e}"
+    except Exception as e: logs = f"Error reading logs from {log_file}: {e}"
     return templates.TemplateResponse("index.html", {"request": request, "view": "logs", "logs": logs, "state": state})
 
 DEFAULT_ENV = {
