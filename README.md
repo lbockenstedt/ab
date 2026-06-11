@@ -8,6 +8,7 @@ An automated GitHub issue fixer that polls repositories for the `automated-fix` 
 - **Git Workflow**: Automated cloning, fixing, and pushing (Direct Commit or PR).
 - **Infra Sync**: Triggers an external API update after every fix.
 - **Force Cloud**: Manual override via UI to bypass local compute.
+- **Auto-Update**: Automatically pulls the latest version of the bot from GitHub every hour.
 
 ## 🚀 Quick Start
 1. Clone this repo to your Debian LXC.

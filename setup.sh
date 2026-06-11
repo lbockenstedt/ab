@@ -17,8 +17,8 @@ Description=GitHub AI-Fixer Hybrid LLM
 After=network.target
 [Service]
 User=root
-WorkingDirectory=$(pwd)
-ExecStart=$(pwd)/venv/bin/python3 main.py
+WorkingDirectory=/opt/bugfixer
+ExecStart=/opt/bugfixer/venv/bin/python3 main.py
 Restart=always
 [Install]
 WantedBy=multi-user.target

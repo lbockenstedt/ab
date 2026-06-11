@@ -1,4 +1,4 @@
-import os, json, time, tempfile, threading, requests
+import os, json, time, tempfile, threading, requests, logging
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form
@@ -8,10 +8,18 @@ from github import Github
 import ollama
 import git
 
+# Setup Logging
+log_file = "/opt/bugfixer/ai-fixer.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.FileHandler(log_file), logging.StreamHandler()]
+)
+logger = logging.getLogger("BugFixer")
+
 load_dotenv()
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
-gh = Github(os.getenv("GITHUB_TOKEN"))
 
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False,
@@ -50,15 +58,18 @@ def apply_ai_fix(repo_path, issue_body):
     l_mod, c_mod = os.getenv("LOCAL_OLLAMA_MODEL"), os.getenv("CLOUD_OLLAMA_MODEL")
     l_url, c_url = os.getenv("LOCAL_OLLAMA_URL"), os.getenv("CLOUD_OLLAMA_URL")
     prompt = f"Issue: {issue_body}\n\nProvide the corrected code. Format exactly as:\nFILE: path/to/file\nCODE:\n\`\`\`\ncode\n\`\`\`"
+
     if state["force_cloud"]:
         try:
             state["active_llm"] = f"Cloud ({c_url})"
             return ollama.Client(host=c_url).chat(model=c_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
         except Exception as e: raise Exception(f"Cloud LLM failed: {e}")
+
     try:
         state["active_llm"] = f"Local ({l_url})"
         return ollama.Client(host=l_url).chat(model=l_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
     except Exception as e:
+        logger.warning(f"Local LLM failed: {e}. Falling back to Cloud...")
         try:
             state["active_llm"] = f"Cloud ({c_url})"
             return ollama.Client(host=c_url).chat(model=c_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
@@ -71,8 +82,11 @@ def parse_and_apply(content, repo_path):
         filepath = lines[0].strip()
         try:
             code_block = part[part.find("```")+3 : part.rfind("```")]
-            with open(os.path.join(repo_path, filepath), "w") as f: f.write(code_block.strip())
-        except: pass
+            full_path = os.path.join(repo_path, filepath)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, "w") as f: f.write(code_block.strip())
+            logger.info(f"Applied fix to file: {filepath}")
+        except Exception as e: logger.error(f"Error writing file {filepath}: {e}")
 
 def poller_worker():
     global state
@@ -80,7 +94,7 @@ def poller_worker():
         try:
             load_dotenv(override=True)
 
-            # Auto-update the bot's own code from GitHub if this is a git repo
+            # Auto-update from GitHub
             try:
                 self_repo = git.Repo(os.getcwd())
                 self_repo.remotes.origin.pull()
@@ -90,7 +104,9 @@ def poller_worker():
             state["status"] = "Scanning"
             state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             processed = load_processed()
-            gh_current = Github(os.getenv("GITHUB_TOKEN"))
+
+            token = os.getenv("GITHUB_TOKEN")
+            gh_current = Github(token)
             bot_user = gh_current.get_user().login
 
             for repo_name in config["monitored_repos"]:
@@ -98,37 +114,63 @@ def poller_worker():
                 repo_obj = gh_current.get_repo(repo_name)
                 is_owner = repo_obj.owner.login == bot_user
                 issues = repo_obj.get_issues(labels=["automated-fix"], state="open")
+
                 for issue in issues:
                     issue_id = f"{repo_name}:{issue.number}"
                     if issue_id in processed: continue
+
                     state["current_task"] = f"Fixing {issue_id}"
+                    logger.info(f"Processing issue {issue_id}")
+
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         path = os.path.join(tmp_dir, "repo")
-                        url = repo_obj.clone_url.replace("https://", f"https://{os.getenv('GITHUB_TOKEN')}@")
+                        url = repo_obj.clone_url.replace("https://", f"https://{token}@")
                         repo_git = git.Repo.clone_from(url, path)
+
                         fix_code = apply_ai_fix(path, issue.body)
                         parse_and_apply(fix_code, path)
+
                         repo_git.git.add(A=True)
-                        repo_git.index.commit(f"AI Fix #{issue.number}")
+                        commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
+                        repo_git.index.commit(commit_msg)
+                        logger.info(f"Committed changes: {commit_msg}")
+
                         if repo_name in config["trusted_repos"] and is_owner:
+                            logger.info(f"Owner identified. Pushing directly to main for {repo_name}...")
                             repo_git.remotes.origin.push()
+                            logger.info("Direct push successful.")
                         else:
                             branch = f"ai-fix-issue-{issue.number}"
+                            logger.info(f"Pushing to new branch: {branch}")
                             repo_git.create_head(branch).checkout()
                             repo_git.remotes.origin.push(branch)
-                            repo_obj.create_pull(title=f"AI Fix #{issue.number}", body="Auto-fix", head=branch, base=config["default_branch"])
+                            repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}", head=branch, base=config["default_branch"])
+                            logger.info(f"Pull Request created for {repo_name}")
+
                     state["api_status"] = trigger_infrastructure_update()
                     processed.append(issue_id)
                     save_processed(processed)
+
             state["processed"] = processed
             state["status"] = "Idle"
             state["current_task"] = "None"
-        except Exception as e: state["status"] = f"Error: {str(e)}"
+        except Exception as e:
+            logger.exception(f"Critical poller error: {e}")
+            state["status"] = f"Error: {str(e)}"
         time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 3600)))
 
 @app.get("/")
 async def dashboard(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "view": "status", "state": state})
+
+@app.get("/logs")
+async def get_logs(request: Request):
+    try:
+        with open(log_file, "r") as f:
+            lines = f.readlines()
+            logs = "".join(lines[-100:])
+    except Exception as e: logs = f"Error reading logs: {e}"
+    return templates.TemplateResponse("index.html", {"request": request, "view": "logs", "logs": logs, "state": state})
 
 @app.get("/settings")
 async def settings_page(request: Request):

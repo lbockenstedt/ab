@@ -9,6 +9,7 @@
     <h1 style="text-align: center;">🤖 BugFixer Control Panel</h1>
     <div style="display: flex; gap: 10px; justify-content: center; margin-bottom: 20px;">
         <a href="/" style="padding: 10px 20px; background: {{ '#007bff' if view == 'status' else '#ddd' }}; color: {{ 'white' if view == 'status' else 'black' }}; text-decoration: none; border-radius: 5px;">Dashboard</a>
+        <a href="/logs" style="padding: 10px 20px; background: {{ '#007bff' if view == 'logs' else '#ddd' }}; color: {{ 'white' if view == 'logs' else 'black' }}; text-decoration: none; border-radius: 5px;">Logs</a>
         <a href="/settings" style="padding: 10px 20px; background: {{ '#007bff' if view == 'settings' else '#ddd' }}; color: {{ 'white' if view == 'settings' else 'black' }}; text-decoration: none; border-radius: 5px;">Settings</a>
     </div>
     {% if view == 'status' %}
@@ -44,6 +45,12 @@
             {% endfor %}
         </tbody>
     </table>
+    {% endif %}
+    {% if view == 'logs' %}
+    <div style="max-width: 900px; margin: auto; background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 12px; border: 1px solid #444; font-family: monospace; white-space: pre-wrap; overflow-x: auto;">
+        <h3 style="color: white; text-align: center;">📜 System Logs (Last 100 Lines)</h3>
+        <pre style="font-size: 0.85em; line-height: 1.4;">{{ logs }}</pre>
+    </div>
     {% endif %}
     {% if view == 'settings' %}
     <div style="max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 12px; border: 1px solid #ccc;">
