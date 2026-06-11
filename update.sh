@@ -28,5 +28,5 @@ fi
 echo "♻️ Restarting ai-fixer service..."
 systemctl restart ai-fixer
 
-echo "✅ BugFixer updated successfully and service restarted!"
+echo "✅ BugFixBxer updated successfully and service restarted!"
 EOF

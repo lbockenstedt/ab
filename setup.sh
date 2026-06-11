@@ -1,14 +1,12 @@
 #!/bin/bash
 set -e
-echo "🚀 Installing BugFixBxer..."
+echo "🚀 Installing BugFixer..."
 
 # 1. System dependencies
 apt update && apt install -y python3-pip python3-venv git psmisc
 
 # 2. Setup environment
 mkdir -p /opt/bugfixer
-# If we are running this from within the repo folder, we stay there.
-# Otherwise, we assume the files are already in /opt/bugfixer
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
@@ -55,4 +53,3 @@ chmod +x update.sh
 
 systemctl daemon-reload && systemctl enable ai-fixer && systemctl restart ai-fixer
 echo "✅ Installation complete. Dashboard at http://$(hostname -I | awk '{print $1}'):8000"
-EOF
