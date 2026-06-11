@@ -3,6 +3,7 @@ ollama
 gitpython
 python-dotenv
 fastapi
+python-multipart
 uvicorn[standard]
 jinja2
 requests
