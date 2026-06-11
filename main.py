@@ -50,13 +50,11 @@ def apply_ai_fix(repo_path, issue_body):
     l_mod, c_mod = os.getenv("LOCAL_OLLAMA_MODEL"), os.getenv("CLOUD_OLLAMA_MODEL")
     l_url, c_url = os.getenv("LOCAL_OLLAMA_URL"), os.getenv("CLOUD_OLLAMA_URL")
     prompt = f"Issue: {issue_body}\n\nProvide the corrected code. Format exactly as:\nFILE: path/to/file\nCODE:\n\`\`\`\ncode\n\`\`\`"
-
     if state["force_cloud"]:
         try:
             state["active_llm"] = f"Cloud ({c_url})"
             return ollama.Client(host=c_url).chat(model=c_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
         except Exception as e: raise Exception(f"Cloud LLM failed: {e}")
-
     try:
         state["active_llm"] = f"Local ({l_url})"
         return ollama.Client(host=l_url).chat(model=l_mod, messages=[{'role': 'user', 'content': prompt}])['message']['content']
@@ -81,14 +79,24 @@ def poller_worker():
     while True:
         try:
             load_dotenv(override=True)
+
+            # Auto-update the bot's own code from GitHub if this is a git repo
+            try:
+                self_repo = git.Repo(os.getcwd())
+                self_repo.remotes.origin.pull()
+            except: pass
+
             config = load_config()
             state["status"] = "Scanning"
             state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             processed = load_processed()
             gh_current = Github(os.getenv("GITHUB_TOKEN"))
+            bot_user = gh_current.get_user().login
+
             for repo_name in config["monitored_repos"]:
                 state["current_task"] = f"Checking {repo_name}"
                 repo_obj = gh_current.get_repo(repo_name)
+                is_owner = repo_obj.owner.login == bot_user
                 issues = repo_obj.get_issues(labels=["automated-fix"], state="open")
                 for issue in issues:
                     issue_id = f"{repo_name}:{issue.number}"
@@ -102,7 +110,8 @@ def poller_worker():
                         parse_and_apply(fix_code, path)
                         repo_git.git.add(A=True)
                         repo_git.index.commit(f"AI Fix #{issue.number}")
-                        if repo_name in config["trusted_repos"]: repo_git.remotes.origin.push()
+                        if repo_name in config["trusted_repos"] and is_owner:
+                            repo_git.remotes.origin.push()
                         else:
                             branch = f"ai-fix-issue-{issue.number}"
                             repo_git.create_head(branch).checkout()
@@ -115,7 +124,7 @@ def poller_worker():
             state["status"] = "Idle"
             state["current_task"] = "None"
         except Exception as e: state["status"] = f"Error: {str(e)}"
-        time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 300)))
+        time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 3600)))
 
 @app.get("/")
 async def dashboard(request: Request):
