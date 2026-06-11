@@ -21,6 +21,16 @@ load_dotenv()
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
+# Validate environment on startup
+REQUIRED_ENV = ["GITHUB_TOKEN", "LOCAL_OLLAMA_URL", "LOCAL_OLLAMA_MODEL"]
+missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
+if missing:
+    logger.error(f"MISSING CRITICAL ENVIRONMENT VARIABLES: {', '.join(missing)}. The bot will not function correctly.")
+else:
+    logger.info("Environment variables validated successfully.")
+
+gh = Github(os.getenv("GITHUB_TOKEN", ""))
+
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False,
     "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
@@ -93,64 +103,44 @@ def poller_worker():
     while True:
         try:
             load_dotenv(override=True)
-
-            # Auto-update from GitHub
             try:
                 self_repo = git.Repo(os.getcwd())
                 self_repo.remotes.origin.pull()
             except: pass
-
             config = load_config()
             state["status"] = "Scanning"
             state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             processed = load_processed()
-
-            token = os.getenv("GITHUB_TOKEN")
-            gh_current = Github(token)
+            gh_current = Github(os.getenv("GITHUB_TOKEN", ""))
             bot_user = gh_current.get_user().login
-
             for repo_name in config["monitored_repos"]:
                 state["current_task"] = f"Checking {repo_name}"
                 repo_obj = gh_current.get_repo(repo_name)
                 is_owner = repo_obj.owner.login == bot_user
                 issues = repo_obj.get_issues(labels=["automated-fix"], state="open")
-
                 for issue in issues:
                     issue_id = f"{repo_name}:{issue.number}"
                     if issue_id in processed: continue
-
                     state["current_task"] = f"Fixing {issue_id}"
-                    logger.info(f"Processing issue {issue_id}")
-
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         path = os.path.join(tmp_dir, "repo")
-                        url = repo_obj.clone_url.replace("https://", f"https://{token}@")
+                        url = repo_obj.clone_url.replace("https://", f"https://{os.getenv('GITHUB_TOKEN', '')}@")
                         repo_git = git.Repo.clone_from(url, path)
-
                         fix_code = apply_ai_fix(path, issue.body)
                         parse_and_apply(fix_code, path)
-
                         repo_git.git.add(A=True)
                         commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
                         repo_git.index.commit(commit_msg)
-                        logger.info(f"Committed changes: {commit_msg}")
-
                         if repo_name in config["trusted_repos"] and is_owner:
-                            logger.info(f"Owner identified. Pushing directly to main for {repo_name}...")
                             repo_git.remotes.origin.push()
-                            logger.info("Direct push successful.")
                         else:
                             branch = f"ai-fix-issue-{issue.number}"
-                            logger.info(f"Pushing to new branch: {branch}")
                             repo_git.create_head(branch).checkout()
                             repo_git.remotes.origin.push(branch)
                             repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}", head=branch, base=config["default_branch"])
-                            logger.info(f"Pull Request created for {repo_name}")
-
                     state["api_status"] = trigger_infrastructure_update()
                     processed.append(issue_id)
                     save_processed(processed)
-
             state["processed"] = processed
             state["status"] = "Idle"
             state["current_task"] = "None"
