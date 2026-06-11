@@ -9,7 +9,13 @@ import ollama
 import git
 
 # Setup Logging
-log_file = "/opt/bugfixer/ai-fixer.log"
+# Use /opt/bugfixer if it exists and is writable, otherwise use local directory
+LOG_DIR = "/opt/bugfixer"
+if not (os.path.exists(LOG_DIR) and os.access(LOG_DIR, os.W_OK)):
+    LOG_DIR = os.getcwd()
+
+log_file = os.path.join(LOG_DIR, "ai-fixer.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
