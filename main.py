@@ -202,17 +202,16 @@ def poller_worker():
 
 @app.get("/")
 async def dashboard(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "view": "status", "state": state})
+    return templates.TemplateResponse(request=request, name="index.html", context={"view": "status", "state": state})
 
 @app.get("/logs")
 async def get_logs(request: Request):
     try:
-        # Always use the dynamic log_file path defined at the top
         with open(log_file, "r") as f:
             lines = f.readlines()
             logs = "".join(lines[-100:])
     except Exception as e: logs = f"Error reading logs from {log_file}: {e}"
-    return templates.TemplateResponse("index.html", {"request": request, "view": "logs", "logs": logs, "state": state})
+    return templates.TemplateResponse(request=request, name="index.html", context={"view": "logs", "logs": logs, "state": state})
 
 DEFAULT_ENV = {
     "GITHUB_TOKEN": "",
@@ -234,7 +233,7 @@ async def settings_page(request: Request):
         if val: settings[k] = val
 
     config = load_config()
-    return templates.TemplateResponse("index.html", {"request": request, "view": "settings", "settings": {**settings, **config}})
+    return templates.TemplateResponse(request=request, name="index.html", context={"view": "settings", "settings": {**settings, **config}})
 
 @app.post("/save_settings")
 async def save_settings(request: Request):
