@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse
-from github import Github
+from github import Github, GithubException
 import ollama
 import git
 
@@ -116,7 +116,12 @@ def poller_worker():
                 raise Exception("GITHUB_TOKEN is missing from .env")
 
             gh_current = Github(token)
-            bot_user = gh_current.get_user().login
+            try:
+                bot_user = gh_current.get_user().login
+            except GithubException as ge:
+                if ge.status == 401:
+                    raise Exception("Invalid GitHub Token (401 Unauthorized)")
+                raise ge
 
             for repo_name in config["monitored_repos"]:
                 state["current_task"] = f"Checking {repo_name}"
