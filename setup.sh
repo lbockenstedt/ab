@@ -24,6 +24,7 @@ Restart=always
 WantedBy=multi-user.target
 SERVICE
 
+chmod +x update.sh
+
 systemctl daemon-reload && systemctl enable ai-fixer && systemctl restart ai-fixer
 echo "✅ Installation complete. Dashboard at http://$(hostname -I | awk '{print $1}'):8000"
-EOF
