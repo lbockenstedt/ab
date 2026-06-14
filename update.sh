@@ -25,7 +25,7 @@ else
 fi
 
 # 3. Restart service
-echo "♻️ Restarting ai-fixer service..."
-systemctl restart ai-fixer
+echo "♻️ Restarting bugfixer service..."
+systemctl restart bugfixer
 
 echo "✅ BugFixer updated successfully and service restarted!"

@@ -3,10 +3,13 @@ set -e
 echo "🚀 Installing BugFixer..."
 
 # 1. System dependencies
-apt update && apt install -y python3-pip python3-venv git psmisc
+apt-get update && apt-get install -y curl git gnupg build-essential python3-pip python3-venv psmisc
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+npm install -g @anthropic-ai/claude-code
 
 # 2. Setup environment
 mkdir -p /opt/bugfixer
+mkdir -p /var/log/bugfixer
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
@@ -14,15 +17,10 @@ fi
 ./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt
 
-# 3. Robust .env creation
+# 3. .env creation
 if [ ! -f .env ]; then
-    echo "📝 .env file not found. Creating from template..."
-    if [ -f .env.example ]; then
-        cp .env.example .env
-        echo "✅ .env created from .env.example. PLEASE EDIT IT WITH YOUR TOKENS."
-    else
-        echo "❌ Error: .env.example not found. Creating a blank .env file."
-        cat << 'SOTP' > .env
+    echo "📝 Creating initial .env file..."
+    cat << 'SOTP' > .env
 GITHUB_TOKEN=
 LOCAL_OLLAMA_MODEL=gemma4:31b-coding-mtp-bf16
 CLOUD_OLLAMA_MODEL=gemma4:31b-cloud
@@ -31,14 +29,13 @@ CLOUD_OLLAMA_URL=
 POLL_INTERVAL_SECONDS=3600
 UPDATE_API_URL=
 SOTP
-        echo "✅ Blank .env created. PLEASE EDIT IT."
-    fi
+    echo "✅ Initial .env created. Please configure your keys via the WebUI."
 fi
 
 # 4. Systemd Service
-cat << 'SERVICE' > /etc/systemd/system/ai-fixer.service
+cat << 'SERVICE' > /etc/systemd/system/bugfixer.service
 [Unit]
-Description=GitHub AI-Fixer Hybrid LLM
+Description=GitHub BugFixer Hybrid LLM
 After=network.target
 [Service]
 User=root
@@ -51,5 +48,5 @@ SERVICE
 
 chmod +x update.sh
 
-systemctl daemon-reload && systemctl enable ai-fixer && systemctl restart ai-fixer
+systemctl daemon-reload && systemctl enable bugfixer && systemctl restart bugfixer
 echo "✅ Installation complete. Dashboard at http://$(hostname -I | awk '{print $1}'):8000"
