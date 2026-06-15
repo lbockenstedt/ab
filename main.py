@@ -167,8 +167,8 @@ def clean_repo_name(name):
     return name
 
 def discover_labels(gh_current, monitored_repos):
-    """Fetches all unique labels from all monitored repositories."""
-    all_labels = set()
+    """Fetches all unique labels from all monitored repositories, including built-in defaults."""
+    all_labels = {"automated-fix", "bug", "critical", "high-priority"}
     for repo_name in monitored_repos:
         try:
             repo = gh_current.get_repo(repo_name)
@@ -235,7 +235,11 @@ def get_hub_logs():
         log_url = url.rstrip('/') + "/logs"
         resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
-            return resp.json()
+            try:
+                return resp.json()
+            except json.JSONDecodeError:
+                logger.error(f"Hub returned 200 OK but body was not valid JSON. Content: {resp.text[:100]}...")
+                return None
         return None
     except Exception as e:
         logger.error(f"Hub Log Fetch Error: {e}")
