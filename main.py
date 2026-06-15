@@ -252,21 +252,36 @@ def analyze_logs_for_errors(logs):
 
 def heartbeat_worker():
     while True:
-        local_url = os.getenv("LOCAL_OLLAMA_URL")
         try:
+            config = load_config()
+            # Priority 1: config.json, Priority 2: Environment
+            local_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
+            cloud_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
+
             if local_url:
-                requests.get(f"{local_url}/api/tags", timeout=2)
-                state["local_online"] = True
-                # Update active_llm if it's still Unknown
-                if state["active_llm"] == "Unknown":
-                    if state["force_cloud"]:
-                        state["active_llm"] = f"Cloud ({os.getenv('CLOUD_OLLAMA_URL')})"
-                    else:
-                        state["active_llm"] = f"Local ({local_url})"
+                try:
+                    requests.get(f"{local_url}/api/tags", timeout=2)
+                    state["local_online"] = True
+                except:
+                    state["local_online"] = False
             else:
                 state["local_online"] = False
-        except:
-            state["local_online"] = False
+
+            # Update active_llm based on current configuration and connectivity
+            if state["force_cloud"]:
+                state["active_llm"] = f"Cloud ({cloud_url or 'Not Configured'})"
+            elif state["local_online"]:
+                state["active_llm"] = f"Local ({local_url})"
+            else:
+                # If local is offline, we might still be using cloud if it's the only option
+                # but for the UI, let's be explicit.
+                if cloud_url:
+                    state["active_llm"] = f"Cloud (Fallback - Local Offline)"
+                else:
+                    state["active_llm"] = "No LLM Available"
+        except Exception as e:
+            logger.error(f"Heartbeat worker error: {e}")
+
         time.sleep(5)
 
 def analyze_issue(issue):

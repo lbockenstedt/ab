@@ -125,6 +125,11 @@
                             {{ '⚠️ DISABLE Cloud Override' if state.force_cloud else '☁️ FORCE Cloud LLM' }}
                         </button>
                     </form>
+                    <form action="/update_now" method="post">
+                        <button type="submit" class="w-full py-2 px-4 rounded-lg font-bold bg-slate-600 hover:bg-slate-700 text-white transition-all duration-200">
+                            <i class="fas fa-cloud-download-alt mr-2"></i> Check for Updates
+                        </button>
+                    </form>
                     <form action="/restart" method="post">
                         <button type="submit" class="w-full py-2 px-4 rounded-lg font-bold bg-slate-700 hover:bg-slate-800 text-white transition-all duration-200">
                             <i class="fas fa-sync-alt mr-2"></i> Restart BugFixer
