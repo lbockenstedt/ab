@@ -151,6 +151,17 @@ state = {
 }
 STATE_FILE = "processed_issues.json"
 
+def clean_repo_name(name):
+    """Converts a full GitHub URL or a 'user/repo' string into 'user/repo' format."""
+    name = name.strip()
+    if name.startswith("http"):
+        name = name.replace("https://", "").replace("http://", "")
+        name = name.replace("github.com/", "")
+        if name.endswith(".git"):
+            name = name[:-4]
+        name = name.rstrip("/")
+    return name
+
 def load_config():
     try:
         with open("config.json", "r") as f: return json.load(f)
@@ -728,8 +739,8 @@ async def save_settings(request: Request):
     form_data = await request.form()
     data = dict(form_data)
     config_data = {
-        "monitored_repos": [x.strip() for x in data.get("monitored_repos", "").split(",") if x.strip()],
-        "trusted_repos": [x.strip() for x in data.get("trusted_repos", "").split(",") if x.strip()],
+        "monitored_repos": [clean_repo_name(x.strip()) for x in data.get("monitored_repos", "").replace("\n", ",").split(",") if x.strip()],
+        "trusted_repos": [clean_repo_name(x.strip()) for x in data.get("trusted_repos", "").replace("\n", ",").split(",") if x.strip()],
         "default_branch": data.get("default_branch", "main"),
         "direct_push_enabled": data.get("direct_push_enabled") == "on",
         "dev_branch": data.get("dev_branch", "dev"),
