@@ -26,7 +26,7 @@ if not os.path.exists(log_dir):
         print(f"Error creating log directory {log_dir}: {e}")
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler(log_file, mode='a'),
@@ -151,10 +151,21 @@ state = {
 }
 STATE_FILE = "processed_issues.json"
 
+def clean_repo_name(name):
+    """Converts a full GitHub URL or a 'user/repo' string into 'user/repo' format."""
+    name = name.strip()
+    if name.startswith("http"):
+        name = name.replace("https://", "").replace("http://", "")
+        name = name.replace("github.com/", "")
+        if name.endswith(".git"):
+            name = name[:-4]
+        name = name.rstrip("/")
+    return name
+
 def load_config():
     try:
         with open("config.json", "r") as f: return json.load(f)
-    except: return {"monitored_repos": [], "trusted_repos": [], "default_branch": "main", "direct_push_enabled": False, "dev_branch": "dev", "repo_tests": {}}
+    except: return {"monitored_repos": [], "trusted_repos": [], "default_branch": "main", "direct_push_enabled": False, "dev_branch": "dev", "repo_tests": {}, "GITHUB_TOKEN": "", "monitored_labels": ["automated-fix"]}
 
 def load_processed():
     if os.path.exists(STATE_FILE):
@@ -178,17 +189,66 @@ def trigger_infrastructure_update():
         return "SUCCESS: Sync Triggered" if resp.status_code == 200 else f"FAILED: {resp.status_code}"
     except Exception as e: return f"ERROR: {str(e)}"
 
-def get_hub_state():
+def create_automated_issue(gh_repo, error_data):
+    """Creates a GitHub issue for a log-detected error."""
+    try:
+        title = f"🤖 Log Alert: {error_data['title']}"
+        body = (
+            f"**Automated Error Detection**\n\n"
+            f"The BugFixer Hub analysis detected a potential issue in the logs:\n\n"
+            f"### Log Evidence:\n```\n{error_data['body']}\n```\n\n"
+            f"This issue has been automatically created for fixing."
+        )
+        issue = gh_repo.create_issue(
+            title=title,
+            body=body,
+            labels=["automated-fix", "log-detected"]
+        )
+        logger.info(f"Created automated issue #{issue.number} for {error_data['repo']}")
+        return issue
+    except Exception as e:
+        logger.error(f"Failed to create automated issue: {e}")
+        return None
+
+def get_hub_logs():
+    """Fetches recent logs from the Hub for all modules."""
     url = os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url: return None
     try:
-        resp = requests.get(url, timeout=10)
+        log_url = url.rstrip('/') + "/logs"
+        resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
-            return resp.text
+            return resp.json()
         return None
     except Exception as e:
-        logger.error(f"Hub Query Error: {e}")
+        logger.error(f"Hub Log Fetch Error: {e}")
         return None
+
+def analyze_logs_for_errors(logs):
+    """Uses LLM to identify actionable errors in aggregated logs."""
+    if not logs: return []
+
+    log_text = json.dumps(logs, indent=2)
+    prompt = (
+        f"Logs from Hub:\n{log_text}\n\n"
+        "Analyze these logs for critical, recurring, or actionable errors that can be fixed in code. "
+        "Ignore heartbeat messages or routine status updates. "
+        "For each actionable error found, provide: \n"
+        "1. The module/repo it belongs to.\n"
+        "2. A concise summary of the bug.\n"
+        "3. The specific log snippet that proves the error.\n\n"
+        "Return ONLY a JSON array of objects: [{\"repo\": \"owner/repo\", \"title\": \"Error Summary\", \"body\": \"Log snippet and description\"}]"
+    )
+    try:
+        res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.")
+        import re
+        match = re.search(r'\[.*\]', res, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        return []
+    except Exception as e:
+        logger.error(f"Error analyzing logs: {e}")
+        return []
 
 def heartbeat_worker():
     while True:
@@ -197,8 +257,16 @@ def heartbeat_worker():
             if local_url:
                 requests.get(f"{local_url}/api/tags", timeout=2)
                 state["local_online"] = True
-            else: state["local_online"] = False
-        except: state["local_online"] = False
+                # Update active_llm if it's still Unknown
+                if state["active_llm"] == "Unknown":
+                    if state["force_cloud"]:
+                        state["active_llm"] = f"Cloud ({os.getenv('CLOUD_OLLAMA_URL')})"
+                    else:
+                        state["active_llm"] = f"Local ({local_url})"
+            else:
+                state["local_online"] = False
+        except:
+            state["local_online"] = False
         time.sleep(5)
 
 def analyze_issue(issue):
@@ -408,20 +476,38 @@ def verify_fix(repo_path, repo_name, config):
         logger.error(f"Per-repo tests for {repo_name} failed:\n{error_msg}")
         return False, error_msg
 
+def check_for_updates():
+    """Checks GitHub for new versions and restarts the service if an update is found."""
+    try:
+        self_repo = git.Repo(os.getcwd())
+        # Check current commit hash
+        old_commit = self_repo.head.commit.hexsha
+        self_repo.remotes.origin.pull()
+        new_commit = self_repo.head.commit.hexsha
+        if old_commit != new_commit:
+            logger.info(f"New version detected! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
+            import subprocess
+            subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
+            return True, f"Update found: {old_commit[:7]} -> {new_commit[:7]}. Restarting..."
+        return False, "No updates available."
+    except Exception as e:
+        logger.warning(f"Self-update check failed: {e}")
+        return False, f"Update check failed: {e}"
+
 def poller_worker():
     global state
     while True:
         try:
             load_dotenv(override=True)
-            try:
-                self_repo = git.Repo(os.getcwd())
-                self_repo.remotes.origin.pull()
-            except: pass
+            check_for_updates()
             config = load_config()
+
             state["status"] = "Scanning"
             state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             processed = load_processed()
-            token = os.getenv("GITHUB_TOKEN")
+
+            # Priority 1: config.json, Priority 2: Environment
+            token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
             if not token:
                 raise Exception("Configuration Pending: Please enter your GitHub Token in Settings")
             gh_current = Github(token)
@@ -438,6 +524,56 @@ def poller_worker():
             except Exception as e:
                 logger.exception(f"Unexpected error during GitHub authentication: {e}")
                 raise e
+
+            # --- Production Verification Phase ---
+            # Verify issues that were "fixed" but are awaiting log confirmation
+            for issue_id, info in list(processed.items()):
+                if info.get("status") == "awaiting_prod_verification":
+                    repo_name, issue_num = issue_id.split(":")
+                    logger.info(f"Verifying production fix for {issue_id}...")
+                    try:
+                        repo_obj = gh_current.get_repo(repo_name)
+                        issue = repo_obj.get_issue(int(issue_num))
+
+                        # Get logs from hub
+                        logs = get_hub_logs()
+                        if logs:
+                            module_name = repo_name.split('/')[-1]
+                            relevant_logs = [l['log'] for l in logs if l.get('module') == module_name]
+                            full_log_text = "\n".join(relevant_logs)
+
+                            # Look for the original error snippet in the issue body
+                            import re
+                            match = re.search(r"### Log Evidence:\n```\n(.*?)\n```", issue.body, re.DOTALL)
+                            if match:
+                                snippet = match.group(1).strip()
+                                if snippet.lower() not in full_log_text.lower():
+                                    logger.info(f"Verified: Error snippet no longer found in logs for {issue_id}. Closing issue.")
+                                    issue.create_comment("🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. Closing issue.")
+                                    issue.edit(state='closed')
+                                    processed[issue_id]["status"] = "verified"
+                                    save_processed(processed)
+                                else:
+                                    logger.info(f"Issue {issue_id} still failing in production logs.")
+                    except Exception as e:
+                        logger.error(f"Error verifying {issue_id}: {e}")
+
+            # --- Hub Log Scanning Phase ---
+            state["current_task"] = "Scanning Hub Logs"
+            logger.info("Scanning Hub for new errors...")
+            hub_logs = get_hub_logs()
+            if hub_logs:
+                actionable_errors = analyze_logs_for_errors(hub_logs)
+                for error in actionable_errors:
+                    repo_name = error['repo']
+                    try:
+                        repo_obj = gh_current.get_repo(repo_name)
+                        # Create issue (will be picked up in the next loop or a later iteration)
+                        create_automated_issue(repo_obj, error)
+                        logger.info(f"Automatically created issue for log error in {repo_name}")
+                    except Exception as e:
+                        logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
+
             for repo_name in config["monitored_repos"]:
                 state["current_task"] = f"Checking {repo_name}"
                 logger.info(f"Scanning repository: {repo_name}")
@@ -445,32 +581,17 @@ def poller_worker():
                     repo_obj = gh_current.get_repo(repo_name)
                     is_owner = repo_obj.owner.login == bot_user
                     logger.info(f"Repo {repo_name} found. Owner match: {is_owner}")
-                    issues = repo_obj.get_issues(labels=["automated-fix"], state="open")
+                    issues = repo_obj.get_issues(labels=config.get("monitored_labels", ["automated-fix"]), state="open")
                     issue_count = issues.totalCount
-                    logger.info(f"Found {issue_count} open issues with 'automated-fix' label in {repo_name}")
+                    logger.info(f"Found {issue_count} open issues with tags in {repo_name}")
                     for issue in issues:
                         issue_id = f"{repo_name}:{issue.number}"
                         if issue_id in processed:
+                            # If it's awaiting prod verification, we don't re-fix it yet
+                            if processed[issue_id].get("status") == "awaiting_prod_verification":
+                                continue
                             logger.info(f"Issue {issue_id} was previously processed but is now OPEN again. Re-evaluating...")
                             del processed[issue_id]
-
-                        state["current_task"] = f"Analyzing {issue_id}"
-                        is_actionable, request_msg = analyze_issue(issue)
-                        if not is_actionable:
-                            logger.info(f"Issue {issue_id} is not actionable. Requesting: {request_msg}")
-                            try:
-                                issue.create_comment(f"🤖 **BugFixer AI Triage**\n\nI've analyzed this issue but need more information to provide a fix:\n\n{request_msg}")
-                                # Mark as "needs_info" so we don't spam comments every hour
-                                processed[issue_id] = {
-                                    "status": "needs_info",
-                                    "timestamp": datetime.now().isoformat(),
-                                    "request": request_msg
-                                }
-                                save_processed(processed)
-                            except Exception as e:
-                                logger.error(f"Failed to comment triage request on {issue_id}: {e}")
-                            continue
-
                         state["current_task"] = f"Fixing {issue_id}"
                         logger.info(f"Processing issue {issue_id}: {issue.title}")
                         before_state = get_hub_state()
@@ -544,8 +665,13 @@ def poller_worker():
                                     f"Verification: ✅ Tests passed successfully."
                                 )
                                 issue.create_comment(comment_body)
-                                issue.edit(state='closed')
-                                logger.info(f"Commented and closed issue {issue_id}")
+                                # Only close immediately if it wasn't log-detected
+                                is_log_detected = "log-detected" in issue.get_labels()
+                                if not is_log_detected:
+                                    issue.edit(state='closed')
+                                    logger.info(f"Commented and closed issue {issue_id}")
+                                else:
+                                    logger.info(f"Issue {issue_id} is log-detected. Leaving open until production verification.")
                             except Exception as e:
                                 logger.error(f"Failed to comment/close issue {issue_id}: {e}")
                             state["api_status"] = trigger_infrastructure_update()
@@ -558,7 +684,7 @@ def poller_worker():
                                 else:
                                     logger.error(f"Could not retrieve hub state after update for {issue_id}.")
                             processed[issue_id] = {
-                                "status": "fixed",
+                                "status": "fixed" if not is_log_detected else "awaiting_prod_verification",
                                 "timestamp": datetime.now().isoformat(),
                                 "commit": repo_git.head.commit.hexsha
                             }
@@ -575,7 +701,7 @@ def poller_worker():
         except Exception as e:
             logger.exception(f"Critical poller error: {e}")
             state["status"] = f"Error: {str(e)}"
-        time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 3600)))
+        time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 300)))
 
 @app.get("/")
 async def dashboard(request: Request):
@@ -600,7 +726,7 @@ DEFAULT_ENV = {
     "OLLAMA_API_KEY": "",
     "QA_REPO": "",
     "QA_TEST_COMMAND": "pytest",
-    "POLL_INTERVAL_SECONDS": "3600",
+    "POLL_INTERVAL_SECONDS": "300",
     "UPDATE_API_URL": "",
     "HUB_QUERY_URL": "",
     "LOG_FILE_PATH": "/var/log/bugfixer.log",
@@ -617,19 +743,26 @@ async def settings_page(request: Request):
     config = load_config()
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
-    return templates.TemplateResponse(request=request, name="index.html", context={"view": "settings", "settings": {**settings, **config, "repo_tests_str": repo_tests_str}})
+    # Ensure GITHUB_TOKEN comes from config if available
+    settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
+    # Handle labels for the UI
+    labels = config.get("monitored_labels", ["automated-fix"])
+    settings["monitored_labels_str"] = ", ".join(labels)
+    return templates.TemplateResponse(request=request, name="index.html", context={"view": "settings", "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]}})
 
 @app.post("/save_settings")
 async def save_settings(request: Request):
     form_data = await request.form()
     data = dict(form_data)
     config_data = {
-        "monitored_repos": [x.strip() for x in data.get("monitored_repos", "").split(",") if x.strip()],
-        "trusted_repos": [x.strip() for x in data.get("trusted_repos", "").split(",") if x.strip()],
+        "monitored_repos": [clean_repo_name(x.strip()) for x in data.get("monitored_repos", "").replace("\n", ",").split(",") if x.strip()],
+        "trusted_repos": [clean_repo_name(x.strip()) for x in data.get("trusted_repos", "").replace("\n", ",").split(",") if x.strip()],
         "default_branch": data.get("default_branch", "main"),
         "direct_push_enabled": data.get("direct_push_enabled") == "on",
         "dev_branch": data.get("dev_branch", "dev"),
-        "repo_tests": {}
+        "repo_tests": {},
+        "GITHUB_TOKEN": data.get("GITHUB_TOKEN", ""),
+        "monitored_labels": [x.strip() for x in data.get("monitored_labels", "").split(",") if x.strip()]
     }
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
@@ -645,10 +778,27 @@ async def save_settings(request: Request):
         json.dump(config_data, f, indent=2)
     return RedirectResponse(url="/settings", status_code=303)
 
+@app.post("/update_now")
+async def update_now():
+    updated, msg = check_for_updates()
+    logger.info(f"Manual update check: {msg}")
+    return RedirectResponse(url="/", status_code=303)
+
 @app.post("/toggle_cloud")
 async def toggle_cloud():
     state["force_cloud"] = not state["force_cloud"]
     return RedirectResponse(url="/", status_code=303)
+
+@app.post("/restart")
+async def restart_service():
+    logger.info("Restart request received. Triggering systemctl restart...")
+    try:
+        import subprocess
+        subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
+        return {"status": "success", "message": "Restart signal sent successfully."}
+    except Exception as e:
+        logger.error(f"Restart failed: {e}")
+        return {"status": "error", "message": str(e)}
 
 threading.Thread(target=heartbeat_worker, daemon=True).start()
 threading.Thread(target=poller_worker, daemon=True).start()
