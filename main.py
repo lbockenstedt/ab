@@ -464,8 +464,16 @@ def poller_worker():
             load_dotenv(override=True)
             try:
                 self_repo = git.Repo(os.getcwd())
+                # Check current commit hash
+                old_commit = self_repo.head.commit.hexsha
                 self_repo.remotes.origin.pull()
-            except: pass
+                new_commit = self_repo.head.commit.hexsha
+                if old_commit != new_commit:
+                    logger.info(f"New version detected! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
+                    import subprocess
+                    subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
+            except Exception as e:
+                logger.warning(f"Self-update check failed: {e}")
             config = load_config()
             state["status"] = "Scanning"
             state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
