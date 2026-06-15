@@ -162,6 +162,19 @@ def clean_repo_name(name):
         name = name.rstrip("/")
     return name
 
+def discover_labels(gh_current, monitored_repos):
+    """Fetches all unique labels from all monitored repositories."""
+    all_labels = set()
+    for repo_name in monitored_repos:
+        try:
+            repo = gh_current.get_repo(repo_name)
+            labels = repo.get_labels()
+            for label in labels:
+                all_labels.add(label.name)
+        except Exception as e:
+            logger.error(f"Error discovering labels for {repo_name}: {e}")
+    return sorted(list(all_labels))
+
 def load_config():
     try:
         with open("config.json", "r") as f: return json.load(f)
@@ -540,6 +553,11 @@ def poller_worker():
                 logger.exception(f"Unexpected error during GitHub authentication: {e}")
                 raise e
 
+            # --- Label Discovery Phase ---
+            state["current_task"] = "Discovering Labels"
+            state["available_labels"] = discover_labels(gh_current, config["monitored_repos"])
+            logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
+
             # --- Production Verification Phase ---
             # Verify issues that were "fixed" but are awaiting log confirmation
             for issue_id, info in list(processed.items()):
@@ -596,9 +614,20 @@ def poller_worker():
                     repo_obj = gh_current.get_repo(repo_name)
                     is_owner = repo_obj.owner.login == bot_user
                     logger.info(f"Repo {repo_name} found. Owner match: {is_owner}")
-                    issues = repo_obj.get_issues(labels=config.get("monitored_labels", ["automated-fix"]), state="open")
+                    labels = config.get("monitored_labels", ["automated-fix"])
+                    if "NONE" in labels:
+                        logger.info(f"Label set to NONE for {repo_name}. Skipping issue scan.")
+                        continue
+
+                    if "ANY" in labels:
+                        issues = repo_obj.get_issues(state="open")
+                        logger.info(f"Scanning ALL open issues in {repo_name} (ANY label selected).")
+                    else:
+                        issues = repo_obj.get_issues(labels=labels, state="open")
+                        logger.info(f"Scanning issues with labels {labels} in {repo_name}.")
+
                     issue_count = issues.totalCount
-                    logger.info(f"Found {issue_count} open issues with tags in {repo_name}")
+                    logger.info(f"Found {issue_count} matching open issues in {repo_name}")
                     for issue in issues:
                         issue_id = f"{repo_name}:{issue.number}"
                         if issue_id in processed:
@@ -732,6 +761,11 @@ async def get_logs(request: Request):
     except Exception as e: logs = f"Error reading logs from {get_log_path()}: {e}"
     return templates.TemplateResponse(request=request, name="index.html", context={"view": "logs", "logs": logs, "state": state})
 
+@app.get("/hub-logs")
+async def get_hub_logs_page(request: Request):
+    logs = get_hub_logs()
+    return templates.TemplateResponse(request=request, name="index.html", context={"view": "hub-logs", "hub_logs": logs, "state": state})
+
 DEFAULT_ENV = {
     "GITHUB_TOKEN": "",
     "LOCAL_OLLAMA_MODEL": "gemma4:31b-coding-mtp-bf16",
@@ -763,12 +797,37 @@ async def settings_page(request: Request):
     # Handle labels for the UI
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
-    return templates.TemplateResponse(request=request, name="index.html", context={"view": "settings", "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]}})
+    return templates.TemplateResponse(request=request, name="index.html", context={
+        "view": "settings",
+        "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]},
+        "available_labels": state.get("available_labels", [])
+    })
 
 @app.post("/save_settings")
 async def save_settings(request: Request):
     form_data = await request.form()
     data = dict(form_data)
+
+    # Handle labels logic
+    labels_mode = data.get("label_mode", "SPECIFIC")
+    if labels_mode == "ANY":
+        labels = ["ANY"]
+    elif labels_mode == "NONE":
+        labels = ["NONE"]
+    else:
+        # Combine checkboxes and custom labels
+        labels_list = data.getlist("monitored_labels")
+        custom_labels_raw = data.get("custom_labels", "")
+        if custom_labels_raw:
+            custom_labels = [x.strip() for x in custom_labels_raw.split(",") if x.strip()]
+            labels_list.extend(custom_labels)
+
+        # Ensure we have at least one label (default to automated-fix if empty)
+        if not labels_list:
+            labels = ["automated-fix"]
+        else:
+            labels = list(set(labels_list)) # Deduplicate
+
     config_data = {
         "monitored_repos": [clean_repo_name(x.strip()) for x in data.get("monitored_repos", "").replace("\n", ",").split(",") if x.strip()],
         "trusted_repos": [clean_repo_name(x.strip()) for x in data.get("trusted_repos", "").replace("\n", ",").split(",") if x.strip()],
@@ -777,7 +836,7 @@ async def save_settings(request: Request):
         "dev_branch": data.get("dev_branch", "dev"),
         "repo_tests": {},
         "GITHUB_TOKEN": data.get("GITHUB_TOKEN", ""),
-        "monitored_labels": [x.strip() for x in data.get("monitored_labels", "").split(",") if x.strip()]
+        "monitored_labels": labels
     }
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
