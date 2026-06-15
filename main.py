@@ -232,6 +232,8 @@ def get_hub_logs():
     url = os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url: return None
     try:
+        # If user provided a base URL (e.g. http://ip:port), append /logs
+        # If they already provided /logs, this won't double it
         log_url = url.rstrip('/') + "/logs"
         resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
@@ -243,6 +245,20 @@ def get_hub_logs():
         return None
     except Exception as e:
         logger.error(f"Hub Log Fetch Error: {e}")
+        return None
+
+def get_hub_state():
+    """Fetches the current state of the hub for verification."""
+    url = os.getenv("HUB_QUERY_URL")
+    if not url or "your-netbox" in url: return None
+    try:
+        # Try base URL or /state endpoint
+        resp = requests.get(url.rstrip('/'), timeout=15)
+        if resp.status_code == 200:
+            return resp.text # Return raw text or json if available
+        return None
+    except Exception as e:
+        logger.error(f"Hub State Fetch Error: {e}")
         return None
 
 def analyze_logs_for_errors(logs):
@@ -569,9 +585,29 @@ def poller_worker():
                 logger.exception(f"Unexpected error during GitHub authentication: {e}")
                 raise e
 
+            # Normalize monitored repos before using them
+            raw_repos = config.get("monitored_repos", [])
+            monitored_repos = []
+            if isinstance(raw_repos, list):
+                for r in raw_repos:
+                    # In case a list item contains multiple repos (e.g. ["repo1, repo2"])
+                    for split_r in r.replace("\n", ",").split(","):
+                        cleaned = clean_repo_name(split_r)
+                        if cleaned:
+                            monitored_repos.append(cleaned)
+            elif isinstance(raw_repos, str):
+                for split_r in raw_repos.replace("\n", ",").split(","):
+                    cleaned = clean_repo_name(split_r)
+                    if cleaned:
+                        monitored_repos.append(cleaned)
+
+            monitored_repos = list(set(monitored_repos)) # Deduplicate
+            if not monitored_repos:
+                logger.warning("No monitored repositories configured. Skipping scan.")
+
             # --- Label Discovery Phase ---
             state["current_task"] = "Discovering Labels"
-            state["available_labels"] = discover_labels(gh_current, config["monitored_repos"])
+            state["available_labels"] = discover_labels(gh_current, monitored_repos)
             logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
 
             # --- Production Verification Phase ---
