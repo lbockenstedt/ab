@@ -119,10 +119,15 @@
                         <span class="text-slate-600 text-sm">{{ state.last_run }}</span>
                     </div>
                 </div>
-                <div class="mt-8 pt-6 border-t border-slate-200">
+                <div class="mt-8 pt-6 border-t border-slate-200 space-y-3">
                     <form action="/toggle_cloud" method="post">
                         <button type="submit" class="w-full py-2 px-4 rounded-lg font-bold transition-all duration-200 {{ 'bg-red-600 hover:bg-red-700 text-white' if state.force_cloud else 'bg-[#01A982] hover:bg-[#018f6d] text-white' }}">
                             {{ '⚠️ DISABLE Cloud Override' if state.force_cloud else '☁️ FORCE Cloud LLM' }}
+                        </button>
+                    </form>
+                    <form action="/restart" method="post">
+                        <button type="submit" class="w-full py-2 px-4 rounded-lg font-bold bg-slate-700 hover:bg-slate-800 text-white transition-all duration-200">
+                            <i class="fas fa-sync-alt mr-2"></i> Restart BugFixer
                         </button>
                     </form>
                 </div>
