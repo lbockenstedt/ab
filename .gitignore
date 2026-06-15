@@ -2,3 +2,6 @@
 __pycache__/
 venv/
 processed_issues.json
+node_modules/
+.DS_Store
+*.pyc
