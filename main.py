@@ -257,8 +257,16 @@ def heartbeat_worker():
             if local_url:
                 requests.get(f"{local_url}/api/tags", timeout=2)
                 state["local_online"] = True
-            else: state["local_online"] = False
-        except: state["local_online"] = False
+                # Update active_llm if it's still Unknown
+                if state["active_llm"] == "Unknown":
+                    if state["force_cloud"]:
+                        state["active_llm"] = f"Cloud ({os.getenv('CLOUD_OLLAMA_URL')})"
+                    else:
+                        state["active_llm"] = f"Local ({local_url})"
+            else:
+                state["local_online"] = False
+        except:
+            state["local_online"] = False
         time.sleep(5)
 
 def analyze_issue(issue):
@@ -468,24 +476,32 @@ def verify_fix(repo_path, repo_name, config):
         logger.error(f"Per-repo tests for {repo_name} failed:\n{error_msg}")
         return False, error_msg
 
+def check_for_updates():
+    """Checks GitHub for new versions and restarts the service if an update is found."""
+    try:
+        self_repo = git.Repo(os.getcwd())
+        # Check current commit hash
+        old_commit = self_repo.head.commit.hexsha
+        self_repo.remotes.origin.pull()
+        new_commit = self_repo.head.commit.hexsha
+        if old_commit != new_commit:
+            logger.info(f"New version detected! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
+            import subprocess
+            subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
+            return True, f"Update found: {old_commit[:7]} -> {new_commit[:7]}. Restarting..."
+        return False, "No updates available."
+    except Exception as e:
+        logger.warning(f"Self-update check failed: {e}")
+        return False, f"Update check failed: {e}"
+
 def poller_worker():
     global state
     while True:
         try:
             load_dotenv(override=True)
-            try:
-                self_repo = git.Repo(os.getcwd())
-                # Check current commit hash
-                old_commit = self_repo.head.commit.hexsha
-                self_repo.remotes.origin.pull()
-                new_commit = self_repo.head.commit.hexsha
-                if old_commit != new_commit:
-                    logger.info(f"New version detected! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
-                    import subprocess
-                    subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
-            except Exception as e:
-                logger.warning(f"Self-update check failed: {e}")
+            check_for_updates()
             config = load_config()
+
             state["status"] = "Scanning"
             state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             processed = load_processed()
@@ -761,6 +777,12 @@ async def save_settings(request: Request):
     with open("config.json", "w") as f:
         json.dump(config_data, f, indent=2)
     return RedirectResponse(url="/settings", status_code=303)
+
+@app.post("/update_now")
+async def update_now():
+    updated, msg = check_for_updates()
+    logger.info(f"Manual update check: {msg}")
+    return RedirectResponse(url="/", status_code=303)
 
 @app.post("/toggle_cloud")
 async def toggle_cloud():
