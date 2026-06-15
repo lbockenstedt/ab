@@ -13,7 +13,11 @@ import git
 DEFAULT_LOG_FILE = "/var/log/bugfixer.log"
 
 def get_log_path():
-    return os.getenv("LOG_FILE_PATH", "/var/log/bugfixer.log")
+    path = os.getenv("LOG_FILE_PATH", "/var/log/bugfixer.log")
+    log_dir = os.path.dirname(path) or "."
+    if not os.access(log_dir, os.W_OK):
+        return os.path.join(os.getcwd(), "bugfixer.log")
+    return path
 
 log_file = get_log_path()
 
@@ -522,16 +526,24 @@ def check_for_updates():
         logger.warning(f"Self-update check failed: {e}")
         return False, f"Update check failed: {e}"
 
+def updater_worker():
+    """Dedicated worker to check for updates every hour."""
+    while True:
+        try:
+            logger.info("Checking for self-updates...")
+            check_for_updates()
+        except Exception as e:
+            logger.error(f"Updater worker error: {e}")
+        time.sleep(3600)
+
 def poller_worker():
     global state
     while True:
         try:
             load_dotenv(override=True)
-            check_for_updates()
             config = load_config()
 
             state["status"] = "Scanning"
-            state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             processed = load_processed()
 
             # Priority 1: config.json, Priority 2: Environment
@@ -629,110 +641,114 @@ def poller_worker():
                     issue_count = issues.totalCount
                     logger.info(f"Found {issue_count} matching open issues in {repo_name}")
                     for issue in issues:
-                        issue_id = f"{repo_name}:{issue.number}"
-                        if issue_id in processed:
-                            # If it's awaiting prod verification, we don't re-fix it yet
-                            if processed[issue_id].get("status") == "awaiting_prod_verification":
-                                continue
-                            logger.info(f"Issue {issue_id} was previously processed but is now OPEN again. Re-evaluating...")
-                            del processed[issue_id]
-                        state["current_task"] = f"Fixing {issue_id}"
-                        logger.info(f"Processing issue {issue_id}: {issue.title}")
-                        before_state = get_hub_state()
-                        if before_state:
-                            logger.info(f"Captured hub state before fix for {issue_id}")
-                        with tempfile.TemporaryDirectory() as tmp_dir:
-                            path = os.path.join(tmp_dir, "repo")
-                            url = repo_obj.clone_url.replace("https://", f"https://{token}@")
-                            logger.info(f"Cloning {repo_name} to temporary directory...")
-                            repo_git = git.Repo.clone_from(url, path)
-                            max_attempts = 3
-                            success = False
-                            error_context = None
-                            for attempt in range(1, max_attempts + 1):
-                                logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {issue_id}...")
-                                fix_code = apply_ai_fix(path, issue.body, error_context)
-                                logger.info(f"AI generated fix. Applying to files...")
-                                success_applied, fixes, confidence = parse_and_apply(fix_code, path)
-                                if not success_applied:
-                                    verified = False
-                                    failure_msg = "AI generated invalid JSON format"
-                                else:
-                                    review = review_fix(path, issue.body, fixes)
-                                    review_conf = review.get("confidence", 0.0)
-                                    review_verdict = review.get("verdict", "Reject")
-                                    logger.info(f"Reviewer Verdict: {review_verdict} (Conf: {review_conf:.2f}) - {review.get('critique')}")
-                                    prepare_environment(path)
-                                    verified, failure_msg = verify_fix(path, repo_name, config)
-                                    if verified:
-                                        logger.info(f"Fix verified successfully on attempt {attempt}!")
-                                        success = True
-                                        final_confidence = (confidence + review_conf) / 2
-                                        final_verdict = review_verdict
-                                        break
-                                    else:
-                                        logger.warning(f"Fix attempt {attempt} failed verification. Feeding error back to LLM...")
-                                        error_context = failure_msg
-                            if not success:
-                                logger.error(f"AI failed to find a verified fix for {issue_id} after {max_attempts} attempts.")
-                                continue
-                            repo_git.git.add(A=True)
-                            commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
-                            repo_git.index.commit(commit_msg)
-                            logger.info(f"Committed verified changes: {commit_msg}")
-                            confidence_threshold = 0.95
-                            is_trusted = repo_name in config["trusted_repos"]
-                            can_direct_push = config.get("direct_push_enabled") and is_trusted and is_owner
-                            if can_direct_push and final_confidence >= confidence_threshold and final_verdict == "Approve":
-                                logger.info(f"High confidence ({final_confidence:.2f}) and trust verified. Pushing directly to main for {repo_name}...")
-                                repo_git.remotes.origin.push()
-                                logger.info("Direct push successful.")
-                                commit_type = "Direct Commit"
-                                detail_msg = f"The fix was verified (Avg Conf: {final_confidence:.2%}) and pushed directly to the main branch."
-                            else:
-                                target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
-                                logger.info(f"Pushing to branch: {target_branch} (Avg Conf: {final_confidence:.2f})")
-                                try:
-                                    repo_git.git.checkout(target_branch)
-                                except:
-                                    repo_git.create_head(target_branch).checkout()
-                                repo_git.remotes.origin.push(target_branch, force=True)
-                                pr = repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}", head=target_branch, base=config["default_branch"])
-                                logger.info(f"Pull Request created for {repo_name} on branch {target_branch}")
-                                commit_type = "Pull Request"
-                                detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
-                            try:
-                                comment_body = (
-                                    f"🤖 **BugFixer AI Update**\n\n"
-                                    f"The issue has been successfully resolved via {commit_type}.\n"
-                                    f"{detail_msg}\n\n"
-                                    f"Verification: ✅ Tests passed successfully."
-                                )
-                                issue.create_comment(comment_body)
-                                # Only close immediately if it wasn't log-detected
-                                is_log_detected = "log-detected" in issue.get_labels()
-                                if not is_log_detected:
-                                    issue.edit(state='closed')
-                                    logger.info(f"Commented and closed issue {issue_id}")
-                                else:
-                                    logger.info(f"Issue {issue_id} is log-detected. Leaving open until production verification.")
-                            except Exception as e:
-                                logger.error(f"Failed to comment/close issue {issue_id}: {e}")
-                            state["api_status"] = trigger_infrastructure_update()
+                        try:
+                            issue_id = f"{repo_name}:{issue.number}"
+                            if issue_id in processed:
+                                # If it's awaiting prod verification, we don't re-fix it yet
+                                if processed[issue_id].get("status") == "awaiting_prod_verification":
+                                    continue
+                                logger.info(f"Issue {issue_id} was previously processed but is now OPEN again. Re-evaluating...")
+                                del processed[issue_id]
+                            state["current_task"] = f"Fixing {issue_id}"
+                            logger.info(f"Processing issue {issue_id}: {issue.title}")
+                            before_state = get_hub_state()
                             if before_state:
-                                after_state = get_hub_state()
-                                if after_state and before_state == after_state:
-                                    logger.warning(f"Hub state for {issue_id} remained unchanged after update. Fix may not be reflected in hub.")
-                                elif after_state:
-                                    logger.info(f"Hub state change detected for {issue_id}! Fix successfully reflected.")
+                                logger.info(f"Captured hub state before fix for {issue_id}")
+                            with tempfile.TemporaryDirectory() as tmp_dir:
+                                path = os.path.join(tmp_dir, "repo")
+                                url = repo_obj.clone_url.replace("https://", f"https://{token}@")
+                                logger.info(f"Cloning {repo_name} to temporary directory...")
+                                repo_git = git.Repo.clone_from(url, path, depth=1)
+                                max_attempts = 3
+                                success = False
+                                error_context = None
+                                for attempt in range(1, max_attempts + 1):
+                                    logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {issue_id}...")
+                                    fix_code = apply_ai_fix(path, issue.body, error_context)
+                                    logger.info(f"AI generated fix. Applying to files...")
+                                    success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                                    if not success_applied:
+                                        verified = False
+                                        failure_msg = "AI generated invalid JSON format"
+                                    else:
+                                        review = review_fix(path, issue.body, fixes)
+                                        review_conf = review.get("confidence", 0.0)
+                                        review_verdict = review.get("verdict", "Reject")
+                                        logger.info(f"Reviewer Verdict: {review_verdict} (Conf: {review_conf:.2f}) - {review.get('critique')}")
+                                        prepare_environment(path)
+                                        verified, failure_msg = verify_fix(path, repo_name, config)
+                                        if verified:
+                                            logger.info(f"Fix verified successfully on attempt {attempt}!")
+                                            success = True
+                                            final_confidence = (confidence + review_conf) / 2
+                                            final_verdict = review_verdict
+                                            break
+                                        else:
+                                            logger.warning(f"Fix attempt {attempt} failed verification. Feeding error back to LLM...")
+                                            error_context = failure_msg
+                                if not success:
+                                    logger.error(f"AI failed to find a verified fix for {issue_id} after {max_attempts} attempts.")
+                                    continue
+                                repo_git.git.add(A=True)
+                                commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
+                                repo_git.index.commit(commit_msg)
+                                logger.info(f"Committed verified changes: {commit_msg}")
+                                confidence_threshold = 0.95
+                                is_trusted = repo_name in config["trusted_repos"]
+                                can_direct_push = config.get("direct_push_enabled") and is_trusted and is_owner
+                                if can_direct_push and final_confidence >= confidence_threshold and final_verdict == "Approve":
+                                    logger.info(f"High confidence ({final_confidence:.2f}) and trust verified. Pushing directly to main for {repo_name}...")
+                                    repo_git.remotes.origin.push()
+                                    logger.info("Direct push successful.")
+                                    commit_type = "Direct Commit"
+                                    detail_msg = f"The fix was verified (Avg Conf: {final_confidence:.2%}) and pushed directly to the main branch."
                                 else:
-                                    logger.error(f"Could not retrieve hub state after update for {issue_id}.")
-                            processed[issue_id] = {
-                                "status": "fixed" if not is_log_detected else "awaiting_prod_verification",
-                                "timestamp": datetime.now().isoformat(),
-                                "commit": repo_git.head.commit.hexsha
-                            }
-                            save_processed(processed)
+                                    target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
+                                    logger.info(f"Pushing to branch: {target_branch} (Avg Conf: {final_confidence:.2f})")
+                                    try:
+                                        repo_git.git.checkout(target_branch)
+                                    except:
+                                        repo_git.create_head(target_branch).checkout()
+                                    repo_git.remotes.origin.push(target_branch, force=True)
+                                    pr = repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}", head=target_branch, base=config["default_branch"])
+                                    logger.info(f"Pull Request created for {repo_name} on branch {target_branch}")
+                                    commit_type = "Pull Request"
+                                    detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
+                                try:
+                                    comment_body = (
+                                        f"🤖 **BugFixer AI Update**\n\n"
+                                        f"The issue has been successfully resolved via {commit_type}.\n"
+                                        f"{detail_msg}\n\n"
+                                        f"Verification: ✅ Tests passed successfully."
+                                    )
+                                    issue.create_comment(comment_body)
+                                    # Only close immediately if it wasn't log-detected
+                                    is_log_detected = "log-detected" in issue.get_labels()
+                                    if not is_log_detected:
+                                        issue.edit(state='closed')
+                                        logger.info(f"Commented and closed issue {issue_id}")
+                                    else:
+                                        logger.info(f"Issue {issue_id} is log-detected. Leaving open until production verification.")
+                                except Exception as e:
+                                    logger.error(f"Failed to comment/close issue {issue_id}: {e}")
+                                state["api_status"] = trigger_infrastructure_update()
+                                if before_state:
+                                    after_state = get_hub_state()
+                                    if after_state and before_state == after_state:
+                                        logger.warning(f"Hub state for {issue_id} remained unchanged after update. Fix may not be reflected in hub.")
+                                    elif after_state:
+                                        logger.info(f"Hub state change detected for {issue_id}! Fix successfully reflected.")
+                                    else:
+                                        logger.error(f"Could not retrieve hub state after update for {issue_id}.")
+                                processed[issue_id] = {
+                                    "status": "fixed" if not is_log_detected else "awaiting_prod_verification",
+                                    "timestamp": datetime.now().isoformat(),
+                                    "commit": repo_git.head.commit.hexsha
+                                }
+                                save_processed(processed)
+                        except Exception as e:
+                            logger.exception(f"Failed to process issue {issue_id}: {e}")
+                            continue
                 except GithubException as ge:
                     logger.error(f"GitHub API Error while accessing {repo_name}: {ge.status} - {ge.data}")
                     continue
@@ -742,6 +758,7 @@ def poller_worker():
             state["processed"] = processed
             state["status"] = "Idle"
             state["current_task"] = "None"
+            state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         except Exception as e:
             logger.exception(f"Critical poller error: {e}")
             state["status"] = f"Error: {str(e)}"
@@ -844,12 +861,27 @@ async def save_settings(request: Request):
             if ":" in pair:
                 repo, cmd = pair.split(":", 1)
                 config_data["repo_tests"][repo.strip()] = cmd.strip()
-    with open(".env", "w") as f:
-        for k, v in data.items():
-            if k not in config_data:
-                f.write(f"{k}={v}\n")
     with open("config.json", "w") as f:
         json.dump(config_data, f, indent=2)
+
+    # Update .env without wiping unrelated variables
+    env_vars = {}
+    if os.path.exists(".env"):
+        with open(".env", "r") as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    env_vars[k] = v
+
+    # Update env_vars with new data from form (if not in config_data)
+    for k, v in data.items():
+        if k not in config_data:
+            env_vars[k] = v
+
+    with open(".env", "w") as f:
+        for k, v in env_vars.items():
+            f.write(f"{k}={v}\n")
+
     return RedirectResponse(url="/settings", status_code=303)
 
 @app.post("/update_now")
@@ -876,6 +908,7 @@ async def restart_service():
 
 threading.Thread(target=heartbeat_worker, daemon=True).start()
 threading.Thread(target=poller_worker, daemon=True).start()
+threading.Thread(target=updater_worker, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
