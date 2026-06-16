@@ -1107,9 +1107,17 @@ def scan_self_logs(gh_current, config):
 
         # Identify the BugFixer repository name
         try:
-            self_repo_name = git.Repo(os.getcwd()).ctx.remote_url.replace("https://github.com/", "").replace(".git", "")
-        except:
-            self_repo_name = "lbockenstedt/bugfix same" # Fallback
+            repo = git.Repo(os.getcwd())
+            remote_url = repo.remotes.origin.url
+            import re
+            match = re.search(r'github\.com[:/]([^/]+/[^./]+)', remote_url)
+            if match:
+                self_repo_name = match.group(1).replace('.git', '')
+            else:
+                self_repo_name = "lbockenstedt/bugfixer" # Fallback
+        except Exception as e:
+            logger.debug(f"Could not determine self-repo name from git: {e}")
+            self_repo_name = "lbockenstedt/bugfixer" # Fallback
 
         for error in actionable_errors:
             error['repo'] = self_repo_name
