@@ -116,6 +116,14 @@ app = FastAPI()
 template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
 
+def is_local_llm_allowed():
+    """Checks if the local LLM is allowed to be used based on a fixed schedule."""
+    now = datetime.now().hour
+    # Local allowed: 9AM-4PM (9-16) and 1AM-5AM (1-5)
+    if (9 <= now < 16) or (1 <= now < 5):
+        return True
+    return False
+
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None):
     """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming."""
@@ -189,6 +197,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             raise e
 
     use_cloud = force_cloud if force_cloud is not None else state["force_cloud"]
+
+    # LLM Scheduling: If local LLM is not allowed right now, force cloud
+    if not use_cloud and not is_local_llm_allowed():
+        logger.info("Local LLM not allowed at this hour. Forcing fallback to Cloud.")
+        use_cloud = True
 
     try:
         if use_cloud:
@@ -574,9 +587,14 @@ def heartbeat_worker():
         time.sleep(5)
 
 def analyze_issue(issue):
+    # Combine issue body with all current comments to capture updates/provided logs
+    full_context = f"Issue Title: {issue.title}\nIssue Body: {issue.body}\n\n"
+    comments = issue.get_comments()
+    for i, comment in enumerate(comments, 1):
+        full_context += f"Comment {i}: {comment.body}\n"
+
     prompt = (
-        f"Issue Title: {issue.title}\n"
-        f"Issue Body: {issue.body}\n\n"
+        f"{full_context}\n\n"
         "Determine if this issue contains enough information to provide a code fix. "
         "Specifically, for UI or runtime errors, check if console logs or stack traces are present. "
         "If information is missing, specify exactly what is needed (e.g., 'Please provide the browser console output').\n\n"

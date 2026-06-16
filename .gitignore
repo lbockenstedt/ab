@@ -5,3 +5,4 @@ processed_issues.json
 node_modules/
 .DS_Store
 *.pyc
+bugfixer.log
