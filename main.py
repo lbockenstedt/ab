@@ -275,12 +275,21 @@ async def catch_exceptions_mid(request: Request, call_next):
             content={"message": "Internal Server Error. Check bugfixer.log for details.", "error": str(e)}
         )
 
+def update_task_state(task_name):
+    """Updates current task and resets start timer if the task has changed."""
+    global state
+    if state["current_task"] != task_name:
+        state["current_task"] = task_name
+        state["task_start_time"] = datetime.now()
+        logger.info(f"Task transition: {state['current_task']}")
+
 # Initial state
 config_on_start = load_config()
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False, "cloud_online": False,
     "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
-    "processed": [], "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": ""
+    "processed": [], "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": "",
+    "task_start_time": None, "qa_enabled": config_on_start.get("qa_enabled", True)
 }
 # Remove the line that overwrites STATE_FILE to a local path
 
@@ -797,7 +806,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     review_verdict = review.get("verdict", "Reject")
 
                     prepare_environment(path)
-                    verified, failure_msg = verify_fix(path, repo_name, config)
+                    if state["qa_enabled"]:
+                        verified, failure_msg = verify_fix(path, repo_name, config)
+                    else:
+                        logger.info("QA Testing disabled. Assuming verified.")
+                        verified, failure_msg = True, "QA disabled"
 
                     if verified:
                         success = True
@@ -918,7 +931,7 @@ def verify_production_fixes(gh_current, processed):
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
-    state["current_task"] = "Scanning Hub Logs"
+    update_task_state("Scanning Hub Logs")
     logger.info("Scanning Hub for new errors...")
     hub_logs = get_hub_logs()
     if hub_logs:
@@ -952,7 +965,7 @@ def scan_repo_issues(gh_current, config, processed):
     monitored_repos = list(set(monitored_repos))
 
     for repo_name in monitored_repos:
-        state["current_task"] = f"Checking {repo_name}"
+        update_task_state(f"Checking {repo_name}")
         logger.info(f"Scanning repository: {repo_name}")
         try:
             repo_obj = gh_current.get_repo(repo_name)
@@ -973,7 +986,7 @@ def scan_repo_issues(gh_current, config, processed):
                         if status in ["fixed", "non-actionable", "failed", "awaiting_prod_verification"]:
                             continue
 
-                    state["current_task"] = f"Fixing {issue_id}"
+                    update_task_state(f"Fixing {issue_id}")
                     success, msg = process_single_issue(repo_name, issue.number)
                     if not success:
                         logger.error(f"AI failed to fix {issue_id}: {msg}")
@@ -981,6 +994,60 @@ def scan_repo_issues(gh_current, config, processed):
                     logger.exception(f"Failed to process issue {issue_id}: {e}")
         except Exception as e:
             logger.exception(f"Unexpected error while processing {repo_name}: {e}")
+
+def scan_self_logs(gh_current, config):
+    """Scans BugFixer's own logs and creates GitHub issues for internal errors."""
+    global state
+    update_task_state("Scanning Self Logs")
+    logger.info("Scanning internal BugFixer logs for errors...")
+
+    log_path = get_log_path()
+    if not os.path.exists(log_path):
+        logger.warning(f"BugFixer log file not found at {log_path}")
+        return
+
+    try:
+        with open(log_path, "r") as f:
+            lines = f.readlines()
+
+        # Format local logs as Hub-like entries for analyze_logs_for_errors
+        # We'll group lines by timestamps (roughly) or just treat the whole file.
+        # analyze_logs_for_errors expects a list of {"module":..., "timestamp":..., "log":...}
+        formatted_logs = []
+        for line in lines:
+            if "[ERROR]" in line or "[CRITICAL]" in line:
+                # Basic timestamp extraction: 2026-06-16 18:16:46,268
+                ts = line[:23] if len(line) > 23 else "Unknown"
+                formatted_logs.append({
+                    "module": "bugfixer-core",
+                    "timestamp": ts,
+                    "log": line.strip()
+                })
+
+        if not formatted_logs:
+            return
+
+        actionable_errors = analyze_logs_for_errors(formatted_logs)
+        if not actionable_errors:
+            return
+
+        # Identify the BugFixer repository name
+        try:
+            self_repo_name = git.Repo(os.getcwd()).ctx.remote_url.replace("https://github.com/", "").replace(".git", "")
+        except:
+            self_repo_name = "lbockenstedt/bugfix same" # Fallback
+
+        for error in actionable_errors:
+            error['repo'] = self_repo_name
+            try:
+                repo_obj = gh_current.get_repo(self_repo_name)
+                create_automated_issue(repo_obj, error)
+                logger.info(f"Created self-diagnosis issue for BugFixer: {error['title']}")
+            except Exception as e:
+                logger.error(f"Failed to create self-diagnosis issue: {e}")
+
+    except Exception as e:
+        logger.error(f"Error during self-log scan: {e}")
 
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
@@ -1031,12 +1098,16 @@ def run_scan_cycle():
             logger.warning("No monitored repositories configured. Skipping scan.")
 
         # --- Label Discovery Phase ---
-        state["current_task"] = "Discovering Labels"
+        update_task_state("Discovering Labels")
         state["available_labels"] = discover_labels(gh_current, monitored_repos)
         logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
 
         # --- Production Verification Phase ---
         verify_production_fixes(gh_current, processed)
+
+        # --- Self-Diagnosis Phase ---
+        scan_self_logs(gh_current, config)
+
         # --- Parallel Scan Phase ---
         state["status"] = "Scanning"
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1050,7 +1121,7 @@ def run_scan_cycle():
 
         save_processed(processed) # Ensure state is persisted
         state["status"] = "Idle"
-        state["current_task"] = "None"
+        update_task_state("None")
         state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         logger.exception(f"Critical poller error: {e}")
@@ -1065,7 +1136,35 @@ def poller_worker():
 
 @app.get("/")
 async def dashboard(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html", context={"view": "status", "state": state})
+    # Filter processed issues to show only the last 7 days
+    recent_processed = {}
+    if state["processed"]:
+        now = datetime.now()
+        for issue_id, info in state["processed"].items():
+            try:
+                ts = datetime.fromisoformat(info.get("timestamp", "{}"))
+                if (now - ts).days < 7:
+                    recent_processed[issue_id] = info
+            except:
+                recent_processed[issue_id] = info # Keep if timestamp is invalid
+
+    return templates.TemplateResponse(request=request, name="index.html", context={"view": "status", "state": {**state, "processed": recent_processed}})
+
+@app.get("/api/task-details")
+async def get_task_details():
+    if state["current_task"] == "None" or state["task_start_time"] is None:
+        return {"status": "Idle", "task": "None", "duration": "0s", "stream": ""}
+
+    duration = datetime.now() - state["task_start_time"]
+    seconds = int(duration.total_seconds())
+    duration_str = f"{seconds // 3600}h {(seconds % 3600) // 60}m {seconds % 60}s"
+
+    return {
+        "status": state["status"],
+        "task": state["current_task"],
+        "duration": duration_str,
+        "stream": state["llm_stream"]
+    }
 
 @app.get("/logs")
 async def get_logs(request: Request):
@@ -1176,6 +1275,8 @@ async def save_settings(request: Request):
 
     if "direct_push_enabled" in data:
         config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
+    if "qa_enabled" in data:
+        config_data["qa_enabled"] = data.get("qa_enabled") == "on"
 
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
