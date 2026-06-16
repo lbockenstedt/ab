@@ -820,8 +820,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             return False, "No GitHub Token configured"
 
         gh_current = Github(token)
-        repo_obj = gh_current.get_repo(repo_name)
-        issue = repo_obj.get_issue(int(issue_num))
+        try:
+            repo_obj = gh_current.get_repo(repo_name)
+            issue = repo_obj.get_issue(int(issue_num))
+        except GithubException as ge:
+            if ge.status == 410:
+                logger.warning(f"Issue {repo_name}:{issue_num} was deleted. Skipping.")
+                return False, "Issue deleted"
+            raise ge
         issue_id = f"{repo_name}:{issue_num}"
 
         # --- Triage Phase ---
@@ -1004,7 +1010,7 @@ def verify_production_fixes(gh_current, processed):
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
-    update_task_state("Scanning Hub Logs")
+    update_task_state("HubScan", "Scanning Hub Logs")
     logger.info("Scanning Hub for new errors...")
     hub_logs = get_hub_logs()
     if hub_logs:
@@ -1066,7 +1072,7 @@ def scan_repo_issues(gh_current, config, processed):
 def scan_self_logs(gh_current, config):
     """Scans BugFixer's own logs and creates GitHub issues for internal errors."""
     global state
-    update_task_state("Scanning Self Logs")
+    update_task_state("SelfScan", "Scanning Self Logs")
     logger.info("Scanning internal BugFixer logs for errors...")
 
     log_path = get_log_path()
@@ -1167,7 +1173,7 @@ def run_scan_cycle():
             logger.warning("No monitored repositories configured. Skipping scan.")
 
         # --- Label Discovery Phase ---
-        update_task_state("Discovering Labels")
+        update_task_state("Discovery", "Discovering Labels")
         state["available_labels"] = discover_labels(gh_current, monitored_repos)
         logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
 
@@ -1190,7 +1196,6 @@ def run_scan_cycle():
 
         save_processed(processed) # Ensure state is persisted
         state["status"] = "Idle"
-        update_task_state("None")
         state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         logger.exception(f"Critical poller error: {e}")
