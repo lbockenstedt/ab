@@ -159,6 +159,20 @@
                             {{ state.current_task if state.current_task != 'None' else 'Standing by for issues...' }}
                         </p>
                     </div>
+                    {% if state.llm_stream %}
+                    <div class="mt-4 p-3 bg-slate-900 rounded-lg border border-slate-700">
+                        <div class="flex items-center gap-2 mb-2 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                            <span class="relative flex h-2 w-2">
+                              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                              <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                            </span>
+                            AI Thought Stream
+                        </div>
+                        <div class="text-green-400 font-mono text-[10px] leading-relaxed whitespace-pre-wrap overflow-hidden max-h-32 italic">
+                            {{ state.llm_stream }}
+                        </div>
+                    </div>
+                    {% endif %}
                     <div class="mt-6 space-y-2">
                         <div class="flex justify-between items-center">
                             <span class="text-slate-500 text-sm">Infrastructure Sync</span>

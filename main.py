@@ -78,9 +78,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         is_cloud = "ollama.com" in url and "local" not in url
         primary_endpoint = f"{url.rstrip('/')}/api/generate" if is_cloud else f"{url.rstrip('/')}/api/chat"
 
-        def attempt_request(endpoint, is_generate):
+        def attempt_request(endpoint, is_generate, timeout=120):
             if is_generate:
-                # Combine system and user prompts for the generate endpoint
                 full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
                 payload = {
                     "model": model,
@@ -97,32 +96,44 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     "stream": False
                 }
 
+            # Use a realistic User-Agent to avoid being blocked by basic bot-filters
             headers = {
                 "Content-Type": "application/json",
-                "Accept": "application/json"
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 SafariSameAs537.36"
             }
-            if api_key:
-                clean_key = api_key.strip().strip('"').strip("'")
-                auth_header = clean_key if clean_key.startswith("Bearer ") else f"Bearer {clean_key}"
-                headers["Authorization"] = auth_header
 
-            resp = requests.post(endpoint, json=payload, headers=headers, timeout=120)
-            if resp.status_code == 401:
-                logger.error(f"LLM 401 Unauthorized: {endpoint}. Check if OLLAMA_API_KEY is correctly set.")
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get('message', {}).get('content') if not is_generate else data.get('response', '')
+            if api_key:
+                # Aggressively clean the key: remove quotes, whitespace, and any non-printable characters
+                clean_key = api_key.strip().strip('"').strip("'")
+                clean_key = "".join(char for char in clean_key if char.isprintable())
+
+                # Ensure we have a clean "Bearer <token>" format
+                token_only = clean_key.replace("Bearer ", "").strip()
+                headers["Authorization"] = f"Bearer {token_only}"
+
+            try:
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
+                if resp.status_code == 401:
+                    logger.error(f"LLM 401 Unauthorized at {endpoint}. Token check: Length {len(token_only) if api_key else 0}. Verify OLLAMA_API_KEY in settings.")
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get('message', {}).get('content') if not is_generate else data.get('response', '')
+            except Exception as e:
+                raise e
 
         try:
-            return attempt_request(primary_endpoint, is_cloud)
+            # Cloud requests use standard timeout
+            return attempt_request(primary_endpoint, is_cloud, timeout=120)
         except Exception as e:
             # Fallback logic for local LLM: if /api/chat fails, try /api/generate
             if not is_cloud:
                 fallback_endpoint = f"{url.rstrip('/')}/api/generate"
                 if fallback_endpoint != primary_endpoint:
-                    logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate...")
+                    # Use a much longer timeout for local LLM (300s) as it may be slow to load the model
+                    logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate with 300s timeout...")
                     try:
-                        return attempt_request(fallback_endpoint, True)
+                        return attempt_request(fallback_endpoint, True, timeout=300)
                     except Exception as fe:
                         logger.error(f"Local fallback to /api/generate also failed: {fe}")
                         raise e
@@ -222,7 +233,7 @@ async def catch_exceptions_mid(request: Request, call_next):
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False,
     "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
-    "processed": [], "force_cloud": False, "version": get_version()
+    "processed": [], "force_cloud": False, "version": get_version(), "llm_stream": ""
 }
 STATE_FILE = "processed_issues.json"
 
@@ -249,6 +260,34 @@ def discover_labels(gh_current, monitored_repos):
         except Exception as e:
             logger.error(f"Error discovering labels for {repo_name}: {e}")
     return sorted(list(all_labels))
+
+def bump_repo_version(repo_path):
+    """Increments the version in the VERSION file of the target repository."""
+    version_file = os.path.join(repo_path, "VERSION")
+    current_version = "V.00"
+    if os.path.exists(version_file):
+        try:
+            with open(version_file, "r") as f:
+                current_version = f.read().strip()
+        except Exception as e:
+            logger.error(f"Error reading version file: {e}")
+
+    if current_version.startswith("V."):
+        try:
+            ver_num = int(current_version[2:])
+            new_version = f"V.{ver_num + 1:02d}"
+        except ValueError:
+            new_version = "V.01"
+    else:
+        new_version = "V.01"
+
+    try:
+        with open(version_file, "w") as f:
+            f.write(new_version)
+        return new_version
+    except Exception as e:
+        logger.error(f"Error writing version file: {e}")
+        return None
 
 def load_config():
     # Try persistent config first
@@ -712,7 +751,19 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 return False, "AI failed to find a verified fix"
 
             repo_git.git.add(A=True)
+
+            # Only bump version if we are confident and going to push directly to main
+            version_bumped = False
+            new_v = None
+            if can_direct_push and final_confidence >= confidence_threshold and final_verdict == "Approve":
+                new_v = bump_repo_version(path)
+                if new_v:
+                    version_bumped = True
+                    logger.info(f"Bumped target repository {repo_name} version to {new_v}")
+
             commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
+            if version_bumped:
+                commit_msg += f" (Version Bump to {new_v})"
             repo_git.index.commit(commit_msg)
 
             confidence_threshold = 0.95

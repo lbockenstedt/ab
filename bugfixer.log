@@ -502,3 +502,23 @@ Traceback (most recent call last):
   File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
     repo_git.git.add(A=True)
 Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 07:00:00,249 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    return False, "AI failed to find a verified fix"
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 07:05:00,251 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    verified, failure_msg = verify_fix(path, repo_name, config)
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 07:10:00,255 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    verified, failure_msg = verify_fix(path, repo_name, config)
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 07:15:00,297 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    force_cloud = True
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
