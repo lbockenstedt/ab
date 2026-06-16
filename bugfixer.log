@@ -1,0 +1,495 @@
+2026-06-15 22:18:39,100 [INFO] BugFixer started. Logging to: /Users/lbockenstedt/vscode/bugfixer/bugfixer.log
+2026-06-15 22:18:39,102 [INFO] Checking for self-updates...
+2026-06-15 22:18:39,103 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    raise Exception("Configuration Pending: Please enter your GitHub Token in Settings")
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 22:23:39,112 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    raise Exception("Configuration Pending: Please enter your GitHub Token in Settings")
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 22:28:39,119 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    global state
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 22:33:39,128 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    global state
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 22:38:39,136 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    logger.exception(f"Error in process_single_issue: {e}")
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 22:43:39,104 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    logger.exception(f"Error in process_single_issue: {e}")
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 22:48:39,104 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    state["processed"] = processed
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 22:53:39,109 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    state["processed"] = processed
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 22:58:39,107 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    state["processed"] = processed
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:03:39,108 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    state["processed"] = processed
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:08:39,135 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    state["processed"] = processed
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:13:39,146 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    state["processed"] = processed
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:18:39,156 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    state["processed"] = processed
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:18:39,396 [INFO] Checking for self-updates...
+2026-06-15 23:23:39,165 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    state["processed"] = processed
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:28:39,170 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:33:39,185 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:38:39,194 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:43:39,203 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:48:39,215 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:53:39,228 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-15 23:58:39,235 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:19:50,668 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:24:50,677 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:29:50,688 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:34:50,698 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:34:51,184 [INFO] Checking for self-updates...
+2026-06-16 00:39:50,709 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:44:50,668 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:49:50,667 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:54:50,667 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 00:59:50,677 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:04:50,684 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:09:50,683 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:14:50,690 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:29:59,804 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:34:59,800 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:39:59,803 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:44:59,805 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:45:00,614 [INFO] Checking for self-updates...
+2026-06-16 01:49:59,804 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:54:59,810 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 01:59:59,845 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:04:59,848 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:09:59,859 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:14:59,869 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:19:59,878 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:24:59,888 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:29:59,891 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:34:59,900 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:39:59,902 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:44:59,952 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:45:01,128 [INFO] Checking for self-updates...
+2026-06-16 02:49:59,964 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:54:59,977 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 02:59:59,988 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:04:59,994 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:10:00,006 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:15:00,020 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:20:00,029 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:25:00,034 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:30:00,045 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:35:00,060 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:40:00,069 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:45:00,082 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:45:01,534 [INFO] Checking for self-updates...
+2026-06-16 03:50:00,078 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 03:55:00,089 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:00:00,098 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:05:00,101 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:10:00,109 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:15:00,103 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:20:00,106 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:25:00,114 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:30:00,122 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:35:00,133 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:40:00,130 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:45:00,137 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:45:01,913 [INFO] Checking for self-updates...
+2026-06-16 04:50:00,147 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 04:55:00,151 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:00:00,161 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:05:00,167 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:10:00,176 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:15:00,182 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:20:00,184 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:25:00,185 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:30:00,193 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:35:00,204 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:40:00,206 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:45:00,212 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:45:02,245 [INFO] Checking for self-updates...
+2026-06-16 05:50:00,217 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 05:55:00,227 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:00:00,232 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:05:00,236 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:10:00,246 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:15:00,256 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:20:00,260 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:25:00,266 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:30:00,235 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:35:00,236 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:40:00,238 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    processed[f"{repo_name}:{issue_num}"] = {
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:45:00,238 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    can_direct_push = config.get("direct_push_enabled") and is_trusted and is_owner
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 06:45:02,668 [INFO] Checking for self-updates...

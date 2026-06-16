@@ -22,6 +22,24 @@ else
     cd - > /dev/null
 fi
 
+# 2b. Persistent Config Setup
+echo "📁 Ensuring persistent configuration directory..."
+mkdir -p /etc/bugfixer
+
+# Migrate local configs to persistent storage if not already there
+if [ -f "$INSTALL_DIR/config.json" ] && [ ! -f "/etc/bugfixer/config.json" ]; then
+    echo "Migrating config.json to /etc/bugfixer..."
+    cp "$INSTALL_DIR/config.json" /etc/bugfixer/config.json
+fi
+if [ -f "$INSTALL_DIR/.env" ] && [ ! -f "/etc/bugfixer/.env" ]; then
+    echo "Migrating .env to /etc/bugfixer..."
+    cp "$INSTALL_DIR/.env" /etc/bugfixer/.env
+fi
+if [ -f "$INSTALL_DIR/processed_issues.json" ] && [ ! -f "/etc/bugfixer/processed_issues.json" ]; then
+    echo "Migrating processed_issues.json to /etc/bugfixer..."
+    cp "$INSTALL_DIR/processed_issues.json" /etc/bugfixer/processed_issues.json
+fi
+
 cd $INSTALL_DIR
 
 # 3. Setup environment

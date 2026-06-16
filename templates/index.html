@@ -123,6 +123,10 @@
                         <span class="text-slate-500">Last Run</span>
                         <span class="text-slate-600 text-sm">{{ state.last_run }}</span>
                     </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-slate-500">Version</span>
+                        <span class="text-slate-600 text-sm font-mono">{{ state.version }}</span>
+                    </div>
                 </div>
                 <div class="mt-8 pt-6 border-t border-slate-200 space-y-3">
                     <form action="/toggle_cloud" method="post">

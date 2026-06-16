@@ -41,7 +41,19 @@ logging.basicConfig(
 logger = logging.getLogger("BugFixer")
 logger.info(f"BugFixer started. Logging level: {LOG_LEVEL}. Logging to: {log_file}")
 
-load_dotenv()
+# Persistent Configuration Paths
+CONFIG_DIR = "/etc/bugfixer"
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+ENV_FILE = os.path.join(CONFIG_DIR, ".env")
+STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
+VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
+
+def get_version():
+    try:
+        with open(VERSION_FILE, "r") as f: return f.read().strip()
+    except: return "Unknown"
+
+load_dotenv(ENV_FILE)
 app = FastAPI()
 
 # Use absolute path for templates to avoid 500 errors if CWD changes
@@ -207,7 +219,7 @@ async def catch_exceptions_mid(request: Request, call_next):
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False,
     "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
-    "processed": [], "force_cloud": False
+    "processed": [], "force_cloud": False, "version": get_version()
 }
 STATE_FILE = "processed_issues.json"
 
@@ -236,11 +248,20 @@ def discover_labels(gh_current, monitored_repos):
     return sorted(list(all_labels))
 
 def load_config():
+    # Try persistent config first
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f: return json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading persistent config {CONFIG_FILE}: {e}")
+    # Fallback to local config
     try:
         with open("config.json", "r") as f: return json.load(f)
-    except: return {"monitored_repos": [], "trusted_repos": [], "default_branch": "main", "direct_push_enabled": False, "dev_branch": "dev", "repo_tests": {}, "GITHUB_TOKEN": "", "monitored_labels": ["automated-fix"]}
+    except:
+        return {"monitored_repos": [], "trusted_repos": [], "default_branch": "main", "direct_push_enabled": False, "dev_branch": "dev", "repo_tests": {}, "GITHUB_TOKEN": "", "monitored_labels": ["automated-fix"]}
 
 def load_processed():
+    # Try persistent state first
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
@@ -248,7 +269,16 @@ def load_processed():
                 if isinstance(data, list):
                     return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
                 return data
-        except: return {}
+        except: pass
+    # Fallback to local state
+    if os.path.exists("processed_issues.json"):
+        try:
+            with open("processed_issues.json", "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
+                return data
+        except: pass
     return {}
 
 def save_processed(processed):
@@ -287,17 +317,21 @@ def get_hub_logs():
     """Fetches recent logs from the Hub for all modules."""
     config = load_config()
     url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
-    if not url or "your-netbox" in url: return None
+    if not url or "your-netbox" in url:
+        logger.debug("Hub Query URL not configured. Skipping log fetch.")
+        return None
     try:
         # Use the comprehensive 'all' endpoint to get Hub, Agent, and Module logs
         log_url = url.rstrip('/') + "/setup/logs/all"
+        logger.debug(f"Fetching Hub logs from: {log_url}")
         resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
             try:
                 return resp.json()
-            except json.JSONDecodeError:
-                logger.error(f"Hub returned 200 OK but body was not valid JSON. Content: {resp.text[:100]}...")
+            except Exception as e:
+                logger.error(f"Hub returned 200 OK but failed to parse JSON: {e}. Content: {resp.text[:200]}...")
                 return None
+        logger.error(f"Hub returned unexpected status code {resp.status_code} for {log_url}")
         return None
     except Exception as e:
         logger.error(f"Hub Log Fetch Error: {e}")
@@ -594,10 +628,11 @@ def check_for_updates():
         self_repo.remotes.origin.pull()
         new_commit = self_repo.head.commit.hexsha
         if old_commit != new_commit:
-            logger.info(f"New version detected! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
+            cur_version = get_version()
+            logger.info(f"New version detected (v{cur_version})! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
             import subprocess
             subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
-            return True, f"Update found: {old_commit[:7]} -> {new_commit[:7]}. Restarting..."
+            return True, f"Update found: v{cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
         return False, "No updates available."
     except Exception as e:
         logger.warning(f"Self-update check failed: {e}")
@@ -990,13 +1025,13 @@ async def save_settings(request: Request):
             if ":" in pair:
                 repo, cmd = pair.split(":", 1)
                 config_data["repo_tests"][repo.strip()] = cmd.strip()
-    with open("config.json", "w") as f:
+    with open(CONFIG_FILE, "w") as f:
         json.dump(config_data, f, indent=2)
 
     # Update .env without wiping unrelated variables
     env_vars = {}
-    if os.path.exists(".env"):
-        with open(".env", "r") as f:
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, "r") as f:
             for line in f:
                 if "=" in line:
                     k, v = line.strip().split("=", 1)
@@ -1007,7 +1042,7 @@ async def save_settings(request: Request):
         if k not in config_data:
             env_vars[k] = v
 
-    with open(".env", "w") as f:
+    with open(ENV_FILE, "w") as f:
         for k, v in env_vars.items():
             f.write(f"{k}={v}\n")
 
