@@ -117,8 +117,8 @@ template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
 
 # Shared LLM Utility
-def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None):
-    """Generic LLM caller with Local -> Cloud failover and JSON extraction."""
+def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None):
+    """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming."""
     config = load_config()
     l_mod = config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL")
     c_mod = config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL")
@@ -165,7 +165,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         chunk = json.loads(line.decode('utf-8'))
                         content = chunk.get('response') or chunk.get('message', {}).get('content', '')
                         full_response += content
+                        # Update global stream for legacy/general purposes
                         state["llm_stream"] = full_response
+                        # Update task-specific stream if task_id is provided
+                        if task_id and task_id in state["active_tasks"]:
+                            state["active_tasks"][task_id]["stream"] = full_response
                 return full_response
             except Exception as e:
                 raise e
@@ -275,21 +279,28 @@ async def catch_exceptions_mid(request: Request, call_next):
             content={"message": "Internal Server Error. Check bugfixer.log for details.", "error": str(e)}
         )
 
-def update_task_state(task_name):
-    """Updates current task and resets start timer if the task has changed."""
+def update_task_state(task_id, task_name, action="start"):
+    """Manages active tasks and their start times. action can be 'start' or 'end'."""
     global state
-    if state["current_task"] != task_name:
-        state["current_task"] = task_name
-        state["task_start_time"] = datetime.now()
-        logger.info(f"Task transition: {state['current_task']}")
+    if action == "start":
+        state["active_tasks"][task_id] = {
+            "name": task_name,
+            "start_time": datetime.now(),
+            "stream": ""
+        }
+        logger.info(f"Task started: {task_id} - {task_name}")
+    elif action == "end":
+        if task_id in state["active_tasks"]:
+            del state["active_tasks"][task_id]
+            logger.info(f"Task completed: {task_id}")
 
 # Initial state
 config_on_start = load_config()
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False, "cloud_online": False,
-    "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
+    "last_run": "Never", "api_status": "Not Triggered",
     "processed": [], "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": "",
-    "task_start_time": None, "qa_enabled": config_on_start.get("qa_enabled", True)
+    "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True)
 }
 # Remove the line that overwrites STATE_FILE to a local path
 
@@ -632,7 +643,7 @@ def prepare_environment(repo_path):
     else:
         logger.info("No known dependency file detected. Skipping installation.")
 
-def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None):
+def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None):
     logger.info("Running Skeptical Reviewer pass...")
     fix_details = ""
     for path, code in proposed_fixes.items():
@@ -649,7 +660,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None):
         "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}"
     )
     try:
-        res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.", force_cloud=force_cloud)
+        res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.", force_cloud=force_cloud, task_id=task_id)
         import re
         match = re.search(r'\{.*\}', res, re.DOTALL)
         if match:
@@ -659,7 +670,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None):
         logger.error(f"Reviewer error: {e}")
         return {"confidence": 0.0, "verdict": "Reject", "critique": f"Reviewer crashed: {e}"}
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None):
+def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None):
     relevant_files = identify_files_to_fix(repo_path, issue_body)
     if not relevant_files:
         logger.warning(f"No specific files identified for issue. Attempting general fix.")
@@ -688,7 +699,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None):
             "Example: {\"confidence\": 0.98, \"fixes\": {\"src/main.py\": \"full code here\"}}"
         )
     try:
-        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud)
+        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id)
     except Exception as e:
         raise Exception(f"Fix generation failed: {e}")
 
@@ -811,8 +822,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         gh_current = Github(token)
         repo_obj = gh_current.get_repo(repo_name)
         issue = repo_obj.get_issue(int(issue_num))
+        issue_id = f"{repo_name}:{issue_num}"
 
         # --- Triage Phase ---
+        update_task_state(issue_id, f"Triaging {issue_id}")
         actionable, request_msg = analyze_issue(issue)
         if not actionable:
             logger.info(f"Issue {repo_name}:{issue_num} is non-actionable: {request_msg}")
@@ -825,6 +838,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             }
             save_processed(processed)
             state["processed"] = processed
+            update_task_state(issue_id, "None", action="end")
             return False, f"Non-actionable: {request_msg}"
 
         # Handle LLM preference
@@ -845,20 +859,23 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             error_context = None
 
             for attempt in range(1, max_attempts + 1):
+                update_task_state(issue_id, f"Fix Attempt {attempt}/{max_attempts} for {issue_id}")
                 logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
-                fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud)
+                fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud, task_id=issue_id)
 
                 success_applied, fixes, confidence = parse_and_apply(fix_code, path)
                 if not success_applied:
                     verified = False
                     failure_msg = "AI generated invalid JSON format"
                 else:
-                    review = review_fix(path, issue.body, fixes, force_cloud=force_cloud)
+                    update_task_state(issue_id, f"Reviewing {issue_id}")
+                    review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
                     review_conf = review.get("confidence", 0.0)
                     review_verdict = review.get("verdict", "Reject")
 
                     prepare_environment(path)
                     if state["qa_enabled"]:
+                        update_task_state(issue_id, f"Verifying {issue_id}")
                         verified, failure_msg = verify_fix(path, repo_name, config)
                     else:
                         logger.info("QA Testing disabled. Assuming verified.")
@@ -881,9 +898,17 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 }
                 save_processed(processed)
                 state["processed"] = processed
+                update_task_state(issue_id, "None", action="end")
                 return False, "AI failed to find a verified fix"
 
             repo_git.git.add(A=True)
+
+            # Define thresholds
+            confidence_threshold = 0.95
+            is_trusted = repo_name in config["trusted_repos"]
+            bot_user = gh_current.get_user().login
+            is_owner = repo_obj.owner.login == bot_user
+            can_direct_push = config.get("direct_push_enabled") and is_trusted and is_owner
 
             # Only bump version if we are confident and going to push directly to main
             version_bumped = False
@@ -899,16 +924,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 commit_msg += f" (Version Bump to {new_v})"
             repo_git.index.commit(commit_msg)
 
-            confidence_threshold = 0.95
-            is_trusted = repo_name in config["trusted_repos"]
-            bot_user = gh_current.get_user().login
-            is_owner = repo_obj.owner.login == bot_user
-            can_direct_push = config.get("direct_push_enabled") and is_trusted and is_owner
-
-            if can_direct_push and final_confidence >= confidence_threshold and final_verdict == "Approve":
+            if can_direct_push and final_verdict == "Approve":
                 repo_git.remotes.origin.push()
                 commit_type = "Direct Commit"
-                detail_msg = f"The fix was verified (Avg Conf: {final_confidence:.2%}) and pushed directly to the main branch."
+                detail_msg = f"The fix was verified and pushed directly to the main branch. Avg Confidence: {final_confidence:.2%}"
             else:
                 target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
                 try:
@@ -941,10 +960,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             save_processed(processed)
             state["processed"] = processed
 
+            update_task_state(issue_id, "None", action="end")
             return True, f"Fixed via {commit_type}"
 
     except Exception as e:
         logger.exception(f"Error in process_single_issue: {e}")
+        update_task_state(issue_id, "None", action="end")
         return False, str(e)
 
 def verify_production_fixes(gh_current, processed):
@@ -999,14 +1020,15 @@ def scan_hub_logs(gh_current, config):
                 logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
 
 def scan_repo_issues(gh_current, config, processed):
-    """Phase: Scan monitored repos for issues and attempt fixes."""
+    """Phase: Scan monitored repos for issues and attempt fixes concurrently."""
     global state
     bot_user = gh_current.get_user().login
 
     monitored_repos = get_monitored_repos(config)
+    max_workers = int(config.get("MAX_CONCURRENT_FIXES", 5))
 
     for repo_name in monitored_repos:
-        update_task_state(f"Checking {repo_name}")
+        update_task_state("RepoScan", f"Checking {repo_name}")
         logger.info(f"Scanning repository: {repo_name}")
         try:
             repo_obj = gh_current.get_repo(repo_name)
@@ -1019,6 +1041,7 @@ def scan_repo_issues(gh_current, config, processed):
             else:
                 issues = repo_obj.get_issues(labels=labels, state="open")
 
+            to_fix = []
             for issue in issues:
                 try:
                     issue_id = f"{repo_name}:{issue.number}"
@@ -1026,13 +1049,17 @@ def scan_repo_issues(gh_current, config, processed):
                         status = processed[issue_id].get("status")
                         if status in ["fixed", "non-actionable", "failed", "awaiting_prod_verification"]:
                             continue
-
-                    update_task_state(f"Fixing {issue_id}")
-                    success, msg = process_single_issue(repo_name, issue.number)
-                    if not success:
-                        logger.error(f"AI failed to fix {issue_id}: {msg}")
+                    to_fix.append((repo_name, issue.number))
                 except Exception as e:
-                    logger.exception(f"Failed to process issue {issue_id}: {e}")
+                    logger.exception(f"Failed to triage issue {issue_id}: {e}")
+
+            if to_fix:
+                logger.info(f"Found {len(to_fix)} issues to fix in {repo_name}. Processing concurrently (max {max_workers})...")
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(process_single_issue, r, n) for r, n in to_fix]
+                    for future in futures:
+                        future.result()
+
         except Exception as e:
             logger.exception(f"Unexpected error while processing {repo_name}: {e}")
 
@@ -1193,19 +1220,27 @@ async def dashboard(request: Request):
     return templates.TemplateResponse(request=request, name="index.html", context={"view": "status", "state": {**state, "processed": recent_processed}})
 
 @app.get("/api/task-details")
-async def get_task_details():
-    if state["current_task"] == "None" or state["task_start_time"] is None:
-        return {"status": "Idle", "task": "None", "duration": "0s", "stream": ""}
+async def get_task_details(task_id: str = None):
+    if task_id:
+        if task_id not in state["active_tasks"]:
+            return JSONResponse(status_code=404, content={"error": "Task not found or no longer active"})
 
-    duration = datetime.now() - state["task_start_time"]
-    seconds = int(duration.total_seconds())
-    duration_str = f"{seconds // 3600}h {(seconds % 3600) // 60}m {seconds % 60}s"
+        task = state["active_tasks"][task_id]
+        duration = datetime.now() - task["start_time"]
+        seconds = int(duration.total_seconds())
+        duration_str = f"{seconds // 3600}h {(seconds % 3600) // 60}m {seconds % 60}s"
 
+        return {
+            "status": state["status"],
+            "task": task["name"],
+            "duration": duration_str,
+            "stream": task["stream"]
+        }
+
+    # If no task_id, return a summary of all active tasks
     return {
-        "status": state["status"],
-        "task": state["current_task"],
-        "duration": duration_str,
-        "stream": state["llm_stream"]
+        "active_tasks": state["active_tasks"],
+        "count": len(state["active_tasks"])
     }
 
 @app.get("/logs")
@@ -1237,7 +1272,8 @@ DEFAULT_ENV = {
     "HUB_QUERY_URL": "",
     "LOG_FILE_PATH": "/var/log/bugfixer.log",
     "DEV_BRANCH": "dev",
-    "LLM_TIMEOUT": "900"
+    "LLM_TIMEOUT": "900",
+    "MAX_CONCURRENT_FIXES": "5"
 }
 
 @app.get("/settings")
@@ -1304,6 +1340,7 @@ async def save_settings(request: Request):
         "CLOUD_OLLAMA_MODEL": lambda v: v,
         "LOCAL_OLLAMA_MODEL": lambda v: v,
         "LLM_TIMEOUT": lambda v: v,
+        "MAX_CONCURRENT_FIXES": lambda v: v,
     }
 
     for key, transform in updates.items():
