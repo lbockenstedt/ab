@@ -274,7 +274,8 @@ def create_automated_issue(gh_repo, error_data):
 
 def get_hub_logs():
     """Fetches recent logs from the Hub for all modules."""
-    url = os.getenv("HUB_QUERY_URL")
+    config = load_config()
+    url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url: return None
     try:
         # Use the comprehensive 'all' endpoint to get Hub, Agent, and Module logs
@@ -293,7 +294,8 @@ def get_hub_logs():
 
 def get_hub_state():
     """Fetches the current state of the hub for verification."""
-    url = os.getenv("HUB_QUERY_URL")
+    config = load_config()
+    url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url: return None
     try:
         # Try base URL or /state endpoint
