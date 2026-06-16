@@ -1196,6 +1196,7 @@ def run_scan_cycle():
         load_dotenv(override=True)
         config = load_config()
 
+        state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         state["status"] = "Scanning"
         processed = load_processed()
 
