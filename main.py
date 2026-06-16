@@ -75,8 +75,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             logger.warning(f"Detected potentially incorrect Cloud LLM URL: {url}. Official Ollama Cloud host is 'https://ollama.com'. Please check your settings.")
 
         # Determine primary endpoint
-        is_cloud = "ollama.com" in url and "local" not in url
-        primary_endpoint = f"{url.rstrip('/')}/api/generate" if is_cloud else f"{url.rstrip('/')}/api/chat"
+        primary_endpoint = f"{url.rstrip('/')}/api/generate"
 
         # Use configurable timeout from config or default 15m
         timeout = int(load_config().get("LLM_TIMEOUT", 900))
