@@ -75,57 +75,42 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         if "api.ollama.com" in url:
             logger.warning(f"Detected potentially incorrect Cloud LLM URL: {url}. Official Ollama Cloud host is 'https://ollama.com'. Please check your settings.")
 
-        # Determine primary endpoint
+        # Determine primary endpoint and cloud status
         is_cloud = "ollama.com" in url and "local" not in url
         primary_endpoint = f"{url.rstrip('/')}/api/generate"
-
-        # Use configurable timeout from config or default 15m
         timeout = int(load_config().get("LLM_TIMEOUT", 900))
 
-        def attempt_request(endpoint, is_generate, timeout=None):
-            if timeout is None: timeout = 900
+        def attempt_request(endpoint, use_generate_api, t_out=None):
+            if t_out is None: t_out = 900
 
-            if is_generate:
-                full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
-                payload = {
-                    "model": model,
-                    "prompt": full_prompt,
-                    "stream": True
-                }
+            if use_generate_api:
+                full_prompt = f"System: {system_prompt}\\n\\nUser: {prompt}"
+                payload = {"model": model, "prompt": full_prompt, "stream": True}
             else:
                 payload = {
                     "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
+                    "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
                     "stream": True
                 }
 
             headers = {}
-
             if api_key:
-                # Simply strip whitespace and quotes
                 clean_key = api_key.strip().strip('"').strip("'")
                 token_only = clean_key.replace("Bearer ", "").strip()
                 headers["Authorization"] = f"Bearer {token_only}"
 
             try:
-                # Use streaming response
-                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=t_out, stream=True)
                 if resp.status_code == 401:
                     logger.error(f"LLM 401 Unauthorized at {endpoint}. Verify OLLAMA_API_KEY.")
                 resp.raise_for_status()
-
                 full_response = ""
                 for line in resp.iter_lines():
                     if line:
                         chunk = json.loads(line.decode('utf-8'))
-                        # Handle both /api/generate (response) and /api/chat (message.content)
                         content = chunk.get('response') or chunk.get('message', {}).get('content', '')
                         full_response += content
-                        state["llm_stream"] = full_response # Update the Thought Stream
-
+                        state["llm_stream"] = full_response
                 return full_response
             except Exception as e:
                 raise e
@@ -1031,36 +1016,6 @@ def poller_worker():
 
             # --- Production Verification Phase ---
             verify_production_fixes(gh_current, processed)
-                if info.get("status") == "awaiting_prod_verification":
-                    repo_name, issue_num = issue_id.split(":")
-                    logger.info(f"Verifying production fix for {issue_id}...")
-                    try:
-                        repo_obj = gh_current.get_repo(repo_name)
-                        issue = repo_obj.get_issue(int(issue_num))
-
-                        # Get logs from hub
-                        logs = get_hub_logs()
-                        if logs:
-                            module_name = repo_name.split('/')[-1]
-                            relevant_logs = [l['log'] for l in logs if l.get('module') == module_name]
-                            full_log_text = "\n".join(relevant_logs)
-
-                            # Look for the original error snippet in the issue body
-                            import re
-                            match = re.search(r"### Log Evidence:\n```\n(.*?)\n```", issue.body, re.DOTALL)
-                            if match:
-                                snippet = match.group(1).strip()
-                                if snippet.lower() not in full_log_text.lower():
-                                    logger.info(f"Verified: Error snippet no longer found in logs for {issue_id}. Closing issue.")
-                                    issue.create_comment("🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. Closing issue.")
-                                    issue.edit(state='closed')
-                                    processed[issue_id]["status"] = "verified"
-                                    save_processed(processed)
-                                else:
-                                    logger.info(f"Issue {issue_id} still failing in production logs.")
-                    except Exception as e:
-                        logger.error(f"Error verifying {issue_id}: {e}")
-
             # --- Parallel Scan Phase ---
             state["status"] = "Scanning"
             with ThreadPoolExecutor(max_workers=2) as executor:
