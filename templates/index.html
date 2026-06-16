@@ -232,17 +232,26 @@
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-200">
-                    {% for item in state.processed %}
+                    {% for issue_id, info in state.processed.items() %}
                     <tr class="hover:bg-slate-50 transition-colors">
-                        <td class="px-6 py-4 font-mono text-[#01A982]">{{ item }}</td>
+                        <td class="px-6 py-4 font-mono text-[#01A982]">{{ issue_id }}</td>
                         <td class="px-6 py-4 text-slate-600">AI Correction applied & synced</td>
                         <td class="px-6 py-4 text-right">
-                            <span class="text-green-700 bg-green-100 px-2 py-1 rounded text-xs font-bold">SUCCESS</span>
+                            <span class="text-green-700 bg-green-100 px-2 py-1 rounded text-xs font-bold">{{ info.status.upper() }}</span>
                         </td>
                         <td class="px-6 py-4 text-center space-x-2">
-                            <button onclick="triggerFix('{{ item }}', 'retry')" class="text-xs px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-bold text-slate-700 transition-colors">Retry</button>
-                            <button onclick="triggerFix('{{ item }}', 'local')" class="text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded font-bold text-blue-700 transition-colors">Local</button>
-                            <button onclick="triggerFix('{{ item }}', 'cloud')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors">Cloud</button>
+                            <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-bold text-slate-700 transition-colors">Retry</button>
+                            <button onclick="triggerFix('{{ issue_id }}', 'local')" class="text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded font-bold text-blue-700 transition-colors">Local</button>
+                            <button onclick="triggerFix('{{ issue_id }}', 'cloud')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors">Cloud</button>
+                        </td>
+                    </tr>
+                    <tr class="bg-slate-50/50">
+                        <td colspan="4" class="px-6 py-2 text-slate-500 text-[10px] italic border-b border-slate-100">
+                            <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
+                            <span class="mx-2 text-slate-300">|</span>
+                            <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
+                            <span class="mx-2 text-slate-300">|</span>
+                            <span class="font-semibold">Date:</span> {{ info.timestamp }}
                         </td>
                     </tr>
                     {% endfor %}
@@ -397,6 +406,13 @@
                             <label for="qa_enabled" class="text-sm font-medium text-slate-700">
                                 Enable QA Test Module
                                 <span class="block text-xs text-slate-500 font-normal">Verify fixes in a sandboxed environment before pushing. If disabled, fixes are pushed directly.</span>
+                            </label>
+                        </div>
+                        <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                            <input type="checkbox" name="skip_review" id="skip_review" {{ 'checked' if settings.skip_review else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                            <label for="skip_review" class="text-sm font-medium text-slate-700">
+                                Bypass Skeptical Reviewer
+                                <span class="block text-xs text-slate-500 font-normal">Skip the secondary AI critique and proceed directly to verification/deployment.</span>
                             </label>
                         </div>
                         <div class="space-y-2">

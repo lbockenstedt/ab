@@ -874,13 +874,19 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     verified = False
                     failure_msg = "AI generated invalid JSON format"
                 else:
-                    update_task_state(issue_id, f"Reviewing {issue_id}")
-                    review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
-                    review_conf = review.get("confidence", 0.0)
-                    review_verdict = review.get("verdict", "Reject")
+                    # --- Review Phase ---
+                    if config.get("skip_review", False):
+                        logger.info("Skeptical Reviewer bypassed by configuration.")
+                        review_conf = confidence
+                        review_verdict = "Approve"
+                    else:
+                        update_task_state(issue_id, f"Reviewing {issue_id}")
+                        review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
+                        review_conf = review.get("confidence", 0.0)
+                        review_verdict = review.get("verdict", "Reject")
 
                     prepare_environment(path)
-                    if state["qa_enabled"]:
+                    if config.get("qa_enabled", True):
                         update_task_state(issue_id, f"Verifying {issue_id}")
                         verified, failure_msg = verify_fix(path, repo_name, config)
                     else:
@@ -945,10 +951,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 commit_type = "Pull Request"
                 detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
 
+            files_list = ", ".join(fixes.keys()) if fixes else "No files changed"
+            commit_hash = repo_git.head.commit.hexsha
+
             comment_body = (
                 f"🤖 **BugFixer AI Update**\n\n"
                 f"The issue has been successfully resolved via {commit_type}.\n"
                 f"{detail_msg}\n\n"
+                f"**Changes:**\n- Files modified: `{files_list}`\n- Commit: `{commit_hash[:7]}`\n\n"
                 f"Verification: ✅ Tests passed successfully."
             )
             issue.create_comment(comment_body)
@@ -961,7 +971,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             processed[f"{repo_name}:{issue_num}"] = {
                 "status": "fixed" if not is_log_detected else "awaiting_prod_verification",
                 "timestamp": datetime.now().isoformat(),
-                "commit": repo_git.head.commit.hexsha
+                "commit": commit_hash,
+                "commit_msg": commit_msg,
+                "files": list(fixes.keys())
             }
             save_processed(processed)
             state["processed"] = processed
@@ -1370,6 +1382,8 @@ async def save_settings(request: Request):
         config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     if "qa_enabled" in data:
         config_data["qa_enabled"] = data.get("qa_enabled") == "on"
+    if "skip_review" in data:
+        config_data["skip_review"] = data.get("skip_review") == "on"
 
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
