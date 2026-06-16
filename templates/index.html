@@ -8,6 +8,8 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome same as 6.4.0/css/all.min.css">
     {% if view == 'status' %}
     <meta http-equiv="refresh" content="30">
+    {% elif view == 'logs' %}
+    <meta http-equiv="refresh" content="10">
     {% endif %}
     <style>
         :root {
@@ -110,6 +112,14 @@
                     <div class="flex justify-between items-center">
                         <span class="text-slate-500">Local Model</span>
                         {% if state.local_online %}
+                            <span class="status-pill pill-online">Online</span>
+                        {% else %}
+                            <span class="status-pill pill-offline">Offline</span>
+                        {% endif %}
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-slate-500">Cloud Model</span>
+                        {% if state.cloud_online %}
                             <span class="status-pill pill-online">Online</span>
                         {% else %}
                             <span class="status-pill pill-offline">Offline</span>
@@ -354,6 +364,10 @@
                         <div class="space-y-2">
                             <label class="text-sm font-medium text-slate-600">Poll Interval (Seconds)</label>
                             <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus la-btn-cloud focus:ring-[#01A982]">
+                        </div>
+                        <div class="space-y-2">
+                            <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
+                            <input type="number" name="LLM_TIMEOUT" value="{{ settings.LLM_TIMEOUT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                         </div>
                         <div class="space-y-2">
                             <label class="text-sm font-medium text-slate-600">Log File Path</label>

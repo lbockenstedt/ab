@@ -78,13 +78,18 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         is_cloud = "ollama.com" in url and "local" not in url
         primary_endpoint = f"{url.rstrip('/')}/api/generate" if is_cloud else f"{url.rstrip('/')}/api/chat"
 
-        def attempt_request(endpoint, is_generate, timeout=120):
+        # Use configurable timeout from config or default 15m
+        timeout = int(load_config().get("LLM_TIMEOUT", 900))
+
+        def attempt_request(endpoint, is_generate, timeout=None):
+            if timeout is None: timeout = 900
+
             if is_generate:
                 full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
                 payload = {
                     "model": model,
                     "prompt": full_prompt,
-                    "stream": False
+                    "stream": True
                 }
             else:
                 payload = {
@@ -93,10 +98,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ],
-                    "stream": False
+                    "stream": True
                 }
 
-            # Use a realistic User-Agent to avoid being blocked by basic bot-filters
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -104,36 +108,40 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             }
 
             if api_key:
-                # Aggressively clean the key: remove quotes, whitespace, and any non-printable characters
                 clean_key = api_key.strip().strip('"').strip("'")
                 clean_key = "".join(char for char in clean_key if char.isprintable())
-
-                # Ensure we have a clean "Bearer <token>" format
                 token_only = clean_key.replace("Bearer ", "").strip()
                 headers["Authorization"] = f"Bearer {token_only}"
 
             try:
-                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
+                # Use streaming response
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
                 if resp.status_code == 401:
-                    logger.error(f"LLM 401 Unauthorized at {endpoint}. Token check: Length {len(token_only) if api_key else 0}. Verify OLLAMA_API_KEY in settings.")
+                    logger.error(f"LLM 401 Unauthorized at {endpoint}. Verify OLLAMA_API_KEY.")
                 resp.raise_for_status()
-                data = resp.json()
-                return data.get('message', {}).get('content') if not is_generate else data.get('response', '')
+
+                full_response = ""
+                for line in resp.iter_lines():
+                    if line:
+                        chunk = json.loads(line.decode('utf-8'))
+                        # Handle both /api/generate (response) and /api/chat (message.content)
+                        content = chunk.get('response') or chunk.get('message', {}).get('content', '')
+                        full_response += content
+                        state["llm_stream"] = full_response # Update the Thought Stream
+
+                return full_response
             except Exception as e:
                 raise e
 
         try:
-            # Cloud requests use standard timeout
-            return attempt_request(primary_endpoint, is_cloud, timeout=120)
+            return attempt_request(primary_endpoint, is_cloud, timeout=timeout)
         except Exception as e:
-            # Fallback logic for local LLM: if /api/chat fails, try /api/generate
             if not is_cloud:
                 fallback_endpoint = f"{url.rstrip('/')}/api/generate"
                 if fallback_endpoint != primary_endpoint:
-                    # Use a much longer timeout for local LLM (300s) as it may be slow to load the model
-                    logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate with 300s timeout...")
+                    logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate...")
                     try:
-                        return attempt_request(fallback_endpoint, True, timeout=300)
+                        return attempt_request(fallback_endpoint, True, timeout=timeout)
                     except Exception as fe:
                         logger.error(f"Local fallback to /api/generate also failed: {fe}")
                         raise e
@@ -231,7 +239,7 @@ async def catch_exceptions_mid(request: Request, call_next):
         )
 
 state = {
-    "status": "Idle", "active_llm": "Unknown", "local_online": False,
+    "status": "Idle", "active_llm": "Unknown", "local_online": False, "cloud_online": False,
     "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
     "processed": [], "force_cloud": False, "version": get_version(), "llm_stream": ""
 }
@@ -422,6 +430,43 @@ def analyze_logs_for_errors(logs):
         logger.error(f"Error analyzing logs: {e}")
         return []
 
+def connectivity_worker():
+    """Hourly check to verify both local and cloud LLM responses."""
+    while True:
+        try:
+            config = load_config()
+            l_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
+            c_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
+            l_mod = config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL")
+            c_mod = config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL")
+            api_key = config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
+
+            # Check Local
+            if l_url:
+                try:
+                    # Use a very simple prompt for connectivity check
+                    payload = {"model": l_mod, "prompt": "ping", "stream": False}
+                    resp = requests.post(f"{l_url.rstrip('/')}/api/generate", json=payload, timeout=10)
+                    state["local_online"] = (resp.status_code == 200)
+                except:
+                    state["local_online"] = False
+
+            # Check Cloud
+            if c_url:
+                try:
+                    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                    payload = {"model": c_mod, "prompt": "ping", "stream": False}
+                    resp = requests.post(f"{c_url.rstrip('/')}/api/generate", json=payload, headers=headers, timeout=10)
+                    state["cloud_online"] = (resp.status_code == 200)
+                except:
+                    state["cloud_online"] = False
+
+            logger.info(f"Hourly Connectivity Check: Local={state['local_online']}, Cloud={state['cloud_online']}")
+        except Exception as e:
+            logger.error(f"Connectivity worker error: {e}")
+
+        time.sleep(3600)
+
 def heartbeat_worker():
     while True:
         try:
@@ -441,14 +486,12 @@ def heartbeat_worker():
 
             # Update active_llm based on current configuration and connectivity
             if state["force_cloud"]:
-                state["active_llm"] = f"Cloud ({cloud_url or 'Not Configured'})"
+                state["active_llm"] = "Cloud"
             elif state["local_online"]:
-                state["active_llm"] = f"Local ({local_url})"
+                state["active_llm"] = "Local"
             else:
-                # If local is offline, we might still be using cloud if it's the only option
-                # but for the UI, let's be explicit.
                 if cloud_url:
-                    state["active_llm"] = f"Cloud (Fallback - Local Offline)"
+                    state["active_llm"] = "Cloud"
                 else:
                     state["active_llm"] = "No LLM Available"
         except Exception as e:
@@ -1011,8 +1054,9 @@ DEFAULT_ENV = {
     "UPDATE_API_URL": "",
     "HUB_QUERY_URL": "",
     "LOG_FILE_PATH": "/var/log/bugfixer.log",
-    "DEV_BRANCH": "dev"
-}
+    "DEV_BRANCH": "dev",
+    "LLM_TIMEOUT": "900"
+}}
 
 @app.get("/settings")
 async def settings_page(request: Request):
@@ -1026,6 +1070,7 @@ async def settings_page(request: Request):
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
     # Ensure GITHUB_TOKEN comes from config if available
     settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
+    settings["LLM_TIMEOUT"] = config.get("LLM_TIMEOUT") or settings.get("LLM_TIMEOUT", "900")
     # Handle labels for the UI
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
@@ -1074,6 +1119,7 @@ async def save_settings(request: Request):
         "LOCAL_OLLAMA_URL": data.get("LOCAL_OLLAMA_URL", ""),
         "CLOUD_OLLAMA_MODEL": data.get("CLOUD_OLLAMA_MODEL", ""),
         "LOCAL_OLLAMA_MODEL": data.get("LOCAL_OLLAMA_MODEL", ""),
+        "LLM_TIMEOUT": data.get("LLM_TIMEOUT", "900"),
     }
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
@@ -1170,6 +1216,7 @@ async def restart_service():
         logger.error(f"Restart failed: {e}")
         return {"status": "error", "message": str(e)}
 
+threading.Thread(target=connectivity_worker, daemon=True).start()
 threading.Thread(target=heartbeat_worker, daemon=True).start()
 threading.Thread(target=poller_worker, daemon=True).start()
 threading.Thread(target=updater_worker, daemon=True).start()
