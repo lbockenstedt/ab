@@ -135,8 +135,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         primary_endpoint = f"{url.rstrip('/')}/api/generate"
         timeout = int(load_config().get("LLM_TIMEOUT", 900))
 
-        def attempt_request(endpoint, use_generate_api, t_out=None):
-            if t_out is None: t_out = 900
+        def attempt_request(endpoint, use_generate_api, timeout=None):
+            if timeout is None: timeout = 900
 
             if use_generate_api:
                 full_prompt = f"System: {system_prompt}\\n\\nUser: {prompt}"
@@ -155,7 +155,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 headers["Authorization"] = f"Bearer {token_only}"
 
             try:
-                resp = requests.post(endpoint, json=payload, headers=headers, timeout=t_out, stream=True)
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
                 if resp.status_code == 401:
                     logger.error(f"LLM 401 Unauthorized at {endpoint}. Verify OLLAMA_API_KEY.")
                 resp.raise_for_status()
