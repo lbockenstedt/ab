@@ -1211,7 +1211,7 @@ async def save_settings(request: Request):
 async def update_now():
     updated, msg = check_for_updates()
     logger.info(f"Manual update check: {msg}")
-    return RedirectResponse(url="/", status_code=303)
+    return {"status": "success", "message": msg}
 
 @app.post("/toggle_cloud")
 async def toggle_cloud():
@@ -1222,7 +1222,7 @@ async def toggle_cloud():
     config["force_cloud"] = state["force_cloud"]
     save_config(config)
 
-    return RedirectResponse(url="/", status_code=303)
+    return {"status": "success", "message": "Cloud override toggled successfully."}
 
 @app.post("/trigger_fix")
 async def trigger_fix(request: Request):
