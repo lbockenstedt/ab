@@ -933,16 +933,26 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         error_context = failure_msg
 
             if not success:
+                failure_reason = "AI failed to find a verified fix after max attempts."
+                if error_context:
+                    failure_reason += f" Last attempt error: {error_context}"
+
+                # Log to GitHub
+                try:
+                    issue.create_comment(f"🤖 **BugFixer Failure**\n\nI attempted to fix this issue {max_attempts} times, but I could not find a solution that passed verification.\n\n**Final Error:** `{failure_reason}`")
+                except Exception as ge:
+                    logger.error(f"Failed to post failure comment to issue {issue_id}: {ge}")
+
                 processed = load_processed()
                 processed[f"{repo_name}:{issue_num}"] = {
                     "status": "failed",
                     "timestamp": datetime.now().isoformat(),
-                    "error": "AI failed to find a verified fix after max attempts"
+                    "error": failure_reason
                 }
                 save_processed(processed)
                 state["processed"] = processed
                 update_task_state(issue_id, "None", action="end")
-                return False, "AI failed to find a verified fix"
+                return False, failure_reason
 
             repo_git.git.add(A=True)
 
@@ -1093,6 +1103,10 @@ def scan_repo_issues(gh_current, config, processed):
             to_fix = []
             for issue in issues:
                 try:
+                    # Ensure we only process open issues and ignore Pull Requests
+                    if issue.state != 'open' or issue.pull_request:
+                        continue
+
                     issue_id = f"{repo_name}:{issue.number}"
                     if issue_id in processed:
                         status = processed[issue_id].get("status")
