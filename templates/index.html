@@ -110,20 +110,19 @@
                         </span>
                     </div>
                     <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Local Model</span>
-                        {% if state.local_online %}
-                            <span class="status-pill pill-online">Online</span>
-                        {% else %}
-                            <span class="status-pill pill-offline">Offline</span>
-                        {% endif %}
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Cloud Model</span>
-                        {% if state.cloud_online %}
-                            <span class="status-pill pill-online">Online</span>
-                        {% else %}
-                            <span class="status-pill pill-offline">Offline</span>
-                        {% endif %}
+                        <span class="text-slate-500">Model</span>
+                        <div class="flex gap-2">
+                            {% if state.local_online %}
+                                <span class="status-pill pill-online">LOCAL</span>
+                            {% else %}
+                                <span class="status-pill pill-offline">LOCAL</span>
+                            {% endif %}
+                            {% if state.cloud_online %}
+                                <span class="status-pill pill-online">CLOUD</span>
+                            {% else %}
+                                <span class="status-pill pill-offline">CLOUD</span>
+                            {% endif %}
+                        </div>
                     </div>
                     <div class="pt-4 border-t border-slate-100 space-y-2">
                         <div class="flex justify-between items-center">
@@ -239,11 +238,25 @@
                     </tr>
                     <tr class="bg-slate-50/50">
                         <td colspan="4" class="px-6 py-2 text-slate-500 text-[10px] italic border-b border-slate-100">
-                            <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
-                            <span class="mx-2 text-slate-300">|</span>
-                            <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
-                            <span class="mx-2 text-slate-300">|</span>
-                            <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                            {% if info.status == 'fixed' or info.status == 'verified' %}
+                                <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
+                                <span class="mx-2 text-slate-300">|</span>
+                                <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
+                                <span class="mx-2 text-slate-300">|</span>
+                                <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                            {% elif info.status == 'non-actionable' %}
+                                <span class="font-semibold text-orange-600">Reason:</span> {{ info.reason if info.reason else 'No details provided.' }}
+                                <span class="mx-2 text-slate-300">|</span>
+                                <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                            {% elif info.status == 'failed' %}
+                                <span class="font-semibold text-red-600">Error:</span> {{ info.error if info.error else 'AI failed to find a verified fix.' }}
+                                <span class="mx-2 text-slate-300">|</span>
+                                <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                            {% else %}
+                                <span class="font-semibold">Status:</span> {{ info.status }}
+                                <span class="mx-2 text-slate-300">|</span>
+                                <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
