@@ -1056,7 +1056,7 @@ DEFAULT_ENV = {
     "LOG_FILE_PATH": "/var/log/bugfixer.log",
     "DEV_BRANCH": "dev",
     "LLM_TIMEOUT": "900"
-}}
+}
 
 @app.get("/settings")
 async def settings_page(request: Request):
