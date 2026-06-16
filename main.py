@@ -84,12 +84,23 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 "stream": False
             }
 
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
         if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+            # Strip whitespace and quotes to ensure the key is clean
+            clean_key = api_key.strip().strip('"').strip("'")
+            auth_header = clean_key if clean_key.startswith("Bearer ") else f"Bearer {clean_key}"
+            headers["Authorization"] = auth_header
 
-        # Debugging: Log endpoint and key length to verify it's being loaded
-        key_info = f"Length: {len(api_key)}" if api_key else "MISSING"
+        # Debugging: Log endpoint and key length/preview to verify it's being loaded
+        if api_key:
+            clean_key = api_key.strip().strip('"').strip("'")
+            key_preview = f"{clean_key[:3]}...{clean_key[-3:]}" if len(clean_key) > 6 else "too short"
+            key_info = f"Length: {len(clean_key)} | Preview: {key_preview}"
+        else:
+            key_info = "MISSING"
         logger.info(f"LLM Request: {endpoint} | Model: {model} | Key: {key_info}")
 
         resp = requests.post(endpoint, json=payload, headers=headers, timeout=120)
@@ -966,7 +977,12 @@ async def save_settings(request: Request):
         "dev_branch": data.get("dev_branch", "dev"),
         "repo_tests": {},
         "GITHUB_TOKEN": data.get("GITHUB_TOKEN", ""),
-        "monitored_labels": labels
+        "monitored_labels": labels,
+        "OLLAMA_API_KEY": data.get("OLLAMA_API_KEY", ""),
+        "CLOUD_OLLAMA_URL": data.get("CLOUD_OLLAMA_URL", ""),
+        "LOCAL_OLLAMA_URL": data.get("LOCAL_OLLAMA_URL", ""),
+        "CLOUD_OLLAMA_MODEL": data.get("CLOUD_OLLAMA_MODEL", ""),
+        "LOCAL_OLLAMA_MODEL": data.get("LOCAL_OLLAMA_MODEL", ""),
     }
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
