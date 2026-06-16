@@ -10,10 +10,16 @@ apt-get update && apt-get install -y curl git gnupg build-essential python3-pip 
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
 npm install -g @anthropic-ai/claude-code
 
-# 2. Clone repository
+# 2. Clone or Update repository
 if [ ! -d "$INSTALL_DIR" ]; then
     echo "Cloning repository to $INSTALL_DIR..."
     git clone $REPO_URL $INSTALL_DIR
+else
+    echo "Repository directory already exists. Updating to latest version..."
+    cd $INSTALL_DIR
+    git fetch origin
+    git reset --hard origin/main
+    cd - > /dev/null
 fi
 
 cd $INSTALL_DIR
