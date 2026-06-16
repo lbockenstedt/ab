@@ -374,6 +374,10 @@
                                 <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
                                 <input type="number" name="LLM_TIMEOUT" value="{{ settings.LLM_TIMEOUT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Local LLM Schedule (e.g. 9-16,1-5)</label>
+                                <input type="text" name="LOCAL_LLM_SCHEDULE" value="{{ settings.LOCAL_LLM_SCHEDULE }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="9-16,1-5">
+                            </div>
                         </div>
                     </section>
 

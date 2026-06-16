@@ -117,11 +117,24 @@ template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
 
 def is_local_llm_allowed():
-    """Checks if the local LLM is allowed to be used based on a fixed schedule."""
-    now = datetime.now().hour
-    # Local allowed: 9AM-4PM (9-16) and 1AM-5AM (1-5)
-    if (9 <= now < 16) or (1 <= now < 5):
-        return True
+    """Checks if the local LLM is allowed to be used based on the configured schedule."""
+    config = load_config()
+    schedule_str = config.get("LOCAL_LLM_SCHEDULE") or os.getenv("LOCAL_LLM_SCHEDULE", "9-16,1-5")
+
+    try:
+        now = datetime.now().hour
+        # Expected format: "9-16,1-5"
+        ranges = schedule_str.split(',')
+        for r in ranges:
+            if '-' in r:
+                start, end = map(int, r.split('-'))
+                if start <= now < end:
+                    return True
+    except Exception as e:
+        logger.error(f"Error parsing LLM schedule '{schedule_str}': {e}")
+        # Fallback to a reasonable default if parsing fails
+        if (9 <= now < 16) or (1 <= now < 5):
+            return True
     return False
 
 # Shared LLM Utility
@@ -1316,7 +1329,8 @@ DEFAULT_ENV = {
     "LOG_FILE_PATH": "/var/log/bugfixer.log",
     "DEV_BRANCH": "dev",
     "LLM_TIMEOUT": "900",
-    "MAX_CONCURRENT_FIXES": "5"
+    "MAX_CONCURRENT_FIXES": "5",
+    "LOCAL_LLM_SCHEDULE": "9-16,1-5"
 }
 
 @app.get("/settings")
@@ -1385,6 +1399,7 @@ async def save_settings(request: Request):
         "LOCAL_OLLAMA_MODEL": lambda v: v,
         "LLM_TIMEOUT": lambda v: v,
         "MAX_CONCURRENT_FIXES": lambda v: v,
+        "LOCAL_LLM_SCHEDULE": lambda v: v,
     }
 
     for key, transform in updates.items():
