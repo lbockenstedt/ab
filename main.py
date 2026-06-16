@@ -101,15 +101,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     "stream": True
                 }
 
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 SafariSameAs537.36"
-            }
+            headers = {}
 
             if api_key:
+                # Simply strip whitespace and quotes
                 clean_key = api_key.strip().strip('"').strip("'")
-                clean_key = "".join(char for char in clean_key if char.isprintable())
                 token_only = clean_key.replace("Bearer ", "").strip()
                 headers["Authorization"] = f"Bearer {token_only}"
 
@@ -1085,52 +1081,70 @@ async def save_settings(request: Request):
     form_data = await request.form()
     data = dict(form_data)
 
-    # Handle labels logic
+    # 1. Load existing config for merging to prevent losing settings
+    config_data = load_config()
+
+    # 2. Handle labels logic
     labels_mode = data.get("label_mode", "SPECIFIC")
     if labels_mode == "ANY":
         labels = ["ANY"]
     elif labels_mode == "NONE":
         labels = ["NONE"]
     else:
-        # Combine checkboxes and custom labels
         labels_list = form_data.getlist("monitored_labels")
         custom_labels_raw = data.get("custom_labels", "")
         if custom_labels_raw:
             custom_labels = [x.strip() for x in custom_labels_raw.split(",") if x.strip()]
             labels_list.extend(custom_labels)
 
-        # Ensure we have at least one label (default to automated-fix if empty)
         if not labels_list:
             labels = ["automated-fix"]
         else:
-            labels = list(set(labels_list)) # Deduplicate
+            labels = list(set(labels_list))
 
-    config_data = {
-        "monitored_repos": [clean_repo_name(x.strip()) for x in data.get("monitored_repos", "").replace("\n", ",").split(",") if x.strip()],
-        "trusted_repos": [clean_repo_name(x.strip()) for x in data.get("trusted_repos", "").replace("\n", ",").split(",") if x.strip()],
-        "default_branch": data.get("default_branch", "main"),
-        "direct_push_enabled": data.get("direct_push_enabled") == "on",
-        "dev_branch": data.get("dev_branch", "dev"),
-        "repo_tests": {},
-        "GITHUB_TOKEN": data.get("GITHUB_TOKEN", ""),
-        "monitored_labels": labels,
-        "OLLAMA_API_KEY": data.get("OLLAMA_API_KEY", ""),
-        "CLOUD_OLLAMA_URL": data.get("CLOUD_OLLAMA_URL", ""),
-        "LOCAL_OLLAMA_URL": data.get("LOCAL_OLLAMA_URL", ""),
-        "CLOUD_OLLAMA_MODEL": data.get("CLOUD_OLLAMA_MODEL", ""),
-        "LOCAL_OLLAMA_MODEL": data.get("LOCAL_OLLAMA_MODEL", ""),
-        "LLM_TIMEOUT": data.get("LLM_TIMEOUT", "900"),
+    if "label_mode" in data or "monitored_labels" in form_data or "custom_labels" in data:
+        config_data["monitored_labels"] = labels
+
+    # 3. Map and update config fields from form data
+    updates = {
+        "monitored_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
+        "trusted_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
+        "default_branch": lambda v: v,
+        "dev_branch": lambda v: v,
+        "GITHUB_TOKEN": lambda v: v,
+        "OLLAMA_API_KEY": lambda v: v,
+        "CLOUD_OLLAMA_URL": lambda v: v,
+        "LOCAL_OLLAMA_URL": lambda v: v,
+        "CLOUD_OLLAMA_MODEL": lambda v: v,
+        "LOCAL_OLLAMA_MODEL": lambda v: v,
+        "LLM_TIMEOUT": lambda v: v,
     }
+
+    for key, transform in updates.items():
+        if key in data:
+            val = data[key]
+            # If it's a list field and empty, we treat it as empty list
+            if "repos" in key and not val:
+                config_data[key] = []
+            else:
+                config_data[key] = transform(val)
+
+    if "direct_push_enabled" in data:
+        config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
+
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
+        new_tests = {}
         for pair in repo_tests_raw.split(","):
             if ":" in pair:
                 repo, cmd = pair.split(":", 1)
-                config_data["repo_tests"][repo.strip()] = cmd.strip()
+                new_tests[repo.strip()] = cmd.strip()
+        config_data["repo_tests"] = new_tests
+
     with open(CONFIG_FILE, "w") as f:
         json.dump(config_data, f, indent=2)
 
-    # Update .env without wiping unrelated variables
+    # Update .env
     env_vars = {}
     if os.path.exists(ENV_FILE):
         with open(ENV_FILE, "r") as f:
@@ -1139,9 +1153,8 @@ async def save_settings(request: Request):
                     k, v = line.strip().split("=", 1)
                     env_vars[k] = v
 
-    # Update env_vars with new data from form (if not in config_data)
     for k, v in data.items():
-        if k not in config_data:
+        if k in updates:
             env_vars[k] = v
 
     with open(ENV_FILE, "w") as f:
