@@ -1308,7 +1308,8 @@ async def settings_page(request: Request):
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
         "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]},
-        "available_labels": state.get("available_labels", [])
+        "available_labels": state.get("available_labels", []),
+        "state": state
     })
 
 @app.post("/save_settings")

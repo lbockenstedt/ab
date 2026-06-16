@@ -118,24 +118,20 @@
                         {% endif %}
                     </div>
                     <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Cloud Model</span>
-                        {% if state.cloud_online %}
+                        <span class="text-slate-500">Local Model</span>
+                        {% if state.local_online %}
                             <span class="status-pill pill-online">Online</span>
                         {% else %}
                             <span class="status-pill pill-offline">Offline</span>
                         {% endif %}
                     </div>
                     <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Active LLM</span>
-                        <span class="text-[#01A982] font-mono text-sm">{{ state.active_llm }}</span>
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Last Run</span>
-                        <span class="text-slate-600 text-sm">{{ state.last_run }}</span>
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Version</span>
-                        <span class="text-slate-600 text-sm font-mono">{{ state.version }}</span>
+                        <span class="text-slate-500">Cloud Model</span>
+                        {% if state.cloud_online %}
+                            <span class="status-pill pill-online">Online</span>
+                        {% else %}
+                            <span class="status-pill pill-offline">Offline</span>
+                        {% endif %}
                     </div>
                     <div class="pt-4 border-t border-slate-100 space-y-2">
                         <div class="flex justify-between items-center">
@@ -177,20 +173,6 @@
                             </div>
                         {% endif %}
                     </div>
-                    {% if state.llm_stream %}
-                    <div class="mt-4 p-3 bg-slate-900 rounded-lg border border-slate-700">
-                        <div class="flex items-center gap-2 mb-2 text-xs font-bold text-slate-400 uppercase tracking-wider">
-                            <span class="relative flex h-2 w-2">
-                              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                              <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                            </span>
-                            Global Thought Stream
-                        </div>
-                        <div class="text-green-400 font-mono text-[10px] leading-relaxed whitespace-pre-wrap overflow-hidden max-h-32 italic">
-                            {{ state.llm_stream }}
-                        </div>
-                    </div>
-                    {% endif %}
                     <div class="mt-6 space-y-2">
                         <div class="flex justify-between items-center">
                             <span class="text-slate-500 text-sm">Infrastructure Sync</span>
@@ -209,9 +191,27 @@
                     <i class="fas fa-info-circle text-[#01A982]"></i>
                 </div>
                 <div id="task-details-content" class="space-y-4 text-sm">
+                    {% if state.llm_stream %}
+                    <div class="p-3 bg-slate-900 rounded-lg border border-slate-700 mb-4">
+                        <div class="flex items-center gap-2 mb-2 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                            <span class="relative flex h-2 w-2">
+                              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                              <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                            </span>
+                            Global Thought Stream
+                        </div>
+                        <div class="text-green-400 font-mono text-[10px] leading-relaxed whitespace-pre-wrap overflow-hidden max-h-48 italic">
+                            {{ state.llm_stream }}
+                        </div>
+                    </div>
+                    <div class="text-center text-slate-400 italic text-xs">
+                        Click on an Active Task to see specific details.
+                    </div>
+                    {% else %}
                     <div class="flex flex-col items-center justify-center h-full text-slate-400 italic">
                         Click on the Current Task to see live details.
                     </div>
+                    {% endif %}
                 </div>
             </div>
         </div>
@@ -457,6 +457,8 @@
                 <span>v{{ state.version }}</span>
                 <span class="text-slate-600">|</span>
                 <span>LLM: <span class="text-slate-200">{{ state.active_llm }}</span></span>
+                <span class="text-slate-600">|</span>
+                <span>Last Run: <span class="text-slate-200">{{ state.last_run }}</span></span>
             </div>
             <div class="flex flex-wrap justify-center gap-4">
                 <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')">
