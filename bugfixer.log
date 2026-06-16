@@ -939,3 +939,13 @@ Traceback (most recent call last):
   File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
     if result.returncode == 0:
 Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 14:10:00,660 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    if result.returncode == 0:
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 14:15:00,667 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    except Exception as e:
+Exception: Configuration Pending: Please enter your GitHub Token in Settings

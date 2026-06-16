@@ -304,6 +304,21 @@ def clean_repo_name(name):
         name = name.rstrip("/")
     return name
 
+def get_monitored_repos(config):
+    """Extracts and normalizes a list of monitored repositories from config."""
+    raw_repos = config.get("monitored_repos", [])
+    monitored_repos = []
+    if isinstance(raw_repos, list):
+        for r in raw_repos:
+            for split_r in r.replace("\\n", ",").split(","):
+                cleaned = clean_repo_name(split_r)
+                if cleaned: monitored_repos.append(cleaned)
+    elif isinstance(raw_repos, str):
+        for split_r in raw_repos.replace("\\n", ",").split(","):
+            cleaned = clean_repo_name(split_r)
+            if cleaned: monitored_repos.append(cleaned)
+    return list(set(monitored_repos))
+
 def discover_labels(gh_current, monitored_repos):
     """Fetches all unique labels from all monitored repositories, including built-in defaults."""
     all_labels = {"automated-fix", "bug", "critical", "high-priority"}
@@ -353,25 +368,62 @@ def trigger_infrastructure_update():
         return "SUCCESS: Sync Triggered" if resp.status_code == 200 else f"FAILED: {resp.status_code}"
     except Exception as e: return f"ERROR: {str(e)}"
 
-def create_automated_issue(gh_repo, error_data):
-    """Creates a GitHub issue for a log-detected error."""
+def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
+    """Searches across all monitored repositories for an existing open issue that matches the error."""
+    title_text = error_data['title'].lower()
+    body_text = error_data['body'].lower()
+
+    for repo_name in monitored_repos:
+        try:
+            repo = gh_current.get_repo(repo_name)
+            open_issues = repo.get_issues(state='open')
+            for issue in open_issues:
+                if title_text in issue.title.lower() or body_text in issue.body.lower():
+                    return issue
+        except Exception as e:
+            logger.debug(f"Could not search for duplicates in {repo_name}: {e}")
+    return None
+
+def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
+    """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos."""
     try:
-        title = f"🤖 Log Alert: {error_data['title']}"
-        body = (
+        title_text = error_data['title']
+        body_text = error_data['body']
+        current_repo_name = error_data['repo']
+
+        # 1. Check for existing open issues globally to prevent duplicates
+        existing_issue = find_global_duplicate_issue(gh_current, monitored_repos, error_data)
+
+        if existing_issue:
+            logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {existing_issue.repo.full_name}. Adding info.")
+
+            # If the current log snippet isn't in the body, add it as a comment
+            if body_text.lower() not in existing_issue.body.lower():
+                existing_issue.create_comment(
+                    f"🤖 **BugFixer Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}**:\n\n"
+                    f"```\n{body_text}\n```"
+                )
+                logger.info(f"Added additional evidence from {current_repo_name} to issue #{existing_issue.number}")
+
+            return existing_issue
+
+        # 2. No global duplicate found, create a new issue in the suggested repo
+        full_title = f"🤖 Log Alert: {title_text}"
+        full_body = (
             f"**Automated Error Detection**\n\n"
             f"The BugFixer Hub analysis detected a potential issue in the logs:\n\n"
-            f"### Log Evidence:\n```\n{error_data['body']}\n```\n\n"
+            f"### Log Evidence:\n```\n{body_text}\n```\n\n"
             f"This issue has been automatically created for fixing."
         )
         issue = gh_repo.create_issue(
-            title=title,
-            body=body,
+            title=full_title,
+            body=full_body,
             labels=["automated-fix", "log-detected"]
         )
-        logger.info(f"Created automated issue #{issue.number} for {error_data['repo']}")
+        logger.info(f"Created automated issue #{issue.number} for {current_repo_name}")
         return issue
     except Exception as e:
-        logger.error(f"Failed to create automated issue: {e}")
+        logger.error(f"Failed to handle automated issue creation: {e}")
         return None
 
 def get_hub_logs():
@@ -936,12 +988,13 @@ def scan_hub_logs(gh_current, config):
     hub_logs = get_hub_logs()
     if hub_logs:
         actionable_errors = analyze_logs_for_errors(hub_logs)
+        monitored_repos = get_monitored_repos(config)
         for error in actionable_errors:
             repo_name = error['repo']
             try:
                 repo_obj = gh_current.get_repo(repo_name)
-                create_automated_issue(repo_obj, error)
-                logger.info(f"Automatically created issue for log error in {repo_name}")
+                create_automated_issue(gh_current, monitored_repos, repo_obj, error)
+                logger.info(f"Handled automated issue for log error in {repo_name}")
             except Exception as e:
                 logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
 
@@ -950,19 +1003,7 @@ def scan_repo_issues(gh_current, config, processed):
     global state
     bot_user = gh_current.get_user().login
 
-    # Normalize monitored repos
-    raw_repos = config.get("monitored_repos", [])
-    monitored_repos = []
-    if isinstance(raw_repos, list):
-        for r in raw_repos:
-            for split_r in r.replace("\\n", ",").split(","):
-                cleaned = clean_repo_name(split_r)
-                if cleaned: monitored_repos.append(cleaned)
-    elif isinstance(raw_repos, str):
-        for split_r in raw_repos.replace("\\n", ",").split(","):
-            cleaned = clean_repo_name(split_r)
-            if cleaned: monitored_repos.append(cleaned)
-    monitored_repos = list(set(monitored_repos))
+    monitored_repos = get_monitored_repos(config)
 
     for repo_name in monitored_repos:
         update_task_state(f"Checking {repo_name}")
@@ -1041,8 +1082,9 @@ def scan_self_logs(gh_current, config):
             error['repo'] = self_repo_name
             try:
                 repo_obj = gh_current.get_repo(self_repo_name)
-                create_automated_issue(repo_obj, error)
-                logger.info(f"Created self-diagnosis issue for BugFixer: {error['title']}")
+                monitored_repos = get_monitored_repos(config)
+                create_automated_issue(gh_current, monitored_repos, repo_obj, error)
+                logger.info(f"Handled self-diagnosis issue for BugFixer: {error['title']}")
             except Exception as e:
                 logger.error(f"Failed to create self-diagnosis issue: {e}")
 
