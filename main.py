@@ -51,9 +51,12 @@ templates = Jinja2Templates(directory=template_path)
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None):
     """Generic LLM caller with Local -> Cloud failover and JSON extraction."""
-    l_mod, c_mod = os.getenv("LOCAL_OLLAMA_MODEL"), os.getenv("CLOUD_OLLAMA_MODEL")
-    l_url, c_url = os.getenv("LOCAL_OLLAMA_URL"), os.getenv("CLOUD_OLLAMA_URL")
-    api_key = os.getenv("OLLAMA_API_KEY")
+    config = load_config()
+    l_mod = config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL")
+    c_mod = config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL")
+    l_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
+    c_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
+    api_key = config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
 
     def _request(url, model):
         if "api.ollama.com" in url:
@@ -85,9 +88,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        # Debugging: Log endpoint and presence of key
-        key_status = "Present" if api_key else "MISSING"
-        logger.info(f"LLM Request: {endpoint} | Model: {model} | Key: {key_status}")
+        # Debugging: Log endpoint and key length to verify it's being loaded
+        key_info = f"Length: {len(api_key)}" if api_key else "MISSING"
+        logger.info(f"LLM Request: {endpoint} | Model: {model} | Key: {key_info}")
 
         resp = requests.post(endpoint, json=payload, headers=headers, timeout=120)
 
