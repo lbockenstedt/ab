@@ -317,20 +317,22 @@ def create_automated_issue(gh_repo, error_data):
         return None
 
 def get_hub_logs():
-    """Fetches recent logs from the Hub for all modules."""
+    """Fetches recent logs from the Hub for all modules. Returns a list of log entries."""
     config = load_config()
     url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url:
         logger.debug("Hub Query URL not configured. Skipping log fetch.")
         return None
     try:
-        # Use the comprehensive 'all' endpoint to get Hub, Agent, and Module logs
         log_url = url.rstrip('/') + "/setup/logs/all"
         logger.debug(f"Fetching Hub logs from: {log_url}")
         resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
             try:
-                return resp.json()
+                data = resp.json()
+                if isinstance(data, dict):
+                    return data.get('logs', [])
+                return data if isinstance(data, list) else []
             except Exception as e:
                 logger.error(f"Hub returned 200 OK but failed to parse JSON: {e}. Content: {resp.text[:200]}...")
                 return None
@@ -828,9 +830,9 @@ def poller_worker():
 
                         # Get logs from hub
                         logs = get_hub_logs()
-                        if logs and 'logs' in logs:
+                        if logs:
                             module_name = repo_name.split('/')[-1]
-                            relevant_logs = [l['log'] for l in logs['logs'] if l.get('module') == module_name]
+                            relevant_logs = [l['log'] for l in logs if l.get('module') == module_name]
                             full_log_text = "\n".join(relevant_logs)
 
                             # Look for the original error snippet in the issue body
