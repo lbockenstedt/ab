@@ -11,6 +11,7 @@ import git
 
 # Setup Logging
 DEFAULT_LOG_FILE = "/var/log/bugfixer.log"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 def get_log_path():
     path = os.getenv("LOG_FILE_PATH", "/var/log/bugfixer.log")
@@ -30,7 +31,7 @@ if not os.path.exists(log_dir):
         print(f"Error creating log directory {log_dir}: {e}")
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler(log_file, mode='a'),
@@ -38,7 +39,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("BugFixer")
-logger.info(f"BugFixer started. Logging to: {log_file}")
+logger.info(f"BugFixer started. Logging level: {LOG_LEVEL}. Logging to: {log_file}")
 
 load_dotenv()
 app = FastAPI()
@@ -165,6 +166,17 @@ def run_sandboxed_command(command, cwd):
     except Exception as e:
         logger.error(f"Docker execution error: {e}")
         return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=300, shell=True)
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.debug(f"Incoming request: {request.method} {request.url}")
+    try:
+        response = await call_next(request)
+        logger.debug(f"Response status: {response.status_code} for {request.url}")
+        return response
+    except Exception as e:
+        logger.exception(f"Request failed: {e}")
+        raise e
 
 @app.middleware("http")
 async def catch_exceptions_mid(request: Request, call_next):
@@ -929,7 +941,7 @@ async def save_settings(request: Request):
         labels = ["NONE"]
     else:
         # Combine checkboxes and custom labels
-        labels_list = data.getlist("monitored_labels")
+        labels_list = form_data.getlist("monitored_labels")
         custom_labels_raw = data.get("custom_labels", "")
         if custom_labels_raw:
             custom_labels = [x.strip() for x in custom_labels_raw.split(",") if x.strip()]
