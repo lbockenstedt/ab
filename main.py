@@ -71,14 +71,33 @@ def load_config():
     # Try persistent config first
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f: return json.load(f)
+            with open(CONFIG_FILE, "r") as f:
+                config = json.load(f)
+                # Ensure enabled_models exists
+                if "enabled_models" not in config:
+                    config["enabled_models"] = []
+                return config
         except Exception as e:
             logger.error(f"Error reading persistent config {CONFIG_FILE}: {e}")
     # Fallback to local config
     try:
-        with open("config.json", "r") as f: return json.load(f)
+        with open("config.json", "r") as f:
+            config = json.load(f)
+            if "enabled_models" not in config:
+                config["enabled_models"] = []
+            return config
     except:
-        return {"monitored_repos": [], "trusted_repos": [], "default_branch": "main", "direct_push_enabled": False, "dev_branch": "dev", "repo_tests": {}, "GITHUB_TOKEN": "", "monitored_labels": ["automated-fix"]}
+        return {
+            "monitored_repos": [],
+            "trusted_repos": [],
+            "default_branch": "main",
+            "direct_push_enabled": False,
+            "dev_branch": "dev",
+            "repo_tests": {},
+            "GITHUB_TOKEN": "",
+            "monitored_labels": ["automated-fix"],
+            "enabled_models": []
+        }
 
 def load_processed():
     # Try persistent state first
@@ -1314,6 +1333,61 @@ async def get_task_details(task_id: str = None):
         "count": len(state["active_tasks"])
     }
 
+@app.get("/api/models")
+async def get_models():
+    """Fetches available models from the local Ollama instance and returns enabled models from config."""
+    config = load_config()
+    l_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
+    if not l_url:
+        return JSONResponse(status_code=400, content={"error": "LOCAL_OLLAMA_URL not configured"})
+
+    try:
+        resp = requests.get(f"{l_url.rstrip('/')}/api/tags", timeout=10)
+        resp.raise_for_status()
+        tags_data = resp.json()
+
+        available_models = []
+        for m in tags_data.get("models", []):
+            available_models.append({
+                "name": m["name"],
+                "details": m.get("details", "No description available")
+            })
+
+        return {
+            "available_models": available_models,
+            "enabled_models": config.get("enabled_models", [])
+        }
+    except Exception as e:
+        logger.error(f"Error fetching models from Ollama: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/api/toggle-model")
+async def toggle_model(request: Request):
+    """Toggles a model's enabled status in the configuration."""
+    try:
+        data = await request.json()
+        model_name = data.get("model")
+        enabled = data.get("enabled")
+
+        if not model_name or enabled is None:
+            return JSONResponse(status_code=400, content={"error": "Missing model or enabled status"})
+
+        config = load_config()
+        enabled_list = config.get("enabled_models", [])
+
+        if enabled and model_name not in enabled_list:
+            enabled_list.append(model_name)
+        elif not enabled and model_name in enabled_list:
+            enabled_list.remove(model_name)
+
+        config["enabled_models"] = enabled_list
+        save_config(config)
+
+        return {"status": "success", "enabled_models": enabled_list}
+    except Exception as e:
+        logger.error(f"Error toggling model: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @app.get("/logs")
 async def get_logs(request: Request):
     try:
@@ -1428,8 +1502,10 @@ async def save_settings(request: Request):
 
     if "direct_push_enabled" in data:
         config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
-    if "qa_enabled" in data:
-        config_data["qa_enabled"] = data.get("qa_enabled") == "on"
+
+    # FIX: If qa_enabled is missing from form data, it means it was unchecked.
+    config_data["qa_enabled"] = data.get("qa_enabled") == "on"
+
     if "skip_review" in data:
         config_data["skip_review"] = data.get("skip_review") == "on"
 
