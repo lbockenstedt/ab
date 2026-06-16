@@ -493,3 +493,7 @@ Traceback (most recent call last):
     can_direct_push = config.get("direct_push_enabled") and is_trusted and is_owner
 Exception: Configuration Pending: Please enter your GitHub Token in Settings
 2026-06-16 06:45:02,668 [INFO] Checking for self-updates...
+2026-06-16 06:50:00,248 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+Exception: Configuration Pending: Please enter your GitHub Token in Settings

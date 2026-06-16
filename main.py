@@ -74,56 +74,59 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         if "api.ollama.com" in url:
             logger.warning(f"Detected potentially incorrect Cloud LLM URL: {url}. Official Ollama Cloud host is 'https://ollama.com'. Please check your settings.")
 
-        # Use /api/generate for Cloud LLM to match working curl examples, /api/chat for local
+        # Determine primary endpoint
         is_cloud = "ollama.com" in url and "local" not in url
-        endpoint = f"{url.rstrip('/')}/api/generate" if is_cloud else f"{url.rstrip('/')}/api/chat"
+        primary_endpoint = f"{url.rstrip('/')}/api/generate" if is_cloud else f"{url.rstrip('/')}/api/chat"
 
-        if is_cloud:
-            # Combine system and user prompts for the generate endpoint
-            full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
-            payload = {
-                "model": model,
-                "prompt": full_prompt,
-                "stream": False
+        def attempt_request(endpoint, is_generate):
+            if is_generate:
+                # Combine system and user prompts for the generate endpoint
+                full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
+                payload = {
+                    "model": model,
+                    "prompt": full_prompt,
+                    "stream": False
+                }
+            else:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "stream": False
+                }
+
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
             }
-        else:
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                "stream": False
-            }
+            if api_key:
+                clean_key = api_key.strip().strip('"').strip("'")
+                auth_header = clean_key if clean_key.startswith("Bearer ") else f"Bearer {clean_key}"
+                headers["Authorization"] = auth_header
 
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        if api_key:
-            # Strip whitespace and quotes to ensure the key is clean
-            clean_key = api_key.strip().strip('"').strip("'")
-            auth_header = clean_key if clean_key.startswith("Bearer ") else f"Bearer {clean_key}"
-            headers["Authorization"] = auth_header
+            resp = requests.post(endpoint, json=payload, headers=headers, timeout=120)
+            if resp.status_code == 401:
+                logger.error(f"LLM 401 Unauthorized: {endpoint}. Check if OLLAMA_API_KEY is correctly set.")
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get('message', {}).get('content') if not is_generate else data.get('response', '')
 
-        # Debugging: Log endpoint and key length/preview to verify it's being loaded
-        if api_key:
-            clean_key = api_key.strip().strip('"').strip("'")
-            key_preview = f"{clean_key[:3]}...{clean_key[-3:]}" if len(clean_key) > 6 else "too short"
-            key_info = f"Length: {len(clean_key)} | Preview: {key_preview}"
-        else:
-            key_info = "MISSING"
-        logger.info(f"LLM Request: {endpoint} | Model: {model} | Key: {key_info}")
-
-        resp = requests.post(endpoint, json=payload, headers=headers, timeout=120)
-
-        if resp.status_code == 401:
-            logger.error(f"LLM 401 Unauthorized: {endpoint}. Check if OLLAMA_API_KEY is correctly set in .env or Settings.")
-
-        resp.raise_for_status()
-        data = resp.json()
-
-        return data.get('message', {}).get('content') if not is_cloud else data.get('response', '')
+        try:
+            return attempt_request(primary_endpoint, is_cloud)
+        except Exception as e:
+            # Fallback logic for local LLM: if /api/chat fails, try /api/generate
+            if not is_cloud:
+                fallback_endpoint = f"{url.rstrip('/')}/api/generate"
+                if fallback_endpoint != primary_endpoint:
+                    logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate...")
+                    try:
+                        return attempt_request(fallback_endpoint, True)
+                    except Exception as fe:
+                        logger.error(f"Local fallback to /api/generate also failed: {fe}")
+                        raise e
+            raise e
 
     use_cloud = force_cloud if force_cloud is not None else state["force_cloud"]
 
