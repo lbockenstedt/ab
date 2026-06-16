@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BugFixer Hub</title>
+    <title>BugFixer Hub (Fixed)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     {% if view == 'status' %}
@@ -63,6 +63,17 @@
         }
         .btn-primary:hover {
             filter: brightness(90%);
+        }
+        .cursor-blink {
+            display: inline-block;
+            width: 6px;
+            height: 14px;
+            background-color: #4ade80;
+            margin-left: 2px;
+            animation: blink 1s step-end infinite;
+        }
+        @keyframes blink {
+            50% { opacity: 0; }
         }
     </style>
 </head>
@@ -274,10 +285,15 @@
         <div class="hpe-card rounded-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
                 <h3 class="text-lg font-semibold text-slate-800">System Logs</h3>
-                <span class="text-xs text-slate-500 font-mono">Last 100 lines</span>
+                <div class="flex items-center gap-3">
+                    <span class="text-xs text-slate-500 font-mono">Last 100 lines</span>
+                    <button onclick="copyLogs()" class="text-xs px-3 py-1 bg-slate-100 hover:bg-slate-200 rounded font-bold text-slate-700 transition-colors border border-slate-300">
+                        <i class="fas fa-copy mr-1"></i> Copy All
+                    </button>
+                </div
             </div>
             <div class="bg-slate-900 p-6 overflow-x-auto">
-                <pre class="font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap">{{ logs }}</pre>
+                <pre id="system-logs-text" class="font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap">{{ logs }}</pre>
             </div>
         </div>
         {% endif %}
@@ -540,28 +556,45 @@
         </div>
     </footer>
     <script>
-        async function populateTaskDetails(taskId) {
-            if (!taskId) {
-                const params = new URLSearchParams(window.location.search);
-                taskId = params.get('task');
-            }
+        let currentTaskId = null;
+        let detailsPollingInterval = null;
 
+        async function populateTaskDetails(taskId) {
             if (!taskId) return;
+
+            console.log("Switching to task details:", taskId);
+            currentTaskId = taskId;
 
             // Update URL without refreshing to persist selection
             const url = new URL(window.location);
             url.searchParams.set('task', taskId);
             window.history.pushState({}, '', url);
 
-            try {
-                const resp = await fetch(`/api/task-details?task_id=${taskId}`);
-                const data = await resp.json();
-                const container = document.getElementById('task-details-content');
+            // Initial fetch
+            await updateTaskDetails();
 
-                if (data.error) {
-                    container.innerHTML = `<div class="text-red-500">${data.error}</div>`;
+            // Set up real-time polling every 2 seconds
+            if (detailsPollingInterval) clearInterval(detailsPollingInterval);
+            detailsPollingInterval = setInterval(updateTaskDetails, 2000);
+        }
+
+        async function updateTaskDetails() {
+            if (!currentTaskId) return;
+
+            try {
+                const resp = await fetch(`/api/task-details?task_id=${currentTaskId}`);
+                if (!resp.ok) {
+                    if (resp.status === 404) {
+                        document.getElementById('task-details-content').innerHTML =
+                            `<div class="text-slate-400 italic text-center py-8">Task completed or no longer active.</div>`;
+                        clearInterval(detailsPollingInterval);
+                        currentTaskId = null;
+                    }
                     return;
                 }
+
+                const data = await resp.json();
+                const container = document.getElementById('task-details-content');
 
                 container.innerHTML = `
                     <div class="space-y-3">
@@ -579,17 +612,22 @@
                         </div>
                         <div class="pt-2">
                             <span class="text-slate-500 text-xs block mb-1 uppercase tracking-wider font-bold">AI Thought Process</span>
-                            <div class="bg-slate-900 text-green-400 p-4 rounded-lg font-mono text-xs leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto border border-slate-700 shadow-inner">
-                                <div class="opacity-80 italic">
-                                    ${data.stream || 'No stream available...'}
+                            <div class="bg-slate-900 text-green-400 p-4 rounded-lg font-mono text-xs leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto border border-slate-700 shadow-inner relative">
+                                <div class="opacity-90 italic">
+                                    ${data.stream || 'Waiting for AI to start thinking...'}
+                                    <span class="cursor-blink"></span>
                                 </div>
                             </div>
                         </div>
                     </div>
                 `;
+
+                // Auto-scroll to bottom of the stream
+                const streamDiv = container.querySelector('.max-h-64');
+                if (streamDiv) streamDiv.scrollTop = streamDiv.scrollHeight;
+
             } catch (e) {
-                console.error('Failed to fetch task details:', e);
-                document.getElementById('task-details-content').innerHTML = `<div class="text-red-500">Error loading details.</div>`;
+                console.error('Failed to update task details:', e);
             }
         }
 
