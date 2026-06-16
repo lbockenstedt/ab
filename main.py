@@ -49,6 +49,61 @@ ENV_FILE = os.path.join(CONFIG_DIR, ".env")
 STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
+def save_config(config):
+    """Saves configuration to persistent storage, falling back to local if needed."""
+    try:
+        if os.path.exists(CONFIG_DIR) or os.access(CONFIG_DIR, os.W_OK):
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config, f, indent=2)
+            logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
+        else:
+            raise IOError("Persistent config directory not writable")
+    except Exception as e:
+        logger.warning(f"Could not save to persistent storage ({e}), falling back to local config.json")
+        try:
+            with open("config.json", "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception as fe:
+            logger.error(f"Critical failure saving config: {fe}")
+
+def load_config():
+    # Try persistent config first
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f: return json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading persistent config {CONFIG_FILE}: {e}")
+    # Fallback to local config
+    try:
+        with open("config.json", "r") as f: return json.load(f)
+    except:
+        return {"monitored_repos": [], "trusted_repos": [], "default_branch": "main", "direct_push_enabled": False, "dev_branch": "dev", "repo_tests": {}, "GITHUB_TOKEN": "", "monitored_labels": ["automated-fix"]}
+
+def load_processed():
+    # Try persistent state first
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
+                return data
+        except: pass
+    # Fallback to local state
+    if os.path.exists("processed_issues.json"):
+        try:
+            with open("processed_issues.json", "r") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
+                return data
+        except: pass
+    return {}
+
+def save_processed(processed):
+    with open(STATE_FILE, "w") as f: json.dump(processed, f, indent=2)
+
 def get_version():
     try:
         with open(VERSION_FILE, "r") as f: return f.read().strip()
@@ -280,61 +335,6 @@ def bump_repo_version(repo_path):
     except Exception as e:
         logger.error(f"Error writing version file: {e}")
         return None
-
-def save_config(config):
-    """Saves configuration to persistent storage, falling back to local if needed."""
-    try:
-        if os.path.exists(CONFIG_DIR) or os.access(CONFIG_DIR, os.W_OK):
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(CONFIG_FILE, "w") as f:
-                json.dump(config, f, indent=2)
-            logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
-        else:
-            raise IOError("Persistent config directory not writable")
-    except Exception as e:
-        logger.warning(f"Could not save to persistent storage ({e}), falling back to local config.json")
-        try:
-            with open("config.json", "w") as f:
-                json.dump(config, f, indent=2)
-        except Exception as fe:
-            logger.error(f"Critical failure saving config: {fe}")
-
-def load_config():
-    # Try persistent config first
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f: return json.load(f)
-        except Exception as e:
-            logger.error(f"Error reading persistent config {CONFIG_FILE}: {e}")
-    # Fallback to local config
-    try:
-        with open("config.json", "r") as f: return json.load(f)
-    except:
-        return {"monitored_repos": [], "trusted_repos": [], "default_branch": "main", "direct_push_enabled": False, "dev_branch": "dev", "repo_tests": {}, "GITHUB_TOKEN": "", "monitored_labels": ["automated-fix"]}
-
-def load_processed():
-    # Try persistent state first
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
-                return data
-        except: pass
-    # Fallback to local state
-    if os.path.exists("processed_issues.json"):
-        try:
-            with open("processed_issues.json", "r") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
-                return data
-        except: pass
-    return {}
-
-def save_processed(processed):
-    with open(STATE_FILE, "w") as f: json.dump(processed, f, indent=2)
 
 def trigger_infrastructure_update():
     url = os.getenv("UPDATE_API_URL")
@@ -751,6 +751,21 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         repo_obj = gh_current.get_repo(repo_name)
         issue = repo_obj.get_issue(int(issue_num))
 
+        # --- Triage Phase ---
+        actionable, request_msg = analyze_issue(issue)
+        if not actionable:
+            logger.info(f"Issue {repo_name}:{issue_num} is non-actionable: {request_msg}")
+            issue.create_comment(f"🤖 **BugFixer Triage**\n\nThis issue is currently non-actionable. To help me fix this, please provide: {request_msg}")
+            processed = load_processed()
+            processed[f"{repo_name}:{issue_num}"] = {
+                "status": "non-actionable",
+                "timestamp": datetime.now().isoformat(),
+                "reason": request_msg
+            }
+            save_processed(processed)
+            state["processed"] = processed
+            return False, f"Non-actionable: {request_msg}"
+
         # Handle LLM preference
         force_cloud = None
         if llm_preference == "cloud":
@@ -793,6 +808,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         error_context = failure_msg
 
             if not success:
+                processed = load_processed()
+                processed[f"{repo_name}:{issue_num}"] = {
+                    "status": "failed",
+                    "timestamp": datetime.now().isoformat(),
+                    "error": "AI failed to find a verified fix after max attempts"
+                }
+                save_processed(processed)
+                state["processed"] = processed
                 return False, "AI failed to find a verified fix"
 
             repo_git.git.add(A=True)
@@ -946,9 +969,9 @@ def scan_repo_issues(gh_current, config, processed):
                 try:
                     issue_id = f"{repo_name}:{issue.number}"
                     if issue_id in processed:
-                        if processed[issue_id].get("status") == "awaiting_prod_verification":
+                        status = processed[issue_id].get("status")
+                        if status in ["fixed", "non-actionable", "failed", "awaiting_prod_verification"]:
                             continue
-                        del processed[issue_id]
 
                     state["current_task"] = f"Fixing {issue_id}"
                     success, msg = process_single_issue(repo_name, issue.number)
@@ -959,81 +982,85 @@ def scan_repo_issues(gh_current, config, processed):
         except Exception as e:
             logger.exception(f"Unexpected error while processing {repo_name}: {e}")
 
+def run_scan_cycle():
+    """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
+    global state
+    try:
+        load_dotenv(override=True)
+        config = load_config()
+
+        state["status"] = "Scanning"
+        processed = load_processed()
+
+        # Priority 1: config.json, Priority 2: Environment
+        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+        if not token:
+            raise Exception("Configuration Pending: Please enter your GitHub Token in Settings")
+        gh_current = Github(token)
+        try:
+            logger.info("Attempting to authenticate with GitHub API...")
+            bot_user = gh_current.get_user().login
+            logger.info(f"Authenticated as GitHub user: {bot_user}")
+        except GithubException as ge:
+            if ge.status == 401:
+                logger.error("GitHub Authentication Failed: 401 Unauthorized. Please check your token.")
+                raise Exception("Invalid GitHub Token (401 Unauthorized)")
+            logger.error(f"GitHub API Error: {ge.status} - {ge.data}")
+            raise ge
+        except Exception as e:
+            logger.exception(f"Unexpected error during GitHub authentication: {e}")
+            raise e
+
+        # Normalize monitored repos before using them
+        raw_repos = config.get("monitored_repos", [])
+        monitored_repos = []
+        if isinstance(raw_repos, list):
+            for r in raw_repos:
+                for split_r in r.replace("\\n", ",").split(","):
+                    cleaned = clean_repo_name(split_r)
+                    if cleaned:
+                        monitored_repos.append(cleaned)
+        elif isinstance(raw_repos, str):
+            for split_r in raw_repos.replace("\\n", ",").split(","):
+                cleaned = clean_repo_name(split_r)
+                if cleaned:
+                    monitored_repos.append(cleaned)
+
+        monitored_repos = list(set(monitored_repos)) # Deduplicate
+        if not monitored_repos:
+            logger.warning("No monitored repositories configured. Skipping scan.")
+
+        # --- Label Discovery Phase ---
+        state["current_task"] = "Discovering Labels"
+        state["available_labels"] = discover_labels(gh_current, monitored_repos)
+        logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
+
+        # --- Production Verification Phase ---
+        verify_production_fixes(gh_current, processed)
+        # --- Parallel Scan Phase ---
+        state["status"] = "Scanning"
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Run Hub Log Scan and Repo Issue Scan in parallel
+            futures = [
+                executor.submit(scan_hub_logs, gh_current, config),
+                executor.submit(scan_repo_issues, gh_current, config, processed)
+            ]
+            for future in futures:
+                future.result() # Wait for completion and catch exceptions
+
+        save_processed(processed) # Ensure state is persisted
+        state["status"] = "Idle"
+        state["current_task"] = "None"
+        state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        logger.exception(f"Critical poller error: {e}")
+        state["status"] = f"Error: {str(e)}"
+
 def poller_worker():
 
     global state
     while True:
-        try:
-            load_dotenv(override=True)
-            config = load_config()
-
-            state["status"] = "Scanning"
-            processed = load_processed()
-
-            # Priority 1: config.json, Priority 2: Environment
-            token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
-            if not token:
-                raise Exception("Configuration Pending: Please enter your GitHub Token in Settings")
-            gh_current = Github(token)
-            try:
-                logger.info("Attempting to authenticate with GitHub API...")
-                bot_user = gh_current.get_user().login
-                logger.info(f"Authenticated as GitHub user: {bot_user}")
-            except GithubException as ge:
-                if ge.status == 401:
-                    logger.error("GitHub Authentication Failed: 401 Unauthorized. Please check your token.")
-                    raise Exception("Invalid GitHub Token (401 Unauthorized)")
-                logger.error(f"GitHub API Error: {ge.status} - {ge.data}")
-                raise ge
-            except Exception as e:
-                logger.exception(f"Unexpected error during GitHub authentication: {e}")
-                raise e
-
-            # Normalize monitored repos before using them
-            raw_repos = config.get("monitored_repos", [])
-            monitored_repos = []
-            if isinstance(raw_repos, list):
-                for r in raw_repos:
-                    # In case a list item contains multiple repos (e.g. ["repo1, repo2"])
-                    for split_r in r.replace("\n", ",").split(","):
-                        cleaned = clean_repo_name(split_r)
-                        if cleaned:
-                            monitored_repos.append(cleaned)
-            elif isinstance(raw_repos, str):
-                for split_r in raw_repos.replace("\n", ",").split(","):
-                    cleaned = clean_repo_name(split_r)
-                    if cleaned:
-                        monitored_repos.append(cleaned)
-
-            monitored_repos = list(set(monitored_repos)) # Deduplicate
-            if not monitored_repos:
-                logger.warning("No monitored repositories configured. Skipping scan.")
-
-            # --- Label Discovery Phase ---
-            state["current_task"] = "Discovering Labels"
-            state["available_labels"] = discover_labels(gh_current, monitored_repos)
-            logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
-
-            # --- Production Verification Phase ---
-            verify_production_fixes(gh_current, processed)
-            # --- Parallel Scan Phase ---
-            state["status"] = "Scanning"
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                # Run Hub Log Scan and Repo Issue Scan in parallel
-                futures = [
-                    executor.submit(scan_hub_logs, gh_current, config),
-                    executor.submit(scan_repo_issues, gh_current, config, processed)
-                ]
-                for future in futures:
-                    future.result() # Wait for completion and catch exceptions
-
-            save_processed(processed) # Ensure state is persisted
-            state["status"] = "Idle"
-            state["current_task"] = "None"
-            state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        except Exception as e:
-            logger.exception(f"Critical poller error: {e}")
-            state["status"] = f"Error: {str(e)}"
+        run_scan_cycle()
         time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 300)))
 
 @app.get("/")
@@ -1218,6 +1245,14 @@ async def trigger_fix(request: Request):
 
     threading.Thread(target=run_fix, daemon=True).start()
     return {"status": "triggered", "message": f"Fix process started for {repo_name}:{issue_num}"}
+
+@app.post("/scan_now")
+async def scan_now():
+    def trigger():
+        state["status"] = "Manual Scan"
+        run_scan_cycle()
+    threading.Thread(target=trigger, daemon=True).start()
+    return {"status": "triggered", "message": "Manual scan cycle started in background."}
 
 @app.post("/retry_issue")
 async def retry_issue(request: Request):
