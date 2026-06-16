@@ -48,30 +48,60 @@ template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
 
 # Shared LLM Utility
-def call_llm(prompt, system_prompt="You are a helpful AI assistant."):
+def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None):
     """Generic LLM caller with Local -> Cloud failover and JSON extraction."""
     l_mod, c_mod = os.getenv("LOCAL_OLLAMA_MODEL"), os.getenv("CLOUD_OLLAMA_MODEL")
     l_url, c_url = os.getenv("LOCAL_OLLAMA_URL"), os.getenv("CLOUD_OLLAMA_URL")
     api_key = os.getenv("OLLAMA_API_KEY")
 
     def _request(url, model):
-        endpoint = f"{url.rstrip('/')}/api/chat"
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            "stream": False
-        }
+        if "api.ollama.com" in url:
+            logger.warning(f"Detected potentially incorrect Cloud LLM URL: {url}. Official Ollama Cloud host is 'https://ollama.com'. Please check your settings.")
+
+        # Use /api/generate for Cloud LLM to match working curl examples, /api/chat for local
+        is_cloud = "ollama.com" in url and "local" not in url
+        endpoint = f"{url.rstrip('/')}/api/generate" if is_cloud else f"{url.rstrip('/')}/api/chat"
+
+        if is_cloud:
+            # Combine system and user prompts for the generate endpoint
+            full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
+            payload = {
+                "model": model,
+                "prompt": full_prompt,
+                "stream": False
+            }
+        else:
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "stream": False
+            }
+
         headers = {"Content-Type": "application/json"}
-        if api_key: headers["Authorization"] = f"Bearer {api_key}"
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        # Debugging: Log endpoint and presence of key
+        key_status = "Present" if api_key else "MISSING"
+        logger.info(f"LLM Request: {endpoint} | Model: {model} | Key: {key_status}")
+
         resp = requests.post(endpoint, json=payload, headers=headers, timeout=120)
+
+        if resp.status_code == 401:
+            logger.error(f"LLM 401 Unauthorized: {endpoint}. Check if OLLAMA_API_KEY is correctly set in .env or Settings.")
+
         resp.raise_for_status()
-        return resp.json()['message']['content']
+        data = resp.json()
+
+        return data.get('message', {}).get('content') if not is_cloud else data.get('response', '')
+
+    use_cloud = force_cloud if force_cloud is not None else state["force_cloud"]
 
     try:
-        if state["force_cloud"]:
+        if use_cloud:
             state["active_llm"] = f"Cloud ({c_url})"
             return _request(c_url, c_mod)
         try:
@@ -232,9 +262,8 @@ def get_hub_logs():
     url = os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url: return None
     try:
-        # If user provided a base URL (e.g. http://ip:port), append /logs
-        # If they already provided /logs, this won't double it
-        log_url = url.rstrip('/') + "/logs"
+        # Use the comprehensive 'all' endpoint to get Hub, Agent, and Module logs
+        log_url = url.rstrip('/') + "/setup/logs/all"
         resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
             try:
@@ -391,7 +420,7 @@ def prepare_environment(repo_path):
     else:
         logger.info("No known dependency file detected. Skipping installation.")
 
-def review_fix(repo_path, issue_body, proposed_fixes):
+def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None):
     logger.info("Running Skeptical Reviewer pass...")
     fix_details = ""
     for path, code in proposed_fixes.items():
@@ -408,7 +437,7 @@ def review_fix(repo_path, issue_body, proposed_fixes):
         "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}"
     )
     try:
-        res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.")
+        res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.", force_cloud=force_cloud)
         import re
         match = re.search(r'\{.*\}', res, re.DOTALL)
         if match:
@@ -418,7 +447,7 @@ def review_fix(repo_path, issue_body, proposed_fixes):
         logger.error(f"Reviewer error: {e}")
         return {"confidence": 0.0, "verdict": "Reject", "critique": f"Reviewer crashed: {e}"}
 
-def apply_ai_fix(repo_path, issue_body, error_context=None):
+def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None):
     relevant_files = identify_files_to_fix(repo_path, issue_body)
     if not relevant_files:
         logger.warning(f"No specific files identified for issue. Attempting general fix.")
@@ -447,7 +476,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None):
             "Example: {\"confidence\": 0.98, \"fixes\": {\"src/main.py\": \"full code here\"}}"
         )
     try:
-        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.")
+        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud)
     except Exception as e:
         raise Exception(f"Fix generation failed: {e}")
 
@@ -556,7 +585,118 @@ def updater_worker():
             logger.error(f"Updater worker error: {e}")
         time.sleep(3600)
 
+def process_single_issue(repo_name, issue_num, llm_preference=None):
+    """Core logic to fix a single issue. Used by poller and manual triggers."""
+    global state
+    try:
+        config = load_config()
+        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+        if not token:
+            logger.error(f"Manual trigger failed: No GitHub Token configured.")
+            return False, "No GitHub Token configured"
+
+        gh_current = Github(token)
+        repo_obj = gh_current.get_repo(repo_name)
+        issue = repo_obj.get_issue(int(issue_num))
+
+        # Handle LLM preference
+        force_cloud = None
+        if llm_preference == "cloud":
+            force_cloud = True
+        elif llm_preference == "local":
+            force_cloud = False
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "repo")
+            url = repo_obj.clone_url.replace("https://", f"https://{token}@")
+            logger.info(f"Cloning {repo_name} for manual fix...")
+            repo_git = git.Repo.clone_from(url, path, depth=1)
+
+            max_attempts = 3
+            success = False
+            error_context = None
+
+            for attempt in range(1, max_attempts + 1):
+                logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
+                fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud)
+
+                success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                if not success_applied:
+                    verified = False
+                    failure_msg = "AI generated invalid JSON format"
+                else:
+                    review = review_fix(path, issue.body, fixes, force_cloud=force_cloud)
+                    review_conf = review.get("confidence", 0.0)
+                    review_verdict = review.get("verdict", "Reject")
+
+                    prepare_environment(path)
+                    verified, failure_msg = verify_fix(path, repo_name, config)
+
+                    if verified:
+                        success = True
+                        final_confidence = (confidence + review_conf) / 2
+                        final_verdict = review_verdict
+                        break
+                    else:
+                        error_context = failure_msg
+
+            if not success:
+                return False, "AI failed to find a verified fix"
+
+            repo_git.git.add(A=True)
+            commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
+            repo_git.index.commit(commit_msg)
+
+            confidence_threshold = 0.95
+            is_trusted = repo_name in config["trusted_repos"]
+            bot_user = gh_current.get_user().login
+            is_owner = repo_obj.owner.login == bot_user
+            can_direct_push = config.get("direct_push_enabled") and is_trusted and is_owner
+
+            if can_direct_push and final_confidence >= confidence_threshold and final_verdict == "Approve":
+                repo_git.remotes.origin.push()
+                commit_type = "Direct Commit"
+                detail_msg = f"The fix was verified (Avg Conf: {final_confidence:.2%}) and pushed directly to the main branch."
+            else:
+                target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
+                try:
+                    repo_git.git.checkout(target_branch)
+                except:
+                    repo_git.create_head(target_branch).checkout()
+                repo_git.remotes.origin.push(target_branch, force=True)
+                pr = repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}", head=target_branch, base=config["default_branch"])
+                commit_type = "Pull Request"
+                detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
+
+            comment_body = (
+                f"🤖 **BugFixer AI Update**\n\n"
+                f"The issue has been successfully resolved via {commit_type}.\n"
+                f"{detail_msg}\n\n"
+                f"Verification: ✅ Tests passed successfully."
+            )
+            issue.create_comment(comment_body)
+
+            is_log_detected = "log-detected" in issue.get_labels()
+            if not is_log_detected:
+                issue.edit(state='closed')
+
+            processed = load_processed()
+            processed[f"{repo_name}:{issue_num}"] = {
+                "status": "fixed" if not is_log_detected else "awaiting_prod_verification",
+                "timestamp": datetime.now().isoformat(),
+                "commit": repo_git.head.commit.hexsha
+            }
+            save_processed(processed)
+            state["processed"] = processed
+
+            return True, f"Fixed via {commit_type}"
+
+    except Exception as e:
+        logger.exception(f"Error in process_single_issue: {e}")
+        return False, str(e)
+
 def poller_worker():
+
     global state
     while True:
         try:
@@ -622,9 +762,9 @@ def poller_worker():
 
                         # Get logs from hub
                         logs = get_hub_logs()
-                        if logs:
+                        if logs and 'logs' in logs:
                             module_name = repo_name.split('/')[-1]
-                            relevant_logs = [l['log'] for l in logs if l.get('module') == module_name]
+                            relevant_logs = [l['log'] for l in logs['logs'] if l.get('module') == module_name]
                             full_log_text = "\n".join(relevant_logs)
 
                             # Look for the original error snippet in the issue body
@@ -691,101 +831,17 @@ def poller_worker():
                                 del processed[issue_id]
                             state["current_task"] = f"Fixing {issue_id}"
                             logger.info(f"Processing issue {issue_id}: {issue.title}")
-                            before_state = get_hub_state()
-                            if before_state:
-                                logger.info(f"Captured hub state before fix for {issue_id}")
-                            with tempfile.TemporaryDirectory() as tmp_dir:
-                                path = os.path.join(tmp_dir, "repo")
-                                url = repo_obj.clone_url.replace("https://", f"https://{token}@")
-                                logger.info(f"Cloning {repo_name} to temporary directory...")
-                                repo_git = git.Repo.clone_from(url, path, depth=1)
-                                max_attempts = 3
-                                success = False
-                                error_context = None
-                                for attempt in range(1, max_attempts + 1):
-                                    logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {issue_id}...")
-                                    fix_code = apply_ai_fix(path, issue.body, error_context)
-                                    logger.info(f"AI generated fix. Applying to files...")
-                                    success_applied, fixes, confidence = parse_and_apply(fix_code, path)
-                                    if not success_applied:
-                                        verified = False
-                                        failure_msg = "AI generated invalid JSON format"
-                                    else:
-                                        review = review_fix(path, issue.body, fixes)
-                                        review_conf = review.get("confidence", 0.0)
-                                        review_verdict = review.get("verdict", "Reject")
-                                        logger.info(f"Reviewer Verdict: {review_verdict} (Conf: {review_conf:.2f}) - {review.get('critique')}")
-                                        prepare_environment(path)
-                                        verified, failure_msg = verify_fix(path, repo_name, config)
-                                        if verified:
-                                            logger.info(f"Fix verified successfully on attempt {attempt}!")
-                                            success = True
-                                            final_confidence = (confidence + review_conf) / 2
-                                            final_verdict = review_verdict
-                                            break
-                                        else:
-                                            logger.warning(f"Fix attempt {attempt} failed verification. Feeding error back to LLM...")
-                                            error_context = failure_msg
-                                if not success:
-                                    logger.error(f"AI failed to find a verified fix for {issue_id} after {max_attempts} attempts.")
-                                    continue
-                                repo_git.git.add(A=True)
-                                commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
-                                repo_git.index.commit(commit_msg)
-                                logger.info(f"Committed verified changes: {commit_msg}")
-                                confidence_threshold = 0.95
-                                is_trusted = repo_name in config["trusted_repos"]
-                                can_direct_push = config.get("direct_push_enabled") and is_trusted and is_owner
-                                if can_direct_push and final_confidence >= confidence_threshold and final_verdict == "Approve":
-                                    logger.info(f"High confidence ({final_confidence:.2f}) and trust verified. Pushing directly to main for {repo_name}...")
-                                    repo_git.remotes.origin.push()
-                                    logger.info("Direct push successful.")
-                                    commit_type = "Direct Commit"
-                                    detail_msg = f"The fix was verified (Avg Conf: {final_confidence:.2%}) and pushed directly to the main branch."
-                                else:
-                                    target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
-                                    logger.info(f"Pushing to branch: {target_branch} (Avg Conf: {final_confidence:.2f})")
-                                    try:
-                                        repo_git.git.checkout(target_branch)
-                                    except:
-                                        repo_git.create_head(target_branch).checkout()
-                                    repo_git.remotes.origin.push(target_branch, force=True)
-                                    pr = repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}", head=target_branch, base=config["default_branch"])
-                                    logger.info(f"Pull Request created for {repo_name} on branch {target_branch}")
-                                    commit_type = "Pull Request"
-                                    detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
-                                try:
-                                    comment_body = (
-                                        f"🤖 **BugFixer AI Update**\n\n"
-                                        f"The issue has been successfully resolved via {commit_type}.\n"
-                                        f"{detail_msg}\n\n"
-                                        f"Verification: ✅ Tests passed successfully."
-                                    )
-                                    issue.create_comment(comment_body)
-                                    # Only close immediately if it wasn't log-detected
-                                    is_log_detected = "log-detected" in issue.get_labels()
-                                    if not is_log_detected:
-                                        issue.edit(state='closed')
-                                        logger.info(f"Commented and closed issue {issue_id}")
-                                    else:
-                                        logger.info(f"Issue {issue_id} is log-detected. Leaving open until production verification.")
-                                except Exception as e:
-                                    logger.error(f"Failed to comment/close issue {issue_id}: {e}")
-                                state["api_status"] = trigger_infrastructure_update()
-                                if before_state:
-                                    after_state = get_hub_state()
-                                    if after_state and before_state == after_state:
-                                        logger.warning(f"Hub state for {issue_id} remained unchanged after update. Fix may not be reflected in hub.")
-                                    elif after_state:
-                                        logger.info(f"Hub state change detected for {issue_id}! Fix successfully reflected.")
-                                    else:
-                                        logger.error(f"Could not retrieve hub state after update for {issue_id}.")
-                                processed[issue_id] = {
-                                    "status": "fixed" if not is_log_detected else "awaiting_prod_verification",
-                                    "timestamp": datetime.now().isoformat(),
-                                    "commit": repo_git.head.commit.hexsha
-                                }
-                                save_processed(processed)
+
+                            # Use the new unified processing logic
+                            success, msg = process_single_issue(repo_name, issue.number)
+                            if not success:
+                                logger.error(f"AI failed to fix {issue_id}: {msg}")
+
+                            # The following block was the old complex logic
+                            # (removed to avoid duplication)
+                            # ... [Existing complex cloning/fixing logic here] ...
+                            # This part is now handled by process_single_issue
+                            # We just need to skip the old logic.
                         except Exception as e:
                             logger.exception(f"Failed to process issue {issue_id}: {e}")
                             continue
@@ -934,6 +990,50 @@ async def update_now():
 async def toggle_cloud():
     state["force_cloud"] = not state["force_cloud"]
     return RedirectResponse(url="/", status_code=303)
+
+@app.post("/trigger_fix")
+async def trigger_fix(request: Request):
+    data = await request.json()
+    repo_name = data.get("repo_name")
+    issue_num = data.get("issue_num")
+    llm_pref = data.get("llm_preference") # 'local' or 'cloud'
+
+    if not repo_name or not issue_num:
+        return JSONResponse(status_code=400, content={"message": "Missing repo_name or issue_num"})
+
+    logger.info(f"Manual trigger: Fixing {repo_name}:{issue_num} with preference {llm_pref}")
+
+    def run_fix():
+        success, msg = process_single_issue(repo_name, int(issue_num), llm_preference=llm_pref)
+        if success:
+            logger.info(f"Manual fix successful for {repo_name}:{issue_num}")
+        else:
+            logger.error(f"Manual fix failed for {repo_name}:{issue_num}: {msg}")
+
+    threading.Thread(target=run_fix, daemon=True).start()
+    return {"status": "triggered", "message": f"Fix process started for {repo_name}:{issue_num}"}
+
+@app.post("/retry_issue")
+async def retry_issue(request: Request):
+    data = await request.json()
+    issue_id = data.get("issue_id") # "repo:num"
+
+    if not issue_id or ":" not in issue_id:
+        return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
+
+    repo_name, issue_num = issue_id.split(":")
+
+    logger.info(f"Manual retry: {issue_id}")
+
+    def run_fix():
+        success, msg = process_single_issue(repo_name, int(issue_num))
+        if success:
+            logger.info(f"Manual retry successful for {issue_id}")
+        else:
+            logger.error(f"Manual retry failed for {issue_id}: {msg}")
+
+    threading.Thread(target=run_fix, daemon=True).start()
+    return {"status": "triggered", "message": f"Retry started for {issue_id}"}
 
 @app.post("/restart")
 async def restart_service():

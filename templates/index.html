@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BugFixer Hub</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome same as 6.4.0/css/all.min.css">
     {% if view == 'status' %}
     <meta http-equiv="refresh" content="30">
     {% endif %}
@@ -191,6 +191,7 @@
                         <th class="px-6 py-3 font-medium">Issue ID</th>
                         <th class="px-6 py-3 font-medium">Result</th>
                         <th class="px-6 py-3 font-medium text-right">Status</th>
+                        <th class="px-6 py-3 font-medium text-center">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-200">
@@ -201,11 +202,16 @@
                         <td class="px-6 py-4 text-right">
                             <span class="text-green-700 bg-green-100 px-2 py-1 rounded text-xs font-bold">SUCCESS</span>
                         </td>
+                        <td class="px-6 py-4 text-center space-x-2">
+                            <button onclick="triggerFix('{{ item }}', 'retry')" class="text-xs px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-bold text-slate-700 transition-colors">Retry</button>
+                            <button onclick="triggerFix('{{ item }}', 'local')" class="text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded font-bold text-blue-700 transition-colors">Local</button>
+                            <button onclick="triggerFix('{{ item }}', 'cloud')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors">Cloud</button>
+                        </td>
                     </tr>
                     {% endfor %}
                     {% if not state.processed %}
                     <tr>
-                        <td colspan="3" class="px-6 py-8 text-center text-slate-400 italic">No issues processed yet.</td>
+                        <td colspan="4" class="px-6 py-8 text-center text-slate-400 italic">No issues processed yet.</td>
                     </tr>
                     {% endif %}
                 </tbody>
@@ -227,7 +233,7 @@
 
         {% if view == 'hub-logs' %}
         <div class="hpe-card rounded-2xl overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
+            <div class la-btn-cloud="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
                 <h3 class="text-lg font-semibold text-slate-800">Hub Module Logs</h3>
                 <span class="text-xs text-slate-500 font-mono">Aggregate Hub View</span>
             </div>
@@ -245,7 +251,7 @@
                             {% for log in hub_logs %}
                             <tr class="hover:bg-slate-50 transition-colors">
                                 <td class="px-6 py-4 font-mono text-xs text-slate-600">{{ log.module }}</td>
-                                <td class="px-6 py-4 text-slate-500 text-xs">{{ log.timestamp }}</td>
+                                <td class="px-6 py-4 text-slate-500 text- la-btn-cloud text-xs">{{ log.timestamp }}</td>
                                 <td class="px-6 py-4 text-slate-700 font-mono text-xs whitespace-pre-wrap">{{ log.log }}</td>
                             </tr>
                             {% endfor %}
@@ -329,7 +335,7 @@
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6 border-t border-slate-200">
                         <div class="space-y-2">
                             <label class="text-sm font-medium text-slate-600">Poll Interval (Seconds)</label>
-                            <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus la-btn-cloud focus:ring-[#01A982]">
                         </div>
                         <div class="space-y-2">
                             <label class="text-sm font-medium text-slate-600">Log File Path</label>
@@ -396,5 +402,34 @@
         </div>
         {% endif %}
     </main>
+
+    <script>
+        async function triggerFix(issueId, mode) {
+            const [repoName, issueNum] = issueId.split(':');
+            let endpoint = '/trigger_fix';
+            let payload = {
+                repo_name: repoName,
+                issue_num: issueNum,
+                llm_preference: mode === 'retry' ? null : (mode === 'local' ? 'local' : 'cloud')
+            };
+
+            if (mode === 'retry') {
+                endpoint = '/retry_issue';
+                payload = { issue_id: issueId };
+            }
+
+            try {
+                const resp = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await resp.json();
+                alert(result.message || (result.status === 'triggered' ? 'Triggered successfully!' : 'Error triggering fix.'));
+            } catch (e) {
+                alert('Request failed: ' + e);
+            }
+        }
+    </script>
 </body>
 </html>
