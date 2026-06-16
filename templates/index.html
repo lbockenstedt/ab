@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BugFixer Hub</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome same as 6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     {% if view == 'status' %}
     <meta http-equiv="refresh" content="30">
     {% elif view == 'logs' %}
@@ -261,7 +261,7 @@
 
         {% if view == 'hub-logs' %}
         <div class="hpe-card rounded-2xl overflow-hidden">
-            <div class la-btn-cloud="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
                 <h3 class="text-lg font-semibold text-slate-800">Hub Module Logs</h3>
                 <span class="text-xs text-slate-500 font-mono">Aggregate Hub View</span>
             </div>
@@ -279,7 +279,7 @@
                             {% for log in hub_logs %}
                             <tr class="hover:bg-slate-50 transition-colors">
                                 <td class="px-6 py-4 font-mono text-xs text-slate-600">{{ log.module }}</td>
-                                <td class="px-6 py-4 text-slate-500 text- la-btn-cloud text-xs">{{ log.timestamp }}</td>
+                                <td class="px-6 py-4 text-slate-500 text-xs">{{ log.timestamp }}</td>
                                 <td class="px-6 py-4 text-slate-700 font-mono text-xs whitespace-pre-wrap">{{ log.log }}</td>
                             </tr>
                             {% endfor %}
@@ -363,7 +363,7 @@
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6 border-t border-slate-200">
                         <div class="space-y-2">
                             <label class="text-sm font-medium text-slate-600">Poll Interval (Seconds)</label>
-                            <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus la-btn-cloud focus:ring-[#01A982]">
+                            <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                         </div>
                         <div class="space-y-2">
                             <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
