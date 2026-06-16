@@ -1,4 +1,5 @@
 import os, json, time, tempfile, threading, requests, logging, traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, HTTPException
@@ -75,6 +76,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             logger.warning(f"Detected potentially incorrect Cloud LLM URL: {url}. Official Ollama Cloud host is 'https://ollama.com'. Please check your settings.")
 
         # Determine primary endpoint
+        is_cloud = "ollama.com" in url and "local" not in url
         primary_endpoint = f"{url.rstrip('/')}/api/generate"
 
         # Use configurable timeout from config or default 15m
@@ -233,12 +235,14 @@ async def catch_exceptions_mid(request: Request, call_next):
             content={"message": "Internal Server Error. Check bugfixer.log for details.", "error": str(e)}
         )
 
+# Initial state
+config_on_start = load_config()
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False, "cloud_online": False,
     "last_run": "Never", "current_task": "None", "api_status": "Not Triggered",
-    "processed": [], "force_cloud": False, "version": get_version(), "llm_stream": ""
+    "processed": [], "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": ""
 }
-STATE_FILE = "processed_issues.json"
+# Remove the line that overwrites STATE_FILE to a local path
 
 def clean_repo_name(name):
     """Converts a full GitHub URL or a 'user/repo' string into 'user/repo' format."""
@@ -291,6 +295,24 @@ def bump_repo_version(repo_path):
     except Exception as e:
         logger.error(f"Error writing version file: {e}")
         return None
+
+def save_config(config):
+    """Saves configuration to persistent storage, falling back to local if needed."""
+    try:
+        if os.path.exists(CONFIG_DIR) or os.access(CONFIG_DIR, os.W_OK):
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config, f, indent=2)
+            logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
+        else:
+            raise IOError("Persistent config directory not writable")
+    except Exception as e:
+        logger.warning(f"Could not save to persistent storage ({e}), falling back to local config.json")
+        try:
+            with open("config.json", "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception as fe:
+            logger.error(f"Critical failure saving config: {fe}")
 
 def load_config():
     # Try persistent config first
@@ -852,6 +874,106 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         logger.exception(f"Error in process_single_issue: {e}")
         return False, str(e)
 
+def verify_production_fixes(gh_current, processed):
+    """Verify issues that were 'fixed' but are awaiting log confirmation."""
+    for issue_id, info in list(processed.items()):
+        if info.get("status") == "awaiting_prod_verification":
+            repo_name, issue_num = issue_id.split(":")
+            logger.info(f"Verifying production fix for {issue_id}...")
+            try:
+                repo_obj = gh_current.get_repo(repo_name)
+                issue = repo_obj.get_issue(int(issue_num))
+
+                # Get logs from hub
+                logs = get_hub_logs()
+                if logs:
+                    module_name = repo_name.split('/')[-1]
+                    relevant_logs = [l['log'] for l in logs if l.get('module') == module_name]
+                    full_log_text = "\n".join(relevant_logs)
+
+                    # Look for the original error snippet in the issue body
+                    import re
+                    match = re.search(r"### Log Evidence:\n```\n(.*?)\n```", issue.body, re.DOTALL)
+                    if match:
+                        snippet = match.group(1).strip()
+                        if snippet.lower() not in full_log_text.lower():
+                            logger.info(f"Verified: Error snippet no longer found in logs for {issue_id}. Closing issue.")
+                            issue.create_comment("🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. Closing issue.")
+                            issue.edit(state='closed')
+                            processed[issue_id]["status"] = "verified"
+                            save_processed(processed)
+                        else:
+                            logger.info(f"Issue {issue_id} still failing in production logs.")
+            except Exception as e:
+                logger.error(f"Error verifying {issue_id}: {e}")
+
+def scan_hub_logs(gh_current, config):
+    """Phase: Scan Hub for new errors and create GitHub issues."""
+    global state
+    state["current_task"] = "Scanning Hub Logs"
+    logger.info("Scanning Hub for new errors...")
+    hub_logs = get_hub_logs()
+    if hub_logs:
+        actionable_errors = analyze_logs_for_errors(hub_logs)
+        for error in actionable_errors:
+            repo_name = error['repo']
+            try:
+                repo_obj = gh_current.get_repo(repo_name)
+                create_automated_issue(repo_obj, error)
+                logger.info(f"Automatically created issue for log error in {repo_name}")
+            except Exception as e:
+                logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
+
+def scan_repo_issues(gh_current, config, processed):
+    """Phase: Scan monitored repos for issues and attempt fixes."""
+    global state
+    bot_user = gh_current.get_user().login
+
+    # Normalize monitored repos
+    raw_repos = config.get("monitored_repos", [])
+    monitored_repos = []
+    if isinstance(raw_repos, list):
+        for r in raw_repos:
+            for split_r in r.replace("\\n", ",").split(","):
+                cleaned = clean_repo_name(split_r)
+                if cleaned: monitored_repos.append(cleaned)
+    elif isinstance(raw_repos, str):
+        for split_r in raw_repos.replace("\\n", ",").split(","):
+            cleaned = clean_repo_name(split_r)
+            if cleaned: monitored_repos.append(cleaned)
+    monitored_repos = list(set(monitored_repos))
+
+    for repo_name in monitored_repos:
+        state["current_task"] = f"Checking {repo_name}"
+        logger.info(f"Scanning repository: {repo_name}")
+        try:
+            repo_obj = gh_current.get_repo(repo_name)
+            is_owner = repo_obj.owner.login == bot_user
+            labels = config.get("monitored_labels", ["automated-fix"])
+            if "NONE" in labels:
+                continue
+            if "ANY" in labels:
+                issues = repo_obj.get_issues(state="open")
+            else:
+                issues = repo_obj.get_issues(labels=labels, state="open")
+
+            for issue in issues:
+                try:
+                    issue_id = f"{repo_name}:{issue.number}"
+                    if issue_id in processed:
+                        if processed[issue_id].get("status") == "awaiting_prod_verification":
+                            continue
+                        del processed[issue_id]
+
+                    state["current_task"] = f"Fixing {issue_id}"
+                    success, msg = process_single_issue(repo_name, issue.number)
+                    if not success:
+                        logger.error(f"AI failed to fix {issue_id}: {msg}")
+                except Exception as e:
+                    logger.exception(f"Failed to process issue {issue_id}: {e}")
+        except Exception as e:
+            logger.exception(f"Unexpected error while processing {repo_name}: {e}")
+
 def poller_worker():
 
     global state
@@ -908,8 +1030,7 @@ def poller_worker():
             logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
 
             # --- Production Verification Phase ---
-            # Verify issues that were "fixed" but are awaiting log confirmation
-            for issue_id, info in list(processed.items()):
+            verify_production_fixes(gh_current, processed)
                 if info.get("status") == "awaiting_prod_verification":
                     repo_name, issue_num = issue_id.split(":")
                     logger.info(f"Verifying production fix for {issue_id}...")
@@ -940,75 +1061,18 @@ def poller_worker():
                     except Exception as e:
                         logger.error(f"Error verifying {issue_id}: {e}")
 
-            # --- Hub Log Scanning Phase ---
-            state["current_task"] = "Scanning Hub Logs"
-            logger.info("Scanning Hub for new errors...")
-            hub_logs = get_hub_logs()
-            if hub_logs:
-                actionable_errors = analyze_logs_for_errors(hub_logs)
-                for error in actionable_errors:
-                    repo_name = error['repo']
-                    try:
-                        repo_obj = gh_current.get_repo(repo_name)
-                        # Create issue (will be picked up in the next loop or a later iteration)
-                        create_automated_issue(repo_obj, error)
-                        logger.info(f"Automatically created issue for log error in {repo_name}")
-                    except Exception as e:
-                        logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
+            # --- Parallel Scan Phase ---
+            state["status"] = "Scanning"
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Run Hub Log Scan and Repo Issue Scan in parallel
+                futures = [
+                    executor.submit(scan_hub_logs, gh_current, config),
+                    executor.submit(scan_repo_issues, gh_current, config, processed)
+                ]
+                for future in futures:
+                    future.result() # Wait for completion and catch exceptions
 
-            for repo_name in config["monitored_repos"]:
-                state["current_task"] = f"Checking {repo_name}"
-                logger.info(f"Scanning repository: {repo_name}")
-                try:
-                    repo_obj = gh_current.get_repo(repo_name)
-                    is_owner = repo_obj.owner.login == bot_user
-                    logger.info(f"Repo {repo_name} found. Owner match: {is_owner}")
-                    labels = config.get("monitored_labels", ["automated-fix"])
-                    if "NONE" in labels:
-                        logger.info(f"Label set to NONE for {repo_name}. Skipping issue scan.")
-                        continue
-
-                    if "ANY" in labels:
-                        issues = repo_obj.get_issues(state="open")
-                        logger.info(f"Scanning ALL open issues in {repo_name} (ANY label selected).")
-                    else:
-                        issues = repo_obj.get_issues(labels=labels, state="open")
-                        logger.info(f"Scanning issues with labels {labels} in {repo_name}.")
-
-                    issue_count = issues.totalCount
-                    logger.info(f"Found {issue_count} matching open issues in {repo_name}")
-                    for issue in issues:
-                        try:
-                            issue_id = f"{repo_name}:{issue.number}"
-                            if issue_id in processed:
-                                # If it's awaiting prod verification, we don't re-fix it yet
-                                if processed[issue_id].get("status") == "awaiting_prod_verification":
-                                    continue
-                                logger.info(f"Issue {issue_id} was previously processed but is now OPEN again. Re-evaluating...")
-                                del processed[issue_id]
-                            state["current_task"] = f"Fixing {issue_id}"
-                            logger.info(f"Processing issue {issue_id}: {issue.title}")
-
-                            # Use the new unified processing logic
-                            success, msg = process_single_issue(repo_name, issue.number)
-                            if not success:
-                                logger.error(f"AI failed to fix {issue_id}: {msg}")
-
-                            # The following block was the old complex logic
-                            # (removed to avoid duplication)
-                            # ... [Existing complex cloning/fixing logic here] ...
-                            # This part is now handled by process_single_issue
-                            # We just need to skip the old logic.
-                        except Exception as e:
-                            logger.exception(f"Failed to process issue {issue_id}: {e}")
-                            continue
-                except GithubException as ge:
-                    logger.error(f"GitHub API Error while accessing {repo_name}: {ge.status} - {ge.data}")
-                    continue
-                except Exception as e:
-                    logger.exception(f"Unexpected error while processing {repo_name}: {e}")
-                    continue
-            state["processed"] = processed
+            save_processed(processed) # Ensure state is persisted
             state["status"] = "Idle"
             state["current_task"] = "None"
             state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1140,8 +1204,7 @@ async def save_settings(request: Request):
                 new_tests[repo.strip()] = cmd.strip()
         config_data["repo_tests"] = new_tests
 
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config_data, f, indent=2)
+    save_config(config_data)
 
     # Update .env
     env_vars = {}
@@ -1171,6 +1234,12 @@ async def update_now():
 @app.post("/toggle_cloud")
 async def toggle_cloud():
     state["force_cloud"] = not state["force_cloud"]
+
+    # Persist the setting
+    config = load_config()
+    config["force_cloud"] = state["force_cloud"]
+    save_config(config)
+
     return RedirectResponse(url="/", status_code=303)
 
 @app.post("/trigger_fix")
