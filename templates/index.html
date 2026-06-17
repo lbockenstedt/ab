@@ -449,21 +449,16 @@
                             <i class="fas fa-robot text-slate-400"></i>
                             <h4 class="font-semibold text-slate-700">Automation & Deployment</h4>
                         </div>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Poll Interval (Seconds)</label>
                                 <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Max Concurrent Fixes</label>
-                                <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub Query URL (Verification)</label>
                                 <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="URL to check hub state">
                             </div>
                         </div>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-6">
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
                                 <input type="checkbox" name="direct_push_enabled" id="direct_push_enabled" {{ 'checked' if settings.direct_push_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
                                 <label for="direct_push_enabled" class="text-xs font-medium text-slate-700">
@@ -481,6 +476,20 @@
                                 <label for="skip_review" class="text-xs font-medium text-slate-700">
                                     Bypass Skeptical Reviewer
                                 </label>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6">
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Triage Strictness</label>
+                                <select name="TRIAGE_STRICTNESS" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="Strict" {{ 'selected' if settings.TRIAGE_STRICTNESS == 'Strict' else '' }}>Strict (Requires full logs/traces)</option>
+                                    <option value="Moderate" {{ 'selected' if settings.TRIAGE_STRICTNESS == 'Moderate' else '' }}>Moderate (Prefer logs, but allows a good description)</option>
+                                    <option value="Lenient" {{ 'selected' if settings.TRIAGE_STRICTNESS == 'Lenient' else '' }}>Lenient (Attempt fix if a plausible lead exists)</option>
+                                </select>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max Concurrent Fixes</label>
+                                <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                         </div>
                         <div class="space-y-2 pt-6">

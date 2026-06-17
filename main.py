@@ -625,11 +625,21 @@ def analyze_issue(issue):
     for i, comment in enumerate(comments, 1):
         full_context += f"Comment {i}: {comment.body}\n"
 
+    config = load_config()
+    strictness = config.get("TRIAGE_STRICTNESS", "Moderate")
+
+    if strictness == "Strict":
+        strictness_instruction = "Specifically, for UI or runtime errors, you MUST have full console logs or stack traces. If these are missing, it is non-actionable."
+    elif strictness == "Lenient":
+        strictness_instruction = "Be generous. If the issue describes a bug and the repository is accessible, mark it as actionable even if full logs are missing, provided there is a plausible lead."
+    else: # Moderate
+        strictness_instruction = "Specifically, for UI or runtime errors, prefer console logs or stack traces, but if the description is detailed enough for a senior engineer to hypothesize the bug accurately, mark it as actionable."
+
     prompt = (
         f"{full_context}\n\n"
-        "Determine if this issue contains enough information to provide a code fix. "
-        "Specifically, for UI or runtime errors, check if console logs or stack traces are present. "
-        "If information is missing, specify exactly what is needed (e.g., 'Please provide the browser console output').\n\n"
+        f"Determine if this issue contains enough information to provide a code fix. \n"
+        f"{strictness_instruction}\n"
+        f"If information is missing, specify exactly what is needed (e.g., 'Please provide the browser console output').\n\n"
         "Return ONLY a JSON object: {\"actionable\": boolean, \"request\": \"message if not actionable\"}"
     )
     try:
@@ -1419,7 +1429,8 @@ DEFAULT_ENV = {
     "DEV_BRANCH": "dev",
     "LLM_TIMEOUT": "900",
     "MAX_CONCURRENT_FIXES": "5",
-    "LOCAL_LLM_SCHEDULE": "9-16,1-5"
+    "LOCAL_LLM_SCHEDULE": "9-16,1-5",
+    "TRIAGE_STRICTNESS": "Moderate"
 }
 
 @app.get("/settings")
@@ -1489,6 +1500,7 @@ async def save_settings(request: Request):
         "LLM_TIMEOUT": lambda v: v,
         "MAX_CONCURRENT_FIXES": lambda v: v,
         "LOCAL_LLM_SCHEDULE": lambda v: v,
+        "TRIAGE_STRICTNESS": lambda v: v,
     }
 
     for key, transform in updates.items():
