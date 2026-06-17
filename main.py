@@ -174,7 +174,7 @@ def validate_llm_config_on_startup():
             "  3. Manually add this line to /etc/bugfixer/.env :\n"
             "       OLLAMA_API_KEY=<your-secret-key>\n"
             "  4. Restart the service: sudo systemctl restart bugfixer\n"
-            + "=" * 78
+            "=" * 78
         )
         return False
 
@@ -194,7 +194,7 @@ def validate_llm_config_on_startup():
                     "  1. Verify the key is correct and still active in your Ollama account.\n"
                     "  2. Update it via http://localhost:8000/settings, OR\n"
                     "  3. Edit /etc/bugfixer/.env and restart: sudo systemctl restart bugfixer\n"
-                    + "=" * 78
+                    "=" * 78
                 )
                 return False
             elif test_resp.status_code == 200:
@@ -1339,7 +1339,7 @@ def parse_and_apply(content, repo_path):
         for filepath, code in fixes.items():
             # Confine writes to the cloned repo: reject absolute paths, traversal,
             # and symlinks that escape the repo root (prevents arbitrary file write).
-            if not isinstance(filepath, str) or os.path.isabs(filepath) or ".." in filepath.replace("\\", "/").split("/"):
+            if not isinstance(filepath, str) or os.path.isabs(filepath) or ".." in filepath.replace("\\\\", "/").split("/"):
                 logger.error(f"Refusing to apply fix with unsafe path: {filepath!r}")
                 continue
             full_path = os.path.abspath(os.path.join(repo_root, filepath))
@@ -1465,7 +1465,7 @@ def check_for_updates():
                 if new_commit not in update_state["failed_commits"]:
                     update_state["failed_commits"].append(new_commit)
                     save_update_state(update_state)
-                return False, f"Update failed: Syntax error detected. Rolled back to {old_commit[:7]}."
+                return False, f"Update failed: Syntax error detected. Rolled back to {old_commit[:7]}"
 
             try:
                 with open(os.path.join(CONFIG_DIR, "update_pending"), "w") as f:
@@ -2446,8 +2446,8 @@ async def save_settings(request: Request):
         config_data["monitored_labels"] = labels
 
     updates = {
-        "monitored_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
-        "trusted_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
+        "monitored_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\\\n", ",").split(",") if x.strip()],
+        "trusted_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\\\n", ",").split(",") if x.strip()],
         "default_branch": lambda v: v,
         "dev_branch": lambda v: v,
         "GITHUB_TOKEN": lambda v: v,
