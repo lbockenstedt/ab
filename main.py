@@ -50,6 +50,9 @@ STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
+# Define is_cloud globally to fix 'name is not defined' error
+is_cloud = os.getenv("IS_CLOUD", "false").lower() == "true"
+
 def save_config(config):
     """Saves configuration to persistent storage, falling back to local if needed."""
     try:
@@ -105,7 +108,7 @@ def load_config():
 
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
-    global state
+    global state, is_cloud
     try:
         load_dotenv(override=True)
         config = load_config()
