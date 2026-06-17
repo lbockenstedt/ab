@@ -1986,7 +1986,7 @@ DEFAULT_ENV = {
     "REVIEWER_MODEL_2": "gemma4:31b-cloud",
     "LLM_MAX_RETRIES": "5",
     "LLM_BACKOFF_BASE": "2.0",
-    "LLM_BACKOFF_MAX": "60.0",
+    "LLM_BACKOFF_MAX": "600.0",
 }
 
 @app.get("/settings")
