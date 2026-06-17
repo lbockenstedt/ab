@@ -222,6 +222,9 @@
                         <button onclick="retryAll('cloud')" class="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-all border border-green-200">
                             <i class="fas fa-cloud mr-1"></i> Retry All (Cloud)
                         </button>
+                        <button onclick="clearHistory()" class="px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-all border border-red-200">
+                            <i class="fas fa-trash-alt mr-1"></i> Clear History
+                        </button>
                     </div>
                     <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
                     <button onclick="filterActivity('all')" class="filter-btn active px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">All</button>
@@ -831,6 +834,18 @@
             }
         }
 
+        async function clearHistory() {
+            if (!confirm('Are you sure you want to clear all activity history? This cannot be undone.')) return;
+            try {
+                const resp = await fetch('/clear_history', { method: 'POST' });
+                const data = await resp.json();
+                alert(data.message || (data.status === 'success' ? 'History cleared successfully!' : 'Error clearing history.'));
+                location.reload();
+            } catch (e) {
+                alert('Request failed: ' + e);
+            }
+        }
+
         function filterActivity(status) {
             const rows = document.querySelectorAll('tbody tr');
             const buttons = document.querySelectorAll('.filter-btn');
@@ -939,7 +954,7 @@
                     .filter(name => available.some(m => m.name === name))
                     .map(name => {
                         const model = available.find(m => m.name === name);
-                        const desc = model ? ` - ${model.details}` : '';
+                        const desc = (model && typeof model.details === 'string') ? ` - ${model.details}` : '';
                         return `<option value="${name}">${name}${desc}</option>`;
                     }).join('');
             };
