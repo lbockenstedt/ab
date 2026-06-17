@@ -1167,6 +1167,15 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         logger.warning("No active reviewers found. Falling back to default LLM review.")
         reviewers = [{"name": "Default Reviewer", "model": None, "force_cloud": None}]
 
+    # --- Cloud Availability Check for Reviewers ---
+    # If we have cloud reviewers configured but the cloud is offline,
+    # signal that we should queue for a retry.
+    cloud_reviewers_configured = any(r["force_cloud"] is True for r in reviewers)
+    if cloud_reviewers_configured and not state["cloud_online"]:
+        logger.warning("Cloud reviewers configured but cloud is offline. Signaling retry queue.")
+        return {"status": "queue_for_retry"}
+    # ----------------------------------------------
+
     fix_details = ""
     for path, code in proposed_fixes.items():
         fix_details += f"\n--- FILE: {path} ---\n{code}\n"
@@ -1435,8 +1444,25 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 return False, "Issue deleted"
             raise ge
 
+        # --- Resume from awaiting_review ---
+        processed = load_processed()
+        issue_info = processed.get(issue_id, {})
+        if issue_info.get("status") == "awaiting_review":
+            last_attempt = issue_info.get("timestamp")
+            if last_attempt:
+                try:
+                    ts = datetime.fromisoformat(last_attempt)
+                    if (datetime.now() - ts).total_seconds() < 3600:
+                        logger.info(f"Issue {issue_id} is awaiting review. Next retry in 1 hour.")
+                        return False, "Review queued: Cloud LLM offline (retrying in 1 hour)"
+                except:
+                    pass
+            logger.info(f"Resuming review for {issue_id} after 1 hour timeout.")
+            # We will use the saved fixes later in the loop.
+
         update_task_state(task_id=issue_id, task_name=f"Triaging {issue_id}", action="start")
         actionable, request_msg = analyze_issue(issue)
+
         if not actionable:
             logger.info(f"Issue {repo_name}:{issue_num} is non-actionable: {request_msg}")
             issue.create_comment(f"🤖 **BugFixer Triage**\n\nThis issue is currently non-actionable. To help me fix this, please provide: {request_msg}")
@@ -1470,9 +1496,21 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             for attempt in range(1, max_attempts + 1):
                 update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
                 logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
-                fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud, task_id=issue_id)
 
-                success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                # --- Resume from awaiting_review ---
+                pending_fix = issue_info.get("pending_fix") if attempt == 1 and issue_info.get("status") == "awaiting_review" else None
+                if pending_fix:
+                    logger.info(f"Resuming from queued review for {issue_id} using saved fix.")
+                    success_applied, fixes, confidence = parse_and_apply(json.dumps(pending_fix), path)
+                    # Clear the pending status now that we're processing it
+                    processed = load_processed()
+                    if issue_id in processed:
+                        processed[issue_id]["status"] = "processing"
+                        save_processed(processed)
+                elif not pending_fix:
+                    fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud, task_id=issue_id)
+                    success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+
                 if not success_applied:
                     verified = False
                     failure_msg = "AI generated invalid JSON format"
@@ -1484,6 +1522,21 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     else:
                         update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
                         review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
+
+                        # --- Handle Queue for Retry ---
+                        if isinstance(review, dict) and review.get("status") == "queue_for_retry":
+                            logger.info(f"Review queued for {issue_id}: Cloud LLM offline. Saving fix for retry in 1 hour.")
+                            processed = load_processed()
+                            processed[issue_id] = {
+                                "status": "awaiting_review",
+                                "timestamp": datetime.now().isoformat(),
+                                "pending_fix": {"confidence": confidence, "fixes": fixes}
+                            }
+                            save_processed(processed)
+                            state["processed"] = processed
+                            update_task_state(task_id=issue_id, action="end")
+                            return False, "Cloud offline: Review queued for retry in 1 hour."
+
                         review_conf = review.get("confidence", 0.0)
                         review_verdict = review.get("verdict", "Reject")
 
@@ -1749,7 +1802,10 @@ def scan_repo_issues(gh_current, config, processed):
                         if issue_id in processed:
                             status = processed[issue_id].get("status")
                             if status in ["fixed", "non-actionable", "failed", "awaiting_prod_verification"]:
-                                continue
+                                if status != "awaiting_review": # Allow resuming reviews
+                                    continue
+                            # For awaiting_review, we let it proceed to check the 1-hour timer in process_single_issue
+
                         to_fix.append((repo_name, issue.number))
                     except Exception as e:
                         logger.exception(f"Failed to triage issue {issue_id}: {e}")
