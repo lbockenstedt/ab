@@ -788,7 +788,6 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             # For now, I'll wrap the call. Since call_llm uses config, I'll need to modify it.
             # Let's fix call_llm first.
             res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
-            res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
                            force_cloud=r["force_cloud"], task_id=task_id, model_override=r.get("model"))
 
             import re

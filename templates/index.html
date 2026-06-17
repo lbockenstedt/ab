@@ -588,6 +588,11 @@
                         <i class="fas fa-sync-alt mr-2"></i>Restart BugFixer
                     </button>
                 </form>
+                <form action="/trigger_hub_update" method="post" onsubmit="handleFormSubmit(event, '/trigger_hub_update')">
+                    <button type="submit" class="py-2 px-4 rounded-lg font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-all duration-200 text-sm">
+                        <i class="fas fa-network-wired mr-2"></i>Trigger Hub Update
+                    </button>
+                </form>
             </div>
         </div>
     </footer>
@@ -837,10 +842,14 @@
         function updateModelDropdowns(enabledModels, localAvailable = [], cloudAvailable = []) {
             const localSelect = document.getElementById('local-model-select');
             const cloudSelect = document.getElementById('cloud-model-select');
+            const r1Select = document.getElementById('reviewer-model-1-select');
+            const r2Select = document.getElementById('reviewer-model-2-select');
             if (!localSelect || !cloudSelect) return;
 
             const currentLocal = localSelect.dataset.currentLocal;
             const currentCloud = cloudSelect.dataset.currentCloud;
+            const currentR1 = r1Select ? r1Select.dataset.currentR1 : '';
+            const currentR2 = r2Select ? r2Select.dataset.currentR2 : '';
 
             const buildOptions = (available) => {
                 return enabledModels
@@ -856,8 +865,13 @@
             localSelect.innerHTML = defaultOption + buildOptions(localAvailable);
             cloudSelect.innerHTML = defaultOption + buildOptions(cloudAvailable);
 
+            if (r1Select) r1Select.innerHTML = defaultOption + buildOptions([...localAvailable, ...cloudAvailable]);
+            if (r2Select) r2Select.innerHTML = defaultOption + buildOptions([...localAvailable, ...cloudAvailable]);
+
             if (enabledModels.includes(currentLocal)) localSelect.value = currentLocal;
             if (enabledModels.includes(currentCloud)) cloudSelect.value = currentCloud;
+            if (r1Select && enabledModels.includes(currentR1)) r1Select.value = currentR1;
+            if (r2Select && enabledModels.includes(currentR2)) r2Select.value = currentR2;
         }
     </script>
 </body>
