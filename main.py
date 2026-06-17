@@ -120,6 +120,7 @@ def run_scan_cycle():
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
         if not token:
             logger.warning("No GitHub Token configured. Skipping scan.")
+            # Fix: Exit early instead of raising an exception
             return
         gh_current = Github(token)
         try:
