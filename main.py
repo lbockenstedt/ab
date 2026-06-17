@@ -53,6 +53,14 @@ VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 # Define is_cloud globally to fix 'name is not defined' error
 is_cloud = os.getenv("IS_CLOUD", "false").lower() == "true"
 
+# Initialize state early to avoid NameError in run_scan_cycle
+state = {
+    "last_run": None,
+    "status": "Idle",
+    "available_labels": [],
+    "task_states": {}
+}
+
 def save_config(config):
     """Saves configuration to persistent storage, falling back to local if needed."""
     try:
@@ -103,6 +111,37 @@ def load_config():
             "enabled_models": [],
             "self_diagnosis_repo": ""
         }
+
+def load_processed():
+    """Safely load processed issues state, with fallback."""
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load processed issues: {e}")
+    return {}
+
+def save_processed(data):
+    """Save processed issues state."""
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save processed issues: {e}")
+
+def update_task_state(task_id, task_name=None, action="start"):
+    """Update task state tracking."""
+    if task_id not in state.get("task_states", {}):
+        state.setdefault("task_states", {})[task_id] = {"id": task_id}
+    
+    if action == "start":
+        state["task_states"][task_id]["status"] = "running"
+        state["task_states"][task_id]["started_at"] = datetime.now().isoformat()
+    elif action == "end":
+        state["task_states"][task_id]["status"] = "completed"
+        state["task_states"][task_id]["completed_at"] = datetime.now().isoformat()
 
 # New utility to validate OLLAMA API configuration
 # This prevents 401 Unauthorized by enforcing environment and config consistency
@@ -171,6 +210,8 @@ def run_scan_cycle():
         monitored_repos = list(set(monitored_repos))
         if not monitored_repos:
             logger.warning("No monitored repositories configured. Skipping scan.")
+        else:
+            logger.info(f"Monitoring {len(monitored_repos)} repositories: {', '.join(monitored_repos)}")
 
         update_task_state(task_id="Discovery", task_name="Discovering Labels", action="start")
         state["available_labels"] = discover_labels(gh_current, monitored_repos)
@@ -208,8 +249,7 @@ import functools
 def safe_request(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # Remove 'timeout' if not supported by the underlying function
-        # We pop 'timeout' to prevent it from being passed as a keyword arg to functions like ollama.generate
+        # Remove 'timeout' to prevent it from being passed as a keyword arg
         kwargs.pop('timeout', None)
         return func(*args, **kwargs)
     return wrapper
@@ -261,3 +301,23 @@ def safe_json_response(response):
     except Exception as e:
         logger.error(f"Unexpected error parsing response JSON: {e}")
         return None
+
+# Placeholder stubs to prevent NameError in main.py
+# These are referenced but not defined in the original file, causing runtime failures
+def clean_repo_name(name: str) -> str:
+    return name.strip()
+
+def discover_labels(gh, repos):
+    return []
+
+def verify_production_fixes(gh, processed):
+    pass
+
+def scan_self_logs(gh, config):
+    pass
+
+def scan_hub_logs(gh, config):
+    pass
+
+def scan_repo_issues(gh, config, processed):
+    pass

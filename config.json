@@ -2,5 +2,11 @@
   "monitored_repos": [],
   "trusted_repos": [],
   "default_branch": "main",
-  "self_diagnosis_repo": ""
+  "self_diagnosis_repo": "",
+  "enabled_models": [],
+  "direct_push_enabled": false,
+  "dev_branch": "dev",
+  "repo_tests": {},
+  "GITHUB_TOKEN": "",
+  "monitored_labels": ["automated-fix"]
 }
