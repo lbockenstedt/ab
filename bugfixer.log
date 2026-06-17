@@ -1325,3 +1325,8 @@ Traceback (most recent call last):
   File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
     prompt = (
 Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 20:30:01,072 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
+    prompt = (
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
