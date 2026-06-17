@@ -51,6 +51,10 @@ STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
+class QueueLocalException(Exception):
+    """Raised when a task should be deferred to the local LLM's allowed window."""
+    pass
+
 def save_config(config):
     """Saves configuration to persistent storage, falling back to local if needed."""
     try:
@@ -469,17 +473,36 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
                         _llm_cb_trip(wait_time, f"{resp.status_code} attempt {attempt_num + 1}/{max_retries + 1}")
 
+                        # Capture the upstream error body so we can actually root-cause
+                        # 5xx failures (e.g. context-length exceeded, model not found,
+                        # account/quota errors). The body is not streamed for error
+                        # responses, so reading it here is cheap; we truncate to bound log size.
+                        err_body = ""
+                        try:
+                            err_body = resp.text or ""
+                        except Exception as be:
+                            err_body = f"<unreadable body: {be}>"
+                        err_body = err_body.strip().replace("\n", " ")[:1000]
+                        # full_prompt/prompt length helps distinguish a model-mismatch
+                        # failure from a prompt-size (context-overflow) failure.
+                        try:
+                            prompt_len = len(full_prompt) if use_generate_api else len(prompt)
+                        except Exception:
+                            prompt_len = -1
+
                         if is_last_attempt:
                             logger.error(
                                 f"LLM {resp.status_code} server error at {endpoint} "
-                                f"after {max_retries + 1} attempts. Reporting as permanently failed."
+                                f"after {max_retries + 1} attempts. Reporting as permanently failed. "
+                                f"model={model!r} prompt_len={prompt_len} body={err_body!r}"
                             )
                             resp.close()
                             resp.raise_for_status()
                         logger.warning(
                             f"LLM {resp.status_code} server error at {endpoint}. "
                             f"Backing off {wait_time:.1f}s before retry "
-                            f"(attempt {attempt_num + 1}/{max_retries + 1})."
+                            f"(attempt {attempt_num + 1}/{max_retries + 1}). "
+                            f"model={model!r} prompt_len={prompt_len} body={err_body!r}"
                         )
                         resp.close()
                         time.sleep(wait_time)
@@ -563,6 +586,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     use_cloud = force_cloud if force_cloud is not None else state["force_cloud"]
 
     if not use_cloud and not is_local_llm_allowed():
+        if config.get("queue_local_llm", False):
+            logger.info("Local LLM not allowed at this hour and 'Queue for Local LLM' is enabled. Signaling queue.")
+            raise QueueLocalException("Local LLM off-hours: queuing for later.")
         logger.info("Local LLM not allowed at this hour. Forcing fallback to Cloud.")
         use_cloud = True
 
@@ -1616,68 +1642,81 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             error_context = None
 
             for attempt in range(1, max_attempts + 1):
-                update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
-                logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
+                try:
+                    update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
+                    logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
 
-                # --- Resume from awaiting_review ---
-                pending_fix = issue_info.get("pending_fix") if attempt == 1 and issue_info.get("status") == "awaiting_review" else None
-                if pending_fix:
-                    logger.info(f"Resuming from queued review for {issue_id} using saved fix.")
-                    success_applied, fixes, confidence = parse_and_apply(json.dumps(pending_fix), path)
-                    # Clear the pending status now that we're processing it
-                    processed = load_processed()
-                    if issue_id in processed:
-                        processed[issue_id]["status"] = "processing"
-                        save_processed(processed)
-                elif not pending_fix:
-                    fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud, task_id=issue_id)
-                    success_applied, fixes, confidence = parse_and_apply(fix_code, path)
-
-                if not success_applied:
-                    verified = False
-                    failure_msg = "AI generated invalid JSON format"
-                else:
-                    if config.get("skip_review", False):
-                        logger.info("Skeptical Reviewer bypassed by configuration.")
-                        review_conf = confidence
-                        review_verdict = "Approve"
-                    else:
-                        update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
-                        review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
-
-                        # --- Handle Queue for Retry ---
-                        if isinstance(review, dict) and review.get("status") == "queue_for_retry":
-                            logger.info(f"Review queued for {issue_id}: Cloud LLM offline. Saving fix for retry in 1 hour.")
-                            processed = load_processed()
-                            processed[issue_id] = {
-                                "status": "awaiting_review",
-                                "timestamp": datetime.now().isoformat(),
-                                "pending_fix": {"confidence": confidence, "fixes": fixes}
-                            }
+                    # --- Resume from awaiting_review ---
+                    pending_fix = issue_info.get("pending_fix") if attempt == 1 and issue_info.get("status") == "awaiting_review" else None
+                    if pending_fix:
+                        logger.info(f"Resuming from queued review for {issue_id} using saved fix.")
+                        success_applied, fixes, confidence = parse_and_apply(json.dumps(pending_fix), path)
+                        # Clear the pending status now that we're processing it
+                        processed = load_processed()
+                        if issue_id in processed:
+                            processed[issue_id]["status"] = "processing"
                             save_processed(processed)
-                            state["processed"] = processed
-                            update_task_state(task_id=issue_id, action="end")
-                            return False, "Cloud offline: Review queued for retry in 1 hour."
+                    elif not pending_fix:
+                        fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud, task_id=issue_id)
+                        success_applied, fixes, confidence = parse_and_apply(fix_code, path)
 
-                        review_conf = review.get("confidence", 0.0)
-                        review_verdict = review.get("verdict", "Reject")
-
-                    if config.get("qa_enabled", True):
-                        prepare_environment(path)
-                        update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start")
-                        verified, failure_msg = verify_fix(path, repo_name, config)
+                    if not success_applied:
+                        verified = False
+                        failure_msg = "AI generated invalid JSON format"
                     else:
-                        logger.info("QA Testing disabled. Assuming verified.")
-                        verified, failure_msg = True, "QA disabled"
+                        if config.get("skip_review", False):
+                            logger.info("Skeptical Reviewer bypassed by configuration.")
+                            review_conf = confidence
+                            review_verdict = "Approve"
+                        else:
+                            update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
+                            review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
 
-                    if verified:
-                        success = True
-                        state["success_count"] += 1
-                        final_confidence = (confidence + review_conf) / 2
-                        final_verdict = review_verdict
-                        break
-                    else:
-                        error_context = failure_msg
+                            # --- Handle Queue for Retry ---
+                            if isinstance(review, dict) and review.get("status") == "queue_for_retry":
+                                logger.info(f"Review queued for {issue_id}: Cloud LLM offline. Saving fix for retry in 1 hour.")
+                                processed = load_processed()
+                                processed[issue_id] = {
+                                    "status": "awaiting_review",
+                                    "timestamp": datetime.now().isoformat(),
+                                    "pending_fix": {"confidence": confidence, "fixes": fixes}
+                                }
+                                save_processed(processed)
+                                state["processed"] = processed
+                                update_task_state(task_id=issue_id, action="end")
+                                return False, "Cloud offline: Review queued for retry in 1 hour."
+
+                            review_conf = review.get("confidence", 0.0)
+                            review_verdict = review.get("verdict", "Reject")
+
+                        if config.get("qa_enabled", True):
+                            prepare_environment(path)
+                            update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start")
+                            verified, failure_msg = verify_fix(path, repo_name, config)
+                        else:
+                            logger.info("QA Testing disabled. Assuming verified.")
+                            verified, failure_msg = True, "QA disabled"
+
+                        if verified:
+                            success = True
+                            state["success_count"] += 1
+                            final_confidence = (confidence + review_conf) / 2
+                            final_verdict = review_verdict
+                            break
+                        else:
+                            error_context = failure_msg
+                except QueueLocalException as qle:
+                    logger.info(f"Queuing issue {issue_id} for Local LLM: {qle}")
+                    processed = load_processed()
+                    processed[issue_id] = {
+                        "status": "awaiting_local",
+                        "timestamp": datetime.now().isoformat(),
+                        "reason": "Queued for local LLM window"
+                    }
+                    save_processed(processed)
+                    state["processed"] = processed
+                    update_task_state(task_id=issue_id, action="end")
+                    return False, "Queued for local LLM"
 
             if not success:
                 state["failure_count"] += 1
@@ -1961,6 +2000,9 @@ def scan_repo_issues(gh_current, config, processed):
                             status = processed[issue_id].get("status")
                             if status in ["fixed", "non-actionable", "failed", "awaiting_prod_verification"]:
                                 if status != "awaiting_review": # Allow resuming reviews
+                                    continue
+                            if status == "awaiting_local":
+                                if not (is_local_llm_allowed() or state["force_cloud"]):
                                     continue
                             # For awaiting_review, we let it proceed to check the 1-hour timer in process_single_issue
 
@@ -2387,6 +2429,7 @@ DEFAULT_ENV = {
     "LLM_BACKOFF_MAX": "600.0",
     "LLM_MAX_CONCURRENT": "1",
     "PROD_VERIFICATION_DAYS": "7",
+    "QUEUE_LOCAL_LLM": "False",
 }
 
 @app.get("/settings")
@@ -2511,6 +2554,9 @@ async def save_settings(request: Request):
 
     if "skip_review" in data:
         config_data["skip_review"] = data.get("skip_review") == "on"
+
+    if "queue_local_llm" in data:
+        config_data["queue_local_llm"] = data.get("queue_local_llm") == "on"
 
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
