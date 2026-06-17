@@ -124,7 +124,19 @@ def load_processed():
     return {}
 
 def save_processed(processed):
-    with open(STATE_FILE, "w") as f: json.dump(processed, f, indent=2)
+    """Saves processed issues to persistent storage, with fallback to local file."""
+    try:
+        # Primary: Persistent storage
+        with open(STATE_FILE, "w") as f:
+            json.dump(processed, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving to persistent state file {STATE_FILE}: {e}")
+        try:
+            # Fallback: Local directory
+            with open("processed_issues.json", "w") as f:
+                json.dump(processed, f, indent=2)
+        except Exception as fe:
+            logger.error(f"Critical failure saving processed history to both locations: {fe}")
 
 def load_update_state():
     """Loads the update state for recovery."""
@@ -681,7 +693,7 @@ state = {
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
-    "paused": False
+    "paused": False, "local_configured": False
 }
 
 try:
@@ -1110,6 +1122,7 @@ def heartbeat_worker():
             cloud_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
 
             if local_url:
+                state["local_configured"] = True
                 try:
                     requests.get(f"{local_url}/api/tags", timeout=2)
                     state["local_online"] = True
@@ -1117,6 +1130,7 @@ def heartbeat_worker():
                     state["local_online"] = False
             else:
                 state["local_online"] = False
+                state["local_configured"] = False
 
             state["llm_circuit_breaker"] = _llm_cb_snapshot()
 
@@ -1542,8 +1556,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             repo_obj = gh_current.get_repo(repo_name)
             issue = repo_obj.get_issue(int(issue_num))
         except GithubException as ge:
-            if ge.status == 410:
-                logger.warning(f"Issue {repo_name}:{issue_num} was deleted. Skipping.")
+            if ge.status == 410 or ge.status == 404:
+                logger.warning(f"Issue {repo_name}:{issue_num} was deleted or not found. Removing from history.")
+                processed = load_processed()
+                if issue_id in processed:
+                    del processed[issue_id]
+                    save_processed(processed)
+                    state["processed"] = processed
                 return False, "Issue deleted"
             raise ge
 
