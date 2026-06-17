@@ -1165,7 +1165,32 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 except:
                     repo_git.create_head(target_branch).checkout()
                 repo_git.remotes.origin.push(target_branch, force=True)
-                pr = repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}", head=target_branch, base=config["default_branch"])
+                
+                # Check for existing open PR to avoid GitHub API 422 Validation Failed
+                head_ref = f"{repo_obj.owner.login}:{target_branch}"
+                base_branch = config.get("default_branch", "main")
+                existing_prs = repo_obj.get_pulls(state='open', head=head_ref, base=base_branch)
+                existing_pr = None
+                try:
+                    for pr_item in existing_prs:
+                        existing_pr = pr_item
+                        break
+                except Exception as pre_check_err:
+                    logger.warning(f"Failed to check for existing PRs: {pre_check_err}")
+                    existing_pr = None
+
+                if existing_pr:
+                    pr = existing_pr
+                    logger.info(f"Found existing open PR for {head_ref} -> {base_branch}: {pr.html_url}")
+                else:
+                    pr = repo_obj.create_pull(
+                        title=f"AI Fix #{issue.number}", 
+                        body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}", 
+                        head=target_branch, 
+                        base=base_branch
+                    )
+                    logger.info(f"Created new PR for {head_ref} -> {base_branch}: {pr.html_url}")
+
                 commit_type = "Pull Request"
                 detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
 
