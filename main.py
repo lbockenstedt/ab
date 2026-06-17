@@ -493,7 +493,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
             # If the current log snippet isn't in the body, add it as a comment
             if body_text.lower() not in existing_issue.body.lower():
                 existing_issue.create_comment(
-                    f"🤖 **BugFixer Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}**:\n\n"
+                    f"🤖 **BugFixer Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}:**\n\n"
                     f"```\n{body_text}\n```"
                 )
                 logger.info(f"Added additional evidence from {current_repo_name} to issue #{existing_issue.number}")
@@ -531,13 +531,25 @@ def get_hub_logs():
         logger.debug(f"Fetching Hub logs from: {log_url}")
         resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
+            # Defensive check: ensure the response body is not empty/whitespace
+            # before attempting JSON parse. An empty 200 response previously
+            # caused `json.loads()` (via `resp.json()`) to raise
+            # 'Expecting value: line 1 column 1 (char 0)'. Return an empty list
+            # and log a warning instead of crashing the log-scan pipeline.
+            body = resp.text
+            if not body or not body.strip():
+                logger.warning(
+                    f"Hub returned 200 OK but empty response body for {log_url}. "
+                    f"Skipping JSON parse to avoid json.decode error."
+                )
+                return []
             try:
                 data = resp.json()
                 if isinstance(data, dict):
                     return data.get('logs', [])
                 return data if isinstance(data, list) else []
             except Exception as e:
-                logger.error(f"Hub returned 200 OK but failed to parse JSON: {e}. Content: {resp.text[:200]}...")
+                logger.error(f"Hub returned 200 OK but failed to parse JSON: {e}. Content: {body[:200]}...")
                 return None
         logger.error(f"Hub returned unexpected status code {resp.status_code} for {log_url}")
         return None
@@ -792,12 +804,6 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     for r in reviewers:
         try:
             logger.info(f"Reviewer {r['name']} analyzing...")
-            # We override the model used in call_llm by temporarily updating state or config?
-            # No, call_llm doesn't take a model parameter.
-            # I need to modify call_llm to accept a model override.
-
-            # For now, I'll wrap the call. Since call_llm uses config, I'll need to modify it.
-            # Let's fix call_llm first.
             res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
                            force_cloud=r["force_cloud"], task_id=task_id, model_override=r.get("model"))
 
