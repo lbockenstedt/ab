@@ -451,7 +451,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
         existing_issue = find_global_duplicate_issue(gh_current, monitored_repos, error_data)
 
         if existing_issue:
-            logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {existing_issue.repo.full_name}. Adding info.")
+            logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {existing_issue.repository.full_name}. Adding info.")
 
             # If the current log snippet isn't in the body, add it as a comment
             if body_text.lower() not in existing_issue.body.lower():
@@ -806,7 +806,7 @@ def verify_fix(repo_path, repo_name, config):
             if not test_cmd or test_cmd == "pytest":
                 files = os.listdir(repo_path)
                 if "package.json" in files: test_cmd = "npm test"
-                elif "requirements.txt" in files or "pyproject.toml" in files: test_cmd = "pytest"
+                elif "requirements.txt" in files or "pyproject.toml" in files: test_cmd = "python3 -m pytest"
                 elif "go.mod" in files: test_cmd = "go test ./..."
                 elif "Makefile" in files: test_cmd = "make test"
             if not test_cmd:
@@ -840,10 +840,10 @@ def check_for_updates():
         new_commit = self_repo.head.commit.hexsha
         if old_commit != new_commit:
             cur_version = get_version()
-            logger.info(f"New version detected (v{cur_version})! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
+            logger.info(f"New version detected ({cur_version})! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
             import subprocess
             subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
-            return True, f"Update found: v{cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
+            return True, f"Update found: {cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
         return False, "No updates available."
     except Exception as e:
         logger.warning(f"Self-update check failed: {e}")
