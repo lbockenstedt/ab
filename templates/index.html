@@ -77,9 +77,9 @@
         }
     </style>
 </head>
-<body class="min-h-screen">
+<body class="h-screen flex flex-col overflow-hidden">
     <!-- Header / Nav -->
-    <nav class="border-b border-slate-200 bg-[#263040] sticky top-0 z-50">
+    <nav class="border-b border-slate-200 bg-[#263040] flex-none">
         <div class="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
             <div class="flex items-center gap-3">
                 <div class="bg-[#01A982] p-2 rounded-lg">
@@ -104,7 +104,7 @@
         </div>
     </nav>
 
-    <main class="max-w-6xl mx-auto px-4 py-8 pb-24">
+    <main class="max-w-6xl mx-auto px-4 py-8 flex-grow overflow-y-auto">
         {% if view == 'status' %}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <!-- System Status Card -->
@@ -123,10 +123,12 @@
                     <div class="flex justify-between items-center">
                         <span class="text-slate-500">Models</span>
                         <div class="flex gap-2">
-                            {% if state.local_online %}
-                                <span class="status-pill pill-online">LOCAL</span>
-                            {% else %}
-                                <span class="status-pill pill-offline">LOCAL</span>
+                            {% if state.local_configured %}
+                                {% if state.local_online %}
+                                    <span class="status-pill pill-online">LOCAL</span>
+                                {% else %}
+                                    <span class="status-pill pill-offline">LOCAL</span>
+                                {% endif %}
                             {% endif %}
                             {% if state.cloud_online %}
                                 <span class="status-pill pill-online">CLOUD</span>
@@ -146,6 +148,7 @@
                         </div>
                     </div>
                 </div>
+                {% if state.local_configured %}
                 <div class="mt-8 pt-6 border-t border-slate-200 space-y-3">
                     <form action="/toggle_cloud" method="post" onsubmit="handleFormSubmit(event, '/toggle_cloud')">
                         <button type="submit" class="w-full py-2 px-4 rounded-lg font-bold transition-all duration-200 {{ 'bg-red-600 hover:bg-red-700 text-white' if state.force_cloud else 'bg-[#01A982] hover:bg-[#018f6d] text-white' }}">
@@ -153,6 +156,7 @@
                         </button>
                     </form>
                 </div>
+                {% endif %}
             </div>
 
             <!-- Active Tasks Card -->
@@ -587,7 +591,7 @@
         {% endif %}
     </main>
 
-    <footer class="fixed bottom-0 left-0 right-0 bg-[#263040] border-t border-slate-700 p-4 z-50">
+    <footer class="bg-[#263040] border-t border-slate-700 p-4 flex-none">
         <div class="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-4">
             <div class="flex gap-4 text-xs text-slate-400 font-mono">
                 <span>{{ state.version }}</span>
