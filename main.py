@@ -149,24 +149,11 @@ def get_version():
 
 
 def validate_llm_config_on_startup():
-    """Validates LLM configuration on startup and provides clear, actionable guidance.
-
-    Specifically checks that OLLAMA_API_KEY is present and valid when a Cloud Ollama
-    URL is configured. A missing or invalid key causes EVERY cloud LLM request to fail
-    with HTTP 401 Unauthorized, which recurs extensively and floods the logs.
-
-    By validating once at startup we surface the misconfiguration immediately with
-    concrete remediation steps (dashboard URL, .env path, restart command) instead
-    of waiting for the first failed LLM call.
-
-    Returns True if configuration looks valid (or cannot be verified due to network
-    issues), False if a definite misconfiguration is detected.
-    """
+    """Validates LLM configuration on startup and provides clear, actionable guidance."""
     config = load_config()
     c_url = (config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL") or "").strip()
     api_key = (config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY") or "").strip().strip('"').strip("'")
 
-    # No cloud URL configured -> nothing to validate.
     if not c_url:
         logger.info("Startup LLM validation: No cloud Ollama URL configured. Skipping API key check.")
         return True
@@ -190,8 +177,6 @@ def validate_llm_config_on_startup():
         )
         return False
 
-    # If we have both a cloud URL and a key, attempt a lightweight live validation
-    # so we catch an expired/revoked key immediately rather than on first request.
     if is_cloud_host:
         try:
             token_only = api_key.replace("Bearer ", "").strip()
@@ -233,14 +218,12 @@ def validate_llm_config_on_startup():
             )
             return True
 
-    # Non-cloud URL configured (e.g., self-hosted remote). No managed-cloud key required.
     logger.info(f"Startup LLM validation: Cloud URL '{c_url}' is not a managed cloud host; skipping API key check.")
     return True
 
 load_dotenv(ENV_FILE)
 app = FastAPI()
 
-# Use absolute path for templates to avoid 500 errors if CWD changes
 template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
 
@@ -251,7 +234,6 @@ def is_local_llm_allowed():
 
     try:
         now = datetime.now().hour
-        # Expected format: "9-16,1-5"
         ranges = schedule_str.split(',')
         for r in ranges:
             if '-' in r:
@@ -260,56 +242,29 @@ def is_local_llm_allowed():
                     return True
     except Exception as e:
         logger.error(f"Error parsing LLM schedule '{schedule_str}': {e}")
-        # Fallback to a reasonable default if parsing fails
         if (9 <= now < 16) or (1 <= now < 5):
             return True
     return False
 
 # ============================================================================
 # LLM Circuit Breaker & Global Rate Limiter
-# ----------------------------------------------------------------------------
-# When the Ollama API returns HTTP 429 (Too Many Requests) or sustained 5xx
-# errors, individual per-request retries alone are NOT sufficient: multiple
-# concurrent worker threads (ThreadPoolExecutor with up to 5 workers, each
-# running triage → identify-files → apply-fix → review → verify) can each
-# independently hammer the API, creating a cascade of hundreds of 429s in a
-# tight loop that floods the logs.
-#
-# The circuit breaker below provides a GLOBAL, cross-thread cooldown: when
-# ANY thread receives a 429, ALL threads pause before issuing their next
-# request.  This transforms a tight retry loop into an exponentially
-# backed-off, rate-limit-aware retry strategy.
-#
-# Additionally, a global semaphore limits the number of concurrent in-flight
-# HTTP requests to the LLM API, preventing burst overload.
 # ============================================================================
 
 _LLM_CB_LOCK = threading.Lock()
 _LLM_CB = {
-    "cooldown_until": 0.0,       # epoch timestamp; all threads pause until this time
-    "consecutive_429s": 0,       # reset to 0 on a successful request
-    "total_429s": 0,             # cumulative counter for diagnostics
-    "last_trip_reason": None,    # human-readable reason for last trip
-    "last_trip_time": None,      # ISO timestamp of last trip
+    "cooldown_until": 0.0,
+    "consecutive_429s": 0,
+    "total_429s": 0,
+    "last_trip_reason": None,
+    "last_trip_time": None,
 }
 
 def _llm_cb_wait():
-    """Block while the global LLM circuit breaker is in cooldown.
-
-    Every thread that is about to make an LLM HTTP request MUST call this
-    before issuing the request.  If the breaker is tripped (e.g., another
-    thread just got a 429), this function sleeps until the cooldown expires,
-    preventing a tight-loop hammer pattern.
-
-    A small random jitter is added when the cooldown ends to avoid a
-    thundering-herd of simultaneous retries.
-    """
     while True:
         with _LLM_CB_LOCK:
             cd = _LLM_CB["cooldown_until"]
         remaining = cd - time.time()
         if remaining <= 0:
-            # Add jitter (0–1.5 s) so waiting threads don't all fire at once.
             time.sleep(random.uniform(0, 1.5))
             return
         sleep_chunk = min(remaining, 5.0)
@@ -320,13 +275,7 @@ def _llm_cb_wait():
         time.sleep(sleep_chunk)
 
 def _llm_cb_trip(wait_time, reason="429"):
-    """Trip the global circuit breaker for ``wait_time`` seconds.
-
-    All threads currently in (or about to enter) ``_llm_cb_wait`` will pause
-    until the cooldown expires.  The cooldown is extended (never shortened)
-    if the breaker is already active, so repeated 429s compound the backoff.
-    """
-    wait_time = max(0.5, min(wait_time, 3600.0))  # clamp 0.5 s – 1 h
+    wait_time = max(0.5, min(wait_time, 3600.0))
     with _LLM_CB_LOCK:
         new_cd = max(_LLM_CB["cooldown_until"], time.time() + wait_time)
         _LLM_CB["cooldown_until"] = new_cd
@@ -343,7 +292,6 @@ def _llm_cb_trip(wait_time, reason="429"):
     )
 
 def _llm_cb_reset():
-    """Reset the consecutive-429 counter after a successful request."""
     with _LLM_CB_LOCK:
         if _LLM_CB["consecutive_429s"] > 0:
             logger.info(
@@ -354,7 +302,6 @@ def _llm_cb_reset():
             _LLM_CB["consecutive_429s"] = 0
 
 def _llm_cb_snapshot():
-    """Return a JSON-serialisable snapshot of circuit-breaker state for the dashboard."""
     with _LLM_CB_LOCK:
         cd = _LLM_CB["cooldown_until"]
         return {
@@ -366,9 +313,6 @@ def _llm_cb_snapshot():
             "last_trip_time": _LLM_CB["last_trip_time"],
         }
 
-# Global concurrency limiter — caps the number of simultaneous in-flight LLM
-# HTTP requests across ALL threads.  Default 1 (fully serialised) is safest for
-# avoiding 429 cascades; raise via LLM_MAX_CONCURRENT if your API tier allows it.
 _LLM_SEMAPHORE = None
 _LLM_SEM_LOCK = threading.Lock()
 
@@ -437,16 +381,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             for attempt_num in range(max_retries + 1):
                 is_last_attempt = (attempt_num == max_retries)
 
-                # ---- GLOBAL CIRCUIT BREAKER ----
-                # Wait for any active cooldown before even attempting the request.
-                # This ensures that when one thread gets a 429, every other
-                # concurrent thread also pauses instead of hammering the API.
                 _llm_cb_wait()
 
                 try:
-                    # ---- GLOBAL CONCURRENCY LIMITER ----
-                    # Acquire the semaphore so at most LLM_MAX_CONCURRENT
-                    # HTTP requests are in flight at the same time.
                     sem = _get_llm_semaphore()
                     sem.acquire()
                     try:
@@ -455,7 +392,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         sem.release()
 
                     if resp.status_code == 429:
-                        # Parse Retry-After header (seconds or HTTP-date).
                         retry_after = resp.headers.get("Retry-After")
                         wait_time = None
                         if retry_after:
@@ -471,16 +407,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                                     wait_time = None
 
                         if wait_time is None or wait_time < 0:
-                            # Exponential backoff with jitter: base^attempt * (0.5–1.0)
                             raw_backoff = min(backoff_base ** attempt_num, backoff_max)
                             wait_time = raw_backoff * random.uniform(0.5, 1.0)
                         else:
                             wait_time = min(wait_time, backoff_max)
 
-                        # ---- TRIP THE GLOBAL CIRCUIT BREAKER ----
-                        # All other threads (and this one on its next attempt)
-                        # will pause for wait_time seconds, preventing a tight
-                        # loop of hundreds of 429s.
                         _llm_cb_trip(wait_time, f"429 attempt {attempt_num + 1}/{max_retries + 1}")
 
                         if is_last_attempt:
@@ -514,12 +445,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         resp.raise_for_status()
 
                     if 500 <= resp.status_code < 600:
-                        # Exponential backoff with jitter for server errors.
                         raw_backoff = min(backoff_base ** attempt_num, backoff_max)
                         wait_time = raw_backoff * random.uniform(0.5, 1.0)
 
-                        # Trip circuit breaker for 5xx too, but with a shorter
-                        # cooldown since server errors are often transient.
                         _llm_cb_trip(wait_time, f"{resp.status_code} attempt {attempt_num + 1}/{max_retries + 1}")
 
                         if is_last_attempt:
@@ -550,7 +478,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                             if task_id and task_id in state["active_tasks"]:
                                 state["active_tasks"][task_id]["stream"] = full_response
 
-                    # ---- RESET CIRCUIT BREAKER ON SUCCESS ----
                     _llm_cb_reset()
                     return full_response
 
@@ -574,8 +501,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     if not is_last_attempt:
                         raw_backoff = min(backoff_base ** attempt_num, backoff_max)
                         wait_time = raw_backoff * random.uniform(0.5, 1.0)
-                        # Trip a short cooldown for transient network errors too,
-                        # so concurrent threads don't all retry at once.
                         _llm_cb_trip(wait_time, f"transient {type(e).__name__} attempt {attempt_num + 1}/{max_retries + 1}")
                         logger.warning(
                             f"LLM transient error (attempt {attempt_num + 1}/{max_retries + 1}) "
@@ -708,18 +633,7 @@ async def catch_exceptions_mid(request: Request, call_next):
 _task_state_lock = threading.Lock()
 
 def update_task_state(task_id, task_name="Unknown Task", action="start"):
-    """Manages active tasks and their start times. action can be 'start' or 'end'.
-
-    task_name is optional and defaults to 'Unknown Task' to safely handle cases
-    where a caller cannot provide a meaningful name (e.g. during error cleanup
-    before the task name is known). This prevents the
-    'missing 1 required positional argument: task_name' error observed in the
-    poller when an exception is raised prior to task_id/task_name assignment.
-
-    All callers MUST use keyword arguments (action=..., task_name=...) so the
-    positional-argument count can never be wrong, even if this function's
-    signature evolves in the future.
-    """
+    """Manages active tasks and their start times. action can be 'start' or 'end'."""
     global state
     if not task_id:
         logger.debug("update_task_state called with no task_id; ignoring.")
@@ -755,7 +669,6 @@ state = {
     "llm_circuit_breaker": _llm_cb_snapshot()
 }
 
-# Validate LLM configuration on startup to fail fast with clear guidance
 try:
     validate_llm_config_on_startup()
 except Exception as ve:
@@ -847,6 +760,11 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     (the LLM may omit them). Missing fields are treated as empty strings so that the
     deduplication search degrades gracefully instead of raising a KeyError.
     """
+    # Defensive: ensure error_data is a dict before calling .get()
+    if not isinstance(error_data, dict):
+        logger.warning(f"find_global_duplicate_issue received non-dict error_data: {type(error_data)}")
+        return None, None
+
     title_text = (error_data.get('title') or '').lower()
     body_text = (error_data.get('body') or '').lower()
 
@@ -871,24 +789,43 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
     The 'body' field is required to create a meaningful issue. If it is missing or
     empty, the function logs a warning and returns None instead of raising a
     KeyError, which previously crashed automated issue creation with: 'body'.
+
+    Additionally validates that error_data is a dict and that both 'title' and
+    'body' are present and non-empty strings before any GitHub API call is made.
     """
     try:
+        # Defensive: ensure error_data is a dict; if the LLM returned a malformed
+        # payload (e.g., a string or None), .get() would itself raise AttributeError.
+        if not isinstance(error_data, dict):
+            logger.warning(
+                f"Skipping automated issue creation: error_data is not a dict "
+                f"(type={type(error_data).__name__}). Value: {error_data!r}"
+            )
+            return None
+
         title_text = error_data.get('title')
         body_text = error_data.get('body')
 
-        if not body_text or not str(body_text).strip():
+        # Validate body FIRST — this is the field that was causing the KeyError crash.
+        # We explicitly check for None, empty string, or whitespace-only strings.
+        if body_text is None or not str(body_text).strip():
             logger.warning(
                 f"Skipping automated issue creation: 'body' field is missing or empty. "
                 f"Title was: {title_text!r}. Full error_data: {error_data}"
             )
             return None
 
-        if not title_text or not str(title_text).strip():
+        # Validate title as well — a GitHub issue cannot be created without a title.
+        if title_text is None or not str(title_text).strip():
             logger.warning(
                 f"Skipping automated issue creation: 'title' field is missing or empty. "
                 f"Body was: {str(body_text)[:120]!r}"
             )
             return None
+
+        # Normalise to strings (the LLM might return non-string types).
+        title_text = str(title_text)
+        body_text = str(body_text)
 
         current_repo_name = error_data.get('repo') or gh_repo.full_name
 
@@ -924,6 +861,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
         return issue
     except Exception as e:
         logger.error(f"Failed to handle automated issue creation: {e}")
+        logger.debug(f"create_automated_issue error_data was: {error_data!r}")
         return None
 
 def get_hub_logs():
@@ -974,7 +912,12 @@ def get_hub_state():
         return None
 
 def analyze_logs_for_errors(logs):
-    """Uses LLM to identify actionable errors in aggregated logs."""
+    """Uses LLM to identify actionable errors in aggregated logs.
+
+    Robustly validates the LLM's JSON response: every entry must be a dict with
+    non-empty 'repo', 'title', and 'body' fields. Malformed entries are dropped
+    so they never reach create_automated_issue(), preventing the 'body' KeyError.
+    """
     if not logs: return []
 
     log_text = json.dumps(logs, indent=2)
@@ -995,14 +938,36 @@ def analyze_logs_for_errors(logs):
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:
             parsed = json.loads(match.group())
+            # Defensive: the LLM might return a single object instead of an array.
+            if isinstance(parsed, dict):
+                logger.warning(f"LLM returned a single JSON object instead of an array for log analysis. Wrapping in list.")
+                parsed = [parsed]
+            if not isinstance(parsed, list):
+                logger.warning(f"LLM returned non-array JSON for log analysis: {type(parsed).__name__}. Discarding.")
+                return []
             cleaned = []
             for entry in parsed:
                 if not isinstance(entry, dict):
+                    logger.debug(f"Dropping malformed log-analysis entry (not a dict): {entry}")
                     continue
-                if not entry.get('repo') or not entry.get('title') or not entry.get('body'):
-                    logger.debug(f"Dropping malformed log-analysis entry (missing repo/title/body): {entry}")
+                repo_val = entry.get('repo')
+                title_val = entry.get('title')
+                body_val = entry.get('body')
+                if not repo_val or not str(repo_val).strip():
+                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty repo): {entry}")
                     continue
-                cleaned.append(entry)
+                if not title_val or not str(title_val).strip():
+                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty title): {entry}")
+                    continue
+                if not body_val or not str(body_val).strip():
+                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty body): {entry}")
+                    continue
+                # Normalise all fields to strings so downstream code never receives None.
+                cleaned.append({
+                    'repo': str(repo_val),
+                    'title': str(title_val),
+                    'body': str(body_val),
+                })
             return cleaned
         return []
     except Exception as e:
@@ -1044,7 +1009,6 @@ def connectivity_worker():
                         )
                     elif resp.status_code == 429:
                         state["cloud_online"] = False
-                        # Trip circuit breaker for connectivity 429s too
                         _llm_cb_trip(60.0, "connectivity-worker 429")
                         logger.warning(
                             f"Hourly Cloud LLM connectivity check: 429 at {c_url}. "
@@ -1078,7 +1042,6 @@ def heartbeat_worker():
             else:
                 state["local_online"] = False
 
-            # Update circuit-breaker snapshot for dashboard visibility
             state["llm_circuit_breaker"] = _llm_cb_snapshot()
 
             if state["force_cloud"]:
@@ -1425,17 +1388,9 @@ def updater_worker():
         time.sleep(3600)
 
 def find_existing_pull_request(repo_obj, target_branch, base_branch):
-    """Checks whether an open pull request already exists for the given head/base pair.
-
-    Uses the proper 'owner:branch' format for the head parameter when querying
-    the GitHub API, which is required for the filtered search to work correctly.
-    Falls back to a manual scan of all open PRs if the filtered query fails.
-    """
+    """Checks whether an open pull request already exists for the given head/base pair."""
     existing_pr = None
 
-    # GitHub API requires head in 'owner:ref' format for filtered PR queries.
-    # Passing just the branch name (e.g. 'dev') without the owner prefix causes
-    # the filter to silently return no results, leading to 422 errors on create_pull.
     owner = repo_obj.owner.login
     head_param = f"{owner}:{target_branch}"
 
@@ -1614,7 +1569,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 repo_git.remotes.origin.push(target_branch, force=True)
                 base_branch = config.get("default_branch", "main")
 
-                # Check for existing PR before attempting creation to avoid 422 errors.
                 existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
 
                 if existing_pr:
@@ -1631,8 +1585,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         logger.info(f"Created new PR for {target_branch} -> {base_branch}: {pr.html_url}")
                     except GithubException as ge:
                         if ge.status == 422:
-                            # A PR may have been created by a concurrent process between
-                            # our check and our create call. Re-check for the existing PR.
                             logger.warning(
                                 f"PR creation returned 422 (likely already exists for "
                                 f"{target_branch} -> {base_branch}). Re-checking for existing PR..."
@@ -1741,8 +1693,13 @@ def scan_hub_logs(gh_current, config):
             actionable_errors = analyze_logs_for_errors(hub_logs)
             monitored_repos = get_monitored_repos(config)
             for error in actionable_errors:
+                # Defensive: ensure error is a dict (analyze_logs_for_errors already
+                # guarantees this, but we double-check to be absolutely safe).
+                if not isinstance(error, dict):
+                    logger.warning(f"Skipping non-dict actionable error: {error!r}")
+                    continue
                 repo_name = error.get('repo')
-                if not repo_name:
+                if not repo_name or not str(repo_name).strip():
                     logger.warning(f"Skipping actionable error with no repo specified: {error.get('title')}")
                     continue
                 if not error.get('body') or not str(error.get('body')).strip():
@@ -1860,6 +1817,10 @@ def scan_self_logs(gh_current, config):
             self_repo_name = "lbockenstedt/bugfixer"
 
         for error in actionable_errors:
+            # Defensive: ensure error is a dict before mutation and access.
+            if not isinstance(error, dict):
+                logger.warning(f"Skipping non-dict self-diagnosis error: {error!r}")
+                continue
             error['repo'] = self_repo_name
             if not error.get('body') or not str(error.get('body')).strip():
                 logger.warning(f"Skipping self-diagnosis error with no body specified: {error.get('title')}")
@@ -2246,7 +2207,6 @@ async def save_settings(request: Request):
         for k, v in env_vars.items():
             f.write(f"{k}={v}\n")
 
-    # Reset the LLM concurrency semaphore so the new LLM_MAX_CONCURRENT takes effect
     global _LLM_SEMAPHORE
     with _LLM_SEM_LOCK:
         _LLM_SEMAPHORE = None
