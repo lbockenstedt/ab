@@ -47,18 +47,14 @@ def rollback():
         return False
 
     try:
-        # The app is typically installed in /opt/bugfixer
         app_dir = "/opt/bugfixer"
         if not os.path.exists(app_dir):
-            # Fallback: try to find the directory containing the current process or based on common patterns
-            # In a real deployment, this should be absolute.
             logger.error(f"WATCHDOG: Application directory {app_dir} not found. Rollback impossible.")
             return False
 
         subprocess.run(["git", "-C", app_dir, "reset", "--hard", lkg], check=True)
         logger.info(f"WATCHDOG: Rolled back to {lkg[:7]}")
 
-        # Mark current commit as failed
         try:
             with open(UPDATE_PENDING_FILE, "r") as f:
                 failed_commit = f.read().strip()
@@ -95,7 +91,6 @@ def main():
                 time.sleep(CHECK_INTERVAL)
 
             if success:
-                # Update LKG to the commit that just passed
                 state = load_update_state()
                 try:
                     with open(UPDATE_PENDING_FILE, "r") as f:
@@ -115,7 +110,7 @@ def main():
                 if os.path.exists(UPDATE_PENDING_FILE):
                     os.remove(UPDATE_PENDING_FILE)
 
-        time.sleep(30) # Poll for pending updates every 30s
+        time.sleep(30)
 
 if __name__ == "__main__":
     main()

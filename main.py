@@ -291,21 +291,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
         timeout_val = int(load_config().get("LLM_TIMEOUT", 900))
 
-        # FIX: attempt_request now explicitly accepts a `timeout` keyword argument
-        # (with a default of 900) so callers can safely pass timeout=<value>.
-        # Previously the signature omitted `timeout`, causing:
-        #   attempt_request() got an unexpected keyword argument 'timeout'
-        # which broke every LLM request.
-        #
-        # FIX: Added explicit retry logic with Retry-After header honoring and
-        # exponential backoff for 429 (Too Many Requests) and 5xx server errors.
-        # Previously, any 429 was immediately raised as a permanent failure without
-        # any backoff, causing premature LLM request failures.
-        #
-        # FIX: 401 Unauthorized now logs the key state (MISSING vs set/invalid) and
-        # prints concrete remediation guidance (dashboard URL, .env path, restart
-        # command). 401 is intentionally NOT retried because credentials are static
-        # for the process lifetime; retrying would just spam the log.
         def attempt_request(endpoint, use_generate_api, timeout=900):
             if use_generate_api:
                 full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
@@ -323,9 +308,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 token_only = clean_key.replace("Bearer ", "").strip()
                 headers["Authorization"] = f"Bearer {token_only}"
 
-            # Retry configuration: honors Retry-After header for 429 and uses
-            # exponential backoff as a fallback. Retries are also applied to
-            # transient 5xx server errors and connection/timeout exceptions.
             cfg = load_config()
             max_retries = int(cfg.get("LLM_MAX_RETRIES", 5))
             backoff_base = float(cfg.get("LLM_BACKOFF_BASE", 2.0))
@@ -337,9 +319,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 try:
                     resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
 
-                    # --- 429 Too Many Requests: honor Retry-After, fall back to
-                    # exponential backoff, and only report as permanently failed
-                    # after all retries are exhausted. ---
                     if resp.status_code == 429:
                         if is_last_attempt:
                             logger.error(
@@ -349,9 +328,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                             )
                             resp.raise_for_status()
 
-                        # Determine wait time from Retry-After header.
-                        # The header can be either seconds (integer/float) or an
-                        # HTTP-date (RFC 7231).
                         retry_after = resp.headers.get("Retry-After")
                         wait_time = None
                         if retry_after:
@@ -366,7 +342,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                                 except Exception:
                                     wait_time = None
 
-                        # Fall back to exponential backoff if no/invalid Retry-After.
                         if wait_time is None or wait_time < 0:
                             wait_time = min(backoff_base ** attempt_num, backoff_max)
                         else:
@@ -382,9 +357,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         continue
 
                     if resp.status_code == 401:
-                        # Provide clear, actionable configuration guidance so the
-                        # operator can fix the root cause (missing/invalid key)
-                        # instead of just seeing a bare 401 in the logs.
                         key_state = "MISSING" if not api_key else f"set but INVALID (length={len(api_key)})"
                         logger.error(
                             f"LLM 401 Unauthorized at {endpoint}. "
@@ -395,7 +367,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         )
                         resp.raise_for_status()
 
-                    # --- 5xx server errors: retry with exponential backoff ---
                     if 500 <= resp.status_code < 600:
                         if is_last_attempt:
                             logger.error(
@@ -428,10 +399,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
                 except requests.exceptions.HTTPError as e:
                     resp_status = e.response.status_code if e.response is not None else None
-                    # Safety net: retry 429 and 5xx that slipped through explicit checks.
-                    # 401 is deliberately NOT retried - credentials are static for the
-                    # process lifetime, so retrying would only spam the log without
-                    # any chance of success.
                     if not is_last_attempt and resp_status is not None and (resp_status == 429 or 500 <= resp_status < 600):
                         wait_time = min(backoff_base ** attempt_num, backoff_max)
                         logger.warning(
@@ -440,7 +407,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         )
                         time.sleep(wait_time)
                         continue
-                    # Non-retryable HTTP errors (401, 403, 404, etc.) — raise immediately.
                     raise
                 except (requests.exceptions.ConnectionError,
                         requests.exceptions.Timeout,
@@ -467,7 +433,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         continue
                     raise
 
-            # Should not reach here, but guard against infinite loops.
             if last_exception:
                 raise last_exception
             raise Exception(f"LLM request to {endpoint} exhausted all {max_retries + 1} attempts")
@@ -625,9 +590,6 @@ state = {
 }
 
 # Validate LLM configuration on startup to fail fast with clear guidance
-# instead of letting every subsequent LLM call fail with 401 Unauthorized.
-# This is non-fatal: we still start the service so the operator can reach
-# the dashboard at /settings and fix the configuration.
 try:
     validate_llm_config_on_startup()
 except Exception as ve:
@@ -722,7 +684,6 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     title_text = (error_data.get('title') or '').lower()
     body_text = (error_data.get('body') or '').lower()
 
-    # If we have nothing to match against, there is no point scanning every repo.
     if not title_text and not body_text:
         return None, None
 
@@ -749,7 +710,6 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
         title_text = error_data.get('title')
         body_text = error_data.get('body')
 
-        # Ensure the body field is populated before attempting creation.
         if not body_text or not str(body_text).strip():
             logger.warning(
                 f"Skipping automated issue creation: 'body' field is missing or empty. "
@@ -869,7 +829,6 @@ def analyze_logs_for_errors(logs):
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:
             parsed = json.loads(match.group())
-            # Defensive: drop any entries that are not dicts or are missing required fields.
             cleaned = []
             for entry in parsed:
                 if not isinstance(entry, dict):
@@ -908,10 +867,6 @@ def connectivity_worker():
                     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
                     payload = {"model": c_mod, "prompt": "ping", "stream": False}
                     resp = requests.post(f"{c_url.rstrip('/')}/api/generate", json=payload, headers=headers, timeout=10)
-                    # FIX: Explicitly detect 401 so we can give the operator clear,
-                    # actionable guidance instead of silently flipping cloud_online
-                    # to False with no explanation (which previously hid the root
-                    # cause: a missing or invalid OLLAMA_API_KEY).
                     if resp.status_code == 401:
                         state["cloud_online"] = False
                         key_state = "MISSING" if not api_key else "INVALID (rejected by cloud)"
@@ -1613,7 +1568,6 @@ def scan_hub_logs(gh_current, config):
                 if not repo_name:
                     logger.warning(f"Skipping actionable error with no repo specified: {error.get('title')}")
                     continue
-                # Ensure the body field is populated before attempting creation.
                 if not error.get('body') or not str(error.get('body')).strip():
                     logger.warning(f"Skipping actionable error with no body specified: {error.get('title')} (repo={repo_name})")
                     continue
@@ -1730,7 +1684,6 @@ def scan_self_logs(gh_current, config):
 
         for error in actionable_errors:
             error['repo'] = self_repo_name
-            # Ensure the body field is populated before attempting creation.
             if not error.get('body') or not str(error.get('body')).strip():
                 logger.warning(f"Skipping self-diagnosis error with no body specified: {error.get('title')}")
                 continue
@@ -2114,10 +2067,6 @@ async def save_settings(request: Request):
         for k, v in env_vars.items():
             f.write(f"{k}={v}\n")
 
-    # Re-validate the LLM configuration now that the operator may have changed
-    # OLLAMA_API_KEY / CLOUD_OLLAMA_URL. This gives immediate feedback in the log
-    # about whether the new configuration is valid, instead of waiting for the
-    # next LLM request to (potentially) 401 again.
     try:
         validate_llm_config_on_startup()
     except Exception as ve:
