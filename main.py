@@ -190,18 +190,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         if "api.ollama.com" in url:
             logger.warning(f"Detected potentially incorrect Cloud LLM URL: {url}. Official Ollama Cloud host is 'https://ollama.com'. Please check your settings.")
 
-        # Determine primary endpoint and cloud status.
-        # IMPORTANT: is_cloud MUST be defined at the _request function scope so it is
-        # always available to the exception handler below. Previously this variable
-        # was referenced without being defined, causing:
-        #   NameError: name 'is_cloud' is not defined
-        # which broke every LLM request (triage, file identification, fix generation, review).
         is_cloud = ("ollama.com" in url) and ("local" not in url)
 
-        # Cloud endpoints use the /api/generate API with a single prompt string.
-        # Local endpoints prefer /api/chat (chat-style payload) and fall back to
-        # /api/generate if /api/chat is unavailable. Using distinct endpoints for
-        # primary vs. fallback ensures the fallback path is actually reachable.
         if is_cloud:
             primary_endpoint = f"{url.rstrip('/')}/api/generate"
             primary_use_generate = True
@@ -234,7 +224,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
                 if resp.status_code == 401:
                     logger.error(f"LLM 401 Unauthorized at {endpoint}. Verify OLLAMA_API_KEY.")
-                    resp.raise_for_status() # Raise here to trigger failover
+                    resp.raise_for_status()
                 resp.raise_for_status()
                 full_response = ""
                 for line in resp.iter_lines():
@@ -242,9 +232,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         chunk = json.loads(line.decode('utf-8'))
                         content = chunk.get('response') or chunk.get('message', {}).get('content', '')
                         full_response += content
-                        # Update global stream for legacy/general purposes
                         state["llm_stream"] = full_response
-                        # Update task-specific stream if task_id is provided
                         if task_id and task_id in state["active_tasks"]:
                             state["active_tasks"][task_id]["stream"] = full_response
                 return full_response
@@ -254,13 +242,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         try:
             return attempt_request(primary_endpoint, primary_use_generate, timeout=timeout_val)
         except Exception as e:
-            # Only attempt the /api/generate fallback for local endpoints.
-            # is_cloud is guaranteed to be defined here because it is assigned
-            # unconditionally at the top of _request.
             if not is_cloud:
                 fallback_endpoint = f"{url.rstrip('/')}/api/generate"
-                # fallback_endpoint differs from primary_endpoint for local URLs
-                # (primary uses /api/chat), so this branch is now reachable.
                 if fallback_endpoint != primary_endpoint:
                     logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate...")
                     try:
@@ -272,7 +255,6 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
     use_cloud = force_cloud if force_cloud is not None else state["force_cloud"]
 
-    # LLM Scheduling: If local LLM is not allowed right now, force cloud
     if not use_cloud and not is_local_llm_allowed():
         logger.info("Local LLM not allowed at this hour. Forcing fallback to Cloud.")
         use_cloud = True
@@ -296,7 +278,6 @@ def run_sandboxed_command(command, cwd):
     """Executes a command in a Docker container if available, otherwise on host."""
     import subprocess
 
-    # Check if docker is available
     docker_available = False
     try:
         subprocess.run(["docker", "--version"], capture_output=True, check=True)
@@ -308,7 +289,6 @@ def run_sandboxed_command(command, cwd):
         logger.warning("⚠️ Docker not found. Running command on HOST with ROOT privileges. This is insecure.")
         return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=300, shell=True)
 
-    # Determine image based on project type
     image = "ubuntu:latest"
     files = os.listdir(cwd)
     if "package.json" in files: image = "node:18-slim"
@@ -317,10 +297,6 @@ def run_sandboxed_command(command, cwd):
 
     logger.info(f"Running sandboxed command in Docker image {image}...")
 
-    # Docker run command:
-    # -v mounts the repo as a volume
-    # -w sets working directory
-    # --rm removes container after run
     docker_cmd = [
         "docker", "run", "--rm",
         "-v", f"{cwd}:/app",
@@ -366,7 +342,6 @@ async def catch_exceptions_mid(request: Request, call_next):
             content={"message": "Internal Server Error. Check bugfixer.log for details.", "error": str(e)}
         )
 
-# Thread lock for safe concurrent access to active_tasks
 _task_state_lock = threading.Lock()
 
 def update_task_state(task_id, task_name="Unknown Task", action="start"):
@@ -383,7 +358,6 @@ def update_task_state(task_id, task_name="Unknown Task", action="start"):
     signature evolves in the future.
     """
     global state
-    # Defensive guard: never crash the poller over a missing/empty task_id.
     if not task_id:
         logger.debug("update_task_state called with no task_id; ignoring.")
         return
@@ -402,11 +376,8 @@ def update_task_state(task_id, task_name="Unknown Task", action="start"):
                     del state["active_tasks"][task_id]
             logger.info(f"Task completed: {task_id}")
     except Exception as e:
-        # A failure to update task bookkeeping must NEVER propagate and crash
-        # the poller. Log it and move on.
         logger.error(f"update_task_state failed for task_id={task_id!r} action={action!r}: {e}")
 
-# Initial state
 config_on_start = load_config()
 processed_init = load_processed()
 success_count = sum(1 for info in processed_init.values() if info.get("status") in ["fixed", "verified", "awaiting_prod_verification"])
@@ -419,7 +390,6 @@ state = {
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count
 }
-# Remove the line that overwrites STATE_FILE to a local path
 
 def clean_repo_name(name):
     """Converts a full GitHub URL or a 'user/repo' string into 'user/repo' format."""
@@ -502,14 +472,6 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     Returns a tuple (issue, repo_name) where repo_name is the repository in which the
     duplicate issue was found. The repo_name is returned explicitly so callers do NOT
     need to read repository metadata off the Issue object itself.
-
-    IMPORTANT: PyGithub's `Issue` object does not reliably expose a `.repo` attribute
-    (and `.repository` is not always populated depending on how the issue was fetched).
-    Historically the code attempted `existing_issue.repository.full_name` (and earlier
-    `existing_issue.repo`), which raised:
-        AttributeError: 'Issue' object has no attribute 'repo'
-    dozens of times during automated issue creation. Returning the repo_name from this
-    function eliminates that failure mode entirely.
     """
     title_text = error_data['title'].lower()
     body_text = error_data['body'].lower()
@@ -519,7 +481,6 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
             repo = gh_current.get_repo(repo_name)
             open_issues = repo.get_issues(state='open')
             for issue in open_issues:
-                # Defensive: skip issues with no body to avoid AttributeError on .lower()
                 issue_body = issue.body or ""
                 if title_text in issue.title.lower() or body_text in issue_body.lower():
                     return issue, repo_name
@@ -528,37 +489,18 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     return None, None
 
 def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
-    """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos.
-
-    This function deliberately does NOT access `existing_issue.repository` or
-    `existing_issue.repo` because the PyGithub `Issue` object does not reliably
-    expose those attributes. Instead, the repository where any duplicate was
-    found is returned by `find_global_duplicate_issue` and used directly here.
-    This fixes the recurring error:
-        'Issue' object has no attribute 'repo'
-    that was logged dozens of times during automated issue creation.
-    """
+    """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos."""
     try:
         title_text = error_data['title']
         body_text = error_data['body']
-        # Use the repo key if present in the error payload, otherwise derive it from
-        # the explicitly-provided Repository object. Note this is a dict key lookup,
-        # not an attribute access on an Issue object.
         current_repo_name = error_data.get('repo') or gh_repo.full_name
 
-        # 1. Check for existing open issues globally to prevent duplicates.
-        #    find_global_duplicate_issue returns the repo_name where the duplicate
-        #    was found so we do not need to read it back off the Issue object.
         existing_issue, duplicate_repo_name = find_global_duplicate_issue(gh_current, monitored_repos, error_data)
 
         if existing_issue:
-            # Use the repo name returned from the search; fall back to the current repo
-            # name if for some reason it is missing. Never access existing_issue.repo
-            # or existing_issue.repository here.
             duplicate_repo_display = duplicate_repo_name or current_repo_name
             logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {duplicate_repo_display}. Adding info.")
 
-            # If the current log snippet isn't in the body, add it as a comment
             existing_body = existing_issue.body or ""
             if body_text.lower() not in existing_body.lower():
                 existing_issue.create_comment(
@@ -569,7 +511,6 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
 
             return existing_issue
 
-        # 2. No global duplicate found, create a new issue in the suggested repo
         full_title = f"🤖 Log Alert: {title_text}"
         full_body = (
             f"**Automated Error Detection**\n\n"
@@ -600,11 +541,6 @@ def get_hub_logs():
         logger.debug(f"Fetching Hub logs from: {log_url}")
         resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
-            # Defensive check: ensure the response body is not empty/whitespace
-            # before attempting JSON parse. An empty 200 response previously
-            # caused `json.loads()` (via `resp.json()`) to raise
-            # 'Expecting value: line 1 column 1 (char 0)'. Return an empty list
-            # and log a warning instead of crashing the log-scan pipeline.
             body = resp.text
             if not body or not body.strip():
                 logger.warning(
@@ -632,10 +568,9 @@ def get_hub_state():
     url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url: return None
     try:
-        # Try base URL or /state endpoint
         resp = requests.get(url.rstrip('/'), timeout=15)
         if resp.status_code == 200:
-            return resp.text # Return raw text or json if available
+            return resp.text
         return None
     except Exception as e:
         logger.error(f"Hub State Fetch Error: {e}")
@@ -678,17 +613,14 @@ def connectivity_worker():
             c_mod = config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL")
             api_key = config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
 
-            # Check Local
             if l_url:
                 try:
-                    # Use a very simple prompt for connectivity check
                     payload = {"model": l_mod, "prompt": "ping", "stream": False}
                     resp = requests.post(f"{l_url.rstrip('/')}/api/generate", json=payload, timeout=10)
                     state["local_online"] = (resp.status_code == 200)
                 except:
                     state["local_online"] = False
 
-            # Check Cloud
             if c_url:
                 try:
                     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -708,7 +640,6 @@ def heartbeat_worker():
     while True:
         try:
             config = load_config()
-            # Priority 1: config.json, Priority 2: Environment
             local_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
             cloud_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
 
@@ -721,7 +652,6 @@ def heartbeat_worker():
             else:
                 state["local_online"] = False
 
-            # Update active_llm based on current configuration and connectivity
             if state["force_cloud"]:
                 state["active_llm"] = "Cloud"
             elif state["local_online"]:
@@ -737,7 +667,6 @@ def heartbeat_worker():
         time.sleep(5)
 
 def analyze_issue(issue):
-    # Combine issue body with all current comments to capture updates/provided logs
     full_context = f"Issue Title: {issue.title}\nIssue Body: {issue.body}\n\n"
     comments = issue.get_comments()
     for i, comment in enumerate(comments, 1):
@@ -750,7 +679,7 @@ def analyze_issue(issue):
         strictness_instruction = "Specifically, for UI or runtime errors, you MUST have full console logs or stack traces. If these are missing, it is non-actionable."
     elif strictness == "Lenient":
         strictness_instruction = "Be generous. If the issue describes a bug and the repository is accessible, mark it as actionable even if full logs are missing, provided there is a plausible lead."
-    else: # Moderate
+    else:
         strictness_instruction = "Specifically, for UI or runtime errors, prefer console logs or stack traces, but if the description is detailed enough for a senior engineer to hypothesize the bug accurately, mark it as actionable."
 
     prompt = (
@@ -826,23 +755,16 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     logger.info("Running Reviewer Panel pass...")
     config = load_config()
 
-    # Determine Reviewers
     reviewers = []
-    # Reviewer 1
     r1_mod = config.get("REVIEWER_MODEL_1")
     if r1_mod: reviewers.append({"name": "Reviewer 1", "model": r1_mod, "force_cloud": True})
 
-    # Reviewer 2
     r2_mod = config.get("REVIEWER_MODEL_2")
     if r2_mod: reviewers.append({"name": "Reviewer 2", "model": r2_mod, "force_cloud": True})
 
-    # Reviewer 3 (Local)
     l_mod = config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL")
     if l_mod and state["local_online"]:
-        # Check if local model is a different family/version than others
         active_cloud_models = [r["model"] for r in reviewers]
-        # Simple check: if the local model name is not a substring of any cloud model and vice-versa, it's a different model.
-        # More robust: just check if they are exactly the same.
         is_duplicate = any(l_mod == cm for cm in active_cloud_models)
         if not is_duplicate:
             reviewers.append({"name": "Reviewer 3 (Local)", "model": l_mod, "force_cloud": False})
@@ -886,11 +808,10 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     if not votes:
         return {"confidence": 0.0, "verdict": "Reject", "critique": "All reviewers failed."}
 
-    # Voting Logic: Majority Approval
     approvals = [v for v in votes if v.get("verdict") == "Approve"]
     avg_conf = sum(v.get("confidence", 0.0) for v in votes) / len(votes)
 
-    if len(approvals) >= (len(votes) / 2 + 0.5): # Simple majority
+    if len(approvals) >= (len(votes) / 2 + 0.5):
         final_verdict = "Approve"
         critiques = " | ".join([v.get("critique", "") for v in votes])
     else:
@@ -1015,7 +936,6 @@ def check_for_updates():
         self_repo = git.Repo(os.getcwd())
         old_commit = self_repo.head.commit.hexsha
 
-        # Record baseline for recovery
         update_state = load_update_state()
         update_state["last_known_good_commit"] = old_commit
         save_update_state(update_state)
@@ -1027,7 +947,6 @@ def check_for_updates():
             cur_version = get_version()
             logger.info(f"New version detected ({cur_version})! {old_commit[:7]} -> {new_commit[:7]}. Validating...")
 
-            # Pre-flight Syntax Check
             syntax_error = False
             for root, _, files in os.walk(os.getcwd()):
                 for file in files:
@@ -1050,7 +969,6 @@ def check_for_updates():
                     save_update_state(update_state)
                 return False, f"Update failed: Syntax error detected. Rolled back to {old_commit[:7]}."
 
-            # Signal Pending Update for Watchdog
             try:
                 with open(os.path.join(CONFIG_DIR, "update_pending"), "w") as f:
                     f.write(new_commit)
@@ -1078,24 +996,9 @@ def updater_worker():
         time.sleep(3600)
 
 def find_existing_pull_request(repo_obj, target_branch, base_branch):
-    """Checks whether an open pull request already exists for the given head/base pair.
-
-    Uses a two-pronged approach for robustness:
-      1. Try GitHub's filtered query with just the branch name as the head
-         parameter (the correct format for same-repository PRs).
-      2. If that returns nothing, fall back to listing all open PRs and
-         manually comparing head.ref and base.ref attributes.
-
-    Previously, the code used \"owner:branch\" format (e.g. \"lbockenstedt:dev\")
-    as the head filter for same-repo PRs. For same-repo PRs, GitHub's API
-    expects just the bare branch name (e.g. \"dev\"). The \"owner:branch\
-    format caused get_pulls to silently return an empty list even when an
-    open PR existed, so the code proceeded to create_pull and received a
-    422 \"Validation Failed: A pull request already exists\" error.
-    """
+    """Checks whether an open pull request already exists for the given head/base pair."""
     existing_pr = None
 
-    # Approach 1: filtered query using bare branch name (correct for same-repo)
     try:
         existing_prs = repo_obj.get_pulls(state='open', head=target_branch, base=base_branch)
         for pr_item in existing_prs:
@@ -1104,7 +1007,6 @@ def find_existing_pull_request(repo_obj, target_branch, base_branch):
     except Exception as e:
         logger.warning(f"Filtered PR check failed for {target_branch} -> {base_branch}: {e}")
 
-    # Approach 2: manual scan of all open PRs as a fallback
     if not existing_pr:
         try:
             all_open_prs = repo_obj.get_pulls(state='open')
@@ -1120,11 +1022,6 @@ def find_existing_pull_request(repo_obj, target_branch, base_branch):
 def process_single_issue(repo_name, issue_num, llm_preference=None):
     """Core logic to fix a single issue. Used by poller and manual triggers."""
     global state
-    # Pre-initialize issue_id BEFORE the try block so the exception handler can
-    # always safely reference it. This is the root-cause fix for the poller crash:
-    #   'Critical poller error: update_task_state() missing 1 required positional argument: task_name'
-    # which happened when an exception fired before task_id/task_name could be
-    # assigned and the cleanup code then called update_task_state incorrectly.
     issue_id = f"{repo_name}:{issue_num}"
     try:
         config = load_config()
@@ -1143,11 +1040,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 return False, "Issue deleted"
             raise ge
 
-        # --- Triage Phase ---
-        # NOTE: always pass task_name and action as keyword arguments so the
-        # positional-argument count can never be wrong, even if the function
-        # signature changes in the future. This is a defensive measure against
-        # the 'missing 1 required positional argument: task_name' regression.
         update_task_state(task_id=issue_id, task_name=f"Triaging {issue_id}", action="start")
         actionable, request_msg = analyze_issue(issue)
         if not actionable:
@@ -1164,7 +1056,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             update_task_state(task_id=issue_id, action="end")
             return False, f"Non-actionable: {request_msg}"
 
-        # Handle LLM preference
         force_cloud = None
         if llm_preference == "cloud":
             force_cloud = True
@@ -1191,7 +1082,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     verified = False
                     failure_msg = "AI generated invalid JSON format"
                 else:
-                    # --- Review Phase ---
                     if config.get("skip_review", False):
                         logger.info("Skeptical Reviewer bypassed by configuration.")
                         review_conf = confidence
@@ -1225,7 +1115,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 if error_context:
                     failure_reason += f" Last attempt error: {error_context}"
 
-                # Log to GitHub
                 try:
                     issue.create_comment(f"🤖 **BugFixer Failure**\n\nI attempted to fix this issue {max_attempts} times, but I could not find a solution that passed verification.\n\n**Final Error:** `{failure_reason}`")
                 except Exception as ge:
@@ -1244,7 +1133,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             repo_git.git.add(A=True)
 
-            # Define thresholds
             confidence_threshold = 0.95
             is_trusted = repo_name in config["trusted_repos"]
             bot_user = gh_current.get_user().login
@@ -1255,7 +1143,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             logger.info(f"Deployment decision for {repo_name}: DirectPushSetting={direct_push_setting}, IsTrusted={is_trusted}, IsOwner={is_owner} -> can_direct_push={can_direct_push}")
 
 
-            # Only bump version if we are confident and going to push directly to main
             version_bumped = False
             new_v = None
             if can_direct_push and final_confidence >= confidence_threshold and final_verdict == "Approve":
@@ -1285,12 +1172,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 except:
                     repo_git.create_head(target_branch).checkout()
                 repo_git.remotes.origin.push(target_branch, force=True)
-                # Check for existing open PR to avoid GitHub API 422 Validation Failed.
-                # For same-repository PRs, GitHub's API expects the head parameter to be
-                # just the branch name (e.g. "dev"), NOT the "owner:branch" format
-                # (e.g. "lbockenstedt:dev"). Using the wrong format caused the filtered
-                # query to silently return an empty list even when an open PR existed,
-                # which in turn caused create_pull to fail with a 422 error.
                 base_branch = config.get("default_branch", "main")
                 existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
 
@@ -1345,9 +1226,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
     except Exception as e:
         logger.exception(f"Error in process_single_issue: {e}")
-        # Use keyword form for action and rely on the default for task_name so
-        # we never raise the 'missing 1 required positional argument: task_name'
-        # TypeError that previously crashed the poller.
         try:
             update_task_state(task_id=issue_id, action="end")
         except Exception as cleanup_err:
@@ -1364,14 +1242,12 @@ def verify_production_fixes(gh_current, processed):
                 repo_obj = gh_current.get_repo(repo_name)
                 issue = repo_obj.get_issue(int(issue_num))
 
-                # Get logs from hub
                 logs = get_hub_logs()
                 if logs:
                     module_name = repo_name.split('/')[-1]
                     relevant_logs = [l['log'] for l in logs if l.get('module') == module_name]
                     full_log_text = "\n".join(relevant_logs)
 
-                    # Look for the original error snippet in the issue body
                     import re
                     match = re.search(r"### Log Evidence:\n```\n(.*?)\n```", issue.body, re.DOTALL)
                     if match:
@@ -1440,7 +1316,6 @@ def scan_repo_issues(gh_current, config, processed):
                 to_fix = []
                 for issue in issues:
                     try:
-                        # Ensure we only process open issues and ignore Pull Requests
                         if issue.state != 'open' or issue.pull_request:
                             continue
 
@@ -1483,13 +1358,9 @@ def scan_self_logs(gh_current, config):
         with open(log_path, "r") as f:
             lines = f.readlines()
 
-        # Format local logs as Hub-like entries for analyze_logs_for_errors
-        # We'll group lines by timestamps (roughly) or just treat the whole file.
-        # analyze_logs_for_errors expects a list of {"module":..., "timestamp":..., "log":...}
         formatted_logs = []
         for line in lines:
             if "[ERROR]" in line or "[CRITICAL]" in line:
-                # Basic timestamp extraction: 2026-06-16 18:16:46,268
                 ts = line[:23] if len(line) > 23 else "Unknown"
                 formatted_logs.append({
                     "module": "bugfixer-core",
@@ -1506,7 +1377,6 @@ def scan_self_logs(gh_current, config):
             update_task_state(task_id="SelfScan", action="end")
             return
 
-        # Identify the BugFixer repository name
         try:
             repo = git.Repo(os.getcwd())
             remote_url = repo.remotes.origin.url
@@ -1515,10 +1385,10 @@ def scan_self_logs(gh_current, config):
             if match:
                 self_repo_name = match.group(1).replace('.git', '')
             else:
-                self_repo_name = "lbockenstedt/bugfixer" # Fallback
+                self_repo_name = "lbockenstedt/bugfixer"
         except Exception as e:
             logger.debug(f"Could not determine self-repo name from git: {e}")
-            self_repo_name = "lbockenstedt/bugfixer" # Fallback
+            self_repo_name = "lbockenstedt/bugfixer"
 
         for error in actionable_errors:
             error['repo'] = self_repo_name
@@ -1546,7 +1416,6 @@ def run_scan_cycle():
         state["status"] = "Scanning"
         processed = load_processed()
 
-        # Priority 1: config.json, Priority 2: Environment
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
         if not token:
             raise Exception("Configuration Pending: Please enter your GitHub Token in Settings")
@@ -1565,7 +1434,6 @@ def run_scan_cycle():
             logger.exception(f"Unexpected error during GitHub authentication: {e}")
             raise e
 
-        # Normalize monitored repos before using them
         raw_repos = config.get("monitored_repos", [])
         monitored_repos = []
         if isinstance(raw_repos, list):
@@ -1578,45 +1446,36 @@ def run_scan_cycle():
             for split_r in raw_repos.replace("\\n", ",").split(","):
                 cleaned = clean_repo_name(split_r)
                 if cleaned:
-                    monitored_repos.append(cleaned)
+                        monitored_repos.append(cleaned)
 
-        monitored_repos = list(set(monitored_repos)) # Deduplicate
+        monitored_repos = list(set(monitored_repos))
         if not monitored_repos:
             logger.warning("No monitored repositories configured. Skipping scan.")
 
-        # --- Label Discovery Phase ---
         update_task_state(task_id="Discovery", task_name="Discovering Labels", action="start")
         state["available_labels"] = discover_labels(gh_current, monitored_repos)
         logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
         update_task_state(task_id="Discovery", action="end")
 
-        # --- Production Verification Phase ---
         verify_production_fixes(gh_current, processed)
 
-        # --- Self-Diagnosis Phase ---
         scan_self_logs(gh_current, config)
 
-        # --- Parallel Scan Phase ---
         state["status"] = "Scanning"
         with ThreadPoolExecutor(max_workers=2) as executor:
-            # Run Hub Log Scan and Repo Issue Scan in parallel
             futures = [
                 executor.submit(scan_hub_logs, gh_current, config),
                 executor.submit(scan_repo_issues, gh_current, config, processed)
             ]
             for future in futures:
-                future.result() # Wait for completion and catch exceptions
+                future.result()
 
-        save_processed(processed) # Ensure state is persisted
+        save_processed(processed)
         state["status"] = "Idle"
         state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         logger.exception(f"Critical poller error: {e}")
         state["status"] = f"Error: {str(e)}"
-        # Best-effort cleanup of any task bookkeeping that might be left dangling
-        # after a poller-level failure. Wrapped in try/except so a secondary
-        # failure here can never cascade back into the poller loop and cause the
-        # 'missing 1 required positional argument: task_name' error again.
         for cleanup_id in ("Discovery", "HubScan", "RepoScan", "SelfScan"):
             try:
                 update_task_state(task_id=cleanup_id, action="end")
@@ -1637,7 +1496,6 @@ async def health_check():
 
 @app.get("/")
 async def dashboard(request: Request):
-    # Filter processed issues to show only the last 7 days
     recent_processed = {}
     if state["processed"]:
         now = datetime.now()
@@ -1647,7 +1505,7 @@ async def dashboard(request: Request):
                 if (now - ts).days < 7:
                     recent_processed[issue_id] = info
             except:
-                recent_processed[issue_id] = info # Keep if timestamp is invalid
+                recent_processed[issue_id] = info
 
     return templates.TemplateResponse(request=request, name="index.html", context={"view": "status", "state": {**state, "processed": recent_processed}})
 
@@ -1669,7 +1527,6 @@ async def get_task_details(task_id: str = None):
             "stream": task["stream"]
         }
 
-    # If no task_id, return a summary of all active tasks
     return {
         "active_tasks": state["active_tasks"],
         "count": len(state["active_tasks"])
@@ -1689,7 +1546,6 @@ async def get_models():
         "enabled_models": config.get("enabled_models", [])
     }
 
-    # Fetch Local Models
     if l_url:
         try:
             resp = requests.get(f"{l_url.rstrip('/')}/api/tags", timeout=10)
@@ -1703,7 +1559,6 @@ async def get_models():
         except Exception as e:
             logger.error(f"Error fetching local models: {e}")
 
-    # Fetch Cloud Models
     if c_url:
         try:
             headers = {}
@@ -1799,14 +1654,11 @@ async def settings_page(request: Request):
     config = load_config()
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
-    # Ensure GITHUB_TOKEN comes from config if available
     settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
     settings["LLM_TIMEOUT"] = config.get("LLM_TIMEOUT") or settings.get("LLM_TIMEOUT", "900")
-    # Handle labels for the UI
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
 
-    # Fetch available models for dropdowns
     model_data = await get_models()
     local_models = [m["name"] for m in model_data["local_models"]]
     cloud_models = [m["name"] for m in model_data["cloud_models"]]
@@ -1825,10 +1677,8 @@ async def save_settings(request: Request):
     form_data = await request.form()
     data = dict(form_data)
 
-    # 1. Load existing config for merging to prevent losing settings
     config_data = load_config()
 
-    # 2. Handle labels logic
     labels_mode = data.get("label_mode", "SPECIFIC")
     if labels_mode == "ANY":
         labels = ["ANY"]
@@ -1853,7 +1703,6 @@ async def save_settings(request: Request):
     if "label_mode" in data or "monitored_labels" in form_data or "custom_labels" in data:
         config_data["monitored_labels"] = labels
 
-    # 3. Map and update config fields from form data
     updates = {
         "monitored_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
         "trusted_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
@@ -1877,7 +1726,6 @@ async def save_settings(request: Request):
     for key, transform in updates.items():
         if key in data:
             val = data[key]
-            # If it's a list field and empty, we treat it as empty list
             if "repos" in key and not val:
                 config_data[key] = []
             else:
@@ -1886,7 +1734,6 @@ async def save_settings(request: Request):
     if "direct_push_enabled" in data:
         config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
 
-    # FIX: If qa_enabled is missing from form data, it means it was unchecked.
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
 
     if "skip_review" in data:
@@ -1903,7 +1750,6 @@ async def save_settings(request: Request):
 
     save_config(config_data)
 
-    # Update .env
     env_vars = {}
     if os.path.exists(ENV_FILE):
         with open(ENV_FILE, "r") as f:
@@ -1932,7 +1778,6 @@ async def update_now():
 async def toggle_cloud():
     state["force_cloud"] = not state["force_cloud"]
 
-    # Persist the setting
     config = load_config()
     config["force_cloud"] = state["force_cloud"]
     save_config(config)
@@ -1944,7 +1789,7 @@ async def trigger_fix(request: Request):
     data = await request.json()
     repo_name = data.get("repo_name")
     issue_num = data.get("issue_num")
-    llm_pref = data.get("llm_preference") # 'local' or 'cloud'
+    llm_pref = data.get("llm_preference")
 
     if not repo_name or not issue_num:
         return JSONResponse(status_code=400, content={"message": "Missing repo_name or issue_num"})
@@ -1972,7 +1817,7 @@ async def scan_now():
 @app.post("/retry_issue")
 async def retry_issue(request: Request):
     data = await request.json()
-    issue_id = data.get("issue_id") # "repo:num"
+    issue_id = data.get("issue_id")
 
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
