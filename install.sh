@@ -80,7 +80,22 @@ Restart=always
 WantedBy=multi-user.target
 SERVICE
 
+# 6. Watchdog Service
+cat << 'WSERVICE' > /etc/systemd/system/bugfixer-watchdog.service
+[Unit]
+Description=BugFixer Watchdog for Update Recovery
+After=network.target
+[Service]
+User=root
+WorkingDirectory=/opt/bugfixer
+ExecStart=/opt/bugfixer/venv/bin/python3 watchdog.py
+Restart=always
+[Install]
+WantedBy=multi-user.target
+WSERVICE
+
 chmod +x update.sh
 
 systemctl daemon-reload && systemctl enable bugfixer && systemctl restart bugfixer
+systemctl enable bugfixer-watchdog && systemctl restart bugfixer-watchdog
 echo "✅ Installation complete. Dashboard at http://$(hostname -I | awk '{print $1}'):8000"

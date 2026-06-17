@@ -1,4 +1,4 @@
-import os, json, time, tempfile, threading, requests, logging, traceback
+import os, json, time, tempfile, threading, requests, logging, traceback, py_compile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
@@ -47,6 +47,7 @@ CONFIG_DIR = "/etc/bugfixer"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ENV_FILE = os.path.join(CONFIG_DIR, ".env")
 STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
+UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
 def save_config(config):
@@ -123,6 +124,24 @@ def load_processed():
 def save_processed(processed):
     with open(STATE_FILE, "w") as f: json.dump(processed, f, indent=2)
 
+def load_update_state():
+    """Loads the update state for recovery."""
+    if os.path.exists(UPDATE_STATE_FILE):
+        try:
+            with open(UPDATE_STATE_FILE, "r") as f:
+                return json.load(f)
+        except: pass
+    return {"last_known_good_commit": None, "failed_commits": []}
+
+def save_update_state(state):
+    """Saves the update state for recovery."""
+    try:
+        with open(UPDATE_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving update state: {e}")
+
+
 def get_version():
     try:
         with open(VERSION_FILE, "r") as f: return f.read().strip()
@@ -161,7 +180,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming."""
     config = load_config()
     l_mod = model_override if model_override else (config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL"))
-    c_mod = config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL")
+    c_mod = model_override if model_override else (config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL"))
     l_url = url_override if url_override else (config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL"))
     c_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
     api_key = config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
@@ -342,11 +361,16 @@ def update_task_state(task_id, task_name, action="start"):
 
 # Initial state
 config_on_start = load_config()
+processed_init = load_processed()
+success_count = sum(1 for info in processed_init.values() if info.get("status") in ["fixed", "verified", "awaiting_prod_verification"])
+failure_count = sum(1 for info in processed_init.values() if info.get("status") == "failed")
+
 state = {
     "status": "Idle", "active_llm": "Unknown", "local_online": False, "cloud_online": False,
     "last_run": "Never", "api_status": "Not Triggered",
-    "processed": [], "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": "",
-    "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True)
+    "processed": processed_init, "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": "",
+    "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
+    "success_count": success_count, "failure_count": failure_count
 }
 # Remove the line that overwrites STATE_FILE to a local path
 
@@ -764,6 +788,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             # For now, I'll wrap the call. Since call_llm uses config, I'll need to modify it.
             # Let's fix call_llm first.
             res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
+            res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
                            force_cloud=r["force_cloud"], task_id=task_id, model_override=r.get("model"))
 
             import re
@@ -900,19 +925,58 @@ def verify_fix(repo_path, repo_name, config):
         return False, error_msg
 
 def check_for_updates():
-    """Checks GitHub for new versions and restarts the service if an update is found."""
+    """Checks GitHub for new versions, performs pre-flight syntax checks, and signals a restart if safe."""
     try:
         self_repo = git.Repo(os.getcwd())
-        # Check current commit hash
         old_commit = self_repo.head.commit.hexsha
+
+        # Record baseline for recovery
+        update_state = load_update_state()
+        update_state["last_known_good_commit"] = old_commit
+        save_update_state(update_state)
+
         self_repo.remotes.origin.pull()
         new_commit = self_repo.head.commit.hexsha
+
         if old_commit != new_commit:
             cur_version = get_version()
-            logger.info(f"New version detected ({cur_version})! {old_commit[:7]} -> {new_commit[:7]}. Triggering restart...")
+            logger.info(f"New version detected ({cur_version})! {old_commit[:7]} -> {new_commit[:7]}. Validating...")
+
+            # Pre-flight Syntax Check
+            syntax_error = False
+            for root, _, files in os.walk(os.getcwd()):
+                for file in files:
+                    if file.endswith(".py"):
+                        full_path = os.path.join(root, file)
+                        try:
+                            py_compile.compile(full_path, doraise=True)
+                        except py_compile.PyCompileError as e:
+                            logger.error(f"Syntax error in {full_path}: {e}")
+                            syntax_error = True
+                            break
+                if syntax_error: break
+
+            if syntax_error:
+                logger.error(f"Syntax check failed for commit {new_commit[:7]}. Rolling back to {old_commit[:7]}...")
+                self_repo.git.reset("--hard", old_commit)
+                update_state = load_update_state()
+                if new_commit not in update_state["failed_commits"]:
+                    update_state["failed_commits"].append(new_commit)
+                    save_update_state(update_state)
+                return False, f"Update failed: Syntax error detected. Rolled back to {old_commit[:7]}."
+
+            # Signal Pending Update for Watchdog
+            try:
+                with open(os.path.join(CONFIG_DIR, "update_pending"), "w") as f:
+                    f.write(new_commit)
+                logger.info("Update pending signal created. Triggering restart...")
+            except Exception as e:
+                logger.warning(f"Could not create update_pending signal: {e}")
+
             import subprocess
             subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
             return True, f"Update found: {cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
+
         return False, "No updates available."
     except Exception as e:
         logger.warning(f"Self-update check failed: {e}")
@@ -1014,6 +1078,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
                     if verified:
                         success = True
+                        state["success_count"] += 1
                         final_confidence = (confidence + review_conf) / 2
                         final_verdict = review_verdict
                         break
@@ -1021,6 +1086,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         error_context = failure_msg
 
             if not success:
+                state["failure_count"] += 1
                 failure_reason = "AI failed to find a verified fix after max attempts."
                 if error_context:
                     failure_reason += f" Last attempt error: {error_context}"
@@ -1155,6 +1221,7 @@ def verify_production_fixes(gh_current, processed):
                             issue.create_comment("🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. Closing issue.")
                             issue.edit(state='closed')
                             processed[issue_id]["status"] = "verified"
+                            state["success_count"] += 1
                             save_processed(processed)
                         else:
                             logger.info(f"Issue {issue_id} still failing in production logs.")
@@ -1374,6 +1441,11 @@ def poller_worker():
     while True:
         run_scan_cycle()
         time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 300)))
+
+@app.get("/api/health")
+async def health_check():
+    """Heartbeat endpoint for the watchdog service."""
+    return {"status": "ok"}
 
 @app.get("/")
 async def dashboard(request: Request):
