@@ -697,7 +697,7 @@ def prepare_environment(repo_path):
         logger.info("Detected Python project with pyproject.toml. Running pip install .")
         run_sandboxed_command("pip install .", repo_path)
     elif "go.mod" in files:
-        logger.info("Detected Go la project. Running go mod download...")
+        logger.info("Detected Go project. Running go mod download...")
         run_sandboxed_command("go mod download", repo_path)
     elif "Makefile" in files:
         logger.info("Detected Makefile. Attempting 'make install'...")
@@ -1495,7 +1495,11 @@ async def save_settings(request: Request):
     elif labels_mode == "NONE":
         labels = ["NONE"]
     else:
-        labels_list = form_data.getlist("monitored_labels")
+        try:
+            labels_list = form_data.getlist("monitored_labels")
+        except AttributeError:
+            val = form_data.get("monitored_labels", [])
+            labels_list = [val] if isinstance(val, str) else (val if isinstance(val, list) else [])
         custom_labels_raw = data.get("custom_labels", "")
         if custom_labels_raw:
             custom_labels = [x.strip() for x in custom_labels_raw.split(",") if x.strip()]
@@ -1660,6 +1664,6 @@ threading.Thread(target=heartbeat_worker, daemon=True).start()
 threading.Thread(target=poller_worker, daemon=True).start()
 threading.Thread(target=updater_worker, daemon=True).start()
 
-if __name__ == "__main":
+if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
