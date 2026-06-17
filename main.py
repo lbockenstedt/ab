@@ -564,22 +564,36 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         raise e
 
 def run_sandboxed_command(command, cwd):
-    """Executes a command in a Docker container if available, otherwise on host."""
+    """Executes a command in a Docker sandbox. Fails closed (returns an error result)
+    if Docker is unavailable — NEVER runs untrusted repository code on the host as root."""
     import subprocess
+    from dataclasses import dataclass
+
+    @dataclass
+    class MockResult:
+        stdout: str
+        stderr: str
+        returncode: int
 
     docker_available = False
     try:
-        subprocess.run(["docker", "--version"], capture_output=True, check=True)
+        subprocess.run(["docker", "--version"], capture_output=True, check=True, timeout=15)
         docker_available = True
-    except:
+    except Exception:
         pass
 
     if not docker_available:
-        logger.warning("⚠️ Docker not found. Running command on HOST with ROOT privileges. This is insecure.")
-        return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=300, shell=True)
+        msg = ("Docker is not available; refusing to run untrusted repository commands on the host "
+               "(fail-closed). Install Docker and retry.")
+        logger.error("⚠️ " + msg)
+        return MockResult("", msg, 127)
 
     image = "ubuntu:latest"
-    files = os.listdir(cwd)
+    try:
+        files = os.listdir(cwd)
+    except Exception as e:
+        logger.error(f"Cannot read sandbox working directory {cwd}: {e}")
+        return MockResult("", str(e), 1)
     if "package.json" in files: image = "node:18-slim"
     elif "requirements.txt" in files or "pyproject.toml" in files: image = "python:3.9-slim"
     elif "go.mod" in files: image = "golang:1.21-slim"
@@ -596,17 +610,10 @@ def run_sandboxed_command(command, cwd):
 
     try:
         result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=300)
-        from dataclasses import dataclass
-        @dataclass
-        class MockResult:
-            stdout: str
-            stderr: str
-            returncode: int
-
         return MockResult(result.stdout, result.stderr, result.returncode)
     except Exception as e:
         logger.error(f"Docker execution error: {e}")
-        return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=300, shell=True)
+        return MockResult("", f"Docker execution error: {e}", 1)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -667,7 +674,8 @@ state = {
     "processed": processed_init, "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": "",
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count,
-    "llm_circuit_breaker": _llm_cb_snapshot()
+    "llm_circuit_breaker": _llm_cb_snapshot(),
+    "paused": False
 }
 
 try:
@@ -1326,13 +1334,40 @@ def parse_and_apply(content, repo_path):
             data = json.loads(content)
         fixes = data.get("fixes", {})
         confidence = data.get("confidence", 0.0)
+        repo_root = os.path.abspath(repo_path)
+        applied = {}
         for filepath, code in fixes.items():
-            full_path = os.path.join(repo_path, filepath)
+            # Confine writes to the cloned repo: reject absolute paths, traversal,
+            # and symlinks that escape the repo root (prevents arbitrary file write).
+            if not isinstance(filepath, str) or os.path.isabs(filepath) or ".." in filepath.replace("\\", "/").split("/"):
+                logger.error(f"Refusing to apply fix with unsafe path: {filepath!r}")
+                continue
+            full_path = os.path.abspath(os.path.join(repo_root, filepath))
+            try:
+                if os.path.commonpath([repo_root, full_path]) != repo_root:
+                    logger.error(f"Refusing to apply fix escaping repo root: {filepath!r}")
+                    continue
+            except ValueError:
+                logger.error(f"Refusing to apply fix with unresolvable path: {filepath!r}")
+                continue
+            if os.path.islink(full_path):
+                try:
+                    link_target = os.path.abspath(os.readlink(full_path))
+                    if os.path.commonpath([repo_root, link_target]) != repo_root:
+                        logger.error(f"Refusing to write through symlink escaping repo: {filepath!r}")
+                        continue
+                except Exception:
+                    logger.error(f"Refusing to write through unresolvable symlink: {filepath!r}")
+                    continue
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w") as f:
                 f.write(code.strip())
+            applied[filepath] = code
             logger.info(f"Applied fix to file: {filepath}")
-        return True, fixes, confidence
+        if not applied:
+            logger.error("No fixes could be applied (all rejected as unsafe or out-of-repo).")
+            return False, {}, 0.0
+        return True, applied, confidence
     except Exception as e:
         logger.error(f"Error parsing or applying JSON fix: {e}")
         logger.debug(f"Failed content: {content}")
@@ -2125,16 +2160,24 @@ def run_scan_cycle():
                 logger.debug(f"Cleanup for {cleanup_id} failed: {cleanup_err}")
 
 def poller_worker():
-
     global state
     while True:
-        run_scan_cycle()
+        if not state["paused"]:
+            run_scan_cycle()
+        else:
+            logger.debug("Poller worker is paused. Skipping scan cycle.")
         time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 300)))
 
 @app.get("/api/health")
 async def health_check():
     """Heartbeat endpoint for the watchdog service."""
     return {"status": "ok"}
+
+@app.post("/api/toggle-pause")
+async def toggle_pause():
+    state["paused"] = not state["paused"]
+    logger.info(f"BugFixer autonomous operations {'PAUSED' if state['paused'] else 'RESUMED'}")
+    return {"status": "success", "paused": state["paused"]}
 
 @app.get("/")
 async def dashboard(request: Request):
@@ -2194,9 +2237,12 @@ async def get_models():
             resp.raise_for_status()
             tags_data = resp.json()
             for m in tags_data.get("models", []):
+                details = m.get("details", "No description available")
+                if not isinstance(details, str):
+                    details = details.get("description", str(details)) if isinstance(details, dict) else str(details)
                 results["local_models"].append({
                     "name": m["name"],
-                    "details": m.get("details", "No description available")
+                    "details": details
                 })
         except Exception as e:
             logger.error(f"Error fetching local models: {e}")
