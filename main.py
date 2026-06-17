@@ -496,7 +496,20 @@ def trigger_infrastructure_update():
     except Exception as e: return f"ERROR: {str(e)}"
 
 def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
-    """Searches across all monitored repositories for an existing open issue that matches the error."""
+    """Searches across all monitored repositories for an existing open issue that matches the error.
+
+    Returns a tuple (issue, repo_name) where repo_name is the repository in which the
+    duplicate issue was found. The repo_name is returned explicitly so callers do NOT
+    need to read repository metadata off the Issue object itself.
+
+    IMPORTANT: PyGithub's `Issue` object does not reliably expose a `.repo` attribute
+    (and `.repository` is not always populated depending on how the issue was fetched).
+    Historically the code attempted `existing_issue.repository.full_name` (and earlier
+    `existing_issue.repo`), which raised:
+        AttributeError: 'Issue' object has no attribute 'repo'
+    dozens of times during automated issue creation. Returning the repo_name from this
+    function eliminates that failure mode entirely.
+    """
     title_text = error_data['title'].lower()
     body_text = error_data['body'].lower()
 
@@ -505,28 +518,48 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
             repo = gh_current.get_repo(repo_name)
             open_issues = repo.get_issues(state='open')
             for issue in open_issues:
-                if title_text in issue.title.lower() or body_text in issue.body.lower():
-                    return issue
+                # Defensive: skip issues with no body to avoid AttributeError on .lower()
+                issue_body = issue.body or ""
+                if title_text in issue.title.lower() or body_text in issue_body.lower():
+                    return issue, repo_name
         except Exception as e:
             logger.debug(f"Could not search for duplicates in {repo_name}: {e}")
-    return None
+    return None, None
 
 def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
-    """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos."""
+    """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos.
+
+    This function deliberately does NOT access `existing_issue.repository` or
+    `existing_issue.repo` because the PyGithub `Issue` object does not reliably
+    expose those attributes. Instead, the repository where any duplicate was
+    found is returned by `find_global_duplicate_issue` and used directly here.
+    This fixes the recurring error:
+        'Issue' object has no attribute 'repo'
+    that was logged dozens of times during automated issue creation.
+    """
     try:
         title_text = error_data['title']
         body_text = error_data['body']
-        # Use the repo attribute if present, otherwise derive it from the repo object
-        current_repo_name = error_data.get('repo', gh_repo.full_name)
+        # Use the repo key if present in the error payload, otherwise derive it from
+        # the explicitly-provided Repository object. Note this is a dict key lookup,
+        # not an attribute access on an Issue object.
+        current_repo_name = error_data.get('repo') or gh_repo.full_name
 
-        # 1. Check for existing open issues globally to prevent duplicates
-        existing_issue = find_global_duplicate_issue(gh_current, monitored_repos, error_data)
+        # 1. Check for existing open issues globally to prevent duplicates.
+        #    find_global_duplicate_issue returns the repo_name where the duplicate
+        #    was found so we do not need to read it back off the Issue object.
+        existing_issue, duplicate_repo_name = find_global_duplicate_issue(gh_current, monitored_repos, error_data)
 
         if existing_issue:
-            logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {existing_issue.repository.full_name}. Adding info.")
+            # Use the repo name returned from the search; fall back to the current repo
+            # name if for some reason it is missing. Never access existing_issue.repo
+            # or existing_issue.repository here.
+            duplicate_repo_display = duplicate_repo_name or current_repo_name
+            logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {duplicate_repo_display}. Adding info.")
 
             # If the current log snippet isn't in the body, add it as a comment
-            if body_text.lower() not in existing_issue.body.lower():
+            existing_body = existing_issue.body or ""
+            if body_text.lower() not in existing_body.lower():
                 existing_issue.create_comment(
                     f"🤖 **BugFixer Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}:**\n\n"
                     f"```\n{body_text}\n```"
@@ -1289,7 +1322,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             )
             issue.create_comment(comment_body)
 
-            is_log_detected = "log-detected" in issue.get_labels()
+            is_log_detected = "log-detected" in [lbl.name for lbl in issue.get_labels()]
             if not is_log_detected:
                 issue.edit(state='closed')
 
@@ -1366,7 +1399,10 @@ def scan_hub_logs(gh_current, config):
             actionable_errors = analyze_logs_for_errors(hub_logs)
             monitored_repos = get_monitored_repos(config)
             for error in actionable_errors:
-                repo_name = error['repo']
+                repo_name = error.get('repo')
+                if not repo_name:
+                    logger.warning(f"Skipping actionable error with no repo specified: {error.get('title')}")
+                    continue
                 try:
                     repo_obj = gh_current.get_repo(repo_name)
                     create_automated_issue(gh_current, monitored_repos, repo_obj, error)
