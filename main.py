@@ -1617,11 +1617,19 @@ async def settings_page(request: Request):
     # Handle labels for the UI
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
+
+    # Fetch available models for dropdowns
+    model_data = get_models()
+    local_models = [m["name"] for m in model_data["local_models"]]
+    cloud_models = [m["name"] for m in model_data["cloud_models"]]
+
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
         "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]},
         "available_labels": state.get("available_labels", []),
-        "state": state
+        "state": state,
+        "local_models": local_models,
+        "cloud_models": cloud_models
     })
 
 @app.post("/save_settings")
@@ -1805,6 +1813,12 @@ async def restart_service():
     except Exception as e:
         logger.error(f"Restart failed: {e}")
         return {"status": "error", "message": str(e)}
+
+@app.post("/trigger_hub_update")
+async def trigger_hub_update():
+    """Triggers an update on all spokes and agents via the Hub API."""
+    result = trigger_infrastructure_update()
+    return {"status": "success" if "SUCCESS" in result else "error", "message": result}
 
 threading.Thread(target=connectivity_worker, daemon=True).start()
 threading.Thread(target=heartbeat_worker, daemon=True).start()
