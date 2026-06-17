@@ -242,3 +242,22 @@ def call_llm_with_retry(model_name, prompt, max_retries=6, base_delay=1.0, **kwa
                 raise
             time.sleep(base_delay)
     raise Exception(f"LLM call failed after {max_retries} attempts due to rate limiting")
+
+# Additional function to handle Hub logs JSON parsing safely
+# This addresses: "Expecting value: line 1 column 1 (char 0)" and HTML response handling
+def safe_json_response(response):
+    """
+    Safely parse JSON from response or log detailed error if content is non-JSON.
+    Returns None if parsing fails.
+    """
+    try:
+        return response.json()
+    except json.JSONDecodeError as e:
+        content_type = response.headers.get("Content-Type", "").lower()
+        content_preview = response.text[:200] if response.text else "(empty)"
+        logger.error(f"Failed to decode JSON from {response.url}. Status: {response.status_code}. "
+                    f"Content-Type: {content_type}. Content preview: {content_preview}...")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error parsing response JSON: {e}")
+        return None
