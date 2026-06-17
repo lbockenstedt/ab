@@ -1021,6 +1021,75 @@ def get_hub_state():
         logger.error(f"Hub State Fetch Error: {e}")
         return None
 
+def filter_error_logs(logs):
+    """Scrubs raw logs down to error-relevant entries before sending to the LLM.
+
+    Why: HubScan previously JSON-dumped the *entire* Hub log set (every INFO line,
+    last-500-lines-per-module file logs, recurring duplicates) into the LLM
+    prompt. That both bloated the prompt toward the model's context limit
+    (a likely cause of upstream HTTP 500s) and buried actionable errors in noise.
+
+    This keeps only entries whose 'log' text carries an error signature
+    ([ERROR]/[CRITICAL]/Traceback/Exception/Error/Failed), dedupes identical
+    lines per module (recurring errors appear dozens/hundreds of times in file
+    logs), and caps the total to bounded entry/character budgets so the prompt
+    can never overflow context regardless of log volume.
+
+    Schema-agnostic: handles the Hub shape {"module":..., "log":...} and the
+    SelfScan shape {"module":..., "timestamp":..., "log":...} equally, since it
+    only inspects the 'log' field (falling back to the stringified entry).
+    """
+    import re
+    if not logs:
+        return []
+
+    # ERROR/CRITICAL level tags plus common error signatures (tracebacks,
+    # raised exceptions, explicit "Error:"/"Failed"). WARNINGs are excluded:
+    # the LLM task is to find actionable *errors*, not routine warnings.
+    error_pattern = re.compile(
+        r'\[(ERROR|CRITICAL)\]|Traceback|Exception|Error[: ]|Failed|Traceback \(most recent call last\)',
+        re.IGNORECASE
+    )
+
+    cfg = load_config()
+    max_entries = int(cfg.get("LLM_LOG_MAX_ENTRIES", 200))
+    max_chars = int(cfg.get("LLM_LOG_MAX_CHARS", 60000))
+
+    seen = set()
+    kept = []
+    total_chars = 0
+    for entry in logs:
+        if isinstance(entry, dict):
+            module = str(entry.get('module', '') or '')
+            text = entry.get('log')
+            text = str(text) if text is not None else json.dumps(entry)
+        else:
+            module = ''
+            text = str(entry)
+
+        if not error_pattern.search(text):
+            continue
+
+        key = (module, text.strip())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        line_len = len(text) + len(module) + 16
+        if total_chars + line_len > max_chars:
+            logger.info(
+                f"filter_error_logs: reached {max_chars}-char budget after "
+                f"{len(kept)} entries; stopping."
+            )
+            break
+        kept.append(entry if isinstance(entry, dict) else {"module": "", "log": text})
+        total_chars += line_len
+        if len(kept) >= max_entries:
+            logger.info(f"filter_error_logs: reached {max_entries}-entry cap; stopping.")
+            break
+
+    return kept
+
 def analyze_logs_for_errors(logs):
     """Uses LLM to identify actionable errors in aggregated logs.
 
@@ -1931,7 +2000,19 @@ def scan_hub_logs(gh_current, config):
     try:
         hub_logs = get_hub_logs()
         if hub_logs:
-            actionable_errors = analyze_logs_for_errors(hub_logs)
+            # Scrub to error-relevant entries only before paying for an LLM
+            # call: keeps the prompt small (avoids context-overflow 500s) and
+            # focuses the model on actionable errors instead of INFO noise.
+            error_logs = filter_error_logs(hub_logs)
+            logger.info(
+                f"Hub logs scrubbed: {len(hub_logs)} entries -> {len(error_logs)} "
+                f"error-relevant entries for LLM analysis."
+            )
+            actionable_errors = []
+            if not error_logs:
+                logger.info("No error-level Hub log entries this cycle. Skipping LLM analysis.")
+            else:
+                actionable_errors = analyze_logs_for_errors(error_logs)
             monitored_repos = get_monitored_repos(config)
             for error in actionable_errors:
                 # Defensive: ensure error is a dict (analyze_logs_for_errors already
@@ -2141,7 +2222,15 @@ def scan_self_logs(gh_current, config):
             update_task_state(task_id="SelfScan", action="end")
             return
 
-        actionable_errors = analyze_logs_for_errors(formatted_logs)
+        # Dedupe + cap recurring self-errors before LLM analysis: the same
+        # error is logged many times per cycle, and sending every copy bloats
+        # the prompt and yields duplicate issues.
+        scrubbed_self_logs = filter_error_logs(formatted_logs)
+        logger.info(
+            f"Self logs scrubbed: {len(formatted_logs)} -> {len(scrubbed_self_logs)} "
+            f"unique error entries for LLM analysis."
+        )
+        actionable_errors = analyze_logs_for_errors(scrubbed_self_logs)
         if not actionable_errors:
             update_task_state(task_id="SelfScan", action="end")
             return
@@ -2331,11 +2420,14 @@ async def get_models():
             resp.raise_for_status()
             tags_data = resp.json()
             for m in tags_data.get("models", []):
+                name = m["name"]
+                if "bf16" in name:
+                    name = name[:name.find("bf16") + 4]
                 details = m.get("details", "No description available")
                 if not isinstance(details, str):
                     details = details.get("description", str(details)) if isinstance(details, dict) else str(details)
                 results["local_models"].append({
-                    "name": m["name"],
+                    "name": name,
                     "details": details
                 })
         except Exception as e:
