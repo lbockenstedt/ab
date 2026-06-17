@@ -1,4 +1,4 @@
-import os, json, time, tempfile, threading, requests, logging, traceback, py_compile
+import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
@@ -265,6 +265,126 @@ def is_local_llm_allowed():
             return True
     return False
 
+# ============================================================================
+# LLM Circuit Breaker & Global Rate Limiter
+# ----------------------------------------------------------------------------
+# When the Ollama API returns HTTP 429 (Too Many Requests) or sustained 5xx
+# errors, individual per-request retries alone are NOT sufficient: multiple
+# concurrent worker threads (ThreadPoolExecutor with up to 5 workers, each
+# running triage → identify-files → apply-fix → review → verify) can each
+# independently hammer the API, creating a cascade of hundreds of 429s in a
+# tight loop that floods the logs.
+#
+# The circuit breaker below provides a GLOBAL, cross-thread cooldown: when
+# ANY thread receives a 429, ALL threads pause before issuing their next
+# request.  This transforms a tight retry loop into an exponentially
+# backed-off, rate-limit-aware retry strategy.
+#
+# Additionally, a global semaphore limits the number of concurrent in-flight
+# HTTP requests to the LLM API, preventing burst overload.
+# ============================================================================
+
+_LLM_CB_LOCK = threading.Lock()
+_LLM_CB = {
+    "cooldown_until": 0.0,       # epoch timestamp; all threads pause until this time
+    "consecutive_429s": 0,       # reset to 0 on a successful request
+    "total_429s": 0,             # cumulative counter for diagnostics
+    "last_trip_reason": None,    # human-readable reason for last trip
+    "last_trip_time": None,      # ISO timestamp of last trip
+}
+
+def _llm_cb_wait():
+    """Block while the global LLM circuit breaker is in cooldown.
+
+    Every thread that is about to make an LLM HTTP request MUST call this
+    before issuing the request.  If the breaker is tripped (e.g., another
+    thread just got a 429), this function sleeps until the cooldown expires,
+    preventing a tight-loop hammer pattern.
+
+    A small random jitter is added when the cooldown ends to avoid a
+    thundering-herd of simultaneous retries.
+    """
+    while True:
+        with _LLM_CB_LOCK:
+            cd = _LLM_CB["cooldown_until"]
+        remaining = cd - time.time()
+        if remaining <= 0:
+            # Add jitter (0–1.5 s) so waiting threads don't all fire at once.
+            time.sleep(random.uniform(0, 1.5))
+            return
+        sleep_chunk = min(remaining, 5.0)
+        logger.warning(
+            f"LLM circuit breaker active — pausing {sleep_chunk:.1f}s "
+            f"({remaining:.1f}s remaining) to respect rate-limit cooldown."
+        )
+        time.sleep(sleep_chunk)
+
+def _llm_cb_trip(wait_time, reason="429"):
+    """Trip the global circuit breaker for ``wait_time`` seconds.
+
+    All threads currently in (or about to enter) ``_llm_cb_wait`` will pause
+    until the cooldown expires.  The cooldown is extended (never shortened)
+    if the breaker is already active, so repeated 429s compound the backoff.
+    """
+    wait_time = max(0.5, min(wait_time, 3600.0))  # clamp 0.5 s – 1 h
+    with _LLM_CB_LOCK:
+        new_cd = max(_LLM_CB["cooldown_until"], time.time() + wait_time)
+        _LLM_CB["cooldown_until"] = new_cd
+        _LLM_CB["consecutive_429s"] += 1
+        _LLM_CB["total_429s"] += 1
+        _LLM_CB["last_trip_reason"] = reason
+        _LLM_CB["last_trip_time"] = datetime.now().isoformat()
+        consecutive = _LLM_CB["consecutive_429s"]
+        total = _LLM_CB["total_429s"]
+    logger.warning(
+        f"LLM circuit breaker TRIPPED for {wait_time:.1f}s (reason={reason}). "
+        f"consecutive_429s={consecutive}, total_429s={total}. "
+        f"All LLM threads will pause."
+    )
+
+def _llm_cb_reset():
+    """Reset the consecutive-429 counter after a successful request."""
+    with _LLM_CB_LOCK:
+        if _LLM_CB["consecutive_429s"] > 0:
+            logger.info(
+                f"LLM circuit breaker reset after successful request "
+                f"(was consecutive_429s={_LLM_CB['consecutive_429s']}, "
+                f"total_429s={_LLM_CB['total_429s']})."
+            )
+            _LLM_CB["consecutive_429s"] = 0
+
+def _llm_cb_snapshot():
+    """Return a JSON-serialisable snapshot of circuit-breaker state for the dashboard."""
+    with _LLM_CB_LOCK:
+        cd = _LLM_CB["cooldown_until"]
+        return {
+            "active": cd > time.time(),
+            "cooldown_remaining_s": max(0, cd - time.time()),
+            "consecutive_429s": _LLM_CB["consecutive_429s"],
+            "total_429s": _LLM_CB["total_429s"],
+            "last_trip_reason": _LLM_CB["last_trip_reason"],
+            "last_trip_time": _LLM_CB["last_trip_time"],
+        }
+
+# Global concurrency limiter — caps the number of simultaneous in-flight LLM
+# HTTP requests across ALL threads.  Default 1 (fully serialised) is safest for
+# avoiding 429 cascades; raise via LLM_MAX_CONCURRENT if your API tier allows it.
+_LLM_SEMAPHORE = None
+_LLM_SEM_LOCK = threading.Lock()
+
+def _get_llm_semaphore():
+    global _LLM_SEMAPHORE
+    with _LLM_SEM_LOCK:
+        if _LLM_SEMAPHORE is None:
+            try:
+                cfg = load_config()
+                max_conc = int(cfg.get("LLM_MAX_CONCURRENT", 1))
+            except Exception:
+                max_conc = 1
+            _LLM_SEMAPHORE = threading.Semaphore(max(1, max_conc))
+            logger.info(f"LLM global concurrency limiter initialised: max_concurrent={max(1, max_conc)}")
+        return _LLM_SEMAPHORE
+
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None):
     """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming."""
@@ -316,18 +436,26 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             last_exception = None
             for attempt_num in range(max_retries + 1):
                 is_last_attempt = (attempt_num == max_retries)
+
+                # ---- GLOBAL CIRCUIT BREAKER ----
+                # Wait for any active cooldown before even attempting the request.
+                # This ensures that when one thread gets a 429, every other
+                # concurrent thread also pauses instead of hammering the API.
+                _llm_cb_wait()
+
                 try:
-                    resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
+                    # ---- GLOBAL CONCURRENCY LIMITER ----
+                    # Acquire the semaphore so at most LLM_MAX_CONCURRENT
+                    # HTTP requests are in flight at the same time.
+                    sem = _get_llm_semaphore()
+                    sem.acquire()
+                    try:
+                        resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
+                    finally:
+                        sem.release()
 
                     if resp.status_code == 429:
-                        if is_last_attempt:
-                            logger.error(
-                                f"LLM 429 Too Many Requests at {endpoint} "
-                                f"after {max_retries + 1} attempts (including initial). "
-                                f"Reporting as permanently failed."
-                            )
-                            resp.raise_for_status()
-
+                        # Parse Retry-After header (seconds or HTTP-date).
                         retry_after = resp.headers.get("Retry-After")
                         wait_time = None
                         if retry_after:
@@ -343,14 +471,32 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                                     wait_time = None
 
                         if wait_time is None or wait_time < 0:
-                            wait_time = min(backoff_base ** attempt_num, backoff_max)
+                            # Exponential backoff with jitter: base^attempt * (0.5–1.0)
+                            raw_backoff = min(backoff_base ** attempt_num, backoff_max)
+                            wait_time = raw_backoff * random.uniform(0.5, 1.0)
                         else:
                             wait_time = min(wait_time, backoff_max)
+
+                        # ---- TRIP THE GLOBAL CIRCUIT BREAKER ----
+                        # All other threads (and this one on its next attempt)
+                        # will pause for wait_time seconds, preventing a tight
+                        # loop of hundreds of 429s.
+                        _llm_cb_trip(wait_time, f"429 attempt {attempt_num + 1}/{max_retries + 1}")
+
+                        if is_last_attempt:
+                            logger.error(
+                                f"LLM 429 Too Many Requests at {endpoint} "
+                                f"after {max_retries + 1} attempts (including initial). "
+                                f"Reporting as permanently failed."
+                            )
+                            resp.close()
+                            resp.raise_for_status()
 
                         logger.warning(
                             f"LLM 429 Too Many Requests at {endpoint}. "
                             f"Backing off {wait_time:.1f}s before retry "
-                            f"(attempt {attempt_num + 1}/{max_retries + 1})."
+                            f"(attempt {attempt_num + 1}/{max_retries + 1}). "
+                            f"Global circuit breaker tripped."
                         )
                         resp.close()
                         time.sleep(wait_time)
@@ -368,13 +514,21 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         resp.raise_for_status()
 
                     if 500 <= resp.status_code < 600:
+                        # Exponential backoff with jitter for server errors.
+                        raw_backoff = min(backoff_base ** attempt_num, backoff_max)
+                        wait_time = raw_backoff * random.uniform(0.5, 1.0)
+
+                        # Trip circuit breaker for 5xx too, but with a shorter
+                        # cooldown since server errors are often transient.
+                        _llm_cb_trip(wait_time, f"{resp.status_code} attempt {attempt_num + 1}/{max_retries + 1}")
+
                         if is_last_attempt:
                             logger.error(
                                 f"LLM {resp.status_code} server error at {endpoint} "
                                 f"after {max_retries + 1} attempts. Reporting as permanently failed."
                             )
+                            resp.close()
                             resp.raise_for_status()
-                        wait_time = min(backoff_base ** attempt_num, backoff_max)
                         logger.warning(
                             f"LLM {resp.status_code} server error at {endpoint}. "
                             f"Backing off {wait_time:.1f}s before retry "
@@ -395,12 +549,17 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                             state["llm_stream"] = full_response
                             if task_id and task_id in state["active_tasks"]:
                                 state["active_tasks"][task_id]["stream"] = full_response
+
+                    # ---- RESET CIRCUIT BREAKER ON SUCCESS ----
+                    _llm_cb_reset()
                     return full_response
 
                 except requests.exceptions.HTTPError as e:
                     resp_status = e.response.status_code if e.response is not None else None
                     if not is_last_attempt and resp_status is not None and (resp_status == 429 or 500 <= resp_status < 600):
-                        wait_time = min(backoff_base ** attempt_num, backoff_max)
+                        raw_backoff = min(backoff_base ** attempt_num, backoff_max)
+                        wait_time = raw_backoff * random.uniform(0.5, 1.0)
+                        _llm_cb_trip(wait_time, f"HTTPError {resp_status} attempt {attempt_num + 1}/{max_retries + 1}")
                         logger.warning(
                             f"LLM {resp_status} (via HTTPError) at {endpoint}. "
                             f"Backing off {wait_time:.1f}s (attempt {attempt_num + 1}/{max_retries + 1})."
@@ -413,7 +572,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         requests.exceptions.ChunkedEncodingError) as e:
                     last_exception = e
                     if not is_last_attempt:
-                        wait_time = min(backoff_base ** attempt_num, backoff_max)
+                        raw_backoff = min(backoff_base ** attempt_num, backoff_max)
+                        wait_time = raw_backoff * random.uniform(0.5, 1.0)
+                        # Trip a short cooldown for transient network errors too,
+                        # so concurrent threads don't all retry at once.
+                        _llm_cb_trip(wait_time, f"transient {type(e).__name__} attempt {attempt_num + 1}/{max_retries + 1}")
                         logger.warning(
                             f"LLM transient error (attempt {attempt_num + 1}/{max_retries + 1}) "
                             f"at {endpoint}: {e}. Retrying in {wait_time:.1f}s..."
@@ -424,7 +587,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 except Exception as e:
                     last_exception = e
                     if not is_last_attempt:
-                        wait_time = min(backoff_base ** attempt_num, backoff_max)
+                        raw_backoff = min(backoff_base ** attempt_num, backoff_max)
+                        wait_time = raw_backoff * random.uniform(0.5, 1.0)
+                        _llm_cb_trip(wait_time, f"error {type(e).__name__} attempt {attempt_num + 1}/{max_retries + 1}")
                         logger.warning(
                             f"LLM error (attempt {attempt_num + 1}/{max_retries + 1}) "
                             f"at {endpoint}: {e}. Retrying in {wait_time:.1f}s..."
@@ -586,7 +751,8 @@ state = {
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init, "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": "",
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
-    "success_count": success_count, "failure_count": failure_count
+    "success_count": success_count, "failure_count": failure_count,
+    "llm_circuit_breaker": _llm_cb_snapshot()
 }
 
 # Validate LLM configuration on startup to fail fast with clear guidance
@@ -876,6 +1042,14 @@ def connectivity_worker():
                             f"Fix at http://localhost:8000/settings or in {ENV_FILE}, "
                             f"then restart: sudo systemctl restart bugfixer"
                         )
+                    elif resp.status_code == 429:
+                        state["cloud_online"] = False
+                        # Trip circuit breaker for connectivity 429s too
+                        _llm_cb_trip(60.0, "connectivity-worker 429")
+                        logger.warning(
+                            f"Hourly Cloud LLM connectivity check: 429 at {c_url}. "
+                            f"Tripping circuit breaker for 60s."
+                        )
                     else:
                         state["cloud_online"] = (resp.status_code == 200)
                 except Exception as e:
@@ -903,6 +1077,9 @@ def heartbeat_worker():
                     state["local_online"] = False
             else:
                 state["local_online"] = False
+
+            # Update circuit-breaker snapshot for dashboard visibility
+            state["llm_circuit_breaker"] = _llm_cb_snapshot()
 
             if state["force_cloud"]:
                 state["active_llm"] = "Cloud"
@@ -1940,6 +2117,7 @@ DEFAULT_ENV = {
     "LLM_MAX_RETRIES": "5",
     "LLM_BACKOFF_BASE": "2.0",
     "LLM_BACKOFF_MAX": "600.0",
+    "LLM_MAX_CONCURRENT": "1",
 }
 
 @app.get("/settings")
@@ -2021,6 +2199,7 @@ async def save_settings(request: Request):
         "LLM_MAX_RETRIES": lambda v: v,
         "LLM_BACKOFF_BASE": lambda v: v,
         "LLM_BACKOFF_MAX": lambda v: v,
+        "LLM_MAX_CONCURRENT": lambda v: v,
     }
 
 
@@ -2066,6 +2245,11 @@ async def save_settings(request: Request):
     with open(ENV_FILE, "w") as f:
         for k, v in env_vars.items():
             f.write(f"{k}={v}\n")
+
+    # Reset the LLM concurrency semaphore so the new LLM_MAX_CONCURRENT takes effect
+    global _LLM_SEMAPHORE
+    with _LLM_SEM_LOCK:
+        _LLM_SEMAPHORE = None
 
     try:
         validate_llm_config_on_startup()
