@@ -104,7 +104,20 @@ def load_config():
             "self_diagnosis_repo": ""
         }
 
-# [Remaining code unchanged up to run_scan_cycle] ...
+# New utility to validate OLLAMA API configuration
+# This prevents 401 Unauthorized by enforcing environment and config consistency
+def validate_ollama_config():
+    """Ensure OLLAMA_API_KEY is set if using Ollama cloud endpoints."""
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_api_key = os.getenv("OLLAMA_API_KEY", None)
+    
+    # If user explicitly configured a cloud endpoint, require API key
+    if "ollama.com" in ollama_base_url:
+        if not ollama_api_key:
+            logger.warning("OLLAMA_API_KEY not set, but OLLAMA_BASE_URL points to cloud endpoint. API calls will fail with 401 Unauthorized.")
+            return False
+    
+    return True
 
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
@@ -113,6 +126,11 @@ def run_scan_cycle():
         load_dotenv(override=True)
         config = load_config()
 
+        # Fail fast on misconfigured LLM if OLLAMA_BASE_URL is set to ollama.com
+        if not validate_ollama_config():
+            logger.error("LLM misconfiguration detected. Aborting scan cycle.")
+            return
+        
         state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         state["status"] = "Scanning"
         processed = load_processed()
@@ -120,7 +138,6 @@ def run_scan_cycle():
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
         if not token:
             logger.warning("No GitHub Token configured. Skipping scan.")
-            # Fix: Exit early instead of raising an exception
             return
         gh_current = Github(token)
         try:
@@ -149,7 +166,7 @@ def run_scan_cycle():
             for split_r in raw_repos.replace("\\n", ",").split(","):
                 cleaned = clean_repo_name(split_r)
                 if cleaned:
-                        monitored_repos.append(cleaned)
+                    monitored_repos.append(cleaned)
 
         monitored_repos = list(set(monitored_repos))
         if not monitored_repos:
@@ -185,48 +202,33 @@ def run_scan_cycle():
             except Exception as cleanup_err:
                 logger.debug(f"Cleanup for {cleanup_id} failed: {cleanup_err}")
 
-# [Rest of the file unchanged up to run_scan_cycle] ...
-
-# The fix involves modifying the LLM request function to properly handle keyword arguments,
-# especially removing the 'timeout' argument when it's not supported.
-
-# Placeholder for the missing function definition
-# Original error: call_llm.<locals>._request.<locals>.attempt_request() got an unexpected keyword argument 'timeout'
-# This typically occurs when 'timeout' is passed to requests.get/post but not supported by a wrapper function.
-
-# Suggested fix: Modify the call_llm function and its inner _request/attempt_request functions to:
-# 1. Check if 'timeout' is in kwargs before passing it to requests
-# 2. Handle ollama and other LLM providers correctly
-# 3. Use default timeouts where appropriate
-
-# Note: The original error suggests that somewhere in the code, 'timeout' is being passed to attempt_request()
-# but attempt_request() does not accept it. This needs to be fixed in the actual function definition.
-# Since the function definition is not provided in the original code, this fix assumes
-# a common pattern where timeout should be handled explicitly.
-
-# Fix: Add timeout handling in LLM calls
+# Suggested fix for LLM request retry logic, removing unsupported 'timeout' args
 import functools
 
 def safe_request(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         # Remove 'timeout' if not supported by the underlying function
-        timeout = kwargs.pop('timeout', None)
-        if timeout is not None:
-            logger.debug("Timeout parameter provided, ensuring it's handled appropriately")
+        # We pop 'timeout' to prevent it from being passed as a keyword arg to functions like ollama.generate
+        kwargs.pop('timeout', None)
         return func(*args, **kwargs)
     return wrapper
 
-# Placeholder LLM function fix for 429 rate limiting
+# Ollama generate wrapper to avoid passing invalid arguments
 @safe_request
 def call_llm_with_retry(model_name, prompt, max_retries=6, base_delay=1.0, **kwargs):
     """Calls the LLM with retry logic for 429 Too Many Requests errors."""
+    # Remove unsupported arguments before sending to ollama.generate
+    invalid_keys = {'timeout'}
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k not in invalid_keys}
+    
     for attempt in range(1, max_retries + 1):
         try:
-            response = ollama.generate(model=model_name, prompt=prompt, **kwargs)
+            response = ollama.generate(model=model_name, prompt=prompt, **filtered_kwargs)
             return response
         except ollama.ResponseError as e:
-            if "429" in str(e) and attempt < max_retries:
+            error_msg = str(e)
+            if "429" in error_msg and attempt < max_retries:
                 delay = base_delay * (2 ** (attempt - 1))
                 logger.warning(f"Rate limited (429). Retrying in {delay}s... (Attempt {attempt}/{max_retries})")
                 time.sleep(delay)
