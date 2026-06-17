@@ -1330,3 +1330,6 @@ Traceback (most recent call last):
   File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 712, in poller_worker
     prompt = (
 Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-16 20:43:41,484 [INFO] BugFixer started. Logging level: INFO. Logging to: /Users/lbockenstedt/vscode/bugfixer/bugfixer.log
+2026-06-16 20:43:41,637 [INFO] Checking for self-updates...
+2026-06-16 20:43:41,638 [INFO] Hourly Connectivity Check: Local=False, Cloud=False

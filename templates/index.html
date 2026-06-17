@@ -244,10 +244,15 @@
                             {% if info.status == 'fixed' or info.status == 'verified' %}
                                 <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
                                 <span class="mx-2 text-slate-300">|</span>
+                                <span class="font-semibold">Method:</span> {{ info.commit_type if info.commit_type else 'N/A' }}
+                                <span class="mx-2 text-slate-300">|</span>
+                                <span class="font-semibold">Reason:</span> {{ info.decision_reason if info.decision_reason else 'N/A' }}
+                                <span class="mx-2 text-slate-300">|</span>
                                 <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
                                 <span class="mx-2 text-slate-300">|</span>
                                 <span class="font-semibold">Date:</span> {{ info.timestamp }}
                             {% elif info.status == 'non-actionable' %}
+
                                 <span class="font-semibold text-orange-600">Reason:</span> {{ info.reason if info.reason else 'No details provided.' }}
                                 <span class="mx-2 text-slate-300">|</span>
                                 <span class="font-semibold">Date:</span> {{ info.timestamp }}
@@ -408,6 +413,14 @@
                                 <select name="CLOUD_OLLAMA_MODEL" id="cloud-model-select" data-current-cloud="{{ settings.CLOUD_OLLAMA_MODEL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <option value="">Select a model...</option>
                                 </select>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 1</label>
+                                <input type="text" name="REVIEWER_MODEL_1" value="{{ settings.REVIEWER_MODEL_1 }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. gemma4:31b-cloud">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 2</label>
+                                <input type="text" name="REVIEWER_MODEL_2" value="{{ settings.REVIEWER_MODEL_2 }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. gemma4:31b-cloud">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
