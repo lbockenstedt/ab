@@ -201,9 +201,12 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
         timeout_val = int(load_config().get("LLM_TIMEOUT", 900))
 
-        def attempt_request(endpoint, use_generate_api, timeout=None):
-            if timeout is None: timeout = 900
-
+        # FIX: attempt_request now explicitly accepts a `timeout` keyword argument
+        # (with a default of 900) so callers can safely pass timeout=<value>.
+        # Previously the signature omitted `timeout`, causing:
+        #   attempt_request() got an unexpected keyword argument 'timeout'
+        # which broke every LLM request.
+        def attempt_request(endpoint, use_generate_api, timeout=900):
             if use_generate_api:
                 full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
                 payload = {"model": model, "prompt": full_prompt, "stream": True}
