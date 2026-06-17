@@ -121,7 +121,7 @@
                         </span>
                     </div>
                     <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Model</span>
+                        <span class="text-slate-500">Models</span>
                         <div class="flex gap-2">
                             {% if state.local_online %}
                                 <span class="status-pill pill-online">LOCAL</span>
@@ -174,14 +174,6 @@
                                 <p class="text-slate-500 font-mono text-sm italic">Standing by for issues...</p>
                             </div>
                         {% endif %}
-                    </div>
-                    <div class="mt-6 space-y-2">
-                        <div class="flex justify-between items-center">
-                            <span class="text-slate-500 text-sm">Infrastructure Sync</span>
-                            <span class="text-xs {{ 'text-green-600' if 'SUCCESS' in state.api_status else 'text-slate-500' }}">
-                                {{ state.api_status }}
-                            </span>
-                        </div>
                     </div>
                 </div>
             </div>
