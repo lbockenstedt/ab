@@ -472,9 +472,17 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     Returns a tuple (issue, repo_name) where repo_name is the repository in which the
     duplicate issue was found. The repo_name is returned explicitly so callers do NOT
     need to read repository metadata off the Issue object itself.
+
+    Safely handles error_data payloads that may be missing the 'title' or 'body' keys
+    (the LLM may omit them). Missing fields are treated as empty strings so that the
+    deduplication search degrades gracefully instead of raising a KeyError.
     """
-    title_text = error_data['title'].lower()
-    body_text = error_data['body'].lower()
+    title_text = (error_data.get('title') or '').lower()
+    body_text = (error_data.get('body') or '').lower()
+
+    # If we have nothing to match against, there is no point scanning every repo.
+    if not title_text and not body_text:
+        return None, None
 
     for repo_name in monitored_repos:
         try:
@@ -489,10 +497,31 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     return None, None
 
 def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
-    """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos."""
+    """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos.
+
+    The 'body' field is required to create a meaningful issue. If it is missing or
+    empty, the function logs a warning and returns None instead of raising a
+    KeyError, which previously crashed automated issue creation with: 'body'.
+    """
     try:
-        title_text = error_data['title']
-        body_text = error_data['body']
+        title_text = error_data.get('title')
+        body_text = error_data.get('body')
+
+        # Ensure the body field is populated before attempting creation.
+        if not body_text or not str(body_text).strip():
+            logger.warning(
+                f"Skipping automated issue creation: 'body' field is missing or empty. "
+                f"Title was: {title_text!r}. Full error_data: {error_data}"
+            )
+            return None
+
+        if not title_text or not str(title_text).strip():
+            logger.warning(
+                f"Skipping automated issue creation: 'title' field is missing or empty. "
+                f"Body was: {str(body_text)[:120]!r}"
+            )
+            return None
+
         current_repo_name = error_data.get('repo') or gh_repo.full_name
 
         existing_issue, duplicate_repo_name = find_global_duplicate_issue(gh_current, monitored_repos, error_data)
@@ -589,14 +618,25 @@ def analyze_logs_for_errors(logs):
         "1. The module/repo it belongs to.\n"
         "2. A concise summary of the bug.\n"
         "3. The specific log snippet that proves the error.\n\n"
-        "Return ONLY a JSON array of objects: [{\"repo\": \"owner/repo\", \"title\": \"Error Summary\", \"body\": \"Log snippet and description\"}]"
+        "Return ONLY a JSON array of objects: [{\"repo\": \"owner/repo\", \"title\": \"Error Summary\", \"body\": \"Log snippet and description\"}]. "
+        "Every object MUST include non-empty 'repo', 'title', and 'body' fields."
     )
     try:
         res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.")
         import re
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:
-            return json.loads(match.group())
+            parsed = json.loads(match.group())
+            # Defensive: drop any entries that are not dicts or are missing required fields.
+            cleaned = []
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                if not entry.get('repo') or not entry.get('title') or not entry.get('body'):
+                    logger.debug(f"Dropping malformed log-analysis entry (missing repo/title/body): {entry}")
+                    continue
+                cleaned.append(entry)
+            return cleaned
         return []
     except Exception as e:
         logger.error(f"Error analyzing logs: {e}")
@@ -1316,6 +1356,10 @@ def scan_hub_logs(gh_current, config):
                 if not repo_name:
                     logger.warning(f"Skipping actionable error with no repo specified: {error.get('title')}")
                     continue
+                # Ensure the body field is populated before attempting creation.
+                if not error.get('body') or not str(error.get('body')).strip():
+                    logger.warning(f"Skipping actionable error with no body specified: {error.get('title')} (repo={repo_name})")
+                    continue
                 try:
                     repo_obj = gh_current.get_repo(repo_name)
                     create_automated_issue(gh_current, monitored_repos, repo_obj, error)
@@ -1429,6 +1473,10 @@ def scan_self_logs(gh_current, config):
 
         for error in actionable_errors:
             error['repo'] = self_repo_name
+            # Ensure the body field is populated before attempting creation.
+            if not error.get('body') or not str(error.get('body')).strip():
+                logger.warning(f"Skipping self-diagnosis error with no body specified: {error.get('title')}")
+                continue
             try:
                 repo_obj = gh_current.get_repo(self_repo_name)
                 monitored_repos = get_monitored_repos(config)
