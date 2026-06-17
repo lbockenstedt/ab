@@ -1034,6 +1034,46 @@ def updater_worker():
             logger.error(f"Updater worker error: {e}")
         time.sleep(3600)
 
+def find_existing_pull_request(repo_obj, target_branch, base_branch):
+    """Checks whether an open pull request already exists for the given head/base pair.
+
+    Uses a two-pronged approach for robustness:
+      1. Try GitHub's filtered query with just the branch name as the head
+         parameter (the correct format for same-repository PRs).
+      2. If that returns nothing, fall back to listing all open PRs and
+         manually comparing head.ref and base.ref attributes.
+
+    Previously, the code used \"owner:branch\" format (e.g. \"lbockenstedt:dev\")
+    as the head filter for same-repo PRs. For same-repo PRs, GitHub's API
+    expects just the bare branch name (e.g. \"dev\"). The \"owner:branch\
+    format caused get_pulls to silently return an empty list even when an
+    open PR existed, so the code proceeded to create_pull and received a
+    422 \"Validation Failed: A pull request already exists\" error.
+    """
+    existing_pr = None
+
+    # Approach 1: filtered query using bare branch name (correct for same-repo)
+    try:
+        existing_prs = repo_obj.get_pulls(state='open', head=target_branch, base=base_branch)
+        for pr_item in existing_prs:
+            existing_pr = pr_item
+            break
+    except Exception as e:
+        logger.warning(f"Filtered PR check failed for {target_branch} -> {base_branch}: {e}")
+
+    # Approach 2: manual scan of all open PRs as a fallback
+    if not existing_pr:
+        try:
+            all_open_prs = repo_obj.get_pulls(state='open')
+            for pr_item in all_open_prs:
+                if pr_item.head.ref == target_branch and pr_item.base.ref == base_branch:
+                    existing_pr = pr_item
+                    break
+        except Exception as e:
+            logger.warning(f"Manual PR scan failed for {target_branch} -> {base_branch}: {e}")
+
+    return existing_pr
+
 def process_single_issue(repo_name, issue_num, llm_preference=None):
     """Core logic to fix a single issue. Used by poller and manual triggers."""
     global state
@@ -1197,31 +1237,27 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 except:
                     repo_git.create_head(target_branch).checkout()
                 repo_git.remotes.origin.push(target_branch, force=True)
-                
-                # Check for existing open PR to avoid GitHub API 422 Validation Failed
-                head_ref = f"{repo_obj.owner.login}:{target_branch}"
+
+                # Check for existing open PR to avoid GitHub API 422 Validation Failed.
+                # For same-repository PRs, GitHub's API expects the head parameter to be
+                # just the branch name (e.g. "dev"), NOT the "owner:branch" format
+                # (e.g. "lbockenstedt:dev"). Using the wrong format caused the filtered
+                # query to silently return an empty list even when an open PR existed,
+                # which in turn caused create_pull to fail with a 422 error.
                 base_branch = config.get("default_branch", "main")
-                existing_prs = repo_obj.get_pulls(state='open', head=head_ref, base=base_branch)
-                existing_pr = None
-                try:
-                    for pr_item in existing_prs:
-                        existing_pr = pr_item
-                        break
-                except Exception as pre_check_err:
-                    logger.warning(f"Failed to check for existing PRs: {pre_check_err}")
-                    existing_pr = None
+                existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
 
                 if existing_pr:
                     pr = existing_pr
-                    logger.info(f"Found existing open PR for {head_ref} -> {base_branch}: {pr.html_url}")
+                    logger.info(f"Found existing open PR for {target_branch} -> {base_branch}: {pr.html_url}")
                 else:
                     pr = repo_obj.create_pull(
-                        title=f"AI Fix #{issue.number}", 
-                        body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}", 
-                        head=target_branch, 
+                        title=f"AI Fix #{issue.number}",
+                        body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}",
+                        head=target_branch,
                         base=base_branch
                     )
-                    logger.info(f"Created new PR for {head_ref} -> {base_branch}: {pr.html_url}")
+                    logger.info(f"Created new PR for {target_branch} -> {base_branch}: {pr.html_url}")
 
                 commit_type = "Pull Request"
                 detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
