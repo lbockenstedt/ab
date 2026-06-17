@@ -344,9 +344,12 @@ async def catch_exceptions_mid(request: Request, call_next):
             content={"message": "Internal Server Error. Check bugfixer.log for details.", "error": str(e)}
         )
 
+# Thread lock for safe concurrent access to active_tasks
+_task_state_lock = threading.Lock()
+
 def update_task_state(task_id, task_name="Unknown Task", action="start"):
     """Manages active tasks and their start times. action can be 'start' or 'end'.
-    
+
     task_name is optional and defaults to 'Unknown Task' to safely handle cases
     where a caller cannot provide a meaningful name (e.g. during error cleanup
     before the task name is known). This prevents the
@@ -359,16 +362,18 @@ def update_task_state(task_id, task_name="Unknown Task", action="start"):
         logger.debug("update_task_state called with no task_id; ignoring.")
         return
     if action == "start":
-        state["active_tasks"][task_id] = {
-            "name": task_name,
-            "start_time": datetime.now(),
-            "stream": ""
-        }
+        with _task_state_lock:
+            state["active_tasks"][task_id] = {
+                "name": task_name,
+                "start_time": datetime.now(),
+                "stream": ""
+            }
         logger.info(f"Task started: {task_id} - {task_name}")
     elif action == "end":
-        if task_id in state["active_tasks"]:
-            del state["active_tasks"][task_id]
-            logger.info(f"Task completed: {task_id}")
+        with _task_state_lock:
+            if task_id in state["active_tasks"]:
+                del state["active_tasks"][task_id]
+        logger.info(f"Task completed: {task_id}")
 
 # Initial state
 config_on_start = load_config()
@@ -1034,7 +1039,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             raise ge
 
         # --- Triage Phase ---
-        update_task_state(issue_id, f"Triaging {issue_id}")
+        update_task_state(issue_id, task_name=f"Triaging {issue_id}")
         actionable, request_msg = analyze_issue(issue)
         if not actionable:
             logger.info(f"Issue {repo_name}:{issue_num} is non-actionable: {request_msg}")
@@ -1068,7 +1073,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             error_context = None
 
             for attempt in range(1, max_attempts + 1):
-                update_task_state(issue_id, f"Fix Attempt {attempt}/{max_attempts} for {issue_id}")
+                update_task_state(issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}")
                 logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
                 fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud, task_id=issue_id)
 
@@ -1083,14 +1088,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         review_conf = confidence
                         review_verdict = "Approve"
                     else:
-                        update_task_state(issue_id, f"Reviewing {issue_id}")
+                        update_task_state(issue_id, task_name=f"Reviewing {issue_id}")
                         review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
                         review_conf = review.get("confidence", 0.0)
                         review_verdict = review.get("verdict", "Reject")
 
                     if config.get("qa_enabled", True):
                         prepare_environment(path)
-                        update_task_state(issue_id, f"Verifying {issue_id}")
+                        update_task_state(issue_id, task_name=f"Verifying {issue_id}")
                         verified, failure_msg = verify_fix(path, repo_name, config)
                     else:
                         logger.info("QA Testing disabled. Assuming verified.")
@@ -1282,7 +1287,7 @@ def verify_production_fixes(gh_current, processed):
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
-    update_task_state("HubScan", "Scanning Hub Logs")
+    update_task_state("HubScan", task_name="Scanning Hub Logs")
     logger.info("Scanning Hub for new errors...")
     hub_logs = get_hub_logs()
     if hub_logs:
@@ -1307,7 +1312,7 @@ def scan_repo_issues(gh_current, config, processed):
     max_workers = int(config.get("MAX_CONCURRENT_FIXES", 5))
 
     for repo_name in monitored_repos:
-        update_task_state("RepoScan", f"Checking {repo_name}")
+        update_task_state("RepoScan", task_name=f"Checking {repo_name}")
         logger.info(f"Scanning repository: {repo_name}")
         try:
             repo_obj = gh_current.get_repo(repo_name)
@@ -1350,7 +1355,7 @@ def scan_repo_issues(gh_current, config, processed):
 def scan_self_logs(gh_current, config):
     """Scans BugFixer's own logs and creates GitHub issues for internal errors."""
     global state
-    update_task_state("SelfScan", "Scanning Self Logs")
+    update_task_state("SelfScan", task_name="Scanning Self Logs")
     logger.info("Scanning internal BugFixer logs for errors...")
 
     log_path = get_log_path()
@@ -1465,7 +1470,7 @@ def run_scan_cycle():
             logger.warning("No monitored repositories configured. Skipping scan.")
 
         # --- Label Discovery Phase ---
-        update_task_state("Discovery", "Discovering Labels")
+        update_task_state("Discovery", task_name="Discovering Labels")
         state["available_labels"] = discover_labels(gh_current, monitored_repos)
         logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
         update_task_state("Discovery", action="end")
