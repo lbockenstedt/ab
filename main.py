@@ -198,6 +198,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
                 if resp.status_code == 401:
                     logger.error(f"LLM 401 Unauthorized at {endpoint}. Verify OLLAMA_API_KEY.")
+                    resp.raise_for_status() # Raise here to trigger failover
                 resp.raise_for_status()
                 full_response = ""
                 for line in resp.iter_lines():
@@ -763,9 +764,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             # For now, I'll wrap the call. Since call_llm uses config, I'll need to modify it.
             # Let's fix call_llm first.
             res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
-                           force_cloud=r["force_cloud"], task_id=task_id)
-            # NOTE: This is a bug in my current plan. call_llm doesn't take the specific model.
-            # I will fix call_llm in the next edit.
+                           force_cloud=r["force_cloud"], task_id=task_id, model_override=r.get("model"))
 
             import re
             match = re.search(r'\{.*\}', res, re.DOTALL)
@@ -1089,7 +1088,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 pr = repo_obj.create_pull(title=f"AI Fix #{issue.number}", body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}", head=target_branch, base=config["default_branch"])
                 commit_type = "Pull Request"
                 detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
-
 
 
             files_list = ", ".join(fixes.keys()) if fixes else "No files changed"
