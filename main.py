@@ -1801,11 +1801,17 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         return False, str(e)
 
 def verify_production_fixes(gh_current, processed):
-    """Verify issues that were 'fixed' but are awaiting log confirmation."""
+    """Verify issues that were 'fixed' but are awaiting log confirmation.
+    Now implements a configurable 'cooling period' (PROD_VERIFICATION_DAYS).
+    The issue is only closed if the error snippet has been absent for the full period.
+    """
+    config = load_config()
+    days_required = int(config.get("PROD_VERIFICATION_DAYS", 7))
+
     for issue_id, info in list(processed.items()):
         if info.get("status") == "awaiting_prod_verification":
             repo_name, issue_num = issue_id.split(":")
-            logger.info(f"Verifying production fix for {issue_id}...")
+            logger.info(f"Verifying production fix for {issue_id} (Required clean period: {days_required} days)...")
             try:
                 repo_obj = gh_current.get_repo(repo_name)
                 issue = repo_obj.get_issue(int(issue_num))
@@ -1821,13 +1827,34 @@ def verify_production_fixes(gh_current, processed):
                     if match:
                         snippet = match.group(1).strip()
                         if snippet.lower() not in full_log_text.lower():
-                            logger.info(f"Verified: Error snippet no longer found in logs for {issue_id}. Closing issue.")
-                            issue.create_comment("🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. Closing issue.")
-                            issue.edit(state='closed')
-                            processed[issue_id]["status"] = "verified"
-                            state["success_count"] += 1
-                            save_processed(processed)
+                            # Snippet is gone. Check if we've been clean long enough.
+                            clean_since = info.get("clean_since")
+                            now = datetime.now()
+
+                            if not clean_since:
+                                logger.info(f"Issue {issue_id} is clean. Starting {days_required}-day cooling period.")
+                                info["clean_since"] = now.isoformat()
+                                processed[issue_id] = info
+                                save_processed(processed)
+                            else:
+                                first_clean_ts = datetime.fromisoformat(clean_since)
+                                days_clean = (now - first_clean_ts).days
+                                if days_clean >= days_required:
+                                    logger.info(f"Verified: Issue {issue_id} has been clean for {days_clean} days. Closing issue.")
+                                    issue.create_comment(f"🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
+                                    issue.edit(state='closed')
+                                    processed[issue_id]["status"] = "verified"
+                                    state["success_count"] += 1
+                                    save_processed(processed)
+                                else:
+                                    logger.info(f"Issue {issue_id} is clean, but only for {days_clean}/{days_required} days. Waiting...")
                         else:
+                            # Error reappeared. Reset the clean timer.
+                            if info.get("clean_since"):
+                                logger.warning(f"Issue {issue_id} error reappeared in logs. Resetting cooling period.")
+                                info["clean_since"] = None
+                                processed[issue_id] = info
+                                save_processed(processed)
                             logger.info(f"Issue {issue_id} still failing in production logs.")
             except Exception as e:
                 logger.error(f"Error verifying {issue_id}: {e}")
@@ -2334,6 +2361,7 @@ DEFAULT_ENV = {
     "LLM_BACKOFF_BASE": "2.0",
     "LLM_BACKOFF_MAX": "600.0",
     "LLM_MAX_CONCURRENT": "1",
+    "PROD_VERIFICATION_DAYS": "7",
 }
 
 @app.get("/settings")
@@ -2438,6 +2466,7 @@ async def save_settings(request: Request):
         "LLM_BACKOFF_BASE": lambda v: v,
         "LLM_BACKOFF_MAX": lambda v: v,
         "LLM_MAX_CONCURRENT": lambda v: v,
+        "PROD_VERIFICATION_DAYS": lambda v: v,
         "self_diagnosis_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
     }
 
@@ -2563,6 +2592,29 @@ async def retry_issue(request: Request):
 
     threading.Thread(target=run_fix, daemon=True).start()
     return {"status": "triggered", "message": f"Retry started for {issue_id}"}
+
+@app.post("/retry_all_failed")
+async def retry_all_failed(request: Request):
+    """Retries all issues that currently have a 'failed' or 'non-actionable' status with a given LLM preference."""
+    data = await request.json()
+    llm_pref = data.get("llm_preference")
+
+    processed = load_processed()
+    to_retry = [issue_id for issue_id, info in processed.items()
+                if info.get("status") in ["failed", "non-actionable"]]
+
+    if not to_retry:
+        return {"status": "no_issues", "message": "No failed or non-actionable issues found to retry."}
+
+    logger.info(f"Bulk retry triggered for {len(to_retry)} issues with preference {llm_pref}: {to_retry}")
+
+    def bulk_run():
+        for issue_id in to_retry:
+            repo_name, issue_num = issue_id.split(":")
+            process_single_issue(repo_name, int(issue_num), llm_preference=llm_pref)
+
+    threading.Thread(target=bulk_run, daemon=True).start()
+    return {"status": "triggered", "message": f"Bulk retry started for {len(to_retry)} issues using {llm_pref} LLM."}
 
 @app.post("/restart")
 async def restart_service():

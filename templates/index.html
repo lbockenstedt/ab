@@ -215,6 +215,14 @@
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
                 <h3 class="text-lg font-semibold text-slate-800">Activity Feed</h3>
                 <div class="flex gap-2 items-center">
+                    <div class="flex gap-2 items-center mr-4 border-r border-slate-200 pr-4">
+                        <button onclick="retryAll('local')" class="px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-all border border-blue-200">
+                            <i class="fas fa-redo-alt mr-1"></i> Retry All (Local)
+                        </button>
+                        <button onclick="retryAll('cloud')" class="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-all border border-green-200">
+                            <i class="fas fa-cloud mr-1"></i> Retry All (Cloud)
+                        </button>
+                    </div>
                     <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
                     <button onclick="filterActivity('all')" class="filter-btn active px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">All</button>
                     <button onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Fixed</button>
@@ -223,6 +231,7 @@
                     <i class="fas fa-history text-slate-400 ml-4"></i>
                 </div>
             </div
+
 >
             <table class="w-full text-left text-sm">
                 <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
@@ -516,6 +525,10 @@
                                 <label class="text-sm font-medium text-slate-600">Max Concurrent Fixes</label>
                                 <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Prod Verification Days</label>
+                                <input type="number" name="PROD_VERIFICATION_DAYS" value="{{ settings.PROD_VERIFICATION_DAYS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
                         </div>
                         <div class="space-y-2 pt-6">
                             <label class="text-sm font-medium text-slate-600">Trigger Labels</label>
@@ -801,6 +814,20 @@
                 }
             } catch (e) {
                 alert('Failed to toggle pause state');
+            }
+        }
+
+        async function retryAll(preference) {
+            try {
+                const resp = await fetch('/retry_all_failed', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ llm_preference: preference })
+                });
+                const data = await resp.json();
+                alert(data.message || (data.status === 'triggered' ? 'Bulk retry started!' : 'Error retrying all failures.'));
+            } catch (e) {
+                alert('Request failed: ' + e);
             }
         }
 
