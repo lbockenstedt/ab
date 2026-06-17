@@ -1453,7 +1453,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             version_bumped = False
             new_v = None
-            if can_direct_push and final_confidence >= confidence_threshold and final_verdict == "Approve":
+            if can_direct_push and final_verdict == "Approve":
                 new_v = bump_repo_version(path)
                 if new_v:
                     version_bumped = True
