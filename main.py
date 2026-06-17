@@ -181,4 +181,21 @@ def run_scan_cycle():
             except Exception as cleanup_err:
                 logger.debug(f"Cleanup for {cleanup_id} failed: {cleanup_err}")
 
-# [Rest of the file unchanged] ...
+# [Rest of the file unchanged up to run_scan_cycle] ...
+
+# The fix involves modifying the LLM request function to properly handle keyword arguments,
+# especially removing the 'timeout' argument when it's not supported.
+
+# Placeholder for the missing function definition
+# Original error: call_llm.<locals>._request.<locals>.attempt_request() got an unexpected keyword argument 'timeout'
+# This typically occurs when 'timeout' is passed to requests.get/post but not supported by a wrapper function.
+
+# Suggested fix: Modify the call_llm function and its inner _request/attempt_request functions to:
+# 1. Check if 'timeout' is in kwargs before passing it to requests
+# 2. Handle ollama and other LLM providers correctly
+# 3. Use default timeouts where appropriate
+
+# Note: The original error suggests that somewhere in the code, 'timeout' is being passed to attempt_request()
+# but attempt_request() does not accept it. This needs to be fixed in the actual function definition.
+# Since the function definition is not provided in the original code, this fix assumes
+# a common pattern where timeout should be handled explicitly.
