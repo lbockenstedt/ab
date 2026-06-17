@@ -639,6 +639,7 @@ def analyze_issue(issue):
         f"{full_context}\n\n"
         f"Determine if this issue contains enough information to provide a code fix. \n"
         f"{strictness_instruction}\n"
+        f"Note: If this is an automated log alert, the provided log snippet is the primary evidence. Do not request a stack trace if a clear error is already present in the logs.\n"
         f"If information is missing, specify exactly what is needed (e.g., 'Please provide the browser console output').\n\n"
         "Return ONLY a JSON object: {\"actionable\": boolean, \"request\": \"message if not actionable\"}"
     )
@@ -1345,31 +1346,53 @@ async def get_task_details(task_id: str = None):
 
 @app.get("/api/models")
 async def get_models():
-    """Fetches available models from the local Ollama instance and returns enabled models from config."""
+    """Fetches available models from both local and cloud Ollama instances."""
     config = load_config()
     l_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
-    if not l_url:
-        return JSONResponse(status_code=400, content={"error": "LOCAL_OLLAMA_URL not configured"})
+    c_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
+    api_key = config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
 
-    try:
-        resp = requests.get(f"{l_url.rstrip('/')}/api/tags", timeout=10)
-        resp.raise_for_status()
-        tags_data = resp.json()
+    results = {
+        "local_models": [],
+        "cloud_models": [],
+        "enabled_models": config.get("enabled_models", [])
+    }
 
-        available_models = []
-        for m in tags_data.get("models", []):
-            available_models.append({
-                "name": m["name"],
-                "details": m.get("details", "No description available")
-            })
+    # Fetch Local Models
+    if l_url:
+        try:
+            resp = requests.get(f"{l_url.rstrip('/')}/api/tags", timeout=10)
+            resp.raise_for_status()
+            tags_data = resp.json()
+            for m in tags_data.get("models", []):
+                results["local_models"].append({
+                    "name": m["name"],
+                    "details": m.get("details", "No description available")
+                })
+        except Exception as e:
+            logger.error(f"Error fetching local models: {e}")
 
-        return {
-            "available_models": available_models,
-            "enabled_models": config.get("enabled_models", [])
-        }
-    except Exception as e:
-        logger.error(f"Error fetching models from Ollama: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    # Fetch Cloud Models
+    if c_url:
+        try:
+            headers = {}
+            if api_key:
+                clean_key = api_key.strip().strip('"').strip("'")
+                token_only = clean_key.replace("Bearer ", "").strip()
+                headers["Authorization"] = f"Bearer {token_only}"
+
+            resp = requests.get(f"{c_url.rstrip('/')}/api/tags", headers=headers, timeout=10)
+            resp.raise_for_status()
+            tags_data = resp.json()
+            for m in tags_data.get("models", []):
+                results["cloud_models"].append({
+                    "name": m["name"],
+                    "details": m.get("details", "No description available")
+                })
+        except Exception as e:
+            logger.error(f"Error fetching cloud models: {e}")
+
+    return results
 
 @app.post("/api/toggle-model")
 async def toggle_model(request: Request):

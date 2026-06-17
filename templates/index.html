@@ -391,7 +391,7 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Local Model</label>
-                                <select name="LOCAL_OLLAMA_MODEL" id="local-model-select" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <select name="LOCAL_OLLAMA_MODEL" id="local-model-select" data-current-local="{{ settings.LOCAL_OLLAMA_MODEL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <option value="">Select a model...</option>
                                 </select>
                             </div>
@@ -405,7 +405,7 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Cloud Model</label>
-                                <select name="CLOUD_OLLAMA_MODEL" id="cloud-model-select" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <select name="CLOUD_OLLAMA_MODEL" id="cloud-model-select" data-current-cloud="{{ settings.CLOUD_OLLAMA_MODEL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <option value="">Select a model...</option>
                                 </select>
                             </div>
@@ -762,36 +762,42 @@
                 if (!resp.ok) throw new Error('Failed to fetch models');
                 const data = await resp.json();
 
-                const { available_models, enabled_models } = data;
+                const { local_models, cloud_models, enabled_models } = data;
 
                 // Render the model management list
                 container.innerHTML = '';
-                if (available_models.length === 0) {
-                    container.innerHTML = '<div class="text-center text-slate-400 italic text-xs py-4">No models found on Ollama server.</div>';
+                if (local_models.length === 0 && cloud_models.length === 0) {
+                    container.innerHTML = '<div class="text-center text-slate-400 italic text-xs py-4">No models found on Ollama servers.</div>';
                 } else {
-                    available_models.forEach(model => {
-                        const isEnabled = enabled_models.includes(model.name);
-                        const item = document.createElement('div');
-                        item.className = 'flex items-center justify-between p-2 bg-white rounded-lg border border-slate-200 hover:border-slate-300 transition-all';
-                        item.innerHTML = `
-                            <div class="flex flex-col">
-                                <span class="text-xs font-bold text-slate-700">${model.name}</span>
-                                <span class="text-[10px] text-slate-500 italic">${model.details}</span>
-                            </div>
-                            <button onclick="toggleModel('${model.name}', ${!isEnabled})"
-                                    class="text-xs px-3 py-1 rounded-full font-bold transition-all ${isEnabled ? 'bg-green-100 text-green-700 border border-green-200' : 'bg-slate-100 text-slate-600 border border-slate-300'}">
-                                ${isEnabled ? 'Enabled' : 'Enable'}
-                            </button>
-                        `;
-                        container.appendChild(item);
-                    });
+                    const renderSection = (title, models, isCloud) => {
+                        if (models.length === 0) return '';
+                        let html = `<div class="mb-3"><span class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">${title}</span><div class="space-y-2 mt-1">`;
+                        models.forEach(model => {
+                            const isEnabled = enabled_models.includes(model.name);
+                            html += `
+                                <div class="flex items-center justify-between p-2 bg-white rounded-lg border border-slate-200 hover:border-slate-300 transition-all">
+                                    <div class="flex flex-col">
+                                        <span class="text-xs font-bold text-slate-700">${model.name}</span>
+                                        <span class="text-[10px] text-slate-500 italic">${model.details}</span>
+                                    </div>
+                                    <button onclick="toggleModel('${model.name}', ${!isEnabled})"
+                                            class="text-xs px-3 py-1 rounded-full font-bold transition-all ${isEnabled ? 'bg-green-100 text-green-700 border border-green-200' : 'bg-slate-100 text-slate-600 border border-slate-300'}">
+                                        ${isEnabled ? 'Enabled' : 'Enable'}
+                                    </button>
+                                </div>`;
+                        });
+                        html += `</div></div>`;
+                        return html;
+                    };
+
+                    container.innerHTML = renderSection('Local Models', local_models, false) + renderSection('Cloud Models', cloud_models, true);
                 }
 
-                updateModelDropdowns(enabled_models, available_models);
+                updateModelDropdowns(enabled_models, local_models, cloud_models);
 
             } catch (e) {
                 console.error('Model fetch error:', e);
-                container.innerHTML = '<div class="text-center text-red-500 italic text-xs py-4">Error loading models. Check Local LLM URL.</div>';
+                container.innerHTML = '<div class="text-center text-red-500 italic text-xs py-4">Error loading models. Check LLM URLs.</div>';
             }
         }
 
@@ -804,34 +810,34 @@
                 });
                 const data = await resp.json();
                 if (data.status === 'success') {
-                    // We need the full list again to get descriptions for the dropdowns
-                    const modelsResp = await fetch('/api/models');
-                    const modelsData = await modelsResp.json();
-                    updateModelDropdowns(data.enabled_models, modelsData.available_models);
-                    fetchModels(); // Refresh list and toggles
+                    fetchModels(); // Refresh list and dropdowns
                 }
             } catch (e) {
                 console.error('Toggle model error:', e);
             }
         }
 
-        function updateModelDropdowns(enabledModels, availableModels = []) {
+        function updateModelDropdowns(enabledModels, localAvailable = [], cloudAvailable = []) {
             const localSelect = document.getElementById('local-model-select');
             const cloudSelect = document.getElementById('cloud-model-select');
             if (!localSelect || !cloudSelect) return;
 
-            const currentLocal = localSelect.value;
-            const currentCloud = cloudSelect.value;
+            const currentLocal = localSelect.dataset.currentLocal;
+            const currentCloud = cloudSelect.dataset.currentCloud;
 
-            const optionsHtml = enabledModels.map(name => {
-                const model = availableModels.find(m => m.name === name);
-                const desc = model ? ` - ${model.details}` : '';
-                return `<option value="${name}">${name}${desc}</option>`;
-            }).join('');
+            const buildOptions = (available) => {
+                return enabledModels
+                    .filter(name => available.some(m => m.name === name))
+                    .map(name => {
+                        const model = available.find(m => m.name === name);
+                        const desc = model ? ` - ${model.details}` : '';
+                        return `<option value="${name}">${name}${desc}</option>`;
+                    }).join('');
+            };
+
             const defaultOption = `<option value="">Select a model...</option>`;
-
-            localSelect.innerHTML = defaultOption + optionsHtml;
-            cloudSelect.innerHTML = defaultOption + optionsHtml;
+            localSelect.innerHTML = defaultOption + buildOptions(localAvailable);
+            cloudSelect.innerHTML = defaultOption + buildOptions(cloudAvailable);
 
             if (enabledModels.includes(currentLocal)) localSelect.value = currentLocal;
             if (enabledModels.includes(currentCloud)) cloudSelect.value = currentCloud;
