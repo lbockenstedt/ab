@@ -147,6 +147,96 @@ def get_version():
         with open(VERSION_FILE, "r") as f: return f.read().strip()
     except: return "Unknown"
 
+
+def validate_llm_config_on_startup():
+    """Validates LLM configuration on startup and provides clear, actionable guidance.
+
+    Specifically checks that OLLAMA_API_KEY is present and valid when a Cloud Ollama
+    URL is configured. A missing or invalid key causes EVERY cloud LLM request to fail
+    with HTTP 401 Unauthorized, which recurs extensively and floods the logs.
+
+    By validating once at startup we surface the misconfiguration immediately with
+    concrete remediation steps (dashboard URL, .env path, restart command) instead
+    of waiting for the first failed LLM call.
+
+    Returns True if configuration looks valid (or cannot be verified due to network
+    issues), False if a definite misconfiguration is detected.
+    """
+    config = load_config()
+    c_url = (config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL") or "").strip()
+    api_key = (config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY") or "").strip().strip('"').strip("'")
+
+    # No cloud URL configured -> nothing to validate.
+    if not c_url:
+        logger.info("Startup LLM validation: No cloud Ollama URL configured. Skipping API key check.")
+        return True
+
+    is_cloud_host = ("ollama.com" in c_url) or ("api.ollama" in c_url)
+
+    if is_cloud_host and not api_key:
+        logger.error(
+            "\n" + "=" * 78 + "\n"
+            "!!  CRITICAL LLM CONFIGURATION WARNING  !!\n"
+            "A Cloud Ollama URL is configured but OLLAMA_API_KEY is MISSING or EMPTY.\n"
+            f"  Cloud URL : {c_url}\n"
+            "Every cloud LLM request will fail with HTTP 401 Unauthorized.\n\n"
+            "HOW TO FIX:\n"
+            "  1. Open the BugFixer dashboard: http://localhost:8000/settings\n"
+            "  2. Enter your OLLAMA_API_KEY in the Settings form and click Save, OR\n"
+            "  3. Manually add this line to /etc/bugfixer/.env :\n"
+            "       OLLAMA_API_KEY=<your-secret-key>\n"
+            "  4. Restart the service: sudo systemctl restart bugfixer\n"
+            + "=" * 78
+        )
+        return False
+
+    # If we have both a cloud URL and a key, attempt a lightweight live validation
+    # so we catch an expired/revoked key immediately rather than on first request.
+    if is_cloud_host:
+        try:
+            token_only = api_key.replace("Bearer ", "").strip()
+            headers = {"Authorization": f"Bearer {token_only}"}
+            test_resp = requests.get(f"{c_url.rstrip('/')}/api/tags", headers=headers, timeout=15)
+            if test_resp.status_code == 401:
+                logger.error(
+                    "\n" + "=" * 78 + "\n"
+                    "!!  CRITICAL LLM CONFIGURATION WARNING  !!\n"
+                    "OLLAMA_API_KEY is set but the Cloud Ollama API rejected it (401 Unauthorized).\n"
+                    f"  Cloud URL : {c_url}\n"
+                    "The key may be expired, revoked, or pasted incorrectly.\n\n"
+                    "HOW TO FIX:\n"
+                    "  1. Verify the key is correct and still active in your Ollama account.\n"
+                    "  2. Update it via http://localhost:8000/settings, OR\n"
+                    "  3. Edit /etc/bugfixer/.env and restart: sudo systemctl restart bugfixer\n"
+                    + "=" * 78
+                )
+                return False
+            elif test_resp.status_code == 200:
+                logger.info("Startup LLM validation: Cloud OLLAMA_API_KEY is valid and reachable.")
+                return True
+            else:
+                logger.warning(
+                    f"Startup LLM validation: Cloud returned unexpected status "
+                    f"{test_resp.status_code}. Proceeding, but watch the logs."
+                )
+                return True
+        except requests.exceptions.ConnectionError:
+            logger.warning(
+                f"Startup LLM validation: Could not reach cloud URL {c_url} (connection error). "
+                f"The key will be validated on the first real LLM request."
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                f"Startup LLM validation: Skipping live key check due to error: {e}. "
+                f"The key will be validated on the first real LLM request."
+            )
+            return True
+
+    # Non-cloud URL configured (e.g., self-hosted remote). No managed-cloud key required.
+    logger.info(f"Startup LLM validation: Cloud URL '{c_url}' is not a managed cloud host; skipping API key check.")
+    return True
+
 load_dotenv(ENV_FILE)
 app = FastAPI()
 
@@ -211,6 +301,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         # exponential backoff for 429 (Too Many Requests) and 5xx server errors.
         # Previously, any 429 was immediately raised as a permanent failure without
         # any backoff, causing premature LLM request failures.
+        #
+        # FIX: 401 Unauthorized now logs the key state (MISSING vs set/invalid) and
+        # prints concrete remediation guidance (dashboard URL, .env path, restart
+        # command). 401 is intentionally NOT retried because credentials are static
+        # for the process lifetime; retrying would just spam the log.
         def attempt_request(endpoint, use_generate_api, timeout=900):
             if use_generate_api:
                 full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
@@ -287,7 +382,17 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         continue
 
                     if resp.status_code == 401:
-                        logger.error(f"LLM 401 Unauthorized at {endpoint}. Verify OLLAMA_API_KEY.")
+                        # Provide clear, actionable configuration guidance so the
+                        # operator can fix the root cause (missing/invalid key)
+                        # instead of just seeing a bare 401 in the logs.
+                        key_state = "MISSING" if not api_key else f"set but INVALID (length={len(api_key)})"
+                        logger.error(
+                            f"LLM 401 Unauthorized at {endpoint}. "
+                            f"OLLAMA_API_KEY is {key_state}. "
+                            f"To fix: open http://localhost:8000/settings and set OLLAMA_API_KEY, "
+                            f"or add 'OLLAMA_API_KEY=<your-key>' to {ENV_FILE}, "
+                            f"then run: sudo systemctl restart bugfixer"
+                        )
                         resp.raise_for_status()
 
                     # --- 5xx server errors: retry with exponential backoff ---
@@ -324,6 +429,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 except requests.exceptions.HTTPError as e:
                     resp_status = e.response.status_code if e.response is not None else None
                     # Safety net: retry 429 and 5xx that slipped through explicit checks.
+                    # 401 is deliberately NOT retried - credentials are static for the
+                    # process lifetime, so retrying would only spam the log without
+                    # any chance of success.
                     if not is_last_attempt and resp_status is not None and (resp_status == 429 or 500 <= resp_status < 600):
                         wait_time = min(backoff_base ** attempt_num, backoff_max)
                         logger.warning(
@@ -515,6 +623,15 @@ state = {
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count
 }
+
+# Validate LLM configuration on startup to fail fast with clear guidance
+# instead of letting every subsequent LLM call fail with 401 Unauthorized.
+# This is non-fatal: we still start the service so the operator can reach
+# the dashboard at /settings and fix the configuration.
+try:
+    validate_llm_config_on_startup()
+except Exception as ve:
+    logger.warning(f"Startup LLM validation failed (non-fatal): {ve}")
 
 def clean_repo_name(name):
     """Converts a full GitHub URL or a 'user/repo' string into 'user/repo' format."""
@@ -791,9 +908,24 @@ def connectivity_worker():
                     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
                     payload = {"model": c_mod, "prompt": "ping", "stream": False}
                     resp = requests.post(f"{c_url.rstrip('/')}/api/generate", json=payload, headers=headers, timeout=10)
-                    state["cloud_online"] = (resp.status_code == 200)
-                except:
+                    # FIX: Explicitly detect 401 so we can give the operator clear,
+                    # actionable guidance instead of silently flipping cloud_online
+                    # to False with no explanation (which previously hid the root
+                    # cause: a missing or invalid OLLAMA_API_KEY).
+                    if resp.status_code == 401:
+                        state["cloud_online"] = False
+                        key_state = "MISSING" if not api_key else "INVALID (rejected by cloud)"
+                        logger.error(
+                            f"Hourly Cloud LLM connectivity check: 401 Unauthorized at {c_url}. "
+                            f"OLLAMA_API_KEY is {key_state}. "
+                            f"Fix at http://localhost:8000/settings or in {ENV_FILE}, "
+                            f"then restart: sudo systemctl restart bugfixer"
+                        )
+                    else:
+                        state["cloud_online"] = (resp.status_code == 200)
+                except Exception as e:
                     state["cloud_online"] = False
+                    logger.debug(f"Cloud connectivity check error: {e}")
 
             logger.info(f"Hourly Connectivity Check: Local={state['local_online']}, Cloud={state['cloud_online']}")
         except Exception as e:
@@ -1981,6 +2113,15 @@ async def save_settings(request: Request):
     with open(ENV_FILE, "w") as f:
         for k, v in env_vars.items():
             f.write(f"{k}={v}\n")
+
+    # Re-validate the LLM configuration now that the operator may have changed
+    # OLLAMA_API_KEY / CLOUD_OLLAMA_URL. This gives immediate feedback in the log
+    # about whether the new configuration is valid, instead of waiting for the
+    # next LLM request to (potentially) 401 again.
+    try:
+        validate_llm_config_on_startup()
+    except Exception as ve:
+        logger.warning(f"Post-save LLM validation failed (non-fatal): {ve}")
 
     return RedirectResponse(url="/settings", status_code=303)
 
