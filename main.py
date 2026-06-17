@@ -206,6 +206,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         # Previously the signature omitted `timeout`, causing:
         #   attempt_request() got an unexpected keyword argument 'timeout'
         # which broke every LLM request.
+        #
+        # FIX: Added explicit retry logic with Retry-After header honoring and
+        # exponential backoff for 429 (Too Many Requests) and 5xx server errors.
+        # Previously, any 429 was immediately raised as a permanent failure without
+        # any backoff, causing premature LLM request failures.
         def attempt_request(endpoint, use_generate_api, timeout=900):
             if use_generate_api:
                 full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
@@ -223,24 +228,141 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 token_only = clean_key.replace("Bearer ", "").strip()
                 headers["Authorization"] = f"Bearer {token_only}"
 
-            try:
-                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
-                if resp.status_code == 401:
-                    logger.error(f"LLM 401 Unauthorized at {endpoint}. Verify OLLAMA_API_KEY.")
+            # Retry configuration: honors Retry-After header for 429 and uses
+            # exponential backoff as a fallback. Retries are also applied to
+            # transient 5xx server errors and connection/timeout exceptions.
+            cfg = load_config()
+            max_retries = int(cfg.get("LLM_MAX_RETRIES", 5))
+            backoff_base = float(cfg.get("LLM_BACKOFF_BASE", 2.0))
+            backoff_max = float(cfg.get("LLM_BACKOFF_MAX", 60.0))
+
+            last_exception = None
+            for attempt_num in range(max_retries + 1):
+                is_last_attempt = (attempt_num == max_retries)
+                try:
+                    resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
+
+                    # --- 429 Too Many Requests: honor Retry-After, fall back to
+                    # exponential backoff, and only report as permanently failed
+                    # after all retries are exhausted. ---
+                    if resp.status_code == 429:
+                        if is_last_attempt:
+                            logger.error(
+                                f"LLM 429 Too Many Requests at {endpoint} "
+                                f"after {max_retries + 1} attempts (including initial). "
+                                f"Reporting as permanently failed."
+                            )
+                            resp.raise_for_status()
+
+                        # Determine wait time from Retry-After header.
+                        # The header can be either seconds (integer/float) or an
+                        # HTTP-date (RFC 7231).
+                        retry_after = resp.headers.get("Retry-After")
+                        wait_time = None
+                        if retry_after:
+                            try:
+                                wait_time = float(retry_after)
+                            except ValueError:
+                                try:
+                                    from email.utils import parsedate_to_datetime
+                                    retry_date = parsedate_to_datetime(retry_after)
+                                    if retry_date:
+                                        wait_time = retry_date.timestamp() - datetime.now().timestamp()
+                                except Exception:
+                                    wait_time = None
+
+                        # Fall back to exponential backoff if no/invalid Retry-After.
+                        if wait_time is None or wait_time < 0:
+                            wait_time = min(backoff_base ** attempt_num, backoff_max)
+                        else:
+                            wait_time = min(wait_time, backoff_max)
+
+                        logger.warning(
+                            f"LLM 429 Too Many Requests at {endpoint}. "
+                            f"Backing off {wait_time:.1f}s before retry "
+                            f"(attempt {attempt_num + 1}/{max_retries + 1})."
+                        )
+                        resp.close()
+                        time.sleep(wait_time)
+                        continue
+
+                    if resp.status_code == 401:
+                        logger.error(f"LLM 401 Unauthorized at {endpoint}. Verify OLLAMA_API_KEY.")
+                        resp.raise_for_status()
+
+                    # --- 5xx server errors: retry with exponential backoff ---
+                    if 500 <= resp.status_code < 600:
+                        if is_last_attempt:
+                            logger.error(
+                                f"LLM {resp.status_code} server error at {endpoint} "
+                                f"after {max_retries + 1} attempts. Reporting as permanently failed."
+                            )
+                            resp.raise_for_status()
+                        wait_time = min(backoff_base ** attempt_num, backoff_max)
+                        logger.warning(
+                            f"LLM {resp.status_code} server error at {endpoint}. "
+                            f"Backing off {wait_time:.1f}s before retry "
+                            f"(attempt {attempt_num + 1}/{max_retries + 1})."
+                        )
+                        resp.close()
+                        time.sleep(wait_time)
+                        continue
+
                     resp.raise_for_status()
-                resp.raise_for_status()
-                full_response = ""
-                for line in resp.iter_lines():
-                    if line:
-                        chunk = json.loads(line.decode('utf-8'))
-                        content = chunk.get('response') or chunk.get('message', {}).get('content', '')
-                        full_response += content
-                        state["llm_stream"] = full_response
-                        if task_id and task_id in state["active_tasks"]:
-                            state["active_tasks"][task_id]["stream"] = full_response
-                return full_response
-            except Exception as e:
-                raise e
+
+                    full_response = ""
+                    for line in resp.iter_lines():
+                        if line:
+                            chunk = json.loads(line.decode('utf-8'))
+                            content = chunk.get('response') or chunk.get('message', {}).get('content', '')
+                            full_response += content
+                            state["llm_stream"] = full_response
+                            if task_id and task_id in state["active_tasks"]:
+                                state["active_tasks"][task_id]["stream"] = full_response
+                    return full_response
+
+                except requests.exceptions.HTTPError as e:
+                    resp_status = e.response.status_code if e.response is not None else None
+                    # Safety net: retry 429 and 5xx that slipped through explicit checks.
+                    if not is_last_attempt and resp_status is not None and (resp_status == 429 or 500 <= resp_status < 600):
+                        wait_time = min(backoff_base ** attempt_num, backoff_max)
+                        logger.warning(
+                            f"LLM {resp_status} (via HTTPError) at {endpoint}. "
+                            f"Backing off {wait_time:.1f}s (attempt {attempt_num + 1}/{max_retries + 1})."
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    # Non-retryable HTTP errors (401, 403, 404, etc.) — raise immediately.
+                    raise
+                except (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ChunkedEncodingError) as e:
+                    last_exception = e
+                    if not is_last_attempt:
+                        wait_time = min(backoff_base ** attempt_num, backoff_max)
+                        logger.warning(
+                            f"LLM transient error (attempt {attempt_num + 1}/{max_retries + 1}) "
+                            f"at {endpoint}: {e}. Retrying in {wait_time:.1f}s..."
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    raise
+                except Exception as e:
+                    last_exception = e
+                    if not is_last_attempt:
+                        wait_time = min(backoff_base ** attempt_num, backoff_max)
+                        logger.warning(
+                            f"LLM error (attempt {attempt_num + 1}/{max_retries + 1}) "
+                            f"at {endpoint}: {e}. Retrying in {wait_time:.1f}s..."
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    raise
+
+            # Should not reach here, but guard against infinite loops.
+            if last_exception:
+                raise last_exception
+            raise Exception(f"LLM request to {endpoint} exhausted all {max_retries + 1} attempts")
 
         try:
             return attempt_request(primary_endpoint, primary_use_generate, timeout=timeout_val)
@@ -1730,6 +1852,9 @@ DEFAULT_ENV = {
     "TRIAGE_STRICTNESS": "Moderate",
     "REVIEWER_MODEL_1": "gemma4:31b-cloud",
     "REVIEWER_MODEL_2": "gemma4:31b-cloud",
+    "LLM_MAX_RETRIES": "5",
+    "LLM_BACKOFF_BASE": "2.0",
+    "LLM_BACKOFF_MAX": "60.0",
 }
 
 @app.get("/settings")
@@ -1808,6 +1933,9 @@ async def save_settings(request: Request):
         "TRIAGE_STRICTNESS": lambda v: v,
         "REVIEWER_MODEL_1": lambda v: v,
         "REVIEWER_MODEL_2": lambda v: v,
+        "LLM_MAX_RETRIES": lambda v: v,
+        "LLM_BACKOFF_BASE": lambda v: v,
+        "LLM_BACKOFF_MAX": lambda v: v,
     }
 
 
