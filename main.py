@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from github import Github, GithubException
 import ollama
 import git
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Setup Logging
 DEFAULT_LOG_FILE = "/var/log/bugfixer.log"
@@ -2529,6 +2530,20 @@ async def save_settings(request: Request):
         logger.warning(f"Post-save LLM validation failed (non-fatal): {ve}")
 
     return RedirectResponse(url="/settings", status_code=303)
+
+@app.post("/clear_history")
+async def clear_history():
+    """Clears all processed issues and resets success/failure counters."""
+    global state
+    logger.info("Clearing all issue history and resetting counters.")
+
+    state["processed"] = {}
+    state["success_count"] = 0
+    state["failure_count"] = 0
+
+    save_processed({})
+
+    return {"status": "success", "message": "All history and tasks have been cleared."}
 
 @app.post("/update_now")
 async def update_now():

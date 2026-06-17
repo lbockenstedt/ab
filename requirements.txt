@@ -7,3 +7,4 @@ python-multipart
 uvicorn[standard]
 jinja2
 requests
+tenacity
