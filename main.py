@@ -344,9 +344,20 @@ async def catch_exceptions_mid(request: Request, call_next):
             content={"message": "Internal Server Error. Check bugfixer.log for details.", "error": str(e)}
         )
 
-def update_task_state(task_id, task_name, action="start"):
-    """Manages active tasks and their start times. action can be 'start' or 'end'."""
+def update_task_state(task_id, task_name="Unknown Task", action="start"):
+    """Manages active tasks and their start times. action can be 'start' or 'end'.
+    
+    task_name is optional and defaults to 'Unknown Task' to safely handle cases
+    where a caller cannot provide a meaningful name (e.g. during error cleanup
+    before the task name is known). This prevents the
+    'missing 1 required positional argument: task_name' error observed in the
+    poller when an exception is raised prior to task_id/task_name assignment.
+    """
     global state
+    if not task_id:
+        # Nothing to track; ignore gracefully instead of crashing the poller.
+        logger.debug("update_task_state called with no task_id; ignoring.")
+        return
     if action == "start":
         state["active_tasks"][task_id] = {
             "name": task_name,
@@ -994,6 +1005,11 @@ def updater_worker():
 def process_single_issue(repo_name, issue_num, llm_preference=None):
     """Core logic to fix a single issue. Used by poller and manual triggers."""
     global state
+    # Pre-initialize so the exception handler can safely reference it even if
+    # the failure happens before issue_id is assigned. This prevents the
+    # 'missing 1 required positional argument: task_name' poller crash that
+    # occurred when cleanup code attempted to call update_task_state.
+    issue_id = f"{repo_name}:{issue_num}"
     try:
         config = load_config()
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
@@ -1010,7 +1026,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 logger.warning(f"Issue {repo_name}:{issue_num} was deleted. Skipping.")
                 return False, "Issue deleted"
             raise ge
-        issue_id = f"{repo_name}:{issue_num}"
 
         # --- Triage Phase ---
         update_task_state(issue_id, f"Triaging {issue_id}")
@@ -1026,7 +1041,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             }
             save_processed(processed)
             state["processed"] = processed
-            update_task_state(issue_id, "None", action="end")
+            update_task_state(issue_id, action="end")
             return False, f"Non-actionable: {request_msg}"
 
         # Handle LLM preference
@@ -1104,7 +1119,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 }
                 save_processed(processed)
                 state["processed"] = processed
-                update_task_state(issue_id, "None", action="end")
+                update_task_state(issue_id, action="end")
                 return False, failure_reason
 
             repo_git.git.add(A=True)
@@ -1185,12 +1200,18 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             save_processed(processed)
             state["processed"] = processed
 
-            update_task_state(issue_id, "None", action="end")
+            update_task_state(issue_id, action="end")
             return True, f"Fixed via {commit_type}"
 
     except Exception as e:
         logger.exception(f"Error in process_single_issue: {e}")
-        update_task_state(issue_id, "None", action="end")
+        # Use keyword form for action and rely on the default for task_name so
+        # we never raise the 'missing 1 required positional argument: task_name'
+        # TypeError that previously crashed the poller.
+        try:
+            update_task_state(issue_id, action="end")
+        except Exception as cleanup_err:
+            logger.error(f"Failed to clean up task state for {issue_id}: {cleanup_err}")
         return False, str(e)
 
 def verify_production_fixes(gh_current, processed):
@@ -1244,6 +1265,7 @@ def scan_hub_logs(gh_current, config):
                 logger.info(f"Handled automated issue for log error in {repo_name}")
             except Exception as e:
                 logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
+    update_task_state("HubScan", action="end")
 
 def scan_repo_issues(gh_current, config, processed):
     """Phase: Scan monitored repos for issues and attempt fixes concurrently."""
@@ -1292,6 +1314,7 @@ def scan_repo_issues(gh_current, config, processed):
 
         except Exception as e:
             logger.exception(f"Unexpected error while processing {repo_name}: {e}")
+    update_task_state("RepoScan", action="end")
 
 def scan_self_logs(gh_current, config):
     """Scans BugFixer's own logs and creates GitHub issues for internal errors."""
@@ -1302,6 +1325,7 @@ def scan_self_logs(gh_current, config):
     log_path = get_log_path()
     if not os.path.exists(log_path):
         logger.warning(f"BugFixer log file not found at {log_path}")
+        update_task_state("SelfScan", action="end")
         return
 
     try:
@@ -1323,10 +1347,12 @@ def scan_self_logs(gh_current, config):
                 })
 
         if not formatted_logs:
+            update_task_state("SelfScan", action="end")
             return
 
         actionable_errors = analyze_logs_for_errors(formatted_logs)
         if not actionable_errors:
+            update_task_state("SelfScan", action="end")
             return
 
         # Identify the BugFixer repository name
@@ -1355,6 +1381,8 @@ def scan_self_logs(gh_current, config):
 
     except Exception as e:
         logger.error(f"Error during self-log scan: {e}")
+    finally:
+        update_task_state("SelfScan", action="end")
 
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
@@ -1409,6 +1437,7 @@ def run_scan_cycle():
         update_task_state("Discovery", "Discovering Labels")
         state["available_labels"] = discover_labels(gh_current, monitored_repos)
         logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
+        update_task_state("Discovery", action="end")
 
         # --- Production Verification Phase ---
         verify_production_fixes(gh_current, processed)
