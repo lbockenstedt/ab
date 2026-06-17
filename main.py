@@ -996,11 +996,22 @@ def updater_worker():
         time.sleep(3600)
 
 def find_existing_pull_request(repo_obj, target_branch, base_branch):
-    """Checks whether an open pull request already exists for the given head/base pair."""
+    """Checks whether an open pull request already exists for the given head/base pair.
+
+    Uses the proper 'owner:branch' format for the head parameter when querying
+    the GitHub API, which is required for the filtered search to work correctly.
+    Falls back to a manual scan of all open PRs if the filtered query fails.
+    """
     existing_pr = None
 
+    # GitHub API requires head in 'owner:ref' format for filtered PR queries.
+    # Passing just the branch name (e.g. 'dev') without the owner prefix causes
+    # the filter to silently return no results, leading to 422 errors on create_pull.
+    owner = repo_obj.owner.login
+    head_param = f"{owner}:{target_branch}"
+
     try:
-        existing_prs = repo_obj.get_pulls(state='open', head=target_branch, base=base_branch)
+        existing_prs = repo_obj.get_pulls(state='open', head=head_param, base=base_branch)
         for pr_item in existing_prs:
             existing_pr = pr_item
             break
@@ -1173,19 +1184,45 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     repo_git.create_head(target_branch).checkout()
                 repo_git.remotes.origin.push(target_branch, force=True)
                 base_branch = config.get("default_branch", "main")
+
+                # Check for existing PR before attempting creation to avoid 422 errors.
                 existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
 
                 if existing_pr:
                     pr = existing_pr
                     logger.info(f"Found existing open PR for {target_branch} -> {base_branch}: {pr.html_url}")
                 else:
-                    pr = repo_obj.create_pull(
-                        title=f"AI Fix #{issue.number}",
-                        body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}",
-                        head=target_branch,
-                        base=base_branch
-                    )
-                    logger.info(f"Created new PR for {target_branch} -> {base_branch}: {pr.html_url}")
+                    try:
+                        pr = repo_obj.create_pull(
+                            title=f"AI Fix #{issue.number}",
+                            body=f"Automated fix for issue #{issue.number}. Avg Confidence: {final_confidence:.2%}",
+                            head=target_branch,
+                            base=base_branch
+                        )
+                        logger.info(f"Created new PR for {target_branch} -> {base_branch}: {pr.html_url}")
+                    except GithubException as ge:
+                        if ge.status == 422:
+                            # A PR may have been created by a concurrent process between
+                            # our check and our create call. Re-check for the existing PR.
+                            logger.warning(
+                                f"PR creation returned 422 (likely already exists for "
+                                f"{target_branch} -> {base_branch}). Re-checking for existing PR..."
+                            )
+                            time.sleep(2)
+                            existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
+                            if existing_pr:
+                                pr = existing_pr
+                                logger.info(
+                                    f"Found existing open PR after 422 error: {pr.html_url}"
+                                )
+                            else:
+                                logger.error(
+                                    f"Could not find existing PR after 422 error for "
+                                    f"{target_branch} -> {base_branch}. Re-raising."
+                                )
+                                raise ge
+                        else:
+                            raise ge
 
                 commit_type = "Pull Request"
                 detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
