@@ -1618,7 +1618,7 @@ async def settings_page(request: Request):
     settings["monitored_labels_str"] = ", ".join(labels)
 
     # Fetch available models for dropdowns
-    model_data = get_models()
+    model_data = await get_models()
     local_models = [m["name"] for m in model_data["local_models"]]
     cloud_models = [m["name"] for m in model_data["cloud_models"]]
 
