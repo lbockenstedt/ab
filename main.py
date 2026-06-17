@@ -178,6 +178,7 @@ def is_local_llm_allowed():
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None):
     """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming."""
+    global state
     config = load_config()
     l_mod = model_override if model_override else (config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL"))
     c_mod = model_override if model_override else (config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL"))
@@ -1284,7 +1285,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 except:
                     repo_git.create_head(target_branch).checkout()
                 repo_git.remotes.origin.push(target_branch, force=True)
-
                 # Check for existing open PR to avoid GitHub API 422 Validation Failed.
                 # For same-repository PRs, GitHub's API expects the head parameter to be
                 # just the branch name (e.g. "dev"), NOT the "owner:branch" format
