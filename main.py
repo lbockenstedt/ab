@@ -866,7 +866,17 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
         return None
 
 def get_hub_logs():
-    """Fetches recent logs from the Hub for all modules. Returns a list of log entries."""
+    """Fetches recent logs from the Hub for all modules. Returns a list of log entries.
+
+    Robustly handles non-JSON 200 responses (e.g., HTML login pages or error pages
+    served by reverse proxies). The Hub endpoint may return HTTP 200 with an HTML
+    body when an authentication redirect, maintenance page, or upstream error
+    page is served. In such cases we detect the mismatch via the Content-Type
+    header (and as a fallback by inspecting the body for HTML markers) and return
+    None gracefully — logging a single WARNING instead of an ERROR — so we do
+    not generate recurring error-log noise that itself triggers automated issue
+    creation in a feedback loop.
+    """
     config = load_config()
     url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url:
@@ -878,21 +888,68 @@ def get_hub_logs():
         resp = requests.get(log_url, timeout=15)
         if resp.status_code == 200:
             body = resp.text
+
+            # Empty body — nothing to parse.
             if not body or not body.strip():
                 logger.warning(
                     f"Hub returned 200 OK but empty response body for {log_url}. "
                     f"Skipping JSON parse to avoid json.decode error."
                 )
-                return []
+                return None
+
+            # --- Content-Type guard for non-JSON 200 responses ---
+            # The Hub endpoint may serve an HTML error page or login redirect with
+            # HTTP 200 (e.g., behind a reverse proxy like nginx/traefik/caddy that
+            # intercepts the request, or when an upstream app serves a custom
+            # error page). We check the Content-Type header first, and as a
+            # fallback inspect the body for HTML markers. This prevents the
+            # recurring "Hub returned 200 OK but body was not valid JSON" ERROR
+            # log entries that previously spammed the logs and triggered
+            # automated issue creation in a noisy feedback loop.
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            stripped_body = body.lstrip()
+            looks_like_html = (
+                "text/html" in content_type
+                or "application/xhtml" in content_type
+                or stripped_body.startswith("<!DOCTYPE")
+                or stripped_body.startswith("<html")
+                or stripped_body.startswith("<?xml")
+                or (stripped_body.startswith("<") and "<head" in stripped_body[:512].lower())
+            )
+
+            if looks_like_html:
+                # The endpoint is serving an HTML page instead of JSON. This is
+                # typically a login redirect, a maintenance page, or an upstream
+                # error page. Log a single WARNING (not ERROR) so we do not
+                # generate recurring error-log noise that itself triggers
+                # automated issue creation. Return None so callers skip this
+                # cycle gracefully. We also include a short content preview to
+                # aid debugging without flooding the logs.
+                logger.warning(
+                    f"Hub returned 200 OK but received non-JSON content "
+                    f"(Content-Type={content_type or 'unknown'}) for {log_url}. "
+                    f"The endpoint may be serving an error page or login redirect. "
+                    f"Skipping this cycle. First 200 chars: {body[:200]!r}"
+                )
+                return None
+
+            # Content-Type looks JSON-compatible — attempt to parse.
             try:
                 data = resp.json()
                 if isinstance(data, dict):
                     return data.get('logs', [])
                 return data if isinstance(data, list) else []
             except Exception as e:
-                logger.error(f"Hub returned 200 OK but failed to parse JSON: {e}. Content: {body[:200]}...")
+                # Even with a JSON-ish Content-Type, parsing could fail (truncated
+                # body, BOM, etc.). Treat this as a soft failure (WARNING) and
+                # return None so we don't crash the scan cycle or generate noise.
+                logger.warning(
+                    f"Hub returned 200 OK but failed to parse JSON: {e}. "
+                    f"Content-Type={content_type}. Content: {body[:200]!r}"
+                )
                 return None
-        logger.error(f"Hub returned unexpected status code {resp.status_code} for {log_url}")
+
+        logger.warning(f"Hub returned unexpected status code {resp.status_code} for {log_url}")
         return None
     except Exception as e:
         logger.error(f"Hub Log Fetch Error: {e}")
@@ -1936,8 +1993,7 @@ def scan_self_logs(gh_current, config):
 
     try:
         with open(log_path, "r") as f:
-            lines = f.readlines()
-
+            lines = f.readlines()\n
         formatted_logs = []
         for line in lines:
             if "[ERROR]" in line or "[CRITICAL]" in line:
