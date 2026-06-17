@@ -179,7 +179,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             if timeout is None: timeout = 900
 
             if use_generate_api:
-                full_prompt = f"System: {system_prompt}\\n\\nUser: {prompt}"
+                full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
                 payload = {"model": model, "prompt": full_prompt, "stream": True}
             else:
                 payload = {
@@ -445,7 +445,8 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
     try:
         title_text = error_data['title']
         body_text = error_data['body']
-        current_repo_name = error_data['repo']
+        # Use the repo attribute if present, otherwise derive it from the repo object
+        current_repo_name = error_data.get('repo', gh_repo.full_name)
 
         # 1. Check for existing open issues globally to prevent duplicates
         existing_issue = find_global_duplicate_issue(gh_current, monitored_repos, error_data)
@@ -1659,6 +1660,6 @@ threading.Thread(target=heartbeat_worker, daemon=True).start()
 threading.Thread(target=poller_worker, daemon=True).start()
 threading.Thread(target=updater_worker, daemon=True).start()
 
-if __name__ == "__main__":
+if __name__ == "__main":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
