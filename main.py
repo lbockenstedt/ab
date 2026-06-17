@@ -189,9 +189,25 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         if "api.ollama.com" in url:
             logger.warning(f"Detected potentially incorrect Cloud LLM URL: {url}. Official Ollama Cloud host is 'https://ollama.com'. Please check your settings.")
 
-        # Determine primary endpoint and cloud status
-        is_cloud = "ollama.com" in url and "local" not in url
-        primary_endpoint = f"{url.rstrip('/')}/api/generate"
+        # Determine primary endpoint and cloud status.
+        # IMPORTANT: is_cloud MUST be defined at the _request function scope so it is
+        # always available to the exception handler below. Previously this variable
+        # was referenced without being defined, causing:
+        #   NameError: name 'is_cloud' is not defined
+        # which broke every LLM request (triage, file identification, fix generation, review).
+        is_cloud = ("ollama.com" in url) and ("local" not in url)
+
+        # Cloud endpoints use the /api/generate API with a single prompt string.
+        # Local endpoints prefer /api/chat (chat-style payload) and fall back to
+        # /api/generate if /api/chat is unavailable. Using distinct endpoints for
+        # primary vs. fallback ensures the fallback path is actually reachable.
+        if is_cloud:
+            primary_endpoint = f"{url.rstrip('/')}/api/generate"
+            primary_use_generate = True
+        else:
+            primary_endpoint = f"{url.rstrip('/')}/api/chat"
+            primary_use_generate = False
+
         timeout_val = int(load_config().get("LLM_TIMEOUT", 900))
 
         def attempt_request(endpoint, use_generate_api, timeout=None):
@@ -235,10 +251,15 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 raise e
 
         try:
-            return attempt_request(primary_endpoint, is_cloud, timeout=timeout_val)
+            return attempt_request(primary_endpoint, primary_use_generate, timeout=timeout_val)
         except Exception as e:
+            # Only attempt the /api/generate fallback for local endpoints.
+            # is_cloud is guaranteed to be defined here because it is assigned
+            # unconditionally at the top of _request.
             if not is_cloud:
                 fallback_endpoint = f"{url.rstrip('/')}/api/generate"
+                # fallback_endpoint differs from primary_endpoint for local URLs
+                # (primary uses /api/chat), so this branch is now reachable.
                 if fallback_endpoint != primary_endpoint:
                     logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate...")
                     try:
