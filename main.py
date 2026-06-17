@@ -376,25 +376,34 @@ def update_task_state(task_id, task_name="Unknown Task", action="start"):
     before the task name is known). This prevents the
     'missing 1 required positional argument: task_name' error observed in the
     poller when an exception is raised prior to task_id/task_name assignment.
+
+    All callers MUST use keyword arguments (action=..., task_name=...) so the
+    positional-argument count can never be wrong, even if this function's
+    signature evolves in the future.
     """
     global state
+    # Defensive guard: never crash the poller over a missing/empty task_id.
     if not task_id:
-        # Nothing to track; ignore gracefully instead of crashing the poller.
         logger.debug("update_task_state called with no task_id; ignoring.")
         return
-    if action == "start":
-        with _task_state_lock:
-            state["active_tasks"][task_id] = {
-                "name": task_name,
-                "start_time": datetime.now(),
-                "stream": ""
-            }
-        logger.info(f"Task started: {task_id} - {task_name}")
-    elif action == "end":
-        with _task_state_lock:
-            if task_id in state["active_tasks"]:
-                del state["active_tasks"][task_id]
-        logger.info(f"Task completed: {task_id}")
+    try:
+        if action == "start":
+            with _task_state_lock:
+                state["active_tasks"][task_id] = {
+                    "name": task_name,
+                    "start_time": datetime.now(),
+                    "stream": ""
+                }
+            logger.info(f"Task started: {task_id} - {task_name}")
+        elif action == "end":
+            with _task_state_lock:
+                if task_id in state["active_tasks"]:
+                    del state["active_tasks"][task_id]
+            logger.info(f"Task completed: {task_id}")
+    except Exception as e:
+        # A failure to update task bookkeeping must NEVER propagate and crash
+        # the poller. Log it and move on.
+        logger.error(f"update_task_state failed for task_id={task_id!r} action={action!r}: {e}")
 
 # Initial state
 config_on_start = load_config()
@@ -1077,10 +1086,11 @@ def find_existing_pull_request(repo_obj, target_branch, base_branch):
 def process_single_issue(repo_name, issue_num, llm_preference=None):
     """Core logic to fix a single issue. Used by poller and manual triggers."""
     global state
-    # Pre-initialize so the exception handler can safely reference it even if
-    # the failure happens before issue_id is assigned. This prevents the
-    # 'missing 1 required positional argument: task_name' poller crash that
-    # occurred when cleanup code attempted to call update_task_state.
+    # Pre-initialize issue_id BEFORE the try block so the exception handler can
+    # always safely reference it. This is the root-cause fix for the poller crash:
+    #   'Critical poller error: update_task_state() missing 1 required positional argument: task_name'
+    # which happened when an exception fired before task_id/task_name could be
+    # assigned and the cleanup code then called update_task_state incorrectly.
     issue_id = f"{repo_name}:{issue_num}"
     try:
         config = load_config()
@@ -1100,7 +1110,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             raise ge
 
         # --- Triage Phase ---
-        update_task_state(issue_id, task_name=f"Triaging {issue_id}")
+        # NOTE: always pass task_name and action as keyword arguments so the
+        # positional-argument count can never be wrong, even if the function
+        # signature changes in the future. This is a defensive measure against
+        # the 'missing 1 required positional argument: task_name' regression.
+        update_task_state(task_id=issue_id, task_name=f"Triaging {issue_id}", action="start")
         actionable, request_msg = analyze_issue(issue)
         if not actionable:
             logger.info(f"Issue {repo_name}:{issue_num} is non-actionable: {request_msg}")
@@ -1113,7 +1127,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             }
             save_processed(processed)
             state["processed"] = processed
-            update_task_state(issue_id, action="end")
+            update_task_state(task_id=issue_id, action="end")
             return False, f"Non-actionable: {request_msg}"
 
         # Handle LLM preference
@@ -1134,7 +1148,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             error_context = None
 
             for attempt in range(1, max_attempts + 1):
-                update_task_state(issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}")
+                update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
                 logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
                 fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud, task_id=issue_id)
 
@@ -1149,14 +1163,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         review_conf = confidence
                         review_verdict = "Approve"
                     else:
-                        update_task_state(issue_id, task_name=f"Reviewing {issue_id}")
+                        update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
                         review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
                         review_conf = review.get("confidence", 0.0)
                         review_verdict = review.get("verdict", "Reject")
 
                     if config.get("qa_enabled", True):
                         prepare_environment(path)
-                        update_task_state(issue_id, task_name=f"Verifying {issue_id}")
+                        update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start")
                         verified, failure_msg = verify_fix(path, repo_name, config)
                     else:
                         logger.info("QA Testing disabled. Assuming verified.")
@@ -1191,7 +1205,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 }
                 save_processed(processed)
                 state["processed"] = processed
-                update_task_state(issue_id, action="end")
+                update_task_state(task_id=issue_id, action="end")
                 return False, failure_reason
 
             repo_git.git.add(A=True)
@@ -1293,7 +1307,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             save_processed(processed)
             state["processed"] = processed
 
-            update_task_state(issue_id, action="end")
+            update_task_state(task_id=issue_id, action="end")
             return True, f"Fixed via {commit_type}"
 
     except Exception as e:
@@ -1302,7 +1316,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         # we never raise the 'missing 1 required positional argument: task_name'
         # TypeError that previously crashed the poller.
         try:
-            update_task_state(issue_id, action="end")
+            update_task_state(task_id=issue_id, action="end")
         except Exception as cleanup_err:
             logger.error(f"Failed to clean up task state for {issue_id}: {cleanup_err}")
         return False, str(e)
@@ -1344,21 +1358,25 @@ def verify_production_fixes(gh_current, processed):
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
-    update_task_state("HubScan", task_name="Scanning Hub Logs")
+    update_task_state(task_id="HubScan", task_name="Scanning Hub Logs", action="start")
     logger.info("Scanning Hub for new errors...")
-    hub_logs = get_hub_logs()
-    if hub_logs:
-        actionable_errors = analyze_logs_for_errors(hub_logs)
-        monitored_repos = get_monitored_repos(config)
-        for error in actionable_errors:
-            repo_name = error['repo']
-            try:
-                repo_obj = gh_current.get_repo(repo_name)
-                create_automated_issue(gh_current, monitored_repos, repo_obj, error)
-                logger.info(f"Handled automated issue for log error in {repo_name}")
-            except Exception as e:
-                logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
-    update_task_state("HubScan", action="end")
+    try:
+        hub_logs = get_hub_logs()
+        if hub_logs:
+            actionable_errors = analyze_logs_for_errors(hub_logs)
+            monitored_repos = get_monitored_repos(config)
+            for error in actionable_errors:
+                repo_name = error['repo']
+                try:
+                    repo_obj = gh_current.get_repo(repo_name)
+                    create_automated_issue(gh_current, monitored_repos, repo_obj, error)
+                    logger.info(f"Handled automated issue for log error in {repo_name}")
+                except Exception as e:
+                    logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
+    except Exception as e:
+        logger.error(f"Hub log scan failed: {e}")
+    finally:
+        update_task_state(task_id="HubScan", action="end")
 
 def scan_repo_issues(gh_current, config, processed):
     """Phase: Scan monitored repos for issues and attempt fixes concurrently."""
@@ -1368,57 +1386,61 @@ def scan_repo_issues(gh_current, config, processed):
     monitored_repos = get_monitored_repos(config)
     max_workers = int(config.get("MAX_CONCURRENT_FIXES", 5))
 
-    for repo_name in monitored_repos:
-        update_task_state("RepoScan", task_name=f"Checking {repo_name}")
-        logger.info(f"Scanning repository: {repo_name}")
-        try:
-            repo_obj = gh_current.get_repo(repo_name)
-            is_owner = repo_obj.owner.login == bot_user
-            labels = config.get("monitored_labels", ["automated-fix"])
-            if "NONE" in labels:
-                continue
-            if "ANY" in labels:
-                issues = repo_obj.get_issues(state="open")
-            else:
-                issues = repo_obj.get_issues(labels=labels, state="open")
+    try:
+        for repo_name in monitored_repos:
+            update_task_state(task_id="RepoScan", task_name=f"Checking {repo_name}", action="start")
+            logger.info(f"Scanning repository: {repo_name}")
+            try:
+                repo_obj = gh_current.get_repo(repo_name)
+                is_owner = repo_obj.owner.login == bot_user
+                labels = config.get("monitored_labels", ["automated-fix"])
+                if "NONE" in labels:
+                    continue
+                if "ANY" in labels:
+                    issues = repo_obj.get_issues(state="open")
+                else:
+                    issues = repo_obj.get_issues(labels=labels, state="open")
 
-            to_fix = []
-            for issue in issues:
-                try:
-                    # Ensure we only process open issues and ignore Pull Requests
-                    if issue.state != 'open' or issue.pull_request:
-                        continue
-
-                    issue_id = f"{repo_name}:{issue.number}"
-                    if issue_id in processed:
-                        status = processed[issue_id].get("status")
-                        if status in ["fixed", "non-actionable", "failed", "awaiting_prod_verification"]:
+                to_fix = []
+                for issue in issues:
+                    try:
+                        # Ensure we only process open issues and ignore Pull Requests
+                        if issue.state != 'open' or issue.pull_request:
                             continue
-                    to_fix.append((repo_name, issue.number))
-                except Exception as e:
-                    logger.exception(f"Failed to triage issue {issue_id}: {e}")
 
-            if to_fix:
-                logger.info(f"Found {len(to_fix)} issues to fix in {repo_name}. Processing concurrently (max {max_workers})...")
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(process_single_issue, r, n) for r, n in to_fix]
-                    for future in futures:
-                        future.result()
+                        issue_id = f"{repo_name}:{issue.number}"
+                        if issue_id in processed:
+                            status = processed[issue_id].get("status")
+                            if status in ["fixed", "non-actionable", "failed", "awaiting_prod_verification"]:
+                                continue
+                        to_fix.append((repo_name, issue.number))
+                    except Exception as e:
+                        logger.exception(f"Failed to triage issue {issue_id}: {e}")
 
-        except Exception as e:
-            logger.exception(f"Unexpected error while processing {repo_name}: {e}")
-    update_task_state("RepoScan", action="end")
+                if to_fix:
+                    logger.info(f"Found {len(to_fix)} issues to fix in {repo_name}. Processing concurrently (max {max_workers})...")
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = [executor.submit(process_single_issue, r, n) for r, n in to_fix]
+                        for future in futures:
+                            future.result()
+
+            except Exception as e:
+                logger.exception(f"Unexpected error while processing {repo_name}: {e}")
+    except Exception as e:
+        logger.exception(f"scan_repo_issues failed: {e}")
+    finally:
+        update_task_state(task_id="RepoScan", action="end")
 
 def scan_self_logs(gh_current, config):
     """Scans BugFixer's own logs and creates GitHub issues for internal errors."""
     global state
-    update_task_state("SelfScan", task_name="Scanning Self Logs")
+    update_task_state(task_id="SelfScan", task_name="Scanning Self Logs", action="start")
     logger.info("Scanning internal BugFixer logs for errors...")
 
     log_path = get_log_path()
     if not os.path.exists(log_path):
         logger.warning(f"BugFixer log file not found at {log_path}")
-        update_task_state("SelfScan", action="end")
+        update_task_state(task_id="SelfScan", action="end")
         return
 
     try:
@@ -1440,12 +1462,12 @@ def scan_self_logs(gh_current, config):
                 })
 
         if not formatted_logs:
-            update_task_state("SelfScan", action="end")
+            update_task_state(task_id="SelfScan", action="end")
             return
 
         actionable_errors = analyze_logs_for_errors(formatted_logs)
         if not actionable_errors:
-            update_task_state("SelfScan", action="end")
+            update_task_state(task_id="SelfScan", action="end")
             return
 
         # Identify the BugFixer repository name
@@ -1475,7 +1497,7 @@ def scan_self_logs(gh_current, config):
     except Exception as e:
         logger.error(f"Error during self-log scan: {e}")
     finally:
-        update_task_state("SelfScan", action="end")
+        update_task_state(task_id="SelfScan", action="end")
 
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
@@ -1527,10 +1549,10 @@ def run_scan_cycle():
             logger.warning("No monitored repositories configured. Skipping scan.")
 
         # --- Label Discovery Phase ---
-        update_task_state("Discovery", task_name="Discovering Labels")
+        update_task_state(task_id="Discovery", task_name="Discovering Labels", action="start")
         state["available_labels"] = discover_labels(gh_current, monitored_repos)
         logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
-        update_task_state("Discovery", action="end")
+        update_task_state(task_id="Discovery", action="end")
 
         # --- Production Verification Phase ---
         verify_production_fixes(gh_current, processed)
@@ -1555,6 +1577,15 @@ def run_scan_cycle():
     except Exception as e:
         logger.exception(f"Critical poller error: {e}")
         state["status"] = f"Error: {str(e)}"
+        # Best-effort cleanup of any task bookkeeping that might be left dangling
+        # after a poller-level failure. Wrapped in try/except so a secondary
+        # failure here can never cascade back into the poller loop and cause the
+        # 'missing 1 required positional argument: task_name' error again.
+        for cleanup_id in ("Discovery", "HubScan", "RepoScan", "SelfScan"):
+            try:
+                update_task_state(task_id=cleanup_id, action="end")
+            except Exception as cleanup_err:
+                logger.debug(f"Cleanup for {cleanup_id} failed: {cleanup_err}")
 
 def poller_worker():
 
