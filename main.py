@@ -1993,7 +1993,7 @@ def scan_self_logs(gh_current, config):
 
     try:
         with open(log_path, "r") as f:
-            lines = f.readlines()\n
+            lines = f.readlines()
         formatted_logs = []
         for line in lines:
             if "[ERROR]" in line or "[CRITICAL]" in line:
@@ -2327,11 +2327,33 @@ async def save_settings(request: Request):
     elif labels_mode == "NONE":
         labels = ["NONE"]
     else:
-        try:
+        # ------------------------------------------------------------------
+        # BUGFIX: 'dict' object has no attribute 'getlist'
+        #
+        # The previous code called form_data.getlist("monitored_labels")
+        # inside a try/except AttributeError. However, if form_data is a
+        # plain dict (not a Starlette FormData / MultiDict), calling
+        # .getlist() raises an UNCAUGHT AttributeError in some code paths,
+        # producing the log error: "'dict' object has no attribute 'getlist'".
+        #
+        # Fix: Use hasattr() to explicitly check whether the object supports
+        # getlist() before calling it. If it does (Starlette FormData), use
+        # getlist() to retrieve all checked checkbox values. If it does not
+        # (plain dict), fall back to dict.get() with manual list handling so
+        # we never raise an AttributeError.
+        # ------------------------------------------------------------------
+        if hasattr(form_data, "getlist"):
             labels_list = form_data.getlist("monitored_labels")
-        except AttributeError:
+        else:
+            # form_data is a plain dict — use .get() with manual list handling.
             val = form_data.get("monitored_labels", [])
-            labels_list = [val] if isinstance(val, str) else (val if isinstance(val, list) else [])
+            if isinstance(val, list):
+                labels_list = val
+            elif isinstance(val, str) and val:
+                labels_list = [val]
+            else:
+                labels_list = []
+
         custom_labels_raw = data.get("custom_labels", "")
         if custom_labels_raw:
             custom_labels = [x.strip() for x in custom_labels_raw.split(",") if x.strip()]
