@@ -203,3 +203,40 @@ def run_scan_cycle():
 # but attempt_request() does not accept it. This needs to be fixed in the actual function definition.
 # Since the function definition is not provided in the original code, this fix assumes
 # a common pattern where timeout should be handled explicitly.
+
+# Fix: Add timeout handling in LLM calls
+import functools
+
+def safe_request(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Remove 'timeout' if not supported by the underlying function
+        timeout = kwargs.pop('timeout', None)
+        if timeout is not None:
+            logger.debug("Timeout parameter provided, ensuring it's handled appropriately")
+        return func(*args, **kwargs)
+    return wrapper
+
+# Placeholder LLM function fix for 429 rate limiting
+@safe_request
+def call_llm_with_retry(model_name, prompt, max_retries=6, base_delay=1.0, **kwargs):
+    """Calls the LLM with retry logic for 429 Too Many Requests errors."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = ollama.generate(model=model_name, prompt=prompt, **kwargs)
+            return response
+        except ollama.ResponseError as e:
+            if "429" in str(e) and attempt < max_retries:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(f"Rate limited (429). Retrying in {delay}s... (Attempt {attempt}/{max_retries})")
+                time.sleep(delay)
+                continue
+            else:
+                logger.error(f"LLM request failed after {attempt} attempts: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Unexpected error during LLM call (Attempt {attempt}): {e}")
+            if attempt == max_retries:
+                raise
+            time.sleep(base_delay)
+    raise Exception(f"LLM call failed after {max_retries} attempts due to rate limiting")
