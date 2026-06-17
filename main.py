@@ -1053,7 +1053,11 @@ def connectivity_worker():
 
             if c_url:
                 try:
-                    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                    headers = {}
+                    if api_key:
+                        clean_key = api_key.strip().strip('"').strip("'")
+                        token_only = clean_key.replace("Bearer ", "").strip()
+                        headers["Authorization"] = f"Bearer {token_only}"
                     payload = {"model": c_mod, "prompt": "ping", "stream": False}
                     resp = requests.post(f"{c_url.rstrip('/')}/api/generate", json=payload, headers=headers, timeout=10)
                     if resp.status_code == 401:
