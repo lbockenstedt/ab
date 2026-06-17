@@ -957,9 +957,7 @@
                 return enabledModels
                     .filter(name => available.some(m => m.name === name))
                     .map(name => {
-                        const model = available.find(m => m.name === name);
-                        const desc = (model && typeof model.details === 'string') ? ` - ${model.details}` : '';
-                        return `<option value="${name}">${name}${desc}</option>`;
+                        return `<option value="${name}">${name}</option>`;
                     }).join('');
             };
 

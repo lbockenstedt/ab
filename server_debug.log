@@ -403,3 +403,13 @@ Exception: Configuration Pending: Please enter your GitHub Token in Settings
 2026-06-17 18:41:17,903 [INFO] Task completed: HubScan
 2026-06-17 18:41:17,903 [INFO] Task completed: RepoScan
 2026-06-17 18:41:17,903 [INFO] Task completed: SelfScan
+2026-06-17 18:46:17,672 [INFO] Hourly Connectivity Check: Local=False, Cloud=False
+2026-06-17 18:46:17,908 [ERROR] Critical poller error: Configuration Pending: Please enter your GitHub Token in Settings
+Traceback (most recent call last):
+  File "/Users/lbockenstedt/vscode/bugfixer/main.py", line 2130, in run_scan_cycle
+    if not self_repo_name:
+Exception: Configuration Pending: Please enter your GitHub Token in Settings
+2026-06-17 18:46:17,909 [INFO] Task completed: Discovery
+2026-06-17 18:46:17,909 [INFO] Task completed: HubScan
+2026-06-17 18:46:17,909 [INFO] Task completed: RepoScan
+2026-06-17 18:46:17,909 [INFO] Task completed: SelfScan

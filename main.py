@@ -2445,9 +2445,12 @@ async def get_models():
             resp.raise_for_status()
             tags_data = resp.json()
             for m in tags_data.get("models", []):
+                details = m.get("details", "No description available")
+                if not isinstance(details, str):
+                    details = details.get("description", str(details)) if isinstance(details, dict) else str(details)
                 results["cloud_models"].append({
                     "name": m["name"],
-                    "details": m.get("details", "No description available")
+                    "details": details
                 })
         except Exception as e:
             logger.error(f"Error fetching cloud models: {e}")
