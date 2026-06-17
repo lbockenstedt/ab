@@ -753,6 +753,89 @@ def get_monitored_repos(config):
             if cleaned: monitored_repos.append(cleaned)
     return list(set(monitored_repos))
 
+def resolve_module_repo(module, monitored_repos, config):
+    """Maps a Hub log module name to the GitHub repo its issues should be filed in.
+
+    Routing precedence (first match wins):
+      1. Explicit 'module_repo_map' config key: {module_name: "owner/repo"}.
+         Case-insensitive module lookup; lets the user override auto-matching
+         for aliases or modules with no name-matching repo (e.g. "hub" -> "owner/lm").
+      2. Auto-match: a monitored repo whose basename (the segment after the final
+         '/') equals the module name, case-insensitive. e.g. module "pxmx" ->
+         "lbockenstedt/pxmx".
+      3. None if nothing matches — the caller should skip filing (NOT dump into
+         the self-diagnosis repo, which is the behaviour the user explicitly
+         wants to avoid).
+
+    The returned repo is always a member of monitored_repos (auto-match) or a
+    user-declared repo (explicit map); it is never invented.
+    """
+    if not module:
+        return None
+    mod_key = str(module).strip().lower()
+    if not mod_key:
+        return None
+
+    # 1. Explicit user-provided mapping.
+    module_map = config.get("module_repo_map") or {}
+    if isinstance(module_map, dict):
+        for k, v in module_map.items():
+            if str(k).strip().lower() == mod_key and v and str(v).strip():
+                resolved = clean_repo_name(str(v).strip())
+                if resolved:
+                    return resolved
+
+    # 2. Auto-match against monitored repo basenames.
+    for repo_name in monitored_repos:
+        basename = str(repo_name).strip().split('/')[-1].lower()
+        if basename == mod_key:
+            return repo_name
+
+    return None
+
+def parse_module_repo_map(value):
+    """Normalises a module_repo_map setting into {module: "owner/repo"}.
+
+    Accepts a dict, a JSON object string, or a newline/comma-separated list of
+    'module=owner/repo' pairs, so the Settings form can send any of these shapes.
+    Values are cleaned via clean_repo_name; entries with empty module or repo are
+    dropped. Module keys are stored as-is (case-insensitive lookup happens in
+    resolve_module_repo), so callers see the original casing.
+    """
+    result = {}
+    if value is None:
+        return result
+    if isinstance(value, dict):
+        pairs = value.items()
+    elif isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return result
+        # Try JSON object first; fall back to line/separated 'module=repo' pairs.
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                pairs = obj.items()
+            else:
+                return result
+        except Exception:
+            pairs = []
+            for part in s.replace(",", "\n").split("\n"):
+                part = part.strip()
+                if not part or "=" not in part:
+                    continue
+                mod, _, repo = part.partition("=")
+                pairs = [(mod.strip(), repo.strip())]
+    else:
+        return result
+
+    for mod, repo in pairs:
+        mod_s = str(mod).strip()
+        repo_s = clean_repo_name(str(repo).strip()) if repo else ""
+        if mod_s and repo_s:
+            result[mod_s] = repo_s
+    return result
+
 def discover_labels(gh_current, monitored_repos):
     """Fetches all unique labels from all monitored repositories, including built-in defaults."""
     all_labels = {"automated-fix", "bug", "critical", "high-priority"}
@@ -1094,8 +1177,13 @@ def analyze_logs_for_errors(logs):
     """Uses LLM to identify actionable errors in aggregated logs.
 
     Robustly validates the LLM's JSON response: every entry must be a dict with
-    non-empty 'repo', 'title', and 'body' fields. Malformed entries are dropped
+    non-empty 'module', 'title', and 'body' fields. Malformed entries are dropped
     so they never reach create_automated_issue(), preventing the 'body' KeyError.
+
+    The 'module' field (carried through from the source log entry) is the
+    authoritative key for routing an issue to the correct repository — see
+    resolve_module_repo(). The LLM may also suggest a 'repo', but it is treated
+    as a hint only and is not required.
     """
     if not logs: return []
 
@@ -1105,11 +1193,12 @@ def analyze_logs_for_errors(logs):
         "Analyze these logs for critical, recurring, or actionable errors that can be fixed in code. "
         "Ignore heartbeat messages or routine status updates. "
         "For each actionable error found, provide: \n"
-        "1. The module/repo it belongs to.\n"
-        "2. A concise summary of the bug.\n"
-        "3. The specific log snippet that proves the error.\n\n"
-        "Return ONLY a JSON array of objects: [{\"repo\": \"owner/repo\", \"title\": \"Error Summary\", \"body\": \"Log snippet and description\"}]. "
-        "Every object MUST include non-empty 'repo', 'title', and 'body' fields."
+        "1. The exact 'module' value from the source log entry the error came from.\n"
+        "2. A concise summary of the bug ('title').\n"
+        "3. The specific log snippet that proves the error ('body').\n\n"
+        "Return ONLY a JSON array of objects: [{\"module\": \"module-name\", \"title\": \"Error Summary\", \"body\": \"Log snippet and description\"}]. "
+        "Every object MUST include non-empty 'module', 'title', and 'body' fields. "
+        "The 'module' MUST be copied verbatim from the source log entry's module field."
     )
     try:
         res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.")
@@ -1129,11 +1218,11 @@ def analyze_logs_for_errors(logs):
                 if not isinstance(entry, dict):
                     logger.debug(f"Dropping malformed log-analysis entry (not a dict): {entry}")
                     continue
-                repo_val = entry.get('repo')
+                module_val = entry.get('module')
                 title_val = entry.get('title')
                 body_val = entry.get('body')
-                if not repo_val or not str(repo_val).strip():
-                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty repo): {entry}")
+                if not module_val or not str(module_val).strip():
+                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty module): {entry}")
                     continue
                 if not title_val or not str(title_val).strip():
                     logger.debug(f"Dropping malformed log-analysis entry (missing/empty title): {entry}")
@@ -1142,10 +1231,12 @@ def analyze_logs_for_errors(logs):
                     logger.debug(f"Dropping malformed log-analysis entry (missing/empty body): {entry}")
                     continue
                 # Normalise all fields to strings so downstream code never receives None.
+                # 'repo' is an optional LLM hint; routing is resolved from 'module'.
                 cleaned.append({
-                    'repo': str(repo_val),
+                    'module': str(module_val),
                     'title': str(title_val),
                     'body': str(body_val),
+                    'repo': str(entry.get('repo')) if entry.get('repo') and str(entry.get('repo')).strip() else '',
                 })
             return cleaned
         return []
@@ -2020,17 +2111,34 @@ def scan_hub_logs(gh_current, config):
                 if not isinstance(error, dict):
                     logger.warning(f"Skipping non-dict actionable error: {error!r}")
                     continue
-                repo_name = error.get('repo')
-                if not repo_name or not str(repo_name).strip():
-                    logger.warning(f"Skipping actionable error with no repo specified: {error.get('title')}")
-                    continue
                 if not error.get('body') or not str(error.get('body')).strip():
-                    logger.warning(f"Skipping actionable error with no body specified: {error.get('title')} (repo={repo_name})")
+                    logger.warning(f"Skipping actionable error with no body specified: {error.get('title')}")
                     continue
+
+                # Route the issue to the module's own repo rather than relying on
+                # the LLM's repo guess (which previously dumped everything into the
+                # self-diagnosis repo). The module is authoritative.
+                module = error.get('module')
+                repo_name = resolve_module_repo(module, monitored_repos, config)
+                if not repo_name:
+                    # Fall back to the LLM's repo hint only if it is itself a
+                    # monitored repo (so we never file into an arbitrary repo).
+                    llm_repo = error.get('repo') or ''
+                    if llm_repo and llm_repo in monitored_repos:
+                        repo_name = llm_repo
+                    else:
+                        logger.warning(
+                            f"Skipping actionable error for module={module!r}: no monitored repo "
+                            f"maps to this module (LLM repo hint={llm_repo!r}). Add a "
+                            f"'module_repo_map' entry in Settings if this module should be tracked."
+                        )
+                        continue
+                # Make the resolved repo authoritative for downstream code.
+                error['repo'] = repo_name
                 try:
                     repo_obj = gh_current.get_repo(repo_name)
                     create_automated_issue(gh_current, monitored_repos, repo_obj, error)
-                    logger.info(f"Handled automated issue for log error in {repo_name}")
+                    logger.info(f"Handled automated issue for log error in {repo_name} (module={module})")
                 except GithubException as ge:
                     if ge.status == 404:
                         logger.error(
@@ -2631,6 +2739,7 @@ async def save_settings(request: Request):
         "LLM_MAX_CONCURRENT": lambda v: v,
         "PROD_VERIFICATION_DAYS": lambda v: v,
         "self_diagnosis_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
+        "module_repo_map": lambda v: parse_module_repo_map(v),
     }
 
 
