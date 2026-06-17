@@ -1,5 +1,6 @@
 {
   "monitored_repos": [],
   "trusted_repos": [],
-  "default_branch": "main"
+  "default_branch": "main",
+  "self_diagnosis_repo": ""
 }

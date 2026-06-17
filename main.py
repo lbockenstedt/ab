@@ -97,7 +97,8 @@ def load_config():
             "repo_tests": {},
             "GITHUB_TOKEN": "",
             "monitored_labels": ["automated-fix"],
-            "enabled_models": []
+            "enabled_models": [],
+            "self_diagnosis_repo": ""
         }
 
 def load_processed():
@@ -1762,6 +1763,15 @@ def scan_hub_logs(gh_current, config):
                     repo_obj = gh_current.get_repo(repo_name)
                     create_automated_issue(gh_current, monitored_repos, repo_obj, error)
                     logger.info(f"Handled automated issue for log error in {repo_name}")
+                except GithubException as ge:
+                    if ge.status == 404:
+                        logger.error(
+                            f"Cannot create automated issue for '{repo_name}': repository not found (404). "
+                            f"Verify that '{repo_name}' exists and the configured GITHUB_TOKEN has access. "
+                            f"Skipping this error."
+                        )
+                    else:
+                        logger.error(f"Failed to create auto-issue for {repo_name}: {ge}")
                 except Exception as e:
                     logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
     except Exception as e:
@@ -1817,6 +1827,14 @@ def scan_repo_issues(gh_current, config, processed):
                         for future in futures:
                             future.result()
 
+            except GithubException as ge:
+                if ge.status == 404:
+                    logger.error(
+                        f"Monitored repository '{repo_name}' not found or inaccessible (404). "
+                        f"Remove it from monitored_repos or verify GITHUB_TOKEN access. Skipping."
+                    )
+                else:
+                    logger.exception(f"GitHub API error while processing {repo_name}: {ge}")
             except Exception as e:
                 logger.exception(f"Unexpected error while processing {repo_name}: {e}")
     except Exception as e:
@@ -1824,11 +1842,91 @@ def scan_repo_issues(gh_current, config, processed):
     finally:
         update_task_state(task_id="RepoScan", action="end")
 
+def resolve_self_diagnosis_repo(config):
+    """Resolves the target repository for self-diagnosis issues.
+
+    Priority:
+      1. Explicit 'self_diagnosis_repo' config key (preferred, user-configurable).
+      2. Git remote origin URL of the running BugFixer checkout (best-effort).
+
+    Returns the normalized 'owner/repo' string, or None if no valid target could
+    be determined. Callers MUST handle a None return by skipping self-diagnosis
+    instead of attempting to create issues against a hardcoded fallback that may
+    not exist (which previously caused 404 errors every scan cycle).
+    """
+    self_repo_name = (config.get("self_diagnosis_repo") or "").strip()
+
+    if not self_repo_name:
+        try:
+            repo = git.Repo(os.getcwd())
+            remote_url = repo.remotes.origin.url
+            import re
+            match = re.search(r'github\.com[:/]([^/]+/[^./]+)', remote_url)
+            if match:
+                self_repo_name = match.group(1).replace('.git', '')
+        except Exception as e:
+            logger.debug(f"Could not determine self-repo name from git remote: {e}")
+
+    if not self_repo_name:
+        return None
+
+    return clean_repo_name(self_repo_name)
+
 def scan_self_logs(gh_current, config):
-    """Scans BugFixer's own logs and creates GitHub issues for internal errors."""
+    """Scans BugFixer's own logs and creates GitHub issues for internal errors.
+
+    The target repository for self-diagnosis issues is resolved via
+    resolve_self_diagnosis_repo(), which honors the 'self_diagnosis_repo' config
+    key. If no valid repository can be determined, or if the resolved repository
+    is not accessible (e.g., 404), self-diagnosis is skipped gracefully rather
+    than crashing or spamming the logs with 404 errors every cycle.
+    """
     global state
     update_task_state(task_id="SelfScan", task_name="Scanning Self Logs", action="start")
     logger.info("Scanning internal BugFixer logs for errors...")
+
+    # Resolve and validate the target repository for self-diagnosis issues.
+    self_repo_name = resolve_self_diagnosis_repo(config)
+
+    if not self_repo_name:
+        logger.warning(
+            "Self-diagnosis repository is not configured. Set 'self_diagnosis_repo' in the "
+            "BugFixer settings (http://localhost:8000/settings) to a valid, accessible "
+            "'owner/repo' GitHub repository where self-diagnosis issues should be filed. "
+            "Skipping self-log scan until configured."
+        )
+        update_task_state(task_id="SelfScan", action="end")
+        return
+
+    # Pre-validate that the target repository exists and is accessible with the
+    # configured token. We catch 404 (and other GitHubExceptions) explicitly so a
+    # misconfigured or inaccessible repo does not produce recurring 404 errors
+    # in the logs every scan cycle.
+    try:
+        repo_obj = gh_current.get_repo(self_repo_name)
+    except GithubException as ge:
+        if ge.status == 404:
+            logger.error(
+                f"Self-diagnosis target repository '{self_repo_name}' was not found or is "
+                f"inaccessible (404 Not Found). The configured GITHUB_TOKEN may lack access, "
+                f"or the repository does not exist. Update 'self_diagnosis_repo' in the "
+                f"BugFixer settings (http://localhost:8000/settings) to point at a valid, "
+                f"accessible repository. Skipping self-log scan."
+            )
+        else:
+            logger.error(
+                f"Cannot access self-diagnosis repository '{self_repo_name}' "
+                f"(GitHub API status {ge.status}): {ge}. Skipping self-log scan."
+            )
+        update_task_state(task_id="SelfScan", action="end")
+        return
+    except Exception as e:
+        logger.error(
+            f"Cannot access self-diagnosis repository '{self_repo_name}': {e}. "
+            f"Skipping self-log scan."
+        )
+        update_task_state(task_id="SelfScan", action="end")
+        return
 
     log_path = get_log_path()
     if not os.path.exists(log_path):
@@ -1859,19 +1957,7 @@ def scan_self_logs(gh_current, config):
             update_task_state(task_id="SelfScan", action="end")
             return
 
-        try:
-            repo = git.Repo(os.getcwd())
-            remote_url = repo.remotes.origin.url
-            import re
-            match = re.search(r'github\.com[:/]([^/]+/[^./]+)', remote_url)
-            if match:
-                self_repo_name = match.group(1).replace('.git', '')
-            else:
-                self_repo_name = "lbockenstedt/bugfixer"
-        except Exception as e:
-            logger.debug(f"Could not determine self-repo name from git: {e}")
-            self_repo_name = "lbockenstedt/bugfixer"
-
+        monitored_repos = get_monitored_repos(config)
         for error in actionable_errors:
             # Defensive: ensure error is a dict before mutation and access.
             if not isinstance(error, dict):
@@ -1882,10 +1968,17 @@ def scan_self_logs(gh_current, config):
                 logger.warning(f"Skipping self-diagnosis error with no body specified: {error.get('title')}")
                 continue
             try:
-                repo_obj = gh_current.get_repo(self_repo_name)
-                monitored_repos = get_monitored_repos(config)
                 create_automated_issue(gh_current, monitored_repos, repo_obj, error)
-                logger.info(f"Handled self-diagnosis issue for BugFixer: {error['title']}")
+                logger.info(f"Handled self-diagnosis issue for BugFixer: {error.get('title')}")
+            except GithubException as ge:
+                if ge.status == 404:
+                    logger.error(
+                        f"Self-diagnosis repository '{self_repo_name}' returned 404 while "
+                        f"creating issue for '{error.get('title')}'. Repository may have been "
+                        f"deleted or token access revoked. Skipping."
+                    )
+                else:
+                    logger.error(f"Failed to create self-diagnosis issue: {ge}")
             except Exception as e:
                 logger.error(f"Failed to create self-diagnosis issue: {e}")
 
@@ -2217,6 +2310,7 @@ async def save_settings(request: Request):
         "LLM_BACKOFF_BASE": lambda v: v,
         "LLM_BACKOFF_MAX": lambda v: v,
         "LLM_MAX_CONCURRENT": lambda v: v,
+        "self_diagnosis_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
     }
 
 
