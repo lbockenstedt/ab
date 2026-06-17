@@ -173,7 +173,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         # Determine primary endpoint and cloud status
         is_cloud = "ollama.com" in url and "local" not in url
         primary_endpoint = f"{url.rstrip('/')}/api/generate"
-        timeout = int(load_config().get("LLM_TIMEOUT", 900))
+        timeout_val = int(load_config().get("LLM_TIMEOUT", 900))
 
         def attempt_request(endpoint, use_generate_api, timeout=None):
             if timeout is None: timeout = 900
@@ -215,14 +215,14 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 raise e
 
         try:
-            return attempt_request(primary_endpoint, is_cloud, timeout=timeout)
+            return attempt_request(primary_endpoint, is_cloud, timeout=timeout_val)
         except Exception as e:
             if not is_cloud:
                 fallback_endpoint = f"{url.rstrip('/')}/api/generate"
                 if fallback_endpoint != primary_endpoint:
                     logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate...")
                     try:
-                        return attempt_request(fallback_endpoint, True, timeout=timeout)
+                        return attempt_request(fallback_endpoint, True, timeout=timeout_val)
                     except Exception as fe:
                         logger.error(f"Local fallback to /api/generate also failed: {fe}")
                         raise e
