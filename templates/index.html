@@ -961,17 +961,17 @@
                 if (spans[0]) spans[0].textContent = data.task ?? '';
                 if (spans[1]) spans[1].textContent = data.duration ?? '';
                 if (spans[2]) spans[2].textContent = data.status ?? '';
-                const streamDiv = container.querySelector('.stream-text');
-                if (streamDiv) {
-                    streamDiv.textContent = data.stream || 'Waiting for AI to start thinking...';
+                const streamText = container.querySelector('.stream-text');
+                if (streamText) {
+                    streamText.textContent = data.stream || 'Waiting for AI to start thinking...';
                     const blink = document.createElement('span');
                     blink.className = 'cursor-blink';
-                    streamDiv.appendChild(blink);
+                    streamText.appendChild(blink);
                 }
 
                 // Auto-scroll to bottom of the stream
-                const streamDiv = container.querySelector('.max-h-64');
-                if (streamDiv) streamDiv.scrollTop = streamDiv.scrollHeight;
+                const streamScroll = container.querySelector('.max-h-64');
+                if (streamScroll) streamScroll.scrollTop = streamScroll.scrollHeight;
 
             } catch (e) {
                 console.error('Failed to update task details:', e);
