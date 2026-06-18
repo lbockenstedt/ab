@@ -2053,11 +2053,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             repo_git.index.commit(commit_msg)
 
             if can_direct_push and final_verdict == "Approve":
-                logger.info(f"Decision: Direct Commit to main. Reason: can_direct_push=True AND verdict='Approve' ({final_verdict})")
+                logger.info(f"Decision: Direct Commit to {base_branch}. Reason: can_direct_push=True AND verdict='Approve' ({final_verdict})")
                 decision_reason = "Trusted repo & approved"
-                repo_git.remotes.origin.push()
+                repo_git.remotes.origin.push(f"HEAD:{base_branch}")
                 commit_type = "Direct Commit"
-                detail_msg = f"The fix was verified and pushed directly to the main branch. Avg Confidence: {final_confidence:.2%}"
+                detail_msg = f"The fix was verified and pushed directly to the {base_branch} branch. Avg Confidence: {final_confidence:.2%}"
             else:
                 reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else "Trust/Ownership requirements not met (can_direct_push=False)"
                 decision_reason = reason
