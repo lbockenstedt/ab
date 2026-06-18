@@ -691,6 +691,8 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                 time.sleep(wait_time)
                 continue
             raise
+        except LLMCreditExhausted:
+            raise  # never retry a billing wall — propagate immediately
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
             last_exception = e
             if not is_last:
@@ -998,18 +1000,15 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 return result
             raise Exception(f"Provider {force_provider} unavailable: {err}")
 
-        # force_cloud=False: Provider 1 only.
-        use_p1_only = (not force_cloud) and state.get("force_local", False)
-        if force_cloud is False and not state.get("force_cloud", False):
+        # force_cloud=False: Provider 1 only, no fallover.
+        if force_cloud is False:
             result, err = _try_provider(1, p1_provider, p1_model, p1_key, p1_url)
             if result is not None:
                 return result
-            if use_p1_only:
-                raise Exception(f"Provider 1 failed and force_local is set: {err}")
             raise Exception(f"Provider 1 (force-only) unavailable: {err}")
 
         # Determine starting provider.
-        use_p2_first = force_cloud is True or state.get("force_cloud", False)
+        use_p2_first = force_cloud is True
         order = [2, 1, 3] if use_p2_first else [1, 2, 3]
         pmap = {n: row for n, *row in [(r[0], *r[1:]) for r in all_providers]}
 
@@ -1148,14 +1147,12 @@ state = {
     "local_online": False, "cloud_online": False,
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
-    "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"),
-    "force_local": config_on_start.get("force_local", os.getenv("FORCE_LOCAL", "False").lower() == "true"),
     "version": get_version(), "llm_stream": "",
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "provider_credit_cb": _provider_credit_cb_snapshot(),
-    "paused": False, "local_configured": False,
+    "paused": False,
     "chat_streams": {}, "chat_fix_proposals": {}
 }
 
@@ -1976,8 +1973,6 @@ def connectivity_worker():
             state["provider_1_online"] = p1_online
             state["provider_2_online"] = p2_online
             state["provider_3_online"] = p3_online
-            state["local_online"] = p1_online
-            state["cloud_online"] = p2_online
             logger.info(f"Connectivity Check: P1={p1_online}, P2={p2_online}, P3={p3_online}")
         except Exception as e:
             logger.error(f"Connectivity worker error: {e}")
@@ -1993,15 +1988,10 @@ def heartbeat_worker():
 
             p1_configured = bool(p1_key and p1_model)
             p2_configured = bool(p2_key and p2_model)
-            state["local_configured"] = p1_configured
             state["llm_circuit_breaker"] = _llm_cb_snapshot()
             state["provider_credit_cb"] = _provider_credit_cb_snapshot()
 
-            if state.get("force_cloud") and p2_configured:
-                state["active_llm"] = p2_model
-            elif state.get("force_local") and p1_configured:
-                state["active_llm"] = p1_model
-            elif p1_configured:
+            if p1_configured:
                 state["active_llm"] = p1_model
             elif p2_configured:
                 state["active_llm"] = p2_model
@@ -3778,31 +3768,20 @@ async def update_now():
     logger.info(f"Manual update check: {msg}")
     return {"status": "success", "message": msg}
 
-@app.post("/toggle_cloud")
-async def toggle_cloud():
-    """Force Provider 2 (secondary provider) for all requests."""
-    state["force_cloud"] = not state["force_cloud"]
-    if state["force_cloud"]:
-        state["force_local"] = False
-    config = load_config()
-    config["force_cloud"] = state["force_cloud"]
-    config["force_local"] = state["force_local"]
-    save_config(config)
-    status = "enabled" if state["force_cloud"] else "disabled"
-    return {"status": "success", "message": f"Force Provider 2 {status}."}
 
-@app.post("/toggle_local")
-async def toggle_local():
-    """Force Provider 1 (primary provider) for all requests with no fallback."""
-    state["force_local"] = not state["force_local"]
-    if state["force_local"]:
-        state["force_cloud"] = False
-    config = load_config()
-    config["force_local"] = state["force_local"]
-    config["force_cloud"] = state["force_cloud"]
-    save_config(config)
-    status = "enabled" if state["force_local"] else "disabled"
-    return {"status": "success", "message": f"Force Provider 1 {status}."}
+
+@app.post("/api/clear-credit-cooldown/{n}")
+async def clear_credit_cooldown(n: int):
+    """Manually clear the 1-hour credit-exhaustion cooldown for provider n (1/2/3)."""
+    if n not in (1, 2, 3):
+        return JSONResponse(status_code=400, content={"error": "n must be 1, 2, or 3"})
+    with _PROVIDER_CREDIT_CB_LOCK:
+        _PROVIDER_CREDIT_CB[n]["cooldown_until"] = 0.0
+        _PROVIDER_CREDIT_CB[n]["tripped_at"] = None
+        _PROVIDER_CREDIT_CB[n]["reason"] = None
+    state["provider_credit_cb"] = _provider_credit_cb_snapshot()
+    logger.info(f"Credit cooldown for Provider {n} manually cleared.")
+    return {"status": "cleared", "provider": n}
 
 
 @app.post("/trigger_fix")

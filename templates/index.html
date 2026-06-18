@@ -158,20 +158,22 @@
                         </span>
                     </div>
                     <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Models</span>
-                        <div class="flex gap-2">
-                            {% if state.local_configured %}
-                                {% if state.local_online %}
-                                    <span class="status-pill pill-online">LOCAL</span>
+                        <span class="text-slate-500">Providers</span>
+                        <div class="flex gap-2 flex-wrap justify-end">
+                            {% for n in [1, 2, 3] %}
+                            {% set online_key = 'provider_' ~ n ~ '_online' %}
+                            {% set cb = state.provider_credit_cb[n] if state.provider_credit_cb else {} %}
+                            <div class="flex items-center gap-1">
+                                {% if state[online_key] %}
+                                    <span class="status-pill pill-online">P{{ n }}</span>
                                 {% else %}
-                                    <span class="status-pill pill-offline">LOCAL</span>
+                                    <span class="status-pill pill-offline">P{{ n }}</span>
                                 {% endif %}
-                            {% endif %}
-                            {% if state.cloud_online %}
-                                <span class="status-pill pill-online">CLOUD</span>
-                            {% else %}
-                                <span class="status-pill pill-offline">CLOUD</span>
-                            {% endif %}
+                                {% if cb and cb.active %}
+                                    <button onclick="clearCreditCooldown({{ n }})" title="Credit cooldown: {{ cb.cooldown_remaining_min|int }} min left — click to reset" class="text-[9px] px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200 rounded font-bold border border-amber-300 transition-colors">⏱ {{ cb.cooldown_remaining_min|int }}m</button>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
                         </div>
                     </div>
                     <div class="pt-4 border-t border-slate-100 space-y-2">
@@ -185,15 +187,6 @@
                         </div>
                     </div>
                 </div>
-                {% if state.local_configured %}
-                <div class="mt-8 pt-6 border-t border-slate-200 space-y-3">
-                    <form action="/toggle_cloud" method="post" onsubmit="handleFormSubmit(event, '/toggle_cloud')">
-                        <button type="submit" class="w-full py-2 px-4 rounded-lg font-bold transition-all duration-200 {{ 'bg-red-600 hover:bg-red-700 text-white' if state.force_cloud else 'bg-[#01A982] hover:bg-[#018f6d] text-white' }}">
-                            {{ '⚠️ DISABLE Cloud Override' if state.force_cloud else '☁️ FORCE Cloud LLM' }}
-                        </button>
-                    </form>
-                </div>
-                {% endif %}
             </div>
 
             <!-- Active Tasks Card -->
@@ -257,11 +250,8 @@
                 <h3 class="text-lg font-semibold text-slate-800">Activity Feed</h3>
                 <div class="flex gap-2 items-center">
                     <div class="flex gap-2 items-center mr-4 border-r border-slate-200 pr-4">
-                        <button onclick="retryAll('local')" class="px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700 hover:bg-blue-200 transition-all border border-blue-200">
-                            <i class="fas fa-redo-alt mr-1"></i> Retry All (Local)
-                        </button>
                         <button onclick="retryAll('cloud')" class="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-all border border-green-200">
-                            <i class="fas fa-cloud mr-1"></i> Retry All (Cloud)
+                            <i class="fas fa-redo-alt mr-1"></i> Retry All
                         </button>
                         <button onclick="clearHistory()" class="px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-all border border-red-200">
                             <i class="fas fa-trash-alt mr-1"></i> Clear History
@@ -296,8 +286,7 @@
                         </td>
                         <td class="px-6 py-4 text-center space-x-2">
                             <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-bold text-slate-700 transition-colors">Retry</button>
-                            <button onclick="triggerFix('{{ issue_id }}', 'local')" class="text-xs px-2 py-1 bg-blue-100 hover:bg-blue-200 rounded font-bold text-blue-700 transition-colors">Local</button>
-                            <button onclick="triggerFix('{{ issue_id }}', 'cloud')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors">Cloud</button>
+                            <button onclick="triggerFix('{{ issue_id }}', 'cloud')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors">Retry (Cloud)</button>
                         </td>
                     </tr>
                     <tr class="bg-slate-50/50">
@@ -952,7 +941,7 @@
             let payload = {
                 repo_name: repoName,
                 issue_num: issueNum,
-                llm_preference: mode === 'retry' ? null : (mode === 'local' ? 'local' : 'cloud')
+                llm_preference: mode === 'retry' ? null : 'cloud'
             };
 
             if (mode === 'retry') {
@@ -1106,6 +1095,15 @@
                     }
                 }
             });
+        }
+
+        async function clearCreditCooldown(n) {
+            try {
+                const resp = await fetch(`/api/clear-credit-cooldown/${n}`, { method: 'POST' });
+                const data = await resp.json();
+                if (data.status === 'cleared') location.reload();
+                else alert('Failed to clear cooldown: ' + JSON.stringify(data));
+            } catch (e) { alert('Request failed: ' + e); }
         }
 
         async function fetchModels() { /* kept for compat — delegates to loadProviderModels */ }
