@@ -417,13 +417,24 @@ class LLMCreditExhausted(Exception):
         super().__init__(f"Provider '{provider}' credit exhausted (HTTP {status_code}): {body[:200]}")
 
 
+_CREDIT_MSG_KEYWORDS = frozenset({
+    "credit balance is too low", "credit balance too low",
+    "insufficient credits", "insufficient_quota",
+    "billing_hard_limit_reached", "billing not enabled",
+    "quota exceeded", "out of credits", "payment required",
+    "upgrade or purchase credits",
+})
+
 def _is_credit_exhaustion(status_code, body_text, provider):
     """Return True if the HTTP error indicates billing/quota exhaustion, not just rate limiting.
 
     Provider-specific signals:
-      OpenAI/Ollama  — 402, or 429 error.code in {insufficient_quota, billing_hard_limit_reached}
-      Anthropic      — 402, or 400/403 error.type in {credit_balance_too_low, billing_error}
-      Google         — 429/403 with RESOURCE_EXHAUSTED AND billing/quota keyword in message
+      All            — HTTP 402 Payment Required
+      OpenAI/Ollama  — error.code/type in {insufficient_quota, billing_hard_limit_reached}
+      Anthropic      — error.type in {credit_balance_too_low, billing_error}
+                       OR any error message containing credit/billing keywords
+                       (Anthropic wraps credit errors as invalid_request_error)
+      Google         — RESOURCE_EXHAUSTED with billing/quota keyword in message
     """
     if status_code == 402:
         return True
@@ -434,26 +445,32 @@ def _is_credit_exhaustion(status_code, body_text, provider):
         body = {}
 
     p = (provider or "openai").lower().strip()
+    err = body.get("error") if isinstance(body.get("error"), dict) else {}
+    err_msg = (err.get("message") or "").lower()
 
     if p in ("openai", "ollama"):
-        err = body.get("error") if isinstance(body.get("error"), dict) else {}
         if err.get("code") in {"insufficient_quota", "billing_hard_limit_reached"}:
             return True
         if err.get("type") in {"insufficient_quota", "billing_not_active"}:
             return True
+        # OpenAI-compat providers sometimes put it in the message too
+        if any(k in err_msg for k in _CREDIT_MSG_KEYWORDS):
+            return True
 
     if p == "anthropic":
-        err = body.get("error") if isinstance(body.get("error"), dict) else {}
+        # Anthropic sometimes uses credit_balance_too_low as error.type directly,
+        # but also wraps it as invalid_request_error with the reason in the message.
         if err.get("type") in {"credit_balance_too_low", "billing_error"}:
             return True
         if body.get("type") in {"credit_balance_too_low", "billing_error"}:
             return True
+        if any(k in err_msg for k in _CREDIT_MSG_KEYWORDS):
+            return True
 
     if p == "google":
-        err = body.get("error") if isinstance(body.get("error"), dict) else {}
         if err.get("status") == "RESOURCE_EXHAUSTED":
             msg = (err.get("message") or "").lower()
-            if any(k in msg for k in ("quota", "billing", "budget", "credit", "payment", "exhausted")):
+            if any(k in msg for k in ("quota", "billing", "budget", "credit", "payment")):
                 return True
 
     return False
