@@ -6,3 +6,7 @@ node_modules/
 .DS_Store
 *.pyc
 bugfixer.log
+# Runtime log files written by the service in its working dir; never commit these.
+server.log
+server_debug.log
+server*.log
