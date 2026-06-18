@@ -1,4 +1,4 @@
-import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, re, uuid
+import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, re, uuid, collections
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -531,6 +531,38 @@ def _provider_credit_cb_snapshot():
     return result
 
 
+_PROVIDER_RL_LOCK = threading.Lock()
+_PROVIDER_REQUEST_TIMES = {n: collections.deque() for n in (1, 2, 3, 4)}
+
+
+def _provider_rate_limit_wait(n, rpm, provider_name):
+    """Block the calling thread until provider n is under its RPM limit.
+
+    Uses a 60-second sliding window. rpm=0 means unlimited.
+    Releases the lock before sleeping so other providers are never blocked.
+    """
+    if not rpm or rpm <= 0:
+        return
+    window = 60.0
+    while True:
+        now = time.time()
+        with _PROVIDER_RL_LOCK:
+            dq = _PROVIDER_REQUEST_TIMES[n]
+            while dq and now - dq[0] >= window:
+                dq.popleft()
+            if len(dq) < rpm:
+                dq.append(now)
+                return  # Under limit — stamp and proceed.
+            wait_s = dq[0] + window - now
+        # Sleep outside the lock so other providers are not blocked.
+        if wait_s > 0:
+            logger.info(
+                f"Provider {n} ({provider_name}) RPM throttle ({rpm}/min) — "
+                f"waiting {wait_s:.1f}s before next request."
+            )
+            time.sleep(min(wait_s + 0.05, 5.0))
+
+
 def _any_provider_available(config):
     """Return (available: bool, soonest_free_s: float).
 
@@ -1020,6 +1052,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             )
             return None, "credit_cooldown"
         try:
+            # Honour per-provider RPM cap (0 = unlimited).
+            rpm = int(config.get(f"LLM_RPM_{n}") or 0)
+            _provider_rate_limit_wait(n, rpm, provider)
             state["active_llm"] = model
             result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config)
             # Successful call: clear any rate-limit cooldown for this provider.
@@ -3662,6 +3697,10 @@ DEFAULT_ENV = {
     "REVIEWER_MODEL_2": "",
     "REVIEWER_MODEL_3": "",
     "REVIEWER_MODEL_4": "",
+    "LLM_RPM_1": "0",
+    "LLM_RPM_2": "0",
+    "LLM_RPM_3": "0",
+    "LLM_RPM_4": "0",
     "LLM_MAX_RETRIES": "5",
     "LLM_BACKOFF_BASE": "2.0",
     "LLM_BACKOFF_MAX": "600.0",
@@ -3773,6 +3812,10 @@ async def save_settings(request: Request):
         "REVIEWER_MODEL_2": lambda v: v,
         "REVIEWER_MODEL_3": lambda v: v,
         "REVIEWER_MODEL_4": lambda v: v,
+        "LLM_RPM_1": lambda v: v,
+        "LLM_RPM_2": lambda v: v,
+        "LLM_RPM_3": lambda v: v,
+        "LLM_RPM_4": lambda v: v,
         "LLM_MAX_RETRIES": lambda v: v,
         "LLM_BACKOFF_BASE": lambda v: v,
         "LLM_BACKOFF_MAX": lambda v: v,

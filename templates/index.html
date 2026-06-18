@@ -476,9 +476,13 @@
                                     <label class="text-sm font-medium text-slate-600">API Key</label>
                                     <input type="password" name="LLM_API_KEY_1" id="llm-key-1" value="{{ settings.LLM_API_KEY_1 }}" placeholder="sk-..." onblur="loadProviderModels(1)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
-                                <div class="space-y-2 md:col-span-3">
+                                <div class="space-y-2 md:col-span-2">
                                     <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional — leave blank for the provider default)</span></label>
                                     <input type="text" name="LLM_BASE_URL_1" id="llm-url-1" value="{{ settings.LLM_BASE_URL_1 }}" placeholder="https://ollama.com" onblur="loadProviderModels(1)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Rate Limit <span class="text-slate-400 font-normal">(RPM, 0=unlimited)</span></label>
+                                    <input type="number" name="LLM_RPM_1" value="{{ settings.LLM_RPM_1 }}" min="0" placeholder="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                             </div>
                         </div>
@@ -509,9 +513,13 @@
                                     <label class="text-sm font-medium text-slate-600">API Key</label>
                                     <input type="password" name="LLM_API_KEY_2" id="llm-key-2" value="{{ settings.LLM_API_KEY_2 }}" placeholder="sk-ant-..." onblur="loadProviderModels(2)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
-                                <div class="space-y-2 md:col-span-3">
+                                <div class="space-y-2 md:col-span-2">
                                     <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
                                     <input type="text" name="LLM_BASE_URL_2" id="llm-url-2" value="{{ settings.LLM_BASE_URL_2 }}" placeholder="https://ollama.com" onblur="loadProviderModels(2)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Rate Limit <span class="text-slate-400 font-normal">(RPM, 0=unlimited)</span></label>
+                                    <input type="number" name="LLM_RPM_2" value="{{ settings.LLM_RPM_2 }}" min="0" placeholder="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                             </div>
                         </div>
@@ -542,9 +550,13 @@
                                     <label class="text-sm font-medium text-slate-600">API Key</label>
                                     <input type="password" name="LLM_API_KEY_3" id="llm-key-3" value="{{ settings.LLM_API_KEY_3 }}" placeholder="sk-..." onblur="loadProviderModels(3)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
-                                <div class="space-y-2 md:col-span-3">
+                                <div class="space-y-2 md:col-span-2">
                                     <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
                                     <input type="text" name="LLM_BASE_URL_3" id="llm-url-3" value="{{ settings.LLM_BASE_URL_3 }}" placeholder="https://api.openai.com/v1" onblur="loadProviderModels(3)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Rate Limit <span class="text-slate-400 font-normal">(RPM, 0=unlimited)</span></label>
+                                    <input type="number" name="LLM_RPM_3" value="{{ settings.LLM_RPM_3 }}" min="0" placeholder="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                             </div>
                         </div>
@@ -575,9 +587,13 @@
                                     <label class="text-sm font-medium text-slate-600">API Key</label>
                                     <input type="password" name="LLM_API_KEY_4" id="llm-key-4" value="{{ settings.LLM_API_KEY_4 }}" placeholder="sk-..." onblur="loadProviderModels(4)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
-                                <div class="space-y-2 md:col-span-3">
+                                <div class="space-y-2 md:col-span-2">
                                     <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
                                     <input type="text" name="LLM_BASE_URL_4" id="llm-url-4" value="{{ settings.LLM_BASE_URL_4 }}" placeholder="https://api.openai.com/v1" onblur="loadProviderModels(4)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Rate Limit <span class="text-slate-400 font-normal">(RPM, 0=unlimited)</span></label>
+                                    <input type="number" name="LLM_RPM_4" value="{{ settings.LLM_RPM_4 }}" min="0" placeholder="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                             </div>
                         </div>
