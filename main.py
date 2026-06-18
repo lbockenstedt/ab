@@ -1374,6 +1374,9 @@ state = {
     "daily_fixes_count": 0,
     "daily_budget_date": "",
     "scheduler_mode": "full",
+    "claude_auth_proc": None,    # background subprocess running `claude auth login`
+    "claude_auth_url": "",       # OAuth URL captured from that process
+    "claude_auth_done": False,   # True once the process exits 0
 }
 
 try:
@@ -3964,59 +3967,173 @@ async def scheduler_status():
 
 @app.get("/api/claude-cli/status")
 async def claude_cli_status():
-    """Check whether the local claude CLI is installed and reachable."""
+    """Check whether the local claude CLI is installed and authenticated."""
     import subprocess
     try:
-        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            return {"status": "ok", "version": r.stdout.strip() or r.stderr.strip()}
-        return {"status": "error", "detail": (r.stderr or r.stdout).strip()[:500]}
+        # Quick authenticated probe: send a minimal prompt and check for auth error
+        probe = subprocess.run(
+            ["claude", "--output-format", "json"],
+            input="ping", capture_output=True, text=True, timeout=15,
+        )
+        output = probe.stdout.strip()
+        try:
+            data = json.loads(output)
+            result_text = data.get("result", "")
+            if "Not logged in" in result_text or "/login" in result_text:
+                return {"status": "needs_auth",
+                        "detail": "Claude CLI installed but not authenticated. Use 'Start Login Flow' to log in."}
+            if data.get("is_error") and data.get("result"):
+                return {"status": "error", "detail": result_text[:300]}
+            return {"status": "authenticated", "detail": "Claude CLI authenticated and ready."}
+        except (json.JSONDecodeError, KeyError):
+            # Fall back to version check
+            r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                return {"status": "ok", "version": r.stdout.strip() or r.stderr.strip()}
+            return {"status": "error", "detail": (r.stderr or r.stdout).strip()[:300]}
     except FileNotFoundError:
         return {"status": "not_found", "detail": "'claude' binary not found in PATH"}
     except subprocess.TimeoutExpired:
-        return {"status": "timeout", "detail": "Version check timed out"}
+        return {"status": "timeout", "detail": "CLI probe timed out — may be authenticating"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
 
-@app.post("/api/claude-cli/auth")
-async def claude_cli_auth():
-    """Trigger the Claude CLI auth flow and return the output (contains the approval URL)."""
-    import subprocess, re
-    try:
-        # Pass "hi" via stdin to avoid ARG_MAX issues.
-        proc = subprocess.Popen(
-            ["claude", "--output-format", "json"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        )
-        try:
-            stdout, stderr = proc.communicate(input="hi", timeout=20)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-        combined = (stdout + "\n" + stderr).strip()
-        urls = re.findall(r'https?://[^\s"\'<>]+', combined)
+@app.post("/api/claude-cli/auth/start")
+async def claude_cli_auth_start():
+    """Start 'claude auth login' as a background process and capture the OAuth URL.
 
-        # Try to parse JSON result to surface auth status cleanly.
-        not_logged_in = ("Not logged in" in combined or "/login" in combined)
+    The subprocess must stay alive so its local callback server can receive the
+    browser redirect after the user approves.  Call /api/claude-cli/auth/poll to
+    check progress.
+    """
+    import subprocess, select as _select
+
+    # Kill any existing auth process first.
+    old = state.get("claude_auth_proc")
+    if old and old.poll() is None:
         try:
-            data = json.loads(stdout.strip())
-            result_text = data.get("result", "")
-            if "Not logged in" in result_text or "/login" in result_text:
-                not_logged_in = True
+            old.terminate()
         except Exception:
             pass
+    state["claude_auth_proc"] = None
+    state["claude_auth_url"] = ""
+    state["claude_auth_done"] = False
 
-        if not_logged_in:
-            return {"status": "needs_auth", "output": combined[:3000], "urls": urls,
-                    "message": "Not logged in — run the auth flow below to get an approval URL."}
-        if proc.returncode == 0:
-            return {"status": "authenticated", "output": combined[:3000], "urls": urls}
-        return {"status": "needs_auth", "output": combined[:3000], "urls": urls}
+    try:
+        proc = subprocess.Popen(
+            ["claude", "auth", "login"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        state["claude_auth_proc"] = proc
+
+        # Read output for up to 20 s to capture the OAuth URL, then return.
+        # The process is NOT killed — it must stay alive for the browser callback.
+        lines = []
+        url_found = ""
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            ready, _, _ = _select.select([proc.stdout, proc.stderr], [], [], 0.5)
+            for stream in ready:
+                line = stream.readline()
+                if line:
+                    lines.append(line)
+                    urls = re.findall(r'https?://\S+', line)
+                    for u in urls:
+                        u = u.rstrip(".,;)")
+                        if u:
+                            url_found = u
+                            break
+            if url_found:
+                break
+            if proc.poll() is not None:  # exited early
+                break
+
+        combined = "".join(lines)
+        # Scan all captured output for URLs if line-by-line didn't find one.
+        if not url_found:
+            all_urls = re.findall(r'https?://\S+', combined)
+            url_found = all_urls[0].rstrip(".,;)") if all_urls else ""
+
+        state["claude_auth_url"] = url_found
+        if proc.poll() == 0:
+            state["claude_auth_done"] = True
+            return {"status": "authenticated", "url": "", "output": combined[:3000]}
+        if url_found:
+            return {"status": "pending", "url": url_found, "output": combined[:3000],
+                    "message": "Open the URL above in your browser to authenticate, then click 'Check Status'."}
+        return {"status": "pending", "url": "", "output": combined[:3000] or "(no output yet — process running)",
+                "message": "Auth process started but no URL captured yet. Wait a moment and click 'Check Status'."}
+
     except FileNotFoundError:
         return {"status": "not_found", "detail": "'claude' binary not found in PATH"}
     except Exception as e:
-        return {"status": "error", "detail": str(e), "output": "", "urls": []}
+        return {"status": "error", "detail": str(e)}
+
+
+@app.get("/api/claude-cli/auth/poll")
+async def claude_cli_auth_poll():
+    """Check whether the background auth process has completed."""
+    proc = state.get("claude_auth_proc")
+    url = state.get("claude_auth_url", "")
+
+    if state.get("claude_auth_done"):
+        return {"status": "authenticated", "url": url}
+
+    if proc is None:
+        # No process — check live whether CLI is authenticated.
+        try:
+            r = subprocess.run(
+                ["claude", "--output-format", "json"],
+                input="ping", capture_output=True, text=True, timeout=10,
+            )
+            try:
+                data = json.loads(r.stdout.strip())
+                if "Not logged in" in data.get("result", ""):
+                    return {"status": "needs_auth", "url": ""}
+                return {"status": "authenticated", "url": ""}
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return {"status": "no_process", "url": ""}
+
+    rc = proc.poll()
+    if rc is None:
+        # Still running — try to pick up any new URL lines from stdout
+        extra = []
+        try:
+            import select as _select
+            while True:
+                ready, _, _ = _select.select([proc.stdout, proc.stderr], [], [], 0)
+                if not ready:
+                    break
+                for s in ready:
+                    line = s.readline()
+                    if line:
+                        extra.append(line)
+        except Exception:
+            pass
+        combined = "".join(extra)
+        new_urls = re.findall(r'https?://\S+', combined)
+        if new_urls and not url:
+            url = new_urls[0].rstrip(".,;)")
+            state["claude_auth_url"] = url
+        return {"status": "pending", "url": url}
+
+    # Process exited.
+    if rc == 0:
+        state["claude_auth_done"] = True
+        state["claude_auth_proc"] = None
+        return {"status": "authenticated", "url": url}
+    # Non-zero exit — collect remaining stderr.
+    try:
+        remaining, _ = proc.communicate(timeout=2)
+    except Exception:
+        remaining = ""
+    state["claude_auth_proc"] = None
+    return {"status": "error", "detail": f"auth login exited {rc}: {remaining[:300]}", "url": url}
 
 
 @app.post("/api/toggle-model")

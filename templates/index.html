@@ -141,7 +141,7 @@
         </div>
     </nav>
 
-    <main class="{{ 'max-w-[90rem]' if view == 'chat' else 'max-w-6xl' }} mx-auto px-4 py-8 flex-grow overflow-y-auto">
+    <main class="max-w-6xl mx-auto px-4 py-8 flex-grow overflow-y-auto">
         {% if view == 'status' %}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <!-- System Status Card -->
@@ -485,7 +485,7 @@
                                         <p class="text-xs text-slate-500">Uses the <strong>Claude Code</strong> session authenticated on this server — no API key needed. The <code class="bg-slate-100 px-1 rounded">claude</code> binary must be in PATH.</p>
                                         <div class="flex gap-2">
                                             <button type="button" onclick="checkClaudeStatus()" class="flex-1 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold transition-colors border border-slate-300">Check Status</button>
-                                            <button type="button" onclick="startClaudeAuth()" class="flex-1 py-1 text-xs bg-violet-600 hover:bg-violet-700 text-white rounded font-bold transition-colors">Get Auth URL</button>
+                                            <button type="button" onclick="startClaudeAuth()" class="flex-1 py-1 text-xs bg-violet-600 hover:bg-violet-700 text-white rounded font-bold transition-colors">Start Login Flow</button>
                                         </div>
                                         <div id="claude-cli-status" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 space-y-1">
                                             <div id="claude-cli-status-line" class="font-medium"></div>
@@ -973,7 +973,7 @@
     </main>
 
     <footer class="bg-[#263040] border-t border-slate-700 p-4 flex-none">
-        <div class="{{ 'max-w-[90rem]' if view == 'chat' else 'max-w-6xl' }} mx-auto flex items-center gap-4">
+        <div class="max-w-6xl mx-auto flex items-center gap-4">
             <div class="flex flex-col items-end gap-1 text-xs text-slate-400 font-mono ml-auto flex-shrink-0 order-2 text-right">
                 <span>{{ state.version }}</span>
                 <span>LLM <span class="text-slate-200">{{ state.active_llm }}</span></span>
@@ -1366,14 +1366,20 @@
         // Load scheduler status on page load if on settings view.
         if (document.getElementById('sched-status-box')) refreshSchedStatus();
 
+        let _claudeAuthPollTimer = null;
+
         async function checkClaudeStatus() {
             _showClaudeCliResult('Checking…', 'text-slate-500', '', []);
             try {
                 const data = await fetch('/api/claude-cli/status').then(r => r.json());
-                if (data.status === 'ok') {
-                    _showClaudeCliResult('✓ Claude CLI installed — ' + (data.version || ''), 'text-green-700', '', []);
+                if (data.status === 'authenticated') {
+                    _showClaudeCliResult('✓ Authenticated — Claude CLI is ready.', 'text-green-700', '', []);
+                } else if (data.status === 'needs_auth') {
+                    _showClaudeCliResult('⚠ Not logged in — click "Start Login Flow" to authenticate.', 'text-orange-600', data.detail || '', []);
                 } else if (data.status === 'not_found') {
                     _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', []);
+                } else if (data.status === 'ok') {
+                    _showClaudeCliResult('✓ Claude CLI installed — ' + (data.version || ''), 'text-green-700', '', []);
                 } else {
                     _showClaudeCliResult('✗ ' + (data.detail || data.status), 'text-red-600', '', []);
                 }
@@ -1383,21 +1389,57 @@
         }
 
         async function startClaudeAuth() {
-            _showClaudeCliResult('Starting auth flow — please wait (~20s)…', 'text-violet-600', '', []);
+            _showClaudeCliResult('Starting login flow — scanning for auth URL (up to 20s)…', 'text-violet-600', '', []);
+            clearInterval(_claudeAuthPollTimer);
             try {
-                const data = await fetch('/api/claude-cli/auth', {method: 'POST'}).then(r => r.json());
+                const data = await fetch('/api/claude-cli/auth/start', {method: 'POST'}).then(r => r.json());
                 if (data.status === 'authenticated') {
-                    _showClaudeCliResult('✓ Already authenticated — Claude CLI is ready to use.', 'text-green-700', data.output || '', []);
-                } else if (data.status === 'not_found') {
-                    _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', []);
-                } else if (data.urls && data.urls.length > 0) {
-                    _showClaudeCliResult('Authorization required — open the URL below in your browser:', 'text-violet-700', data.output || '', data.urls);
-                } else {
-                    _showClaudeCliResult('Auth flow output (no URL detected):', 'text-slate-700', data.output || data.detail || '', []);
+                    _showClaudeCliResult('✓ Already authenticated — Claude CLI is ready.', 'text-green-700', '', []);
+                    return;
                 }
+                if (data.status === 'not_found') {
+                    _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', []);
+                    return;
+                }
+                if (data.url) {
+                    _showClaudeCliResult(
+                        '1. Open the URL below in your browser and approve  2. Return here and click "Check Status"',
+                        'text-violet-700', data.output || '', [data.url]
+                    );
+                } else {
+                    _showClaudeCliResult(
+                        'Auth process started but no URL yet — polling…',
+                        'text-violet-600', data.output || '', []
+                    );
+                }
+                // Poll every 4 s so we pick up the URL if it wasn't ready yet,
+                // and detect when the OAuth callback completes.
+                _claudeAuthPollTimer = setInterval(pollClaudeAuth, 4000);
             } catch(e) {
                 _showClaudeCliResult('Error starting auth: ' + e, 'text-red-600', '', []);
             }
+        }
+
+        async function pollClaudeAuth() {
+            try {
+                const data = await fetch('/api/claude-cli/auth/poll').then(r => r.json());
+                if (data.status === 'authenticated') {
+                    clearInterval(_claudeAuthPollTimer);
+                    _showClaudeCliResult('✓ Authentication complete — Claude CLI is ready!', 'text-green-700', '', []);
+                } else if (data.status === 'error') {
+                    clearInterval(_claudeAuthPollTimer);
+                    _showClaudeCliResult('✗ Auth error: ' + (data.detail || ''), 'text-red-600', '', []);
+                } else if (data.status === 'pending' && data.url) {
+                    // Update the URL display if we got it late.
+                    const urlDiv = document.getElementById('claude-cli-urls');
+                    if (urlDiv && urlDiv.classList.contains('hidden')) {
+                        _showClaudeCliResult(
+                            '1. Open the URL below in your browser and approve  2. Return here and click "Check Status"',
+                            'text-violet-700', '', [data.url]
+                        );
+                    }
+                }
+            } catch(e) { /* network blip — keep polling */ }
         }
 
         async function saveCredential(provider) {
