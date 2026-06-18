@@ -405,8 +405,102 @@ template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
 
 # ============================================================================
-# LLM Circuit Breaker & Global Rate Limiter
+# LLM Circuit Breaker & Credit-Exhaustion Tracker
 # ============================================================================
+
+class LLMCreditExhausted(Exception):
+    """Raised immediately (no retry) when a provider signals billing/credit exhaustion."""
+    def __init__(self, status_code, body, provider):
+        self.status_code = status_code
+        self.body = body
+        self.provider = provider
+        super().__init__(f"Provider '{provider}' credit exhausted (HTTP {status_code}): {body[:200]}")
+
+
+def _is_credit_exhaustion(status_code, body_text, provider):
+    """Return True if the HTTP error indicates billing/quota exhaustion, not just rate limiting.
+
+    Provider-specific signals:
+      OpenAI/Ollama  — 402, or 429 error.code in {insufficient_quota, billing_hard_limit_reached}
+      Anthropic      — 402, or 400/403 error.type in {credit_balance_too_low, billing_error}
+      Google         — 429/403 with RESOURCE_EXHAUSTED AND billing/quota keyword in message
+    """
+    if status_code == 402:
+        return True
+
+    try:
+        body = json.loads(body_text) if body_text else {}
+    except Exception:
+        body = {}
+
+    p = (provider or "openai").lower().strip()
+
+    if p in ("openai", "ollama"):
+        err = body.get("error") if isinstance(body.get("error"), dict) else {}
+        if err.get("code") in {"insufficient_quota", "billing_hard_limit_reached"}:
+            return True
+        if err.get("type") in {"insufficient_quota", "billing_not_active"}:
+            return True
+
+    if p == "anthropic":
+        err = body.get("error") if isinstance(body.get("error"), dict) else {}
+        if err.get("type") in {"credit_balance_too_low", "billing_error"}:
+            return True
+        if body.get("type") in {"credit_balance_too_low", "billing_error"}:
+            return True
+
+    if p == "google":
+        err = body.get("error") if isinstance(body.get("error"), dict) else {}
+        if err.get("status") == "RESOURCE_EXHAUSTED":
+            msg = (err.get("message") or "").lower()
+            if any(k in msg for k in ("quota", "billing", "budget", "credit", "payment", "exhausted")):
+                return True
+
+    return False
+
+
+# Per-provider 1-hour credit-exhaustion cooldown (independent of the global rate-limit CB)
+_PROVIDER_CREDIT_CB_LOCK = threading.Lock()
+_PROVIDER_CREDIT_CB = {
+    1: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
+    2: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
+}
+_CREDIT_COOLDOWN_SECONDS = 3600  # 1 hour
+
+
+def _provider_credit_cb_trip(n, reason):
+    cd = time.time() + _CREDIT_COOLDOWN_SECONDS
+    with _PROVIDER_CREDIT_CB_LOCK:
+        _PROVIDER_CREDIT_CB[n]["cooldown_until"] = cd
+        _PROVIDER_CREDIT_CB[n]["tripped_at"] = datetime.now().isoformat()
+        _PROVIDER_CREDIT_CB[n]["reason"] = reason
+    until_str = datetime.fromtimestamp(cd).strftime("%H:%M:%S")
+    logger.error(
+        f"Provider {n} CREDIT EXHAUSTED — pausing for {_CREDIT_COOLDOWN_SECONDS//60} min "
+        f"(until ~{until_str}). Reason: {reason}"
+    )
+
+
+def _provider_credit_cb_remaining(n):
+    """Seconds remaining on credit cooldown for provider n (0 if clear)."""
+    with _PROVIDER_CREDIT_CB_LOCK:
+        return max(0.0, _PROVIDER_CREDIT_CB[n]["cooldown_until"] - time.time())
+
+
+def _provider_credit_cb_snapshot():
+    result = {}
+    with _PROVIDER_CREDIT_CB_LOCK:
+        for n in (1, 2):
+            rem = max(0.0, _PROVIDER_CREDIT_CB[n]["cooldown_until"] - time.time())
+            result[n] = {
+                "active": rem > 0,
+                "cooldown_remaining_s": rem,
+                "cooldown_remaining_min": round(rem / 60, 1),
+                "tripped_at": _PROVIDER_CREDIT_CB[n]["tripped_at"],
+                "reason": _PROVIDER_CREDIT_CB[n]["reason"],
+            }
+    return result
+
 
 _LLM_CB_LOCK = threading.Lock()
 _LLM_CB = {
@@ -487,8 +581,12 @@ def _get_llm_semaphore():
             logger.info(f"LLM global concurrency limiter initialised: max_concurrent={max(1, max_conc)}")
         return _LLM_SEMAPHORE
 
-def _llm_retry_post(endpoint, payload, headers, config, stream=False):
-    """POST to endpoint with retry/backoff. Returns the response object on success."""
+def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="openai"):
+    """POST to endpoint with retry/backoff. Returns the response object on success.
+
+    Raises LLMCreditExhausted immediately (no retry) when the provider signals
+    billing/credit exhaustion so call_llm() can trip the per-provider 1-hour CB.
+    """
     max_retries = int(config.get("LLM_MAX_RETRIES", 5))
     backoff_base = float(config.get("LLM_BACKOFF_BASE", 2.0))
     backoff_max = float(config.get("LLM_BACKOFF_MAX", 60.0))
@@ -505,6 +603,18 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False):
                 resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout_val, stream=stream)
             finally:
                 sem.release()
+
+            # Credit exhaustion check — happens before any retry logic so we don't
+            # waste retries against a billing wall.
+            if resp.status_code in (400, 402, 403, 429):
+                body_preview = ""
+                try:
+                    body_preview = resp.text[:2000]
+                except Exception:
+                    pass
+                if _is_credit_exhaustion(resp.status_code, body_preview, provider):
+                    resp.close()
+                    raise LLMCreditExhausted(resp.status_code, body_preview, provider)
 
             if resp.status_code == 429:
                 wait_time = _parse_retry_after(resp.headers.get("Retry-After"), backoff_base, backoff_max, attempt)
@@ -600,7 +710,7 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     if tools:
         payload["tools"] = _tools_to_openai(tools)
 
-    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream)
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="openai")
 
     if tools:
         data = resp.json()
@@ -658,7 +768,7 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
     if tools:
         payload["tools"] = _tools_to_anthropic(tools)
 
-    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream)
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="anthropic")
 
     if tools or not use_stream:
         data = resp.json()
@@ -716,7 +826,7 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
             for t in tools
         ]}]
 
-    resp = _llm_retry_post(endpoint, payload, headers, config, stream=False)
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="google")
     data = resp.json()
     candidates = data.get("candidates") or []
     parts = ((candidates[0].get("content") or {}) if candidates else {}).get("parts") or []
@@ -760,7 +870,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
     if tools:
         payload["tools"] = tools
 
-    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream)
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="ollama")
 
     if tools:
         try:
@@ -839,26 +949,68 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     use_p2_first = force_cloud if force_cloud is not None else state.get("force_cloud", False)
     use_p1_only = (not use_p2_first) and state.get("force_local", False)
 
+    def _credit_skip_msg(n, provider):
+        rem = _provider_credit_cb_remaining(n)
+        return (
+            f"Provider {n} ({provider}) skipped — credit exhaustion cooldown active "
+            f"({rem/60:.0f} min remaining)."
+        )
+
+    def _try_provider(n, provider, model, key, url):
+        rem = _provider_credit_cb_remaining(n)
+        if rem > 0:
+            logger.warning(_credit_skip_msg(n, provider))
+            return None, "credit_cooldown"
+        try:
+            state["active_llm"] = f"Provider {n} ({provider}/{model})"
+            result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config)
+            return result, None
+        except LLMCreditExhausted as ce:
+            _provider_credit_cb_trip(n, str(ce))
+            state["provider_credit_cb"] = _provider_credit_cb_snapshot()
+            return None, "credit_exhausted"
+        except Exception as e:
+            return None, e
+
     try:
         if use_p2_first:
             if p2_key and p2_model:
-                state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
-                return _call_provider(p2_provider, p2_model, p2_key, p2_url, messages, tools, effective_stream, task_id, config)
-            logger.warning("Provider 2 requested but not configured; falling back to Provider 1.")
+                result, err = _try_provider(2, p2_provider, p2_model, p2_key, p2_url)
+                if result is not None:
+                    return result
+                if err == "credit_cooldown":
+                    logger.warning("Provider 2 in credit cooldown; trying Provider 1 as fallback.")
+                elif err == "credit_exhausted":
+                    logger.warning("Provider 2 credit exhausted; trying Provider 1 as fallback.")
+                else:
+                    raise err
+            else:
+                logger.warning("Provider 2 requested but not configured; falling back to Provider 1.")
 
         if p1_key and p1_model:
-            try:
-                state["active_llm"] = f"Provider 1 ({p1_provider}/{p1_model})"
-                return _call_provider(p1_provider, p1_model, p1_key, p1_url, messages, tools, effective_stream, task_id, config)
-            except Exception as e1:
-                if use_p1_only:
-                    logger.error(f"Provider 1 failed and force_local is set, no fallback: {e1}")
-                    raise
-                logger.warning(f"Provider 1 ({p1_provider}) failed: {e1}. Falling back to Provider 2...")
+            result, err = _try_provider(1, p1_provider, p1_model, p1_key, p1_url)
+            if result is not None:
+                return result
+            if err == "credit_cooldown":
+                logger.warning("Provider 1 in credit cooldown; trying Provider 2 as fallback.")
+            elif err == "credit_exhausted":
+                logger.warning("Provider 1 credit exhausted; trying Provider 2 as fallback.")
+            elif use_p1_only:
+                logger.error(f"Provider 1 failed and force_local is set, no fallback: {err}")
+                raise err
+            else:
+                logger.warning(f"Provider 1 ({p1_provider}) failed: {err}. Falling back to Provider 2...")
 
         if p2_key and p2_model:
-            state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
-            return _call_provider(p2_provider, p2_model, p2_key, p2_url, messages, tools, effective_stream, task_id, config)
+            result, err = _try_provider(2, p2_provider, p2_model, p2_key, p2_url)
+            if result is not None:
+                return result
+            if err not in ("credit_cooldown", "credit_exhausted"):
+                raise err
+            raise Exception(
+                f"Provider 2 ({p2_provider}) also unavailable due to credit exhaustion. "
+                "Check billing on both providers."
+            )
 
         raise Exception("No LLM providers are configured. Set LLM_PROVIDER_1/LLM_API_KEY_1/LLM_MODEL_1 in settings.")
     except Exception as e:
@@ -983,6 +1135,7 @@ state = {
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
+    "provider_credit_cb": _provider_credit_cb_snapshot(),
     "paused": False, "local_configured": False,
     "chat_streams": {}, "chat_fix_proposals": {}
 }
@@ -1821,6 +1974,7 @@ def heartbeat_worker():
             p2_configured = bool(p2_key and p2_model)
             state["local_configured"] = p1_configured
             state["llm_circuit_breaker"] = _llm_cb_snapshot()
+            state["provider_credit_cb"] = _provider_credit_cb_snapshot()
 
             if state.get("force_cloud") and p2_configured:
                 state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
