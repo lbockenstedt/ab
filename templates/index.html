@@ -170,7 +170,11 @@
                                     <span class="status-pill pill-offline">P{{ n }}</span>
                                 {% endif %}
                                 {% if cb and cb.active %}
-                                    <button onclick="clearCreditCooldown({{ n }})" title="Credit cooldown: {{ cb.cooldown_remaining_min|int }} min left — click to reset" class="text-[9px] px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200 rounded font-bold border border-amber-300 transition-colors">⏱ {{ cb.cooldown_remaining_min|int }}m</button>
+                                    {% if cb.cause == 'rate_limit' %}
+                                        <button onclick="clearCreditCooldown({{ n }})" title="Rate-limited: {{ cb.cooldown_remaining_min|int }} min cooldown — click to reset" class="text-[9px] px-1 py-0.5 bg-blue-100 text-blue-700 hover:bg-blue-200 rounded font-bold border border-blue-300 transition-colors">RL {{ cb.cooldown_remaining_min|int }}m</button>
+                                    {% else %}
+                                        <button onclick="clearCreditCooldown({{ n }})" title="Credit exhausted: {{ cb.cooldown_remaining_min|int }} min left — click to reset" class="text-[9px] px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200 rounded font-bold border border-amber-300 transition-colors">⏱ {{ cb.cooldown_remaining_min|int }}m</button>
+                                    {% endif %}
                                 {% endif %}
                             </div>
                             {% endfor %}

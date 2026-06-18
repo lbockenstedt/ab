@@ -479,29 +479,38 @@ def _is_credit_exhaustion(status_code, body_text, provider):
 # Per-provider 1-hour credit-exhaustion cooldown (independent of the global rate-limit CB)
 _PROVIDER_CREDIT_CB_LOCK = threading.Lock()
 _PROVIDER_CREDIT_CB = {
-    1: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
-    2: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
-    3: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
-    4: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
+    1: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None},
+    2: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None},
+    3: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None},
+    4: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None},
 }
-_CREDIT_COOLDOWN_SECONDS = 3600  # 1 hour
+_CREDIT_COOLDOWN_SECONDS = 3600   # 1 hour for credit exhaustion
+_RATELIMIT_COOLDOWN_SECONDS = 600  # 10 minutes for sustained 429 storms
 
 
-def _provider_credit_cb_trip(n, reason):
-    cd = time.time() + _CREDIT_COOLDOWN_SECONDS
+def _provider_credit_cb_trip(n, reason, duration_s=None, cause="credit"):
+    secs = duration_s if duration_s is not None else _CREDIT_COOLDOWN_SECONDS
+    cd = time.time() + secs
     with _PROVIDER_CREDIT_CB_LOCK:
         _PROVIDER_CREDIT_CB[n]["cooldown_until"] = cd
         _PROVIDER_CREDIT_CB[n]["tripped_at"] = datetime.now().isoformat()
         _PROVIDER_CREDIT_CB[n]["reason"] = reason
+        _PROVIDER_CREDIT_CB[n]["cause"] = cause
     until_str = datetime.fromtimestamp(cd).strftime("%H:%M:%S")
-    logger.error(
-        f"Provider {n} CREDIT EXHAUSTED — pausing for {_CREDIT_COOLDOWN_SECONDS//60} min "
-        f"(until ~{until_str}). Reason: {reason}"
-    )
+    if cause == "rate_limit":
+        logger.warning(
+            f"Provider {n} RATE-LIMITED — pausing for {secs//60} min "
+            f"(until ~{until_str}). Reason: {reason}"
+        )
+    else:
+        logger.error(
+            f"Provider {n} CREDIT EXHAUSTED — pausing for {secs//60} min "
+            f"(until ~{until_str}). Reason: {reason}"
+        )
 
 
 def _provider_credit_cb_remaining(n):
-    """Seconds remaining on credit cooldown for provider n (0 if clear)."""
+    """Seconds remaining on credit/rate-limit cooldown for provider n (0 if clear)."""
     with _PROVIDER_CREDIT_CB_LOCK:
         return max(0.0, _PROVIDER_CREDIT_CB[n]["cooldown_until"] - time.time())
 
@@ -517,6 +526,7 @@ def _provider_credit_cb_snapshot():
                 "cooldown_remaining_min": round(rem / 60, 1),
                 "tripped_at": _PROVIDER_CREDIT_CB[n]["tripped_at"],
                 "reason": _PROVIDER_CREDIT_CB[n]["reason"],
+                "cause": _PROVIDER_CREDIT_CB[n]["cause"],
             }
     return result
 
@@ -978,20 +988,35 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             return None, "not_configured"
         rem = _provider_credit_cb_remaining(n)
         if rem > 0:
+            with _PROVIDER_CREDIT_CB_LOCK:
+                cause = _PROVIDER_CREDIT_CB[n].get("cause", "credit")
+            label = "rate-limit" if cause == "rate_limit" else "credit"
             logger.warning(
-                f"Provider {n} ({provider}) skipped — credit cooldown "
+                f"Provider {n} ({provider}) skipped — {label} cooldown "
                 f"{rem/60:.0f} min remaining."
             )
             return None, "credit_cooldown"
         try:
             state["active_llm"] = model
             result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config)
+            # Successful call: clear any rate-limit cooldown for this provider.
+            with _PROVIDER_CREDIT_CB_LOCK:
+                if _PROVIDER_CREDIT_CB[n].get("cause") == "rate_limit":
+                    _PROVIDER_CREDIT_CB[n].update({"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None})
             return result, None
         except LLMCreditExhausted as ce:
-            _provider_credit_cb_trip(n, str(ce))
+            _provider_credit_cb_trip(n, str(ce), cause="credit")
             state["provider_credit_cb"] = _provider_credit_cb_snapshot()
             return None, "credit_exhausted"
         except Exception as e:
+            # If the provider exhausted all retries with 429s, apply a short
+            # rate-limit cooldown so it stops poisoning the global circuit breaker.
+            err_str = str(e)
+            if "429" in err_str:
+                _provider_credit_cb_trip(n, f"Rate-limited: {err_str[:120]}",
+                                         duration_s=_RATELIMIT_COOLDOWN_SECONDS, cause="rate_limit")
+                state["provider_credit_cb"] = _provider_credit_cb_snapshot()
+                return None, "rate_limited"
             return None, e
 
     try:
@@ -1023,7 +1048,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 return result
             if err == "not_configured":
                 continue
-            if err in ("credit_cooldown", "credit_exhausted"):
+            if err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
                 last_err = err
                 continue
             # Real failure — log and keep trying remaining providers.
