@@ -578,6 +578,9 @@ def _provider_credit_cb_snapshot():
 
 _PROVIDER_RL_LOCK = threading.Lock()
 _PROVIDER_REQUEST_TIMES = {n: collections.deque() for n in (1, 2, 3, 4)}
+# Tracks when each provider slot last emitted an RPM-throttle log line.
+# Prevents duplicate log pairs when two threads throttle on the same provider.
+_PROVIDER_RPM_LAST_LOG: dict = {}
 
 
 def _provider_rate_limit_wait(n, rpm, provider_name):
@@ -600,13 +603,17 @@ def _provider_rate_limit_wait(n, rpm, provider_name):
                 return  # Under limit — stamp and proceed.
             wait_s = dq[0] + window - now
         # Sleep outside the lock so other providers are not blocked.
-        # Log once at the start of the wait; sleep in short chunks so the
-        # thread remains interruptible without re-logging every iteration.
+        # Log at most once per 30 s per provider so concurrent threads sharing
+        # the same slot don't each emit their own "waiting Xs" line.
         if wait_s > 0:
-            logger.info(
-                f"Provider {n} ({provider_name}) RPM throttle ({rpm}/min) — "
-                f"waiting {wait_s:.1f}s before next request."
-            )
+            now2 = time.time()
+            last_log = _PROVIDER_RPM_LAST_LOG.get(n, 0)
+            if now2 - last_log >= 30:
+                logger.info(
+                    f"Provider {n} ({provider_name}) RPM throttle ({rpm}/min) — "
+                    f"waiting {wait_s:.1f}s before next request."
+                )
+                _PROVIDER_RPM_LAST_LOG[n] = now2
             elapsed = 0.0
             chunk = 5.0
             while elapsed < wait_s:
@@ -1196,9 +1203,22 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             state["provider_credit_cb"] = _provider_credit_cb_snapshot()
             return None, "credit_exhausted"
         except Exception as e:
+            err_str = str(e)
+            # Some models (e.g. certain Groq models) reject tool-calling with a 400.
+            # Retry the same provider without tools before giving up.
+            if tools and "400" in err_str and "tool" in err_str.lower() and "not supported" in err_str.lower():
+                logger.warning(
+                    f"Provider {n} ({provider}) model does not support tool calling — retrying without tools."
+                )
+                try:
+                    _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
+                    result = _call_provider(provider, model, key, url, messages, None, effective_stream, task_id, config)
+                    return result, None
+                except Exception as retry_e:
+                    err_str = str(retry_e)
+                    e = retry_e
             # If the provider exhausted all retries with 429s, apply a short
             # rate-limit cooldown so it stops poisoning the global circuit breaker.
-            err_str = str(e)
             if "429" in err_str:
                 _provider_credit_cb_trip(n, f"Rate-limited: {err_str[:120]}",
                                          duration_s=_RATELIMIT_COOLDOWN_SECONDS, cause="rate_limit")
