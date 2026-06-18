@@ -508,6 +508,16 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                             f"then run: sudo systemctl restart bugfixer"
                         )
                         resp.raise_for_status()
+                    if resp.status_code == 400:
+                        err_body = ""
+                        try:
+                            err_body = resp.text or ""
+                        except Exception:
+                            err_body = "<unreadable body>"
+                        err_body = err_body.strip().replace("\n", " ")[:1000]
+                        logger.error(f"LLM 400 Bad Request at {endpoint}. Body: {err_body!r}")
+                        resp.close()
+                        resp.raise_for_status()
 
                     if 500 <= resp.status_code < 600:
                         raw_backoff = min(backoff_base ** attempt_num, backoff_max)
@@ -783,7 +793,9 @@ def clean_repo_name(name):
     return name
 
 def get_monitored_repos(config):
-    """Extracts and normalizes a list of monitored repositories from config."""
+    """Extracts and normalizes a list of monitored repositories from config,
+    always including the self-diagnosis repository if it can be resolved.
+    """
     raw_repos = config.get("monitored_repos", [])
     monitored_repos = []
     if isinstance(raw_repos, list):
@@ -795,6 +807,11 @@ def get_monitored_repos(config):
         for split_r in raw_repos.replace("\\n", ",").split(","):
             cleaned = clean_repo_name(split_r)
             if cleaned: monitored_repos.append(cleaned)
+
+    sd_repo = resolve_self_diagnosis_repo(config)
+    if sd_repo:
+        monitored_repos.append(sd_repo)
+
     return list(set(monitored_repos))
 
 def resolve_module_repo(module, monitored_repos, config):
@@ -2091,7 +2108,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             repo_git.git.add(A=True)
 
             confidence_threshold = 0.95
-            is_trusted = repo_name in config["trusted_repos"]
+            is_trusted = (repo_name in config["trusted_repos"]) or (repo_name == resolve_self_diagnosis_repo(config))
             bot_user = gh_current.get_user().login
             is_owner = repo_obj.owner.login == bot_user
             direct_push_setting = config.get("direct_push_enabled")
@@ -2802,21 +2819,7 @@ def run_scan_cycle():
             logger.exception(f"Unexpected error during GitHub authentication: {e}")
             raise e
 
-        raw_repos = config.get("monitored_repos", [])
-        monitored_repos = []
-        if isinstance(raw_repos, list):
-            for r in raw_repos:
-                for split_r in r.replace("\\n", ",").split(","):
-                    cleaned = clean_repo_name(split_r)
-                    if cleaned:
-                        monitored_repos.append(cleaned)
-        elif isinstance(raw_repos, str):
-            for split_r in raw_repos.replace("\\n", ",").split(","):
-                cleaned = clean_repo_name(split_r)
-                if cleaned:
-                        monitored_repos.append(cleaned)
-
-        monitored_repos = list(set(monitored_repos))
+        monitored_repos = get_monitored_repos(config)
         if not monitored_repos:
             logger.warning("No monitored repositories configured. Skipping scan.")
 
