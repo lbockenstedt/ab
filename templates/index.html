@@ -979,34 +979,32 @@
                 <span>LLM <span class="text-slate-200">{{ state.active_llm }}</span></span>
                 <span>Last Run: <span class="text-slate-200">{% if state.last_run and state.last_run != 'Never' and state.last_run|length >= 16 %}{{ state.last_run[5:16] }}{% else %}{{ state.last_run }}{% endif %}</span></span>
             </div>
-            <div class="flex flex-wrap justify-center gap-4 order-1">
+            <div class="flex flex-nowrap items-center gap-2 order-1">
                 <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')">
-                    <button type="submit" class="py-2 px-4 rounded-lg font-bold bg-slate-600 hover:bg-slate-700 text-white transition-all duration-200 text-sm">
-                        <i class="fas fa-cloud-download-alt mr-2"></i>Check for Updates
+                    <button type="submit" class="py-1 px-2.5 rounded font-bold bg-slate-600 hover:bg-slate-700 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Check for Updates">
+                        <i class="fas fa-cloud-download-alt mr-1"></i>Updates
                     </button>
                 </form>
                 <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')">
-                    <button type="submit" class="py-2 px-4 rounded-lg font-bold bg-[#01A982] hover:bg-[#018f6d] text-white transition-all duration-200 text-sm">
-                        <i class="fas fa-search mr-2"></i>Check for Issues Now
+                    <button type="submit" class="py-1 px-2.5 rounded font-bold bg-[#01A982] hover:bg-[#018f6d] text-white transition-all duration-200 text-xs whitespace-nowrap" title="Check for Issues Now">
+                        <i class="fas fa-search mr-1"></i>Scan Now
                     </button>
                 </form>
                 <form action="/restart" method="post" onsubmit="handleFormSubmit(event, '/restart')">
-                    <button type="submit" class="py-2 px-4 rounded-lg font-bold bg-slate-700 hover:bg-slate-800 text-white transition-all duration-200 text-sm">
-                        <i class="fas fa-sync-alt mr-2"></i>Restart BugFixer
+                    <button type="submit" class="py-1 px-2.5 rounded font-bold bg-slate-700 hover:bg-slate-800 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Restart BugFixer">
+                        <i class="fas fa-sync-alt mr-1"></i>Restart
                     </button>
                 </form>
                 <form action="/trigger_hub_update" method="post" onsubmit="handleFormSubmit(event, '/trigger_hub_update')">
-                    <button type="submit" class="py-2 px-4 rounded-lg font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-all duration-200 text-sm">
-                        <i class="fas fa-network-wired mr-2"></i>Trigger Hub Update
+                    <button type="submit" class="py-1 px-2.5 rounded font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Trigger Hub Update">
+                        <i class="fas fa-network-wired mr-1"></i>Hub Update
                     </button>
                 </form>
-                <button onclick="toggleBlackout()" id="blackout-btn" class="py-2 px-4 rounded-lg font-bold transition-all duration-200 text-sm {% if state.blackout %}bg-violet-600 hover:bg-violet-700{% else %}bg-slate-600 hover:bg-slate-700{% endif %} text-white" title="Triage only — no fix commits pushed">
-                    {% if state.blackout %}<i class="fas fa-ban mr-2"></i>Blackout ON
-                    {% else %}<i class="fas fa-ban mr-2"></i>Blackout{% endif %}
+                <button onclick="toggleBlackout()" id="blackout-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap {% if state.blackout %}bg-violet-600 hover:bg-violet-700{% else %}bg-slate-600 hover:bg-slate-700{% endif %} text-white" title="Triage only — no fix commits pushed">
+                    <i class="fas fa-ban mr-1"></i>{% if state.blackout %}Blackout ON{% else %}Blackout{% endif %}
                 </button>
-                <button onclick="togglePause()" id="pause-btn" class="py-2 px-4 rounded-lg font-bold transition-all duration-200 text-sm {% if state.paused %}bg-green-600 hover:bg-green-700{% else %}bg-orange-600 hover:bg-orange-700{% endif %} text-white">
-                    {% if state.paused %}<i class="fas fa-play mr-2"></i>Resume BugFixer
-                    {% else %}<i class="fas fa-pause mr-2"></i>Stop BugFixer{% endif %}
+                <button onclick="togglePause()" id="pause-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap {% if state.paused %}bg-green-600 hover:bg-green-700{% else %}bg-orange-600 hover:bg-orange-700{% endif %} text-white">
+                    {% if state.paused %}<i class="fas fa-play mr-1"></i>Resume{% else %}<i class="fas fa-pause mr-1"></i>Stop{% endif %}
                 </button>
             </div
 >
