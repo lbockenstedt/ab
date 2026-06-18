@@ -1612,6 +1612,30 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
         if existing_issue:
             duplicate_repo_display = duplicate_repo_name or current_repo_name
 
+            # If the matching issue was previously dismissed, don't create a new
+            # duplicate — instead reopen the original with fresh evidence so the
+            # human can reconsider whether the error is now real.
+            existing_labels = [lbl.name for lbl in (existing_issue.labels or [])]
+            if "bugfixer-dismissed" in existing_labels:
+                logger.info(
+                    f"Previously dismissed issue #{existing_issue.number} in "
+                    f"{duplicate_repo_display} matched a new occurrence — reopening with new evidence."
+                )
+                try:
+                    existing_issue.edit(state='open')
+                except Exception as reopen_err:
+                    logger.warning(f"Could not reopen dismissed issue #{existing_issue.number}: {reopen_err}")
+                try:
+                    existing_issue.create_comment(
+                        f"⚠️ **BugFixer**: This issue was previously dismissed, but the same error "
+                        f"has been detected again in **{current_repo_name}**.\n\n"
+                        f"New evidence:\n```\n{body_text}\n```\n\n"
+                        f"Please review whether this is now a real issue."
+                    )
+                except Exception as comment_err:
+                    logger.warning(f"Could not comment on reopened dismissed issue #{existing_issue.number}: {comment_err}")
+                return existing_issue
+
             if was_closed:
                 # The matching issue was closed (typically the bot merged a "fix"
                 # for it). Reopen it and record the recurrence instead of filing a
@@ -2912,6 +2936,13 @@ def scan_repo_issues(gh_current, config, processed):
                         if issue.state != 'open' or issue.pull_request:
                             continue
 
+                        # Skip issues that are still closed+dismissed (not yet reopened).
+                        # If bugfixer-dismissed is present but the issue is open, it has
+                        # been reopened with new evidence — process it normally.
+                        if issue.state != "open" and any(lbl.name == "bugfixer-dismissed" for lbl in issue.labels):
+                            logger.debug(f"Skipping {repo_name}#{issue.number} — closed and 'bugfixer-dismissed'.")
+                            continue
+
                         issue_id = f"{repo_name}:{issue.number}"
                         if issue_id in processed:
                             status = processed[issue_id].get("status")
@@ -3800,12 +3831,37 @@ async def delete_issue(request: Request):
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         issue = repo.get_issue(issue_num)
+
+        # Ensure the dismissal label exists in the repo; create it if not.
+        label_name = "bugfixer-dismissed"
+        try:
+            repo.get_label(label_name)
+        except Exception:
+            try:
+                repo.create_label(label_name, "b60205",
+                                  "Marked by BugFixer as not a real issue — will not be reopened")
+            except Exception as le:
+                logger.warning(f"Could not create label '{label_name}': {le}")
+
+        # Apply the label and close with an explanatory comment.
+        try:
+            issue.add_to_labels(label_name)
+        except Exception as le:
+            logger.warning(f"Could not apply label '{label_name}' to #{issue_num}: {le}")
+        try:
+            issue.create_comment(
+                "🤖 **BugFixer**: This issue has been marked as **not a real issue** and dismissed. "
+                "It will not be automatically reopened or processed again."
+            )
+        except Exception:
+            pass
+
         if issue.state != "closed":
             issue.edit(state="closed")
-            github_msg = f"Issue #{issue_num} closed on GitHub."
+            github_msg = f"Issue #{issue_num} labelled '{label_name}' and closed on GitHub."
         else:
-            github_msg = f"Issue #{issue_num} was already closed on GitHub."
-        logger.info(f"Deleted issue {issue_id}: removed from history, {github_msg}")
+            github_msg = f"Issue #{issue_num} labelled '{label_name}' (was already closed)."
+        logger.info(f"Dismissed issue {issue_id}: removed from history, {github_msg}")
     except Exception as e:
         github_msg = f"GitHub close failed: {e}"
         logger.warning(f"Could not close {issue_id} on GitHub: {e}")
