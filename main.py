@@ -742,6 +742,54 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
     return text
 
 
+def _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+    """Call an Ollama-compatible API (local or Ollama Cloud). Uses /api/chat natively."""
+    base = (base_url or "https://ollama.com").rstrip("/")
+    endpoint = f"{base}/api/chat"
+    headers = {}
+    if api_key:
+        clean_key = api_key.strip().strip('"').strip("'").replace("Bearer ", "").strip()
+        headers["Authorization"] = f"Bearer {clean_key}"
+
+    use_stream = False if tools else effective_stream
+    payload = {
+        "model": model,
+        "messages": messages if messages else [{"role": "user", "content": ""}],
+        "stream": use_stream,
+    }
+    if tools:
+        payload["tools"] = tools
+
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream)
+
+    if tools:
+        try:
+            data = resp.json()
+        except Exception as je:
+            logger.warning(f"Ollama tool-turn response not JSON: {je}")
+            data = {}
+        msg = (data.get("message") or {}) if isinstance(data, dict) else {}
+        text = msg.get("content") or ""
+        raw_tcs = msg.get("tool_calls") or None
+        tool_calls = raw_tcs if isinstance(raw_tcs, list) and raw_tcs else None
+        return {"text": text, "tool_calls": tool_calls}
+
+    full_response = ""
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        try:
+            chunk = json.loads(line.decode("utf-8") if isinstance(line, bytes) else line)
+            content = chunk.get("message", {}).get("content") or chunk.get("response") or ""
+            full_response += content
+            state["llm_stream"] = full_response
+            if task_id and task_id in state.get("active_tasks", {}):
+                state["active_tasks"][task_id]["stream"] = full_response
+        except json.JSONDecodeError:
+            pass
+    return full_response
+
+
 def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config):
     """Dispatch to the correct provider implementation."""
     p = (provider or "openai").lower().strip()
@@ -749,6 +797,8 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
         return _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if p == "google":
         return _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+    if p == "ollama":
+        return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
 
 
@@ -1717,6 +1767,14 @@ def _check_provider_online(n, config):
             base = (base_url or GOOGLE_BASE_URL).rstrip("/")
             url = f"{base}/v1beta/models?key={api_key}"
             resp = requests.get(url, timeout=10)
+        elif p == "ollama":
+            base = (base_url or "https://ollama.com").rstrip("/")
+            url = f"{base}/api/tags"
+            headers = {}
+            if api_key:
+                clean = api_key.strip().replace("Bearer ", "").strip()
+                headers["Authorization"] = f"Bearer {clean}"
+            resp = requests.get(url, headers=headers, timeout=10)
         else:
             base = (base_url or OPENAI_BASE_URL).rstrip("/")
             url = f"{base}/models"
@@ -3156,49 +3214,86 @@ async def get_task_details(task_id: str = None):
         "count": len(state["active_tasks"])
     }
 
+def _fetch_models_for_provider(provider, api_key, base_url):
+    """Fetch available model names from a provider's API using live credentials.
+    Returns list of {"name": str, "details": str}.
+    """
+    if not api_key:
+        return []
+    p = (provider or "openai").lower().strip()
+    models = []
+    try:
+        if p == "ollama":
+            base = (base_url or "https://ollama.com").rstrip("/")
+            headers = {}
+            if api_key:
+                clean = api_key.strip().replace("Bearer ", "").strip()
+                headers["Authorization"] = f"Bearer {clean}"
+            resp = requests.get(f"{base}/api/tags", headers=headers, timeout=10)
+            resp.raise_for_status()
+            for m in resp.json().get("models", []):
+                name = m.get("name", "")
+                if "bf16" in name:
+                    name = name[:name.find("bf16") + 4]
+                details = m.get("details", "")
+                if isinstance(details, dict):
+                    details = details.get("family", str(details))
+                models.append({"name": name, "details": str(details)})
+        elif p == "anthropic":
+            base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
+            headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_API_VERSION}
+            resp = requests.get(f"{base}/models", headers=headers, timeout=10)
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                models.append({"name": m.get("id", ""), "details": m.get("display_name", "")})
+        elif p == "google":
+            base = (base_url or GOOGLE_BASE_URL).rstrip("/")
+            resp = requests.get(f"{base}/v1beta/models?key={api_key}", timeout=10)
+            resp.raise_for_status()
+            for m in resp.json().get("models", []):
+                name = m.get("name", "").replace("models/", "")
+                if "gemini" in name or "gemma" in name:
+                    models.append({"name": name, "details": m.get("displayName", "")})
+        else:  # openai (and openai-compatible)
+            base = (base_url or OPENAI_BASE_URL).rstrip("/")
+            headers = {"Authorization": f"Bearer {api_key}"}
+            resp = requests.get(f"{base}/models", headers=headers, timeout=10)
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                mid = m.get("id", "")
+                if any(k in mid for k in ("gpt", "o1", "o3", "o4")):
+                    models.append({"name": mid, "details": m.get("owned_by", "")})
+    except Exception as e:
+        logger.debug(f"Model fetch for provider {p!r}: {e}")
+    return models
+
+
 @app.get("/api/models")
 async def get_models():
     """Fetches available models from both configured LLM providers."""
     config = load_config()
-
-    def _fetch_provider_models(n):
-        provider, api_key, model, base_url = _get_provider_config(n, config)
-        if not api_key:
-            return []
-        models = []
-        try:
-            p = (provider or "openai").lower().strip()
-            if p == "anthropic":
-                base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
-                headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_API_VERSION}
-                resp = requests.get(f"{base}/models", headers=headers, timeout=10)
-                resp.raise_for_status()
-                for m in resp.json().get("data", []):
-                    models.append({"name": m.get("id", ""), "details": m.get("display_name", "")})
-            elif p == "google":
-                base = (base_url or GOOGLE_BASE_URL).rstrip("/")
-                resp = requests.get(f"{base}/v1beta/models?key={api_key}", timeout=10)
-                resp.raise_for_status()
-                for m in resp.json().get("models", []):
-                    models.append({"name": m.get("name", "").replace("models/", ""), "details": m.get("displayName", "")})
-            else:
-                base = (base_url or OPENAI_BASE_URL).rstrip("/")
-                headers = {"Authorization": f"Bearer {api_key}"}
-                resp = requests.get(f"{base}/models", headers=headers, timeout=10)
-                resp.raise_for_status()
-                for m in resp.json().get("data", []):
-                    if "gpt" in m.get("id", "") or "o1" in m.get("id", "") or "o3" in m.get("id", ""):
-                        models.append({"name": m.get("id", ""), "details": m.get("owned_by", "")})
-        except Exception as e:
-            logger.error(f"Error fetching models for provider {n}: {e}")
-        return models
-
-    results = {
-        "local_models": _fetch_provider_models(1),
-        "cloud_models": _fetch_provider_models(2),
+    p1_provider, p1_key, _, p1_url = _get_provider_config(1, config)
+    p2_provider, p2_key, _, p2_url = _get_provider_config(2, config)
+    return {
+        "local_models": _fetch_models_for_provider(p1_provider, p1_key, p1_url),
+        "cloud_models": _fetch_models_for_provider(p2_provider, p2_key, p2_url),
         "enabled_models": config.get("enabled_models", []),
     }
-    return results
+
+
+@app.post("/api/fetch-models")
+async def fetch_models_live(request: Request):
+    """Fetch available models for a provider using live (unsaved) credentials."""
+    try:
+        data = await request.json()
+        provider = (data.get("provider") or "openai").strip()
+        api_key = (data.get("api_key") or "").strip()
+        base_url = (data.get("base_url") or "").strip()
+        models = _fetch_models_for_provider(provider, api_key, base_url)
+        return {"models": models}
+    except Exception as e:
+        logger.error(f"fetch-models error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e), "models": []})
 
 @app.post("/api/toggle-model")
 async def toggle_model(request: Request):
@@ -3286,17 +3381,11 @@ async def settings_page(request: Request):
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
 
-    model_data = await get_models()
-    local_models = [m["name"] for m in model_data["local_models"]]
-    cloud_models = [m["name"] for m in model_data["cloud_models"]]
-
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
         "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]},
         "available_labels": state.get("available_labels", []),
         "state": state,
-        "local_models": local_models,
-        "cloud_models": cloud_models
     })
 
 @app.post("/save_settings")

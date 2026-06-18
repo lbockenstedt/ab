@@ -462,23 +462,25 @@
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select name="LLM_PROVIDER_1" id="llm-provider-1" onchange="loadProviderModels(1)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_1 == 'openai' else '' }}>OpenAI</option>
                                         <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_1 == 'anthropic' else '' }}>Anthropic</option>
                                         <option value="google" {{ 'selected' if settings.LLM_PROVIDER_1 == 'google' else '' }}>Google Gemini</option>
+                                        <option value="ollama" {{ 'selected' if settings.LLM_PROVIDER_1 == 'ollama' else '' }}>Ollama Cloud</option>
                                     </select>
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Model</label>
-                                    <input type="text" name="LLM_MODEL_1" value="{{ settings.LLM_MODEL_1 }}" placeholder="gpt-4o" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <label class="text-sm font-medium text-slate-600">Model <span id="p1-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
+                                    <input type="text" name="LLM_MODEL_1" id="llm-model-1" value="{{ settings.LLM_MODEL_1 }}" placeholder="gpt-4o" list="model-list-1" autocomplete="off" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <datalist id="model-list-1"></datalist>
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">API Key</label>
-                                    <input type="password" name="LLM_API_KEY_1" value="{{ settings.LLM_API_KEY_1 }}" placeholder="sk-..." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="password" name="LLM_API_KEY_1" id="llm-key-1" value="{{ settings.LLM_API_KEY_1 }}" placeholder="sk-..." onblur="loadProviderModels(1)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                                 <div class="space-y-2 md:col-span-3">
                                     <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional — leave blank for the provider default)</span></label>
-                                    <input type="text" name="LLM_BASE_URL_1" value="{{ settings.LLM_BASE_URL_1 }}" placeholder="https://api.openai.com/v1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="text" name="LLM_BASE_URL_1" id="llm-url-1" value="{{ settings.LLM_BASE_URL_1 }}" placeholder="https://ollama.com" onblur="loadProviderModels(1)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                             </div>
                         </div>
@@ -492,23 +494,25 @@
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select name="LLM_PROVIDER_2" id="llm-provider-2" onchange="loadProviderModels(2)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_2 == 'openai' else '' }}>OpenAI</option>
                                         <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_2 == 'anthropic' else '' }}>Anthropic</option>
                                         <option value="google" {{ 'selected' if settings.LLM_PROVIDER_2 == 'google' else '' }}>Google Gemini</option>
+                                        <option value="ollama" {{ 'selected' if settings.LLM_PROVIDER_2 == 'ollama' else '' }}>Ollama Cloud</option>
                                     </select>
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Model</label>
-                                    <input type="text" name="LLM_MODEL_2" value="{{ settings.LLM_MODEL_2 }}" placeholder="claude-opus-4-5" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <label class="text-sm font-medium text-slate-600">Model <span id="p2-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
+                                    <input type="text" name="LLM_MODEL_2" id="llm-model-2" value="{{ settings.LLM_MODEL_2 }}" placeholder="claude-opus-4-5" list="model-list-2" autocomplete="off" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <datalist id="model-list-2"></datalist>
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">API Key</label>
-                                    <input type="password" name="LLM_API_KEY_2" value="{{ settings.LLM_API_KEY_2 }}" placeholder="sk-ant-..." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="password" name="LLM_API_KEY_2" id="llm-key-2" value="{{ settings.LLM_API_KEY_2 }}" placeholder="sk-ant-..." onblur="loadProviderModels(2)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                                 <div class="space-y-2 md:col-span-3">
                                     <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
-                                    <input type="text" name="LLM_BASE_URL_2" value="{{ settings.LLM_BASE_URL_2 }}" placeholder="https://api.anthropic.com/v1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="text" name="LLM_BASE_URL_2" id="llm-url-2" value="{{ settings.LLM_BASE_URL_2 }}" placeholder="https://ollama.com" onblur="loadProviderModels(2)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                             </div>
                         </div>
@@ -1056,27 +1060,49 @@
             });
         }
 
-        async function fetchModels() {
-            // No-op: model names are now typed as free-text fields per provider.
-            // The /api/models endpoint is still available for reference but the UI
-            // no longer drives dropdown population from it.
-        }
+        async function fetchModels() { /* kept for compat — delegates to loadProviderModels */ }
 
-        async function toggleModel(modelName, isEnabled) {
+        async function loadProviderModels(n) {
+            const providerEl = document.getElementById(`llm-provider-${n}`);
+            const keyEl      = document.getElementById(`llm-key-${n}`);
+            const urlEl      = document.getElementById(`llm-url-${n}`);
+            const datalist   = document.getElementById(`model-list-${n}`);
+            const statusEl   = document.getElementById(`p${n}-model-status`);
+            if (!providerEl || !keyEl || !datalist) return;
+
+            const provider = providerEl.value;
+            const api_key  = keyEl.value.trim();
+            const base_url = urlEl ? urlEl.value.trim() : '';
+
+            if (!api_key) {
+                if (statusEl) statusEl.textContent = '';
+                return;
+            }
+
+            if (statusEl) statusEl.textContent = '(loading…)';
             try {
-                const resp = await fetch('/api/toggle-model', {
+                const resp = await fetch('/api/fetch-models', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model: modelName, enabled: isEnabled })
+                    body: JSON.stringify({ provider, api_key, base_url })
                 });
                 const data = await resp.json();
-                if (data.status === 'success') {
-                    fetchModels(); // Refresh list and dropdowns
-                }
+                const models = data.models || [];
+                datalist.innerHTML = models.map(m => `<option value="${m.name}">`).join('');
+                if (statusEl) statusEl.textContent = models.length ? `(${models.length} available)` : '';
             } catch (e) {
-                console.error('Toggle model error:', e);
+                if (statusEl) statusEl.textContent = '(fetch failed)';
+                console.error('loadProviderModels error:', e);
             }
         }
+
+        // Auto-load model suggestions on settings page load if keys are already saved.
+        (function initProviderModels() {
+            if (!document.getElementById('llm-provider-1')) return;
+            loadProviderModels(1);
+            loadProviderModels(2);
+        })();
+
 
 
         // ===== Chat =====
