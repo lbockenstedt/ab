@@ -1,3 +1,4 @@
+import asyncio
 import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, re, uuid, collections
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -3999,11 +4000,12 @@ async def scheduler_status():
 
 
 @app.get("/api/claude-cli/status")
-async def claude_cli_status():
-    """Check whether the local claude CLI is installed and authenticated."""
+def claude_cli_status():
+    """Check whether the local claude CLI is installed and authenticated.
+    Runs as a sync handler so FastAPI threads it — avoids blocking the event loop.
+    """
     import subprocess
     try:
-        # Quick authenticated probe: send a minimal prompt and check for auth error
         probe = subprocess.run(
             ["claude", "--output-format", "json"],
             input="ping", capture_output=True, text=True, timeout=15,
@@ -4019,7 +4021,6 @@ async def claude_cli_status():
                 return {"status": "error", "detail": result_text[:300]}
             return {"status": "authenticated", "detail": "Claude CLI authenticated and ready."}
         except (json.JSONDecodeError, KeyError):
-            # Fall back to version check
             r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5)
             if r.returncode == 0:
                 return {"status": "ok", "version": r.stdout.strip() or r.stderr.strip()}
@@ -4033,7 +4034,7 @@ async def claude_cli_status():
 
 
 @app.post("/api/claude-cli/auth/start")
-async def claude_cli_auth_start():
+def claude_cli_auth_start():
     """Start 'claude auth login' as a background process and capture the OAuth URL.
 
     The subprocess must stay alive so its local callback server can receive the
@@ -4115,7 +4116,7 @@ async def claude_cli_auth_start():
 
 
 @app.get("/api/claude-cli/auth/poll")
-async def claude_cli_auth_poll():
+def claude_cli_auth_poll():
     """Check whether the background auth process has completed."""
     proc = state.get("claude_auth_proc")
     url = state.get("claude_auth_url", "")
@@ -4184,6 +4185,8 @@ async def claude_cli_auth_submit_code(request: Request):
 
     After the user visits the OAuth URL, claude.ai shows an approval code.
     The user pastes it here and we forward it to the subprocess's stdin.
+    Blocking subprocess I/O runs in a thread via asyncio.to_thread so the
+    event loop is never blocked.
     """
     data = await request.json()
     code = (data.get("code") or "").strip()
@@ -4194,42 +4197,41 @@ async def claude_cli_auth_submit_code(request: Request):
     if proc is None or proc.poll() is not None:
         return {"status": "error", "detail": "No active auth process — click 'Start Login Flow' first."}
 
-    try:
-        proc.stdin.write(code + "\n")
-        proc.stdin.flush()
-    except Exception as e:
-        return {"status": "error", "detail": f"Failed to send code to auth process: {e}"}
-
-    # Collect any immediate output and check if the process finished.
-    import select as _select
-    lines = []
-    deadline = time.time() + 5
-    while time.time() < deadline:
+    def _blocking_submit(proc, code):
+        import select as _select
         try:
-            ready, _, _ = _select.select([proc.stdout, proc.stderr], [], [], 0.5)
-            for s in ready:
-                line = s.readline()
-                if line:
-                    lines.append(line)
-        except Exception:
-            break
-        if proc.poll() is not None:
-            break
+            proc.stdin.write(code + "\n")
+            proc.stdin.flush()
+        except Exception as e:
+            return {"status": "error", "detail": f"Failed to send code to auth process: {e}"}
 
-    rc = proc.poll()
-    output = "".join(lines)
+        lines = []
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                ready, _, _ = _select.select([proc.stdout, proc.stderr], [], [], 0.5)
+                for s in ready:
+                    line = s.readline()
+                    if line:
+                        lines.append(line)
+            except Exception:
+                break
+            if proc.poll() is not None:
+                break
 
-    if rc == 0:
-        state["claude_auth_done"] = True
-        state["claude_auth_proc"] = None
-        return {"status": "authenticated", "output": output}
-    if rc is not None:
-        state["claude_auth_proc"] = None
-        return {"status": "error", "detail": f"Auth process exited {rc}: {output[:300]}"}
+        rc = proc.poll()
+        output = "".join(lines)
+        if rc == 0:
+            state["claude_auth_done"] = True
+            state["claude_auth_proc"] = None
+            return {"status": "authenticated", "output": output}
+        if rc is not None:
+            state["claude_auth_proc"] = None
+            return {"status": "error", "detail": f"Auth process exited {rc}: {output[:300]}"}
+        return {"status": "pending", "output": output,
+                "message": "Code submitted — authentication in progress. Click 'Check Status' in a moment."}
 
-    return {"status": "pending",
-            "output": output,
-            "message": "Code submitted — authentication in progress. Click 'Check Status' in a moment."}
+    return await asyncio.to_thread(_blocking_submit, proc, code)
 
 
 @app.post("/api/toggle-model")
