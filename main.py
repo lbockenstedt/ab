@@ -2573,8 +2573,70 @@ def parse_and_apply(content, repo_path):
         logger.debug(f"Failed content: {content}")
         return False, {}, 0.0
 
+def _qa_service_verify(repo_name, config, timeout=120):
+    """Call the QA service API to run targeted tests for a repo/module.
+
+    Calls POST /api/run?module=<repo_name> and polls GET /api/status until
+    COMPLETED or FAILED (or timeout).  Returns (passed: bool, summary: str).
+    """
+    qa_url = (config.get("QA_API_URL") or "").rstrip("/")
+    if not qa_url:
+        return None, "QA_API_URL not configured"
+
+    # Map full repo name (owner/name) to just the module name the QA service knows.
+    module = repo_name.split("/")[-1] if "/" in repo_name else repo_name
+
+    try:
+        # Trigger a targeted test run for this module.
+        trigger = requests.post(
+            f"{qa_url}/api/run",
+            json={"module": module},
+            timeout=15,
+        )
+        if trigger.status_code not in (200, 202):
+            return None, f"QA service returned HTTP {trigger.status_code} on trigger"
+
+        # Poll for completion.
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(5)
+            status_resp = requests.get(f"{qa_url}/api/status", timeout=10)
+            if status_resp.status_code != 200:
+                continue
+            data = status_resp.json()
+            status = data.get("status", "")
+            if status in ("COMPLETED", "FAILED", "IDLE"):
+                results = data.get("results", [])
+                passed = sum(1 for r in results if r.get("status") == "PASS")
+                total = len(results)
+                failed_names = [r["name"] for r in results if r.get("status") != "PASS"]
+                summary = f"QA: {passed}/{total} passed"
+                if failed_names:
+                    summary += f" — failed: {', '.join(failed_names[:5])}"
+                return status == "COMPLETED" and passed == total, summary
+
+        return None, f"QA service timed out after {timeout}s"
+    except Exception as e:
+        return None, f"QA service error: {e}"
+
+
 def verify_fix(repo_path, repo_name, config):
     logger.info(f"Verifying fix in {repo_path}...")
+
+    # Priority 1: QA service API (when QA_API_URL is configured).
+    if config.get("QA_API_URL"):
+        passed, summary = _qa_service_verify(repo_name, config)
+        if passed is not None:
+            if passed:
+                logger.info(f"QA service verification passed — {summary}")
+                return True, None
+            else:
+                logger.warning(f"QA service verification failed — {summary}")
+                return False, summary
+        else:
+            logger.warning(f"QA service unreachable ({summary}), falling back to local tests")
+
+    # Priority 2: per-repo explicit test command from config.
     repo_tests = config.get("repo_tests", {})
     test_cmd = repo_tests.get(repo_name)
     if test_cmd:
@@ -4335,6 +4397,7 @@ DEFAULT_ENV = {
     "LLM_API_KEY_4": "",
     "LLM_MODEL_4": "",
     "LLM_BASE_URL_4": "",
+    "QA_API_URL": "",
     "QA_REPO": "",
     "QA_TEST_COMMAND": "pytest",
     "POLL_INTERVAL_SECONDS": "300",
@@ -4505,6 +4568,10 @@ async def save_settings(request: Request):
         "SCHEDULER_WORK_CAP_PCT": lambda v: int(v) if str(v).strip().isdigit() else 25,
         "SCHEDULER_WORK_POLL_INTERVAL": lambda v: int(v) if str(v).strip().isdigit() else 600,
         "SCHEDULER_CRITICAL_LABEL": lambda v: v.strip() if v else "critical",
+        "QA_API_URL": lambda v: v.strip() if v else "",
+        "QA_REPO": lambda v: v.strip() if v else "",
+        "QA_TEST_COMMAND": lambda v: v.strip() if v else "pytest",
+        "HUB_QUERY_URL": lambda v: v.strip() if v else "",
     }
 
 

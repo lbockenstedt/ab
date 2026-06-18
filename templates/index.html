@@ -663,12 +663,17 @@
                             <h4 class="font-semibold text-slate-700">QA & Verification</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div class="space-y-2 col-span-1 md:col-span-2">
+                                <label class="text-sm font-medium text-slate-600">QA Service URL <span class="text-[#01A982] font-bold">(primary)</span></label>
+                                <input type="text" name="QA_API_URL" value="{{ settings.QA_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. http://qa-server:8080">
+                                <span class="text-xs text-slate-500">URL of the QA service API. When set, BugFixer calls <code class="bg-slate-100 px-1 rounded">POST /api/run?module=&lt;repo&gt;</code> after each fix instead of running tests locally.</span>
+                            </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">QA Test Repository (owner/repo)</label>
+                                <label class="text-sm font-medium text-slate-600">QA Test Repository (owner/repo) <span class="text-xs text-slate-400">fallback</span></label>
                                 <input type="text" name="QA_REPO" value="{{ settings.QA_REPO }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. myorg/qa-suite">
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Global QA Test Command</label>
+                                <label class="text-sm font-medium text-slate-600">Global QA Test Command <span class="text-xs text-slate-400">fallback</span></label>
                                 <input type="text" name="QA_TEST_COMMAND" value="{{ settings.QA_TEST_COMMAND }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. pytest tests/target_repo">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-2">
