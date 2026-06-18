@@ -482,8 +482,16 @@
                                     </div>
                                     {% if pname == 'claude_cli' %}
                                     <div class="space-y-2">
-                                        <p class="text-xs text-slate-500">Uses the <strong>Claude Code</strong> session already authenticated on this server — no API key needed. The <code class="bg-slate-100 px-1 rounded">claude</code> binary must be in PATH.</p>
-                                        <p class="text-[10px] text-slate-400">Add an entry in Step 2 with provider <em>claude_cli</em> to use it as a provider slot.</p>
+                                        <p class="text-xs text-slate-500">Uses the <strong>Claude Code</strong> session authenticated on this server — no API key needed. The <code class="bg-slate-100 px-1 rounded">claude</code> binary must be in PATH.</p>
+                                        <div class="flex gap-2">
+                                            <button type="button" onclick="checkClaudeStatus()" class="flex-1 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold transition-colors border border-slate-300">Check Status</button>
+                                            <button type="button" onclick="startClaudeAuth()" class="flex-1 py-1 text-xs bg-violet-600 hover:bg-violet-700 text-white rounded font-bold transition-colors">Get Auth URL</button>
+                                        </div>
+                                        <div id="claude-cli-status" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 space-y-1">
+                                            <div id="claude-cli-status-line" class="font-medium"></div>
+                                            <pre id="claude-cli-output" class="whitespace-pre-wrap break-all text-[10px] text-slate-500 max-h-48 overflow-y-auto hidden"></pre>
+                                            <div id="claude-cli-urls" class="hidden space-y-1"></div>
+                                        </div>
                                     </div>
                                     {% else %}
                                     <div class="space-y-2">
@@ -1164,6 +1172,73 @@
         }
 
         // ── LLM Vault UI ──────────────────────────────────────────────────────
+        function _showClaudeCliResult(statusText, statusColor, output, urls) {
+            const box = document.getElementById('claude-cli-status');
+            const line = document.getElementById('claude-cli-status-line');
+            const pre = document.getElementById('claude-cli-output');
+            const urlDiv = document.getElementById('claude-cli-urls');
+            box.classList.remove('hidden');
+            line.textContent = statusText;
+            line.className = 'font-medium ' + statusColor;
+            if (output) {
+                pre.textContent = output;
+                pre.classList.remove('hidden');
+            } else {
+                pre.classList.add('hidden');
+            }
+            if (urls && urls.length > 0) {
+                urlDiv.classList.remove('hidden');
+                urlDiv.innerHTML = '';
+                const label = document.createElement('p');
+                label.className = 'font-bold text-violet-700 text-[11px]';
+                label.textContent = 'Open this URL in your browser to approve:';
+                urlDiv.appendChild(label);
+                urls.forEach(u => {
+                    const a = document.createElement('a');
+                    a.href = u; a.target = '_blank';
+                    a.className = 'block text-blue-600 underline break-all text-[10px]';
+                    a.textContent = u;
+                    urlDiv.appendChild(a);
+                });
+            } else {
+                urlDiv.classList.add('hidden');
+            }
+        }
+
+        async function checkClaudeStatus() {
+            _showClaudeCliResult('Checking…', 'text-slate-500', '', []);
+            try {
+                const data = await fetch('/api/claude-cli/status').then(r => r.json());
+                if (data.status === 'ok') {
+                    _showClaudeCliResult('✓ Claude CLI installed — ' + (data.version || ''), 'text-green-700', '', []);
+                } else if (data.status === 'not_found') {
+                    _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', []);
+                } else {
+                    _showClaudeCliResult('✗ ' + (data.detail || data.status), 'text-red-600', '', []);
+                }
+            } catch(e) {
+                _showClaudeCliResult('Error checking status: ' + e, 'text-red-600', '', []);
+            }
+        }
+
+        async function startClaudeAuth() {
+            _showClaudeCliResult('Starting auth flow — please wait (~20s)…', 'text-violet-600', '', []);
+            try {
+                const data = await fetch('/api/claude-cli/auth', {method: 'POST'}).then(r => r.json());
+                if (data.status === 'authenticated') {
+                    _showClaudeCliResult('✓ Already authenticated — Claude CLI is ready to use.', 'text-green-700', data.output || '', []);
+                } else if (data.status === 'not_found') {
+                    _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', []);
+                } else if (data.urls && data.urls.length > 0) {
+                    _showClaudeCliResult('Authorization required — open the URL below in your browser:', 'text-violet-700', data.output || '', data.urls);
+                } else {
+                    _showClaudeCliResult('Auth flow output (no URL detected):', 'text-slate-700', data.output || data.detail || '', []);
+                }
+            } catch(e) {
+                _showClaudeCliResult('Error starting auth: ' + e, 'text-red-600', '', []);
+            }
+        }
+
         async function saveCredential(provider) {
             const key = document.getElementById(`vault-key-${provider}`)?.value || '';
             const url = document.getElementById(`vault-url-${provider}`)?.value || '';

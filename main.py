@@ -3780,6 +3780,49 @@ async def fetch_models_live(request: Request):
         logger.error(f"fetch-models error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e), "models": []})
 
+@app.get("/api/claude-cli/status")
+async def claude_cli_status():
+    """Check whether the local claude CLI is installed and reachable."""
+    import subprocess
+    try:
+        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return {"status": "ok", "version": r.stdout.strip() or r.stderr.strip()}
+        return {"status": "error", "detail": (r.stderr or r.stdout).strip()[:500]}
+    except FileNotFoundError:
+        return {"status": "not_found", "detail": "'claude' binary not found in PATH"}
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "detail": "Version check timed out"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+@app.post("/api/claude-cli/auth")
+async def claude_cli_auth():
+    """Trigger the Claude CLI auth flow and return the output (contains the approval URL)."""
+    import subprocess, re
+    try:
+        # Send a minimal non-interactive prompt; if unauthenticated, claude outputs an approval URL.
+        proc = subprocess.Popen(
+            ["claude", "-p", "hi", "--output-format", "json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+        combined = (stdout + "\n" + stderr).strip()
+        urls = re.findall(r'https?://[^\s"\'<>]+', combined)
+        if proc.returncode == 0:
+            return {"status": "authenticated", "output": combined[:3000], "urls": urls}
+        return {"status": "needs_auth", "output": combined[:3000], "urls": urls}
+    except FileNotFoundError:
+        return {"status": "not_found", "detail": "'claude' binary not found in PATH"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e), "output": "", "urls": []}
+
+
 @app.post("/api/toggle-model")
 async def toggle_model(request: Request):
     """Toggles a model's enabled status in the configuration."""
@@ -4009,17 +4052,10 @@ async def save_settings(request: Request):
             else:
                 config_data[key] = transform(val)
 
-    if "direct_push_enabled" in data:
-        config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
-
+    config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
-
-    if "skip_review" in data:
-        config_data["skip_review"] = data.get("skip_review") == "on"
-
-    # Chat-agent boolean toggles (checkboxes: present+"on" => True, absent => False).
-    if "CHAT_TOOLS_ENABLED" in data:
-        config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
+    config_data["skip_review"] = data.get("skip_review") == "on"
+    config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
 
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
