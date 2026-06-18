@@ -161,6 +161,8 @@
                         <span class="text-slate-500">Providers</span>
                         <div class="flex gap-2 flex-wrap justify-end">
                             {% for n in [1, 2, 3, 4] %}
+                            {% set cfg_key = 'provider_' ~ n ~ '_configured' %}
+                            {% if state[cfg_key] %}
                             {% set online_key = 'provider_' ~ n ~ '_online' %}
                             {% set cb = state.provider_credit_cb[n] if state.provider_credit_cb else {} %}
                             <div class="flex items-center gap-1">
@@ -177,6 +179,7 @@
                                     {% endif %}
                                 {% endif %}
                             </div>
+                            {% endif %}
                             {% endfor %}
                         </div>
                     </div>

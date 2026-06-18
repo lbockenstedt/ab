@@ -1172,6 +1172,7 @@ failure_count = sum(1 for info in processed_init.values() if info.get("status") 
 state = {
     "status": "Idle", "active_llm": "Unknown",
     "provider_1_online": False, "provider_2_online": False, "provider_3_online": False, "provider_4_online": False,
+    "provider_1_configured": False, "provider_2_configured": False, "provider_3_configured": False, "provider_4_configured": False,
     "local_online": False, "cloud_online": False,
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
@@ -2026,9 +2027,18 @@ def heartbeat_worker():
             config = load_config()
             p1_provider, p1_key, p1_model, _ = _get_provider_config(1, config)
             p2_provider, p2_key, p2_model, _ = _get_provider_config(2, config)
+            p3_provider, p3_key, p3_model, _ = _get_provider_config(3, config)
+            p4_provider, p4_key, p4_model, _ = _get_provider_config(4, config)
 
             p1_configured = bool(p1_key and p1_model)
             p2_configured = bool(p2_key and p2_model)
+            p3_configured = bool(p3_key and p3_model)
+            p4_configured = bool(p4_key and p4_model)
+
+            state["provider_1_configured"] = p1_configured
+            state["provider_2_configured"] = p2_configured
+            state["provider_3_configured"] = p3_configured
+            state["provider_4_configured"] = p4_configured
             state["llm_circuit_breaker"] = _llm_cb_snapshot()
             state["provider_credit_cb"] = _provider_credit_cb_snapshot()
 
