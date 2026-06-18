@@ -2116,6 +2116,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 commit_msg += f" (Version Bump to {new_v})"
             repo_git.index.commit(commit_msg)
 
+            base_branch = config.get("default_branch", "main")
+
             if can_direct_push and final_verdict == "Approve":
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: can_direct_push=True AND verdict='Approve' ({final_verdict})")
                 decision_reason = "Trusted repo & approved"
