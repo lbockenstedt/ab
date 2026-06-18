@@ -1139,8 +1139,9 @@ def get_hub_logs():
             try:
                 data = resp.json()
                 if isinstance(data, dict):
-                    return data.get('logs', [])
-                return data if isinstance(data, list) else []
+                    logs = data.get('logs', [])
+                    return list(reversed(logs)) if isinstance(logs, list) else []
+                return list(reversed(data)) if isinstance(data, list) else []
             except Exception as e:
                 # Even with a JSON-ish Content-Type, parsing could fail (truncated
                 # body, BOM, etc.). Treat this as a soft failure (WARNING) and
@@ -2722,7 +2723,7 @@ async def get_logs(request: Request):
         current_log = get_log_path()
         with open(current_log, "r") as f:
             lines = f.readlines()
-            logs = "".join(lines[-100:])
+            logs = "".join(reversed(lines[-100:]))
     except Exception as e: logs = f"Error reading logs from {get_log_path()}: {e}"
     return templates.TemplateResponse(request=request, name="index.html", context={"view": "logs", "logs": logs, "state": state})
 
