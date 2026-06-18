@@ -1,4 +1,4 @@
-import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random
+import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, re, uuid
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -66,6 +66,18 @@ SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
 CHAT_HISTORY_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
+# Chat-agent configuration defaults. Applied (without overriding user values) by
+# load_config() so every code path sees a fully-populated config, and persisted by
+# save_settings when the user edits them on the Settings page.
+CHAT_CONFIG_DEFAULTS = {
+    "CHAT_TOOLS_ENABLED": True,        # Master switch; False -> chat runs the legacy single-turn path.
+    "CHAT_TOOL_MAX_ITERATIONS": 6,     # Cap on tool-call <-> LLM round trips per turn.
+    "CHAT_TOOL_MAX_TOKENS": 12000,     # Soft cap on cumulative tool-result text appended in a turn.
+    "CHAT_INDEX_ISSUE_LIMIT": 8,       # Max open issues listed per repo in the system-prompt index.
+    "CHAT_INDEX_CACHE_TTL": 60,        # Seconds to cache the GitHub issue index across turns.
+    "CHAT_FIX_PROPOSAL_TTL": 600,      # Seconds a fix-proposal confirmation token stays valid.
+}
+
 class QueueLocalException(Exception):
     """Raised when a task should be deferred to the local LLM's allowed window."""
     pass
@@ -90,6 +102,7 @@ def save_config(config):
 
 def load_config():
     # Try persistent config first
+    config = None
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -97,29 +110,36 @@ def load_config():
                 # Ensure enabled_models exists
                 if "enabled_models" not in config:
                     config["enabled_models"] = []
-                return config
         except Exception as e:
             logger.error(f"Error reading persistent config {CONFIG_FILE}: {e}")
+            config = None
     # Fallback to local config
-    try:
-        with open("config.json", "r") as f:
-            config = json.load(f)
-            if "enabled_models" not in config:
-                config["enabled_models"] = []
-            return config
-    except:
-        return {
-            "monitored_repos": [],
-            "trusted_repos": [],
-            "default_branch": "main",
-            "direct_push_enabled": False,
-            "dev_branch": "dev",
-            "repo_tests": {},
-            "GITHUB_TOKEN": "",
-            "monitored_labels": ["automated-fix"],
-            "enabled_models": [],
-            "self_diagnosis_repo": ""
-        }
+    if config is None:
+        try:
+            with open("config.json", "r") as f:
+                config = json.load(f)
+                if "enabled_models" not in config:
+                    config["enabled_models"] = []
+        except Exception:
+            config = {
+                "monitored_repos": [],
+                "trusted_repos": [],
+                "default_branch": "main",
+                "direct_push_enabled": False,
+                "dev_branch": "dev",
+                "repo_tests": {},
+                "GITHUB_TOKEN": "",
+                "monitored_labels": ["automated-fix"],
+                "enabled_models": [],
+                "self_diagnosis_repo": ""
+            }
+    # Apply chat-agent defaults for any keys the stored config does not set, so
+    # every caller (chat agent loop, index builder, settings form) sees a complete
+    # config regardless of how old the persisted config.json is.
+    for _k, _v in CHAT_CONFIG_DEFAULTS.items():
+        if _k not in config:
+            config[_k] = _v
+    return config
 
 def load_processed():
     # Try persistent state first
@@ -367,13 +387,22 @@ def _get_llm_semaphore():
         return _LLM_SEMAPHORE
 
 # Shared LLM Utility
-def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None):
+def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None):
     """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming.
 
     If `messages` is provided (a list of {role, content} dicts), the call is
     multi-turn: the local /api/chat path passes them through directly, and the
     cloud /api/generate path flattens them into a transcript prompt string. When
     `messages` is given, `prompt` and `system_prompt` are ignored.
+
+    Tool-calling (chat agent): when `tools` (a list of Ollama tool-schema dicts) is
+    provided, the call is forced to /api/chat for BOTH local and cloud (never
+    /api/generate, which has no tool support), the `tools` field is included in the
+    payload, the request is made non-streaming so `message.tool_calls` parses
+    cleanly, and a structured dict {"text": str, "tool_calls": list|None} is
+    returned instead of a bare string. `stream` overrides the streaming flag
+    (default True for legacy callers). Existing callers pass no `tools`/`stream`
+    and are byte-identical to prior behavior.
     """
     global state
     config = load_config()
@@ -389,27 +418,47 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
         is_cloud = is_cloud_url(url)
 
+        is_cloud = is_cloud_url(url)
+        primary_endpoint = url.rstrip('/')
 
-        if is_cloud:
-            # Cloud Ollama instances now use /api/chat for multi-turn (messages)
-            # and /api/generate for single-shot (prompt).
-            primary_endpoint = f"{url.rstrip('/')}/api/generate"
-            primary_use_generate = True
+        if tools is not None:
+            # Tool-calling REQUIRES /api/chat. If the user provided a base URL
+            # or /api/generate, we force it to /api/chat.
+            if not primary_endpoint.endswith('/api/chat'):
+                base = primary_endpoint.split('/api/')[0] if '/api/' in primary_endpoint else primary_endpoint
+                primary_endpoint = f"{base}/api/chat"
+            primary_use_generate = False
         else:
-            primary_endpoint = f"{url.rstrip('/')}/api/chat"
-            primary_use_generate = False
+            # Infer payload format from the URL provided in settings.
+            if "/api/generate" in primary_endpoint:
+                primary_use_generate = True
+            elif "/api/chat" in primary_endpoint:
+                primary_use_generate = False
+            else:
+                # Default fallback if the user provided a base URL without an endpoint.
+                primary_use_generate = is_cloud
 
-        # Overlap: If we have conversation history (messages),
-        # we prefer /api/chat, but if it's a cloud provider, we fall back
-        # to /api/generate via flattening in attempt_request to avoid 500s.
-        if messages is not None and not is_cloud:
-            primary_endpoint = f"{url.rstrip('/')}/api/chat"
-            primary_use_generate = False
+        # Effective streaming flag: legacy callers (stream is None) stream as
+        # before. Tool turns pass stream=False so the full JSON message (with
+        # tool_calls) is parsed in one shot.
+        effective_stream = True if stream is None else bool(stream)
 
         timeout_val = int(load_config().get("LLM_TIMEOUT", 900))
 
         def attempt_request(endpoint, use_generate_api, timeout=900):
-            if messages is not None:
+            if tools is not None:
+                # Tool-capable turn: always /api/chat with the messages array +
+                # tools schema. messages MUST be supplied by the caller (the chat
+                # agent loop always does). Honor effective_stream (False for tool
+                # turns so tool_calls parse cleanly).
+                payload = {
+                    "model": model,
+                    "messages": messages if messages is not None else [{"role": "user", "content": prompt}],
+                    "stream": effective_stream,
+                }
+                if tools:
+                    payload["tools"] = tools
+            elif messages is not None:
                 # Multi-turn conversation. Cloud /api/generate takes a single
                 # prompt, so flatten the message history into a transcript; local
                 # /api/chat takes the messages array natively.
@@ -418,17 +467,17 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                         f"{str(m.get('role', 'user')).capitalize()}: {m.get('content', '')}"
                         for m in messages
                     )
-                    payload = {"model": model, "prompt": flattened, "stream": True}
+                    payload = {"model": model, "prompt": flattened, "stream": effective_stream}
                 else:
-                    payload = {"model": model, "messages": messages, "stream": True}
+                    payload = {"model": model, "messages": messages, "stream": effective_stream}
             elif use_generate_api:
                 full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
-                payload = {"model": model, "prompt": full_prompt, "stream": True}
+                payload = {"model": model, "prompt": full_prompt, "stream": effective_stream}
             else:
                 payload = {
                     "model": model,
                     "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-                    "stream": True
+                    "stream": effective_stream
                 }
 
             headers = {}
@@ -452,7 +501,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     sem = _get_llm_semaphore()
                     sem.acquire()
                     try:
-                        resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=True)
+                        resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=effective_stream)
                     finally:
                         sem.release()
 
@@ -562,6 +611,28 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
                     resp.raise_for_status()
 
+                    # --- Tool-capable turn: parse the full JSON message (non-streaming) ---
+                    # Ollama /api/chat returns {"message":{"role","content","tool_calls":[...]}}
+                    # in one JSON object when stream=false. tool_calls entries use
+                    # {"function":{"name":..,"arguments":<dict|str>}}. Return a structured
+                    # dict so the agent loop can dispatch. content may be empty when the
+                    # model emits only tool_calls.
+                    if tools is not None:
+                        try:
+                            data = resp.json()
+                        except Exception as je:
+                            # Non-JSON body on a tool turn (e.g. proxy error page): degrade
+                            # to an empty-text, no-tool-calls result so the agent loop ends.
+                            logger.warning(f"Tool-turn response was not JSON at {endpoint}: {je}")
+                            data = {}
+                        msg = (data.get("message") or {}) if isinstance(data, dict) else {}
+                        text = msg.get("content") or ""
+                        raw_tcs = msg.get("tool_calls") or None
+                        tool_calls = raw_tcs if isinstance(raw_tcs, list) and raw_tcs else None
+                        _llm_cb_reset()
+                        return {"text": text, "tool_calls": tool_calls}
+
+                    # --- Legacy streaming accumulation (unchanged) ---
                     full_response = ""
                     for line in resp.iter_lines():
                         if line:
@@ -624,7 +695,10 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         try:
             return attempt_request(primary_endpoint, primary_use_generate, timeout=timeout_val)
         except Exception as e:
-            if not is_cloud:
+            # Never fall back to /api/generate on a tool turn — generate has no
+            # tool support, so retrying there would just fail differently. Let the
+            # caller (agent loop) catch and degrade to an index-only answer.
+            if not is_cloud and tools is None:
                 fallback_endpoint = f"{url.rstrip('/')}/api/generate"
                 if fallback_endpoint != primary_endpoint:
                     logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate...")
@@ -773,7 +847,7 @@ state = {
     "success_count": success_count, "failure_count": failure_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "paused": False, "local_configured": False,
-    "chat_streams": {}
+    "chat_streams": {}, "chat_fix_proposals": {}
 }
 
 try:
@@ -813,6 +887,101 @@ def get_monitored_repos(config):
         monitored_repos.append(sd_repo)
 
     return list(set(monitored_repos))
+
+# --- Chat system-prompt context index (cached, TTL-bounded) -----------------
+# A compact markdown snapshot of BugFixer's repos, their open monitored-label
+# issues, processed-issue status totals, and recent Hub error count. Prepended
+# to the chat system prompt every turn so the assistant has the lay of the land
+# without a tool round-trip. Tool calls drill deeper on demand.
+_CHAT_INDEX_CACHE = {}            # key("gh"|"notoken") -> {"ts": float, "text": str}
+_CHAT_INDEX_LOCK = threading.Lock()
+
+
+def _build_chat_context_index_uncached(config, gh=None):
+    lines = ["## BugFixer Context (snapshot — may be up to ~60s stale; use tools for live detail)"]
+    monitored = get_monitored_repos(config)
+    trusted = list(config.get("trusted_repos", []) or [])
+    sd = resolve_self_diagnosis_repo(config)
+    labels = config.get("monitored_labels") or ["automated-fix"]
+    issue_limit = int(config.get("CHAT_INDEX_ISSUE_LIMIT", 8) or 8)
+
+    all_repos = list(dict.fromkeys(monitored + trusted))
+    lines.append("")
+    lines.append("Repositories (owner/repo):")
+    for repo_name in all_repos:
+        tags = []
+        if repo_name in trusted:
+            tags.append("trusted")
+        if repo_name == sd:
+            tags.append("self-diagnosis")
+        tagstr = f" [{', '.join(tags)}]" if tags else ""
+        if gh is None:
+            lines.append(f"- {repo_name}{tagstr} (open monitored issues: unknown — no token)")
+            continue
+        try:
+            issues = gh.get_repo(repo_name).get_issues(state="open", labels=list(labels))
+            titles = []
+            count = 0
+            for it in issues:
+                count += 1
+                if len(titles) < issue_limit:
+                    titles.append(f"#{it.number} {_trunc(it.title, 70)}")
+            more = "" if count <= issue_limit else f"  (+{count - issue_limit} more)"
+            if titles:
+                lines.append(f"- {repo_name}{tagstr} — {count} open: " + "; ".join(titles) + more)
+            else:
+                lines.append(f"- {repo_name}{tagstr} — 0 open")
+        except Exception as e:
+            lines.append(f"- {repo_name}{tagstr} (unavailable: {_trunc(type(e).__name__, 40)})")
+
+    # Processed-issue status totals.
+    try:
+        processed = load_processed()
+        counts = {}
+        for info in processed.values():
+            if isinstance(info, dict):
+                st = info.get("status", "unknown")
+                counts[st] = counts.get(st, 0) + 1
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none"
+        lines.append("")
+        lines.append(f"Processed-issue totals (n={len(processed)}): {summary}")
+    except Exception:
+        lines.append("")
+        lines.append("Processed-issue totals: (unavailable)")
+
+    # Recent Hub error count (best-effort; may be None if Hub not configured).
+    try:
+        hub_url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
+        if hub_url and "your-netbox" not in str(hub_url):
+            logs = get_hub_logs()
+            n = len(filter_error_logs(logs)) if logs else 0
+            lines.append(f"Recent Hub errors: {n} (use get_recent_errors for detail)")
+    except Exception:
+        pass
+
+    lines.append("")
+    lines.append(f"Monitored labels: {', '.join(labels)}")
+    lines.append("You have tools: list_repos, list_issues, get_issue, list_repo_files, "
+                 "read_file, get_processed_issues, get_recent_errors, propose_fix. "
+                 "Use them to answer precisely; do not guess issue/file contents.")
+    text = "\n".join(lines)
+    # Defense-in-depth: never let a leaked token in an issue title reach the model.
+    return _redact_text(text, _secret_denylist(config))
+
+
+def build_chat_context_index(config, gh=None):
+    """Returns the cached chat context-index text, rebuilding if older than
+    CHAT_INDEX_CACHE_TTL. Cached per token-availability key so a no-token turn's
+    sparse index is not served to a later token-enabled turn within the TTL."""
+    ttl = int(config.get("CHAT_INDEX_CACHE_TTL", 60) or 60)
+    key = "gh" if gh is not None else "notoken"
+    with _CHAT_INDEX_LOCK:
+        cached = _CHAT_INDEX_CACHE.get(key)
+        if cached and (time.time() - cached["ts"]) < ttl:
+            return cached["text"]
+        text = _build_chat_context_index_uncached(config, gh)
+        _CHAT_INDEX_CACHE[key] = {"ts": time.time(), "text": text}
+        return text
 
 def resolve_module_repo(module, monitored_repos, config):
     """Maps a Hub log module name to the GitHub repo its issues should be filed in.
@@ -1417,7 +1586,7 @@ def analyze_logs_for_errors(logs):
                 title_val = entry.get('title')
                 body_val = entry.get('body')
                 if not module_val or not str(module_val).strip():
-                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty module): {entry}")
+                    logger.warning(f"Hub log analysis found an actionable error but it's missing a module identifier. Log snippet: {body_val[:200]!r}")
                     continue
                 if not title_val or not str(title_val).strip():
                     logger.debug(f"Dropping malformed log-analysis entry (missing/empty title): {entry}")
@@ -1980,7 +2149,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 "status": "non-actionable",
                 "timestamp": datetime.now().isoformat(),
                 "reason": request_msg,
-                "original_body": issue.body
+                "original_body": issue.body.strip() if issue.body else ""
             }
             save_processed(processed)
             state["processed"] = processed
@@ -1997,7 +2166,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             path = os.path.join(tmp_dir, "repo")
             url = repo_obj.clone_url.replace("https://", f"https://{token}@")
             logger.info(f"Cloning {repo_name} for manual fix...")
-            repo_git = git.Repo.clone_from(url, path, depth=1)
+            repo_git = git.Repo.clone_from(url, path)
 
             max_attempts = 3
             success = False
@@ -2042,7 +2211,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                     "status": "awaiting_review",
                                     "timestamp": datetime.now().isoformat(),
                                     "pending_fix": {"confidence": confidence, "fixes": fixes},
-                                    "original_body": issue.body
+                                    "original_body": issue.body.strip() if issue.body else ""
                                 }
                                 save_processed(processed)
                                 state["processed"] = processed
@@ -2075,7 +2244,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         "status": "awaiting_local",
                         "timestamp": datetime.now().isoformat(),
                         "reason": "Queued for local LLM window",
-                        "original_body": issue.body
+                        "original_body": issue.body.strip() if issue.body else ""
                     }
                     save_processed(processed)
                     state["processed"] = processed
@@ -2119,11 +2288,29 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             version_bumped = False
             new_v = None
+            can_actually_direct_push = False
             if can_direct_push and final_verdict == "Approve":
                 new_v = bump_repo_version(path)
                 if new_v:
                     version_bumped = True
                     logger.info(f"Bumped target repository {repo_name} version to {new_v}")
+
+                try:
+                    repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                    can_actually_direct_push = True
+                    decision_reason = "Trusted repo & approved"
+                except Exception as pe:
+                    logger.warning(f"Direct push failed for {repo_name} ({pe}). Attempting rebase...")
+                    try:
+                        repo_git.remotes.origin.pull(base_branch, rebase=True)
+                        repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                        can_actually_direct_push = True
+                        decision_reason = "Trusted repo & approved (after rebase)"
+                        logger.info(f"Push successful after rebase for {repo_name}")
+                    except Exception as re_err:
+                        logger.warning(f"Direct push failed even after rebase: {re_err}. Falling back to PR.")
+                        decision_reason = f"Direct push failed: {re_err}"
+                        can_actually_direct_push = False
 
             commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
             if version_bumped:
@@ -2132,26 +2319,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             base_branch = config.get("default_branch", "main")
 
-            if can_direct_push and final_verdict == "Approve":
-                logger.info(f"Decision: Direct Commit to {base_branch}. Reason: can_direct_push=True AND verdict='Approve' ({final_verdict})")
-                decision_reason = "Trusted repo & approved"
-                try:
-                    repo_git.remotes.origin.push(f"HEAD:{base_branch}")
-                except Exception as pe:
-                    logger.warning(f"Direct push failed for {repo_name} ({pe}). Attempting rebase...")
-                    try:
-                        repo_git.remotes.origin.pull(base_branch, rebase=True)
-                        repo_git.remotes.origin.push(f"HEAD:{base_branch}")
-                        logger.info(f"Push successful after rebase for {repo_name}")
-                    except Exception as re_err:
-                        logger.error(f"Critical push failure for {repo_name} after rebase attempt: {re_err}")
-                        raise Exception(f"Git push failed for {repo_name} despite rebase attempt: {re_err}")
+            if can_actually_direct_push:
+                logger.info(f"Decision: Direct Commit to {base_branch}. Reason: {decision_reason}")
                 commit_type = "Direct Commit"
                 detail_msg = f"The fix was verified and pushed directly to the {base_branch} branch. Avg Confidence: {final_confidence:.2%}"
             else:
-                reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else "Trust/Ownership requirements not met (can_direct_push=False)"
+                reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (decision_reason if not can_direct_push or "Direct push failed" in decision_reason else "Trust/Ownership requirements not met")
                 decision_reason = reason
-                logger.info(f"Decision: Pull Request. Reason: {reason}. (can_direct_push={can_direct_push}, verdict={final_verdict})")
+                logger.info(f"Decision: Pull Request. Reason: {reason}.")
                 target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
                 try:
                     repo_git.git.checkout(target_branch)
@@ -3143,6 +3318,12 @@ async def save_settings(request: Request):
         "PROD_VERIFICATION_DAYS": lambda v: v,
         "self_diagnosis_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
         "module_repo_map": lambda v: parse_module_repo_map(v),
+        # Chat-agent numeric settings (stored as strings by the form; coerce to int).
+        "CHAT_TOOL_MAX_ITERATIONS": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_TOOL_MAX_ITERATIONS"],
+        "CHAT_TOOL_MAX_TOKENS": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_TOOL_MAX_TOKENS"],
+        "CHAT_INDEX_ISSUE_LIMIT": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_INDEX_ISSUE_LIMIT"],
+        "CHAT_INDEX_CACHE_TTL": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_INDEX_CACHE_TTL"],
+        "CHAT_FIX_PROPOSAL_TTL": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_FIX_PROPOSAL_TTL"],
     }
 
 
@@ -3164,6 +3345,10 @@ async def save_settings(request: Request):
 
     if "queue_local_llm" in data:
         config_data["queue_local_llm"] = data.get("queue_local_llm") == "on"
+
+    # Chat-agent boolean toggles (checkboxes: present+"on" => True, absent => False).
+    if "CHAT_TOOLS_ENABLED" in data:
+        config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
 
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
@@ -3325,28 +3510,447 @@ async def trigger_hub_update():
     result = trigger_infrastructure_update()
     return {"status": "success" if "SUCCESS" in result else "error", "message": result}
 
-def run_chat_reply(chat_id):
-    """Background worker that streams an LLM reply for one conversation turn.
+# =============================================================================
+# Chat agent: tool schemas, executors, secret sanitizer, and stream helpers.
+#
+# The chat agent gives the assistant awareness of BugFixer's repos, GitHub
+# issues, processed-issue state, and recent Hub/self log errors. The LLM calls
+# these tools on demand (Ollama /api/chat `tools`). All tools are READ-ONLY
+# except `propose_fix`, which does NOT mutate GitHub either — it only produces a
+# confirmation descriptor that the UI renders as a Confirm button; the actual
+# fix run (process_single_issue) is launched only after the user clicks Confirm
+# and the server validates a single-use token (see /api/chat/confirm_fix).
+#
+# SECURITY: API keys (GITHUB_TOKEN, OLLAMA_API_KEY) live only on the server and
+# are used solely to authenticate GitHub calls inside the executors. They never
+# enter chat messages, the system-prompt index, tool results, the streamed
+# response, or logs. Every tool result is passed through _sanitize_tool_result,
+# which redacts any accidental secret (e.g. a token pasted into an issue body or
+# a file the assistant read) before it is appended to the conversation.
+# =============================================================================
 
-    Builds a sliding multi-turn window from that conversation's persisted
-    messages (capped to avoid context-overflow 500s), calls call_llm with the
-    messages array, then persists the assistant reply. Live progress is written
-    into state["active_tasks"][chat_id]["stream"] by call_llm itself;
-    completion/error is tracked in state["chat_streams"][chat_id].
-    """
+# GitHub token prefix patterns (classic PATs + fine-grained PATs). Redacted on
+# sight in addition to exact-match denylisting of the configured keys.
+_GH_TOKEN_RE = re.compile(r'(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{80,})')
+
+# Skip-list mirroring identify_files_to_fix (main.py) so list_repo_files hides
+# the same noise the automated pipeline hides.
+_CHAT_FILE_SKIP = (".git", "node_modules", "__pycache__", "venv", ".env")
+
+
+def _secret_denylist(config):
+    """Builds the set of literal secret strings to redact from tool results."""
+    dl = set()
+    for src in (config.get("GITHUB_TOKEN"), os.getenv("GITHUB_TOKEN"),
+                config.get("OLLAMA_API_KEY"), os.getenv("OLLAMA_API_KEY")):
+        if src and isinstance(src, str):
+            s = src.strip().strip('"').strip("'")
+            if len(s) >= 8:
+                dl.add(s)
+    return dl
+
+
+def _redact_text(text, denylist):
+    if not text:
+        return text
+    t = text if isinstance(text, str) else str(text)
+    for s in denylist:
+        if s:
+            t = t.replace(s, "***REDACTED***")
+    return _GH_TOKEN_RE.sub("***REDACTED***", t)
+
+
+def _sanitize_tool_result(obj, config):
+    """Recursively redacts configured secrets + GitHub PAT patterns from a tool
+    result (dict/list/str) before it is appended to the conversation or sent to
+    the browser. Defense-in-depth: the executors never put keys into results in
+    the first place, but an issue body or file may contain a leaked token."""
+    deny = _secret_denylist(config)
+    def walk(o):
+        if isinstance(o, str):
+            return _redact_text(o, deny)
+        if isinstance(o, dict):
+            return {k: walk(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [walk(x) for x in o]
+        return o
+    return walk(obj)
+
+
+def _trunc(s, n):
+    if s is None:
+        return ""
+    s = str(s)
+    return s if len(s) <= n else s[:n] + " …[truncated]"
+
+
+# --- Ollama tool schemas -----------------------------------------------------
+CHAT_TOOLS = [
+    {
+        "name": "list_repos",
+        "description": "List all repositories BugFixer monitors (monitored + trusted + self-diagnosis), with the count of open issues matching monitored labels for each. Use this first to learn what repos exist.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "list_issues",
+        "description": "List open issues for a repo, optionally filtered by state/label/limit. Defaults to issues matching the configured monitored labels.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "owner/repo"},
+                "state": {"type": "string", "enum": ["open", "closed", "all"], "default": "open"},
+                "label": {"type": "string", "description": "single label filter; omit to use monitored labels"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10},
+            },
+            "required": ["repo"],
+        },
+    },
+    {
+        "name": "get_issue",
+        "description": "Fetch one issue with its body, labels, state, and all comments. Use after list_issues to drill into a specific issue.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string"},
+                "number": {"type": "integer"},
+            },
+            "required": ["repo", "number"],
+        },
+    },
+    {
+        "name": "list_repo_files",
+        "description": "List files in a repo's default branch via the git tree API (no clone). Skips .git/node_modules/__pycache__/venv/.env.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 300},
+            },
+            "required": ["repo"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read a single file's decoded contents from a repo's default branch. For large files, ask the user to narrow scope. Returns up to max_bytes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string"},
+                "path": {"type": "string"},
+                "max_bytes": {"type": "integer", "minimum": 256, "maximum": 20000, "default": 8000},
+            },
+            "required": ["repo", "path"],
+        },
+    },
+    {
+        "name": "get_processed_issues",
+        "description": "Return BugFixer's processed-issue state (statuses: fixed/verified/awaiting_prod_verification/failed/non-actionable/awaiting_review/processing). Optionally filter by repo.",
+        "parameters": {
+            "type": "object",
+            "properties": {"repo": {"type": "string"}},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_recent_errors",
+        "description": "Fetch recent Hub + BugFixer self log errors. Returns deduped, capped error entries.",
+        "parameters": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 15}},
+            "required": [],
+        },
+    },
+    {
+        "name": "propose_fix",
+        "description": "Propose running a full automated fix on an issue. Does NOT execute the fix. Returns a confirmation descriptor the user must approve in the UI before the fix runs. Pass llm_preference as 'cloud' or 'local', or omit for default.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string"},
+                "number": {"type": "integer"},
+                "llm_preference": {"type": "string", "enum": ["cloud", "local"]},
+            },
+            "required": ["repo", "number"],
+        },
+    },
+]
+
+
+def _tool_list_repos(gh, config, args):
+    if gh is None:
+        return {"error": "GitHub client unavailable (no token configured)."}
+    monitored = get_monitored_repos(config)
+    trusted = config.get("trusted_repos", []) or []
+    sd = resolve_self_diagnosis_repo(config)
+    seen, out = set(), []
+    label_filter = config.get("monitored_labels", ["automated-fix"]) or ["automated-fix"]
+    for repo_name in list(dict.fromkeys(monitored + list(trusted))):
+        entry = {"repo": repo_name, "is_trusted": repo_name in trusted,
+                 "is_self_diagnosis": repo_name == sd, "open_monitored_issues": None}
+        try:
+            issues = gh.get_repo(repo_name).get_issues(state="open", labels=list(label_filter))
+            count = sum(1 for _ in issues)
+            entry["open_monitored_issues"] = count
+        except Exception as e:
+            entry["open_monitored_issues"] = f"(unavailable: {_trunc(type(e).__name__, 40)})"
+        out.append(entry)
+        seen.add(repo_name)
+    return {"repos": out}
+
+
+def _tool_list_issues(gh, config, args):
+    if gh is None:
+        return {"error": "GitHub client unavailable (no token configured)."}
+    repo_name = (args.get("repo") or "").strip()
+    if not repo_name:
+        return {"error": "repo is required"}
+    state = args.get("state") or "open"
+    limit = max(1, min(30, int(args.get("limit") or 10)))
+    label = args.get("label")
+    labels = [label] if label else (config.get("monitored_labels") or ["automated-fix"])
     try:
-        config = load_config()
+        issues = gh.get_repo(repo_name).get_issues(state=state, labels=list(labels))
+        out = []
+        for it in issues:
+            if len(out) >= limit:
+                break
+            out.append({"number": it.number, "title": _trunc(it.title, 200),
+                        "state": it.state, "labels": [lb.name for lb in it.labels],
+                        "updated_at": str(it.updated_at)})
+        return {"repo": repo_name, "state": state, "labels": labels, "issues": out}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {_trunc(e, 300)}"}
+
+
+def _tool_get_issue(gh, config, args):
+    if gh is None:
+        return {"error": "GitHub client unavailable (no token configured)."}
+    repo_name = (args.get("repo") or "").strip()
+    number = args.get("number")
+    if not repo_name or number is None:
+        return {"error": "repo and number are required"}
+    try:
+        issue = gh.get_repo(repo_name).get_issue(int(number))
+        comments = []
+        for i, c in enumerate(issue.get_comments()):
+            if i >= 20:
+                comments.append({"author": "...", "body": "[more comments truncated]"})
+                break
+            try:
+                author = c.user.login if c.user else "(unknown)"
+            except Exception:
+                author = "(unknown)"
+            comments.append({"author": author, "body": _trunc(c.body, 1500)})
+        return {"number": issue.number, "title": issue.title, "state": issue.state,
+                "labels": [lb.name for lb in issue.labels],
+                "body": _trunc(issue.body, 4000), "comments": comments}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {_trunc(e, 300)}"}
+
+
+def _tool_list_repo_files(gh, config, args):
+    if gh is None:
+        return {"error": "GitHub client unavailable (no token configured)."}
+    repo_name = (args.get("repo") or "").strip()
+    if not repo_name:
+        return {"error": "repo is required"}
+    limit = max(1, min(500, int(args.get("limit") or 300)))
+    try:
+        repo = gh.get_repo(repo_name)
+        tree = repo.get_git_tree(repo.default_branch, recursive=True)
+        files = []
+        for el in tree.tree:
+            if getattr(el, "type", "") != "blob":
+                continue
+            p = el.path
+            if any(seg in p for seg in _CHAT_FILE_SKIP):
+                continue
+            files.append(p)
+            if len(files) >= limit:
+                break
+        return {"repo": repo_name, "branch": repo.default_branch,
+                "files": files, "truncated": len(files) >= limit}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {_trunc(e, 300)}"}
+
+
+def _tool_read_file(gh, config, args):
+    if gh is None:
+        return {"error": "GitHub client unavailable (no token configured)."}
+    repo_name = (args.get("repo") or "").strip()
+    path = (args.get("path") or "").strip()
+    if not repo_name or not path:
+        return {"error": "repo and path are required"}
+    max_bytes = max(256, min(20000, int(args.get("max_bytes") or 8000)))
+    try:
+        contents = gh.get_repo(repo_name).get_contents(path)
+        if isinstance(contents, list):
+            return {"error": f"{path} is a directory, not a file"}
+        raw = contents.decoded_content or b""
+        text = raw.decode("utf-8", "replace")
+        truncated = len(text) > max_bytes
+        return {"repo": repo_name, "path": path, "truncated": truncated,
+                "content": text[:max_bytes]}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {_trunc(e, 300)}"}
+
+
+def _tool_get_processed_issues(gh, config, args):
+    repo_filter = (args.get("repo") or "").strip()
+    processed = load_processed()
+    counts = {}
+    sample = []
+    matched = 0
+    for issue_id, info in processed.items():
+        if not isinstance(info, dict):
+            continue
+        if repo_filter and not issue_id.startswith(repo_filter + ":"):
+            continue
+        matched += 1
+        st = info.get("status", "unknown")
+        counts[st] = counts.get(st, 0) + 1
+        if len(sample) < 20:
+            sample.append({"issue": issue_id, "status": st,
+                           "timestamp": info.get("timestamp", "")})
+    return {"filter_repo": repo_filter or None, "counts": counts, "total": matched,
+            "total_all": len(processed), "sample": sample}
+
+
+def _tool_get_recent_errors(gh, config, args):
+    limit = max(1, min(50, int(args.get("limit") or 15)))
+    hub_errors = []
+    logs = get_hub_logs()
+    if logs:
+        try:
+            hub_errors = filter_error_logs(logs)[:limit]
+        except Exception as e:
+            hub_errors = [{"error": f"filter failed: {type(e).__name__}"}]
+    # Self errors: tail the local BugFixer log and keep ERROR/Traceback lines.
+    self_errors = []
+    try:
+        path = get_log_path()
+        if path and os.path.exists(path):
+            with open(path, "r", errors="replace") as f:
+                lines = f.readlines()[-500:]
+            for ln in lines:
+                if re.search(r'\[ERROR\]|\[CRITICAL\]|Traceback|Exception|Error[: ]', ln):
+                    self_errors.append(_trunc(ln.strip(), 300))
+                    if len(self_errors) >= limit:
+                        break
+    except Exception:
+        pass
+    return {"hub_errors": hub_errors, "self_errors": self_errors,
+            "note": "Use get_issue/list_issues for detail on any error filed as a GitHub issue."}
+
+
+def _tool_propose_fix(gh, config, args):
+    repo_name = (args.get("repo") or "").strip()
+    number = args.get("number")
+    if not repo_name or number is None:
+        return {"error": "repo and number are required"}
+    pref = args.get("llm_preference")
+    if pref not in ("cloud", "local", None):
+        pref = None
+    # Best-effort issue title for the confirmation descriptor (no mutation).
+    title = ""
+    if gh is not None:
+        try:
+            title = gh.get_repo(repo_name).get_issue(int(number)).title or ""
+        except Exception:
+            title = ""
+    token = uuid.uuid4().hex
+    descriptor = {"kind": "confirm_fix", "repo": repo_name, "number": int(number),
+                  "title": _trunc(title, 200), "llm_preference": pref, "confirm_token": token}
+    return descriptor
+
+
+CHAT_TOOL_EXECUTORS = {
+    "list_repos": _tool_list_repos,
+    "list_issues": _tool_list_issues,
+    "get_issue": _tool_get_issue,
+    "list_repo_files": _tool_list_repo_files,
+    "read_file": _tool_read_file,
+    "get_processed_issues": _tool_get_processed_issues,
+    "get_recent_errors": _tool_get_recent_errors,
+    "propose_fix": _tool_propose_fix,
+}
+
+
+# --- Chat stream / proposal helpers (all lock-guarded) -----------------------
+def _set_chat_stream_status(chat_id, text):
+    """Publishes an interim status string (e.g. '[calling tool: list_issues …]')
+    so /api/chat/stream shows progress during multi-turn tool resolution. Writes
+    to both chat_streams (under _chat_lock) and active_tasks (under
+    _task_state_lock), mirroring how chat_stream folds active_tasks in."""
+    with _chat_lock:
+        entry = state.setdefault("chat_streams", {}).setdefault(chat_id, {})
+        entry["stream"] = text
+        entry["done"] = False
+        entry["error"] = None
+    with _task_state_lock:
+        task = state.get("active_tasks", {}).get(chat_id)
+        if task is not None:
+            task["stream"] = text
+
+
+def _finalize_chat_stream(chat_id, text):
+    with _chat_lock:
+        state.setdefault("chat_streams", {})[chat_id] = {
+            "stream": text or "", "done": True, "error": None,
+        }
+
+
+def _set_chat_stream_error(chat_id, message):
+    with _chat_lock:
+        state.setdefault("chat_streams", {})[chat_id] = {
+            "stream": "", "done": True, "error": message,
+        }
+
+
+def _register_fix_proposal(chat_id, descriptor, config):
+    """Stores a fix-proposal confirmation token server-side (under _chat_lock)
+    with a creation timestamp so /api/chat/confirm_fix can validate + TTL it."""
+    token = descriptor.get("confirm_token")
+    if not token:
+        return
+    ttl = int(config.get("CHAT_FIX_PROPOSAL_TTL", 600) or 600)
+    with _chat_lock:
+        state.setdefault("chat_fix_proposals", {})[token] = {
+            "repo": descriptor.get("repo"),
+            "number": descriptor.get("number"),
+            "llm_preference": descriptor.get("llm_preference"),
+            "chat_id": chat_id,
+            "created": time.time(),
+            "ttl": ttl,
+        }
+
+
+def _confirm_fix_marker(descriptor):
+    """Renders the propose_fix descriptor as a fenced block the chat UI parses
+    into a Confirm button. The confirm_token is a server-generated uuid (not a
+    secret); the descriptor has already been through _sanitize_tool_result."""
+    pref = descriptor.get("llm_preference") or ""
+    return (
+        f":::confirm_fix repo={descriptor.get('repo')} number={descriptor.get('number')} "
+        f"token={descriptor.get('confirm_token')} pref={pref}\n"
+        f"Run automated fix on #{descriptor.get('number')} "
+        f"\"{descriptor.get('title', '')}\"? Click Confirm to proceed.\n:::"
+    )
+
+
+def _run_chat_reply_simple(chat_id, config):
+    """Legacy single-turn chat path: used when CHAT_TOOLS_ENABLED is False (or as
+    the graceful-degradation fallback). Streams one call_llm reply with a plain
+    system prompt. Preserves the pre-tool chat behavior."""
+    try:
         window_size = int(config.get("CHAT_HISTORY_WINDOW", 20) or 20)
         system_prompt = config.get("CHAT_SYSTEM_PROMPT") or "You are a helpful assistant."
         store = load_chats()
         conv = get_conversation(store, chat_id)
         if conv is None:
-            with _chat_lock:
-                if chat_id in state["chat_streams"]:
-                    state["chat_streams"][chat_id].update({"done": True, "error": "Conversation not found"})
+            _set_chat_stream_error(chat_id, "Conversation not found")
             return
         messages = conv.get("messages", [])
-        # Keep the most recent `window_size` turns and prepend the system message.
         window = [{"role": "system", "content": system_prompt}] + messages[-window_size:]
         reply = call_llm("", messages=window, task_id=chat_id)
         if reply and reply.strip():
@@ -3355,21 +3959,155 @@ def run_chat_reply(chat_id):
                 "content": reply,
                 "ts": datetime.now().isoformat(),
             })
-        with _chat_lock:
-            if chat_id in state["chat_streams"]:
-                state["chat_streams"][chat_id].update({
-                    "stream": reply or "",
-                    "done": True,
-                    "error": None,
+        _finalize_chat_stream(chat_id, reply or "")
+    except Exception as e:
+        logger.error(f"_run_chat_reply_simple failed for {chat_id}: {e}\n{traceback.format_exc()}")
+        _set_chat_stream_error(chat_id, f"LLM error: {e}")
+
+
+def run_chat_reply(chat_id):
+    """Background worker that produces an LLM reply for one conversation turn.
+
+    With CHAT_TOOLS_ENABLED (default), runs an agent loop: the system prompt
+    carries a compact repo/issue index (build_chat_context_index) and the model
+    may call read-only tools (CHAT_TOOLS) to drill in. propose_fix does not
+    mutate; it emits a :::confirm_fix block the UI renders as a Confirm button,
+    and the real fix run only happens via /api/chat/confirm_fix after the user
+    clicks. Without a GitHub token, tools are disabled but the index still gives
+    the assistant repo/issue awareness. Tool turns are non-streaming so
+    message.tool_calls parse cleanly; interim status is written to
+    state["chat_streams"][chat_id] / active_tasks so /api/chat/stream shows
+    progress. Completion/error is tracked in state["chat_streams"][chat_id].
+    """
+    try:
+        config = load_config()
+        if not config.get("CHAT_TOOLS_ENABLED", True):
+            return _run_chat_reply_simple(chat_id, config)
+
+        window_size = int(config.get("CHAT_HISTORY_WINDOW", 20) or 20)
+        base_system = config.get("CHAT_SYSTEM_PROMPT") or "You are a helpful assistant."
+        max_iter = int(config.get("CHAT_TOOL_MAX_ITERATIONS", 6) or 6)
+        # Token-budget config is in ~tokens; apply a 4x char budget for results.
+        max_result_chars = int(config.get("CHAT_TOOL_MAX_TOKENS", 12000) or 12000) * 4
+
+        store = load_chats()
+        conv = get_conversation(store, chat_id)
+        if conv is None:
+            _set_chat_stream_error(chat_id, "Conversation not found")
+            return
+
+        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+        gh = Github(token) if token else None
+
+        # Index gives awareness even without tools; gh passed so issue titles fill in.
+        index_text = build_chat_context_index(config, gh=gh)
+        system_prompt = base_system + "\n\n" + index_text
+        history = conv.get("messages", [])
+        window = history[-window_size:]
+        messages = [{"role": "system", "content": system_prompt}] + list(window)
+
+        # No GitHub token -> no tools, but the index still informs the answer.
+        if gh is None:
+            _set_chat_stream_status(chat_id, "Thinking…")
+            reply = call_llm("", messages=messages, task_id=chat_id)  # streaming string
+            if reply and reply.strip():
+                append_chat_message(chat_id, {
+                    "role": "assistant",
+                    "content": reply,
+                    "ts": datetime.now().isoformat(),
                 })
+            _finalize_chat_stream(chat_id, reply or "")
+            return
+
+        tools = CHAT_TOOLS
+        used_chars = 0
+        final_text = None
+        last_text = ""
+        for iteration in range(max_iter):
+            _set_chat_stream_status(chat_id, "Thinking…" if iteration == 0 else "Working…")
+            try:
+                result = call_llm("", messages=messages, task_id=chat_id, tools=tools, stream=False)
+            except Exception as e:
+                # Tool-capable /api/chat failed (e.g. cloud without /api/chat tool
+                # support). Degrade to one streaming index-only turn and finish.
+                logger.warning(f"Chat tool turn {iteration} failed ({e}); degrading to index-only answer.")
+                try:
+                    reply = call_llm("", messages=messages[:], task_id=chat_id)
+                    final_text = reply or ""
+                except Exception as ee:
+                    _set_chat_stream_error(chat_id, f"LLM error: {ee}")
+                    return
+                break
+
+            if not isinstance(result, dict):
+                final_text = str(result)
+                break
+            text = result.get("text") or ""
+            tool_calls = result.get("tool_calls") or []
+            last_text = text
+            if not tool_calls:
+                final_text = text
+                break
+
+            # Echo the assistant turn (with tool_calls) back for the next round.
+            messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+
+            hit_proposal = False
+            for tc in tool_calls:
+                fn = tc.get("function") or {}
+                name = fn.get("name") or tc.get("name")
+                args_raw = fn.get("arguments") if fn else tc.get("arguments")
+                if isinstance(args_raw, str):
+                    try:
+                        args = json.loads(args_raw) if args_raw else {}
+                    except Exception:
+                        args = {}
+                elif isinstance(args_raw, dict):
+                    args = args_raw
+                else:
+                    args = {}
+
+                if not name or name not in CHAT_TOOL_EXECUTORS:
+                    out = {"error": f"unknown tool: {name}"}
+                else:
+                    _set_chat_stream_status(chat_id, f"[calling tool: {name} …]")
+                    try:
+                        out = CHAT_TOOL_EXECUTORS[name](gh, config, args)
+                    except Exception as ee:
+                        out = {"error": f"{type(ee).__name__}: {_trunc(ee, 300)}"}
+                out = _sanitize_tool_result(out, config)
+                out_str = json.dumps(out)
+                if used_chars + len(out_str) > max_result_chars:
+                    out_str = json.dumps({"error": "tool result budget exceeded; narrow your query", "truncated": True})
+                used_chars += len(out_str)
+                messages.append({"role": "tool", "name": name or "unknown", "content": out_str})
+
+                # propose_fix is non-mutating: surface a Confirm button and stop.
+                if name == "propose_fix" and isinstance(out, dict) and out.get("kind") == "confirm_fix":
+                    _register_fix_proposal(chat_id, out, config)
+                    marker = _confirm_fix_marker(out)
+                    messages.append({"role": "system", "content": "A confirmation button has been shown to the user for this fix. Stop calling tools this turn and tell the user to click Confirm to run the fix."})
+                    final_text = (text + "\n\n" + marker).strip() if text else marker
+                    hit_proposal = True
+                    break
+            if hit_proposal:
+                break
+        else:
+            # Iteration cap reached without a no-tool_calls turn; return last text.
+            final_text = last_text or ""
+
+        if final_text is None:
+            final_text = last_text or ""
+        if final_text and final_text.strip():
+            append_chat_message(chat_id, {
+                "role": "assistant",
+                "content": final_text,
+                "ts": datetime.now().isoformat(),
+            })
+        _finalize_chat_stream(chat_id, final_text or "")
     except Exception as e:
         logger.error(f"run_chat_reply failed for {chat_id}: {e}\n{traceback.format_exc()}")
-        with _chat_lock:
-            if chat_id in state["chat_streams"]:
-                state["chat_streams"][chat_id].update({
-                    "done": True,
-                    "error": f"LLM error: {e}",
-                })
+        _set_chat_stream_error(chat_id, f"LLM error: {e}")
     finally:
         # Remove the chat task from the Dashboard activity feed.
         update_task_state(chat_id, "Chat", action="end")
@@ -3489,6 +4227,56 @@ async def chat_clear():
         save_chats(store)
         state["chat_streams"].pop(store["active_id"], None)
     return {"ok": True}
+
+@app.post("/api/chat/confirm_fix")
+async def chat_confirm_fix(request: Request):
+    """Confirms a chat-proposed automated fix and launches it in the background.
+
+    The chat agent's propose_fix tool does NOT mutate GitHub; it registers a
+    single-use, TTL-bounded confirmation token in state["chat_fix_proposals"]
+    and emits a :::confirm_fix block the UI renders as a Confirm button. Only
+    when the user clicks Confirm does this endpoint run: it validates + consumes
+    the token, then launches process_single_issue in a daemon thread (the fix
+    run clones, runs tests, and can take minutes — it must NOT block the chat or
+    the request). Returns the pipeline's own issue_id task_id so the UI can watch
+    progress via /api/task-details. Never returns any API key.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"message": "Invalid JSON body"})
+    token = (data.get("token") or "").strip() if isinstance(data, dict) else ""
+    if not token:
+        return JSONResponse(status_code=400, content={"message": "Missing token"})
+
+    config = load_config()
+    ttl = int(config.get("CHAT_FIX_PROPOSAL_TTL", 600) or 600)
+    with _chat_lock:
+        prop = state.get("chat_fix_proposals", {}).pop(token, None)
+    if not prop:
+        return JSONResponse(status_code=410, content={"message": "Proposal expired or already used"})
+    if time.time() - float(prop.get("created", 0)) > ttl:
+        return JSONResponse(status_code=410, content={"message": "Proposal expired"})
+
+    repo_name = prop.get("repo")
+    issue_num = prop.get("number")
+    pref = prop.get("llm_preference")
+    if not repo_name or issue_num is None:
+        return JSONResponse(status_code=400, content={"message": "Invalid proposal"})
+
+    # Use the pipeline's own issue_id form so /api/task-details latches onto the
+    # update_task_state entries process_single_issue creates internally.
+    task_id = f"{repo_name}:{issue_num}"
+
+    def _run():
+        try:
+            ok, msg = process_single_issue(repo_name, issue_num, llm_preference=pref)
+            logger.info(f"Chat-triggered fix {repo_name}:{issue_num} -> ok={ok} msg={msg}")
+        except Exception as e:
+            logger.error(f"Chat-triggered fix {repo_name}:{issue_num} failed: {e}\n{traceback.format_exc()}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "triggered", "task_id": task_id, "repo": repo_name, "number": issue_num}
 
 threading.Thread(target=connectivity_worker, daemon=True).start()
 threading.Thread(target=heartbeat_worker, daemon=True).start()

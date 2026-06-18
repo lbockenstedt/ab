@@ -302,8 +302,8 @@
                     </tr>
                     <tr class="bg-slate-50/50">
                         <td colspan="4" class="px-6 py-2 text-slate-500 text-[10px] italic border-b border-slate-100">
-                            <div class="flex flex-col gap-1">
-                                <div>
+                            <div class="flex flex-col gap-2">
+                                <div class="flex items-center flex-wrap gap-x-2">
                                     {% if info.status == 'fixed' or info.status == 'verified' %}
                                         <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
                                         <span class="mx-2 text-slate-300">|</span>
@@ -330,8 +330,11 @@
                                     {% endif %}
                                 </div>
                                 {% if info.original_body %}
-                                <div class="text-slate-400 font-mono not-italic whitespace-pre-wrap opacity-80">
-                                    <span class="font-semibold text-slate-500">Original Report:</span> {{ info.original_body }}
+                                <div class="bg-white border border-slate-200 p-2 rounded-md shadow-sm">
+                                    <div class="text-slate-700 font-mono not-italic text-xs whitespace-pre-line leading-relaxed">
+                                        <span class="font-bold text-slate-500 block mb-1">Original Report:</span>
+                                        {{ info.original_body }}
+                                    </div>
                                 </div>
                                 {% endif %}
                             </div>
@@ -636,6 +639,50 @@
                         </div>
                     </section>
 
+                    <!-- Chat Agent -->
+                    <section>
+                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                            <i class="fas fa-comment-dots text-slate-400"></i>
+                            <h4 class="font-semibold text-slate-700">Chat Agent</h4>
+                        </div>
+                        <p class="text-xs text-slate-500 mb-4">
+                            When enabled, the chat assistant is given a compact index of your repos, open
+                            issues, and processed-issue state, and may call read-only tools to drill in. It
+                            can also propose running an automated fix (shown as a Confirm button). Tool-calling
+                            needs a tool-capable model (llama3.1+/qwen2.5+ recommended; gemma support is limited).
+                        </p>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <div class="flex items-center gap-2">
+                                    <input type="checkbox" name="CHAT_TOOLS_ENABLED" id="CHAT_TOOLS_ENABLED" {{ 'checked' if settings.CHAT_TOOLS_ENABLED else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <label for="CHAT_TOOLS_ENABLED" class="text-xs font-medium text-slate-700">
+                                        Enable chat tools &amp; repo/issue awareness (disable for the legacy plain-assistant chat)
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max Tool Iterations per Turn</label>
+                                <input type="number" name="CHAT_TOOL_MAX_ITERATIONS" value="{{ settings.CHAT_TOOL_MAX_ITERATIONS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Tool Result Token Budget</label>
+                                <input type="number" name="CHAT_TOOL_MAX_TOKENS" value="{{ settings.CHAT_TOOL_MAX_TOKENS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Index: Issues Per Repo</label>
+                                <input type="number" name="CHAT_INDEX_ISSUE_LIMIT" value="{{ settings.CHAT_INDEX_ISSUE_LIMIT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Index Cache TTL (seconds)</label>
+                                <input type="number" name="CHAT_INDEX_CACHE_TTL" value="{{ settings.CHAT_INDEX_CACHE_TTL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Fix Proposal TTL (seconds)</label>
+                                <input type="number" name="CHAT_FIX_PROPOSAL_TTL" value="{{ settings.CHAT_FIX_PROPOSAL_TTL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                        </div>
+                    </section>
+
                     <div class="pt-6">
                         <button type="submit" class="w-full py-3 px-6 btn-primary font-bold rounded-xl shadow-lg shadow-green-900/20">
                             SAVE CONFIGURATION
@@ -835,6 +882,11 @@
             // Fetch models if on the settings page
             if (document.getElementById('model-management-list')) {
                 fetchModels();
+            }
+
+            // Render any confirm-fix blocks already present in the server-rendered chat transcript.
+            if (document.getElementById('chat-transcript')) {
+                renderExistingChatBubbles();
             }
         });
 
@@ -1166,7 +1218,7 @@
                     const resp = await fetch('/api/chat/stream?chat_id=' + encodeURIComponent(chatId));
                     const data = await resp.json();
                     if (bubble) {
-                        bubble.textContent = data.stream || '';
+                        renderChatContent(bubble, data.stream || '');
                         if (!data.done) bubble.classList.add('chat-cursor');
                         else bubble.classList.remove('chat-cursor');
                     }
@@ -1193,6 +1245,96 @@
                     if (sendBtn) sendBtn.disabled = false;
                 }
             }, 1200);
+        }
+
+        // ===== Chat: confirm-fix block rendering =====
+        // The chat agent's propose_fix tool emits a fenced block the UI turns into
+        // a Confirm button. The actual fix run only starts after the user clicks
+        // Confirm and /api/chat/confirm_fix validates a single-use token.
+        function parseConfirmHeader(headerLine) {
+            const m = {};
+            (headerLine || '').split(/\s+/).forEach(pair => {
+                const i = pair.indexOf('=');
+                if (i > 0) m[pair.slice(0, i)] = pair.slice(i + 1);
+            });
+            return m;
+        }
+
+        function renderChatContent(bubble, text) {
+            if (!bubble) return;
+            bubble.innerHTML = '';
+            if (!text) return;
+            const re = /:::confirm_fix ([\s\S]*?):::/g;
+            let last = 0, m;
+            while ((m = re.exec(text)) !== null) {
+                if (m.index > last) {
+                    const span = document.createElement('span');
+                    span.className = 'whitespace-pre-wrap';
+                    span.textContent = text.slice(last, m.index);
+                    bubble.appendChild(span);
+                }
+                const lines = m[1].split('\n');
+                const header = parseConfirmHeader(lines[0]);
+                const promptText = lines.slice(1).join('\n').trim();
+                if (promptText) {
+                    const p = document.createElement('div');
+                    p.className = 'whitespace-pre-wrap mb-2';
+                    p.textContent = promptText;
+                    bubble.appendChild(p);
+                }
+                if (header.token) {
+                    const btn = document.createElement('button');
+                    btn.className = 'chat-confirm-fix-btn btn-primary px-4 py-1 rounded-lg text-sm mt-1';
+                    btn.textContent = 'Confirm fix #' + (header.number || '?');
+                    btn.addEventListener('click', function (ev) { confirmChatFix(header.token, btn, ev); });
+                    bubble.appendChild(btn);
+                }
+                last = re.lastIndex;
+            }
+            if (last < text.length) {
+                const span = document.createElement('span');
+                span.className = 'whitespace-pre-wrap';
+                span.textContent = text.slice(last);
+                bubble.appendChild(span);
+            }
+        }
+
+        async function confirmChatFix(token, btn, ev) {
+            if (ev) ev.preventDefault();
+            if (!btn || btn.disabled) return;
+            const original = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Starting…';
+            try {
+                const resp = await fetch('/api/chat/confirm_fix', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token })
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (resp.ok && data.task_id) {
+                    btn.textContent = 'Running… (watch dashboard)';
+                    btn.classList.add('opacity-60');
+                    if (typeof populateTaskDetails === 'function') {
+                        populateTaskDetails(data.task_id);
+                    }
+                } else {
+                    btn.disabled = false;
+                    btn.textContent = original;
+                    alert('Could not start fix: ' + (data.message || 'unknown error'));
+                }
+            } catch (e) {
+                btn.disabled = false;
+                btn.textContent = original;
+                alert('Confirm fix failed: ' + e);
+            }
+        }
+
+        // Render any :::confirm_fix blocks already present in the server-rendered transcript.
+        function renderExistingChatBubbles() {
+            document.querySelectorAll('#chat-transcript .chat-bubble').forEach(b => {
+                renderChatContent(b, b.textContent);
+            });
         }
 
         async function newChat() {
