@@ -453,63 +453,79 @@
                             <h4 class="font-semibold text-slate-700">LLM Configuration</h4>
                         </div>
 
-                        <!-- Model Management List -->
-                        <div class="mb-6 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                            <div class="flex items-center justify-between mb-3">
-                                <span class="text-sm font-bold text-slate-600 uppercase tracking-wider">Discovered Models</span>
-                                <button onclick="fetchModels()" class="text-xs px-2 py-1 bg-white hover:bg-slate-100 rounded border border-slate-300 text-slate-600 transition-colors">
-                                    <i class="fas fa-sync-alt mr-1"></i> Refresh
-                                </button>
+                        <!-- Provider 1 -->
+                        <div class="mb-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                            <div class="flex items-center gap-2 mb-3">
+                                <span class="text-xs font-bold text-[#01A982] uppercase tracking-wider">Provider 1</span>
+                                <span class="text-xs text-slate-400">Primary — tried first on every request</span>
                             </div>
-                            <div id="model-management-list" class="space-y-2 max-h-60 overflow-y-auto">
-                                <div class="text-center text-slate-400 italic text-xs py-4">Loading available models...</div>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Provider</label>
+                                    <select name="LLM_PROVIDER_1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_1 == 'openai' else '' }}>OpenAI</option>
+                                        <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_1 == 'anthropic' else '' }}>Anthropic</option>
+                                        <option value="google" {{ 'selected' if settings.LLM_PROVIDER_1 == 'google' else '' }}>Google Gemini</option>
+                                    </select>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Model</label>
+                                    <input type="text" name="LLM_MODEL_1" value="{{ settings.LLM_MODEL_1 }}" placeholder="gpt-4o" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">API Key</label>
+                                    <input type="password" name="LLM_API_KEY_1" value="{{ settings.LLM_API_KEY_1 }}" placeholder="sk-..." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2 md:col-span-3">
+                                    <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional — leave blank for the provider default)</span></label>
+                                    <input type="text" name="LLM_BASE_URL_1" value="{{ settings.LLM_BASE_URL_1 }}" placeholder="https://api.openai.com/v1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
                             </div>
                         </div>
 
+                        <!-- Provider 2 -->
+                        <div class="mb-6 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                            <div class="flex items-center gap-2 mb-3">
+                                <span class="text-xs font-bold text-indigo-500 uppercase tracking-wider">Provider 2</span>
+                                <span class="text-xs text-slate-400">Failover &amp; cross-check reviewer — used when Provider 1 fails</span>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Provider</label>
+                                    <select name="LLM_PROVIDER_2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_2 == 'openai' else '' }}>OpenAI</option>
+                                        <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_2 == 'anthropic' else '' }}>Anthropic</option>
+                                        <option value="google" {{ 'selected' if settings.LLM_PROVIDER_2 == 'google' else '' }}>Google Gemini</option>
+                                    </select>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Model</label>
+                                    <input type="text" name="LLM_MODEL_2" value="{{ settings.LLM_MODEL_2 }}" placeholder="claude-opus-4-5" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">API Key</label>
+                                    <input type="password" name="LLM_API_KEY_2" value="{{ settings.LLM_API_KEY_2 }}" placeholder="sk-ant-..." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2 md:col-span-3">
+                                    <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
+                                    <input type="text" name="LLM_BASE_URL_2" value="{{ settings.LLM_BASE_URL_2 }}" placeholder="https://api.anthropic.com/v1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Reviewer overrides + timeout -->
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Local LLM URL</label>
-                                <input type="text" name="LOCAL_OLLAMA_URL" id="local_url_input" value="{{ settings.LOCAL_OLLAMA_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" onchange="fetchModels()">
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 1 <span class="text-slate-400 font-normal">(override, blank = Provider 1 model)</span></label>
+                                <input type="text" name="REVIEWER_MODEL_1" value="{{ settings.REVIEWER_MODEL_1 }}" placeholder="Leave blank to use Provider 1 model" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Local Model</label>
-                                <select name="LOCAL_OLLAMA_MODEL" id="local-model-select" data-current-local="{{ settings.LOCAL_OLLAMA_MODEL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="">Select a model...</option>
-                                </select>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Ollama API Key</label>
-                                <input type="password" name="OLLAMA_API_KEY" value="{{ settings.OLLAMA_API_KEY }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Cloud LLM URL</label>
-                                <input type="text" name="CLOUD_OLLAMA_URL" value="{{ settings.CLOUD_OLLAMA_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Cloud Model</label>
-                                <select name="CLOUD_OLLAMA_MODEL" id="cloud-model-select" data-current-cloud="{{ settings.CLOUD_OLLAMA_MODEL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="">Select a model...</option>
-                                </select>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 1</label>
-                                <select name="REVIEWER_MODEL_1" id="reviewer-model-1-select" data-current-r1="{{ settings.REVIEWER_MODEL_1 }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="">Select a model...</option>
-                                </select>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 2</label>
-                                <select name="REVIEWER_MODEL_2" id="reviewer-model-2-select" data-current-r2="{{ settings.REVIEWER_MODEL_2 }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="">Select a model...</option>
-                                </select>
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 2 <span class="text-slate-400 font-normal">(override, blank = Provider 2 model)</span></label>
+                                <input type="text" name="REVIEWER_MODEL_2" value="{{ settings.REVIEWER_MODEL_2 }}" placeholder="Leave blank to use Provider 2 model" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
                                 <input type="number" name="LLM_TIMEOUT" value="{{ settings.LLM_TIMEOUT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Local LLM Schedule (e.g. 9-16,1-5)</label>
-                                <input type="text" name="LOCAL_LLM_SCHEDULE" value="{{ settings.LOCAL_LLM_SCHEDULE }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="9-16,1-5">
                             </div>
                         </div>
                     </section>
@@ -569,12 +585,6 @@
                                 <input type="checkbox" name="skip_review" id="skip_review" {{ 'checked' if settings.skip_review else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
                                 <label for="skip_review" class="text-xs font-medium text-slate-700">
                                     Bypass Skeptical Reviewer
-                                </label>
-                            </div>
-                            <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                                <input type="checkbox" name="queue_local_llm" id="queue_local_llm" {{ 'checked' if settings.queue_local_llm else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
-                                <label for="queue_local_llm" class="text-xs font-medium text-slate-700">
-                                    Queue for Local LLM
                                 </label>
                             </div>
                         </div>
@@ -877,10 +887,6 @@
             const taskId = params.get('task');
             if (taskId) populateTaskDetails(taskId);
 
-            // Fetch models if on the settings page
-            if (document.getElementById('model-management-list')) {
-                fetchModels();
-            }
 
             // Render any confirm-fix blocks already present in the server-rendered chat transcript.
             if (document.getElementById('chat-transcript')) {
@@ -1051,51 +1057,9 @@
         }
 
         async function fetchModels() {
-            const container = document.getElementById('model-management-list');
-            if (!container) return;
-
-            try {
-                const resp = await fetch('/api/models');
-                if (!resp.ok) throw new Error('Failed to fetch models');
-                const data = await resp.json();
-
-                const { local_models, cloud_models, enabled_models } = data;
-
-                // Render the model management list
-                container.innerHTML = '';
-                if (local_models.length === 0 && cloud_models.length === 0) {
-                    container.innerHTML = '<div class="text-center text-slate-400 italic text-xs py-4">No models found on Ollama servers.</div>';
-                } else {
-                    const renderSection = (title, models, isCloud) => {
-                        if (models.length === 0) return '';
-                        let html = `<div class="mb-3"><span class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">${title}</span><div class="space-y-2 mt-1">`;
-                        models.forEach(model => {
-                            const isEnabled = enabled_models.includes(model.name);
-                            html += `
-                                <div class="flex items-center justify-between p-2 bg-white rounded-lg border border-slate-200 hover:border-slate-300 transition-all">
-                                    <div class="flex flex-col">
-                                        <span class="text-xs font-bold text-slate-700">${model.name}</span>
-                                        <span class="text-[10px] text-slate-500 italic">${model.details}</span>
-                                    </div>
-                                    <button onclick="toggleModel('${model.name}', ${!isEnabled})"
-                                            class="text-xs px-3 py-1 rounded-full font-bold transition-all ${isEnabled ? 'bg-green-100 text-green-700 border border-green-200' : 'bg-slate-100 text-slate-600 border border-slate-300'}">
-                                        ${isEnabled ? 'Enabled' : 'Enable'}
-                                    </button>
-                                </div>`;
-                        });
-                        html += `</div></div>`;
-                        return html;
-                    };
-
-                    container.innerHTML = renderSection('Local Models', local_models, false) + renderSection('Cloud Models', cloud_models, true);
-                }
-
-                updateModelDropdowns(enabled_models, local_models, cloud_models);
-
-            } catch (e) {
-                console.error('Model fetch error:', e);
-                container.innerHTML = '<div class="text-center text-red-500 italic text-xs py-4">Error loading models. Check LLM URLs.</div>';
-            }
+            // No-op: model names are now typed as free-text fields per provider.
+            // The /api/models endpoint is still available for reference but the UI
+            // no longer drives dropdown population from it.
         }
 
         async function toggleModel(modelName, isEnabled) {
@@ -1114,38 +1078,6 @@
             }
         }
 
-        function updateModelDropdowns(enabledModels, localAvailable = [], cloudAvailable = []) {
-            const localSelect = document.getElementById('local-model-select');
-            const cloudSelect = document.getElementById('cloud-model-select');
-            const r1Select = document.getElementById('reviewer-model-1-select');
-            const r2Select = document.getElementById('reviewer-model-2-select');
-            if (!localSelect || !cloudSelect) return;
-
-            const currentLocal = localSelect.dataset.currentLocal;
-            const currentCloud = cloudSelect.dataset.currentCloud;
-            const currentR1 = r1Select ? r1Select.dataset.currentR1 : '';
-            const currentR2 = r2Select ? r2Select.dataset.currentR2 : '';
-
-            const buildOptions = (available) => {
-                return enabledModels
-                    .filter(name => available.some(m => m.name === name))
-                    .map(name => {
-                        return `<option value="${name}">${name}</option>`;
-                    }).join('');
-            };
-
-            const defaultOption = `<option value="">Select a model...</option>`;
-            localSelect.innerHTML = defaultOption + buildOptions(localAvailable);
-            cloudSelect.innerHTML = defaultOption + buildOptions(cloudAvailable);
-
-            if (r1Select) r1Select.innerHTML = defaultOption + buildOptions([...localAvailable, ...cloudAvailable]);
-            if (r2Select) r2Select.innerHTML = defaultOption + buildOptions([...localAvailable, ...cloudAvailable]);
-
-            if (enabledModels.includes(currentLocal)) localSelect.value = currentLocal;
-            if (enabledModels.includes(currentCloud)) cloudSelect.value = currentCloud;
-            if (r1Select && enabledModels.includes(currentR1)) r1Select.value = currentR1;
-            if (r2Select && enabledModels.includes(currentR2)) r2Select.value = currentR2;
-        }
 
         // ===== Chat =====
         let currentChatTaskId = null;
