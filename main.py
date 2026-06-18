@@ -600,12 +600,18 @@ def _provider_rate_limit_wait(n, rpm, provider_name):
                 return  # Under limit — stamp and proceed.
             wait_s = dq[0] + window - now
         # Sleep outside the lock so other providers are not blocked.
+        # Log once at the start of the wait; sleep in short chunks so the
+        # thread remains interruptible without re-logging every iteration.
         if wait_s > 0:
             logger.info(
                 f"Provider {n} ({provider_name}) RPM throttle ({rpm}/min) — "
                 f"waiting {wait_s:.1f}s before next request."
             )
-            time.sleep(min(wait_s + 0.05, 5.0))
+            elapsed = 0.0
+            chunk = 5.0
+            while elapsed < wait_s:
+                time.sleep(min(chunk, wait_s - elapsed))
+                elapsed += chunk
 
 
 def _any_provider_available(config):
@@ -1057,22 +1063,40 @@ def _request_claude_cli(model, messages, task_id, config):
     if system_parts:
         prompt = system_parts[0] + "\n\n" + prompt
 
-    cmd = ["claude", "-p", prompt, "--output-format", "json", "--verbose"]
+    # Pass the prompt via stdin to avoid OS ARG_MAX limits on large conversations.
+    cmd = ["claude", "--output-format", "json"]
     if model:
         cmd += ["--model", model]
 
     timeout_val = int(config.get("LLM_TIMEOUT", 900))
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_val)
-        if proc.returncode != 0:
-            stderr = proc.stderr.strip()[:500]
-            raise Exception(f"claude CLI exited {proc.returncode}: {stderr}")
+        proc = subprocess.run(
+            cmd, input=prompt, capture_output=True, text=True, timeout=timeout_val
+        )
         output = proc.stdout.strip()
+        stderr = proc.stderr.strip()
+
+        # Parse JSON response if possible.
         try:
             data = json.loads(output)
             text = data.get("result") or data.get("text") or output
+            # Detect auth failure from the JSON payload.
+            if data.get("is_error") or ("Not logged in" in (text or "") or "/login" in (text or "")):
+                raise Exception(
+                    f"Claude CLI not authenticated on this server. "
+                    f"Go to Settings → LLM Vault → claude_cli → Get Auth URL to log in. "
+                    f"Raw: {text[:200]}"
+                )
         except json.JSONDecodeError:
-            text = output
+            text = output or stderr
+
+        if proc.returncode != 0:
+            if "Not logged in" in (output + stderr) or "/login" in (output + stderr):
+                raise Exception(
+                    "Claude CLI not authenticated. Go to Settings → LLM Vault → claude_cli → Get Auth URL."
+                )
+            raise Exception(f"claude CLI exited {proc.returncode}: {stderr[:300]}")
+
         state["llm_stream"] = text
         if task_id and task_id in state.get("active_tasks", {}):
             state["active_tasks"][task_id]["stream"] = text
@@ -3960,18 +3984,32 @@ async def claude_cli_auth():
     """Trigger the Claude CLI auth flow and return the output (contains the approval URL)."""
     import subprocess, re
     try:
-        # Send a minimal non-interactive prompt; if unauthenticated, claude outputs an approval URL.
+        # Pass "hi" via stdin to avoid ARG_MAX issues.
         proc = subprocess.Popen(
-            ["claude", "-p", "hi", "--output-format", "json"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            ["claude", "--output-format", "json"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=20)
+            stdout, stderr = proc.communicate(input="hi", timeout=20)
         except subprocess.TimeoutExpired:
             proc.kill()
             stdout, stderr = proc.communicate()
         combined = (stdout + "\n" + stderr).strip()
         urls = re.findall(r'https?://[^\s"\'<>]+', combined)
+
+        # Try to parse JSON result to surface auth status cleanly.
+        not_logged_in = ("Not logged in" in combined or "/login" in combined)
+        try:
+            data = json.loads(stdout.strip())
+            result_text = data.get("result", "")
+            if "Not logged in" in result_text or "/login" in result_text:
+                not_logged_in = True
+        except Exception:
+            pass
+
+        if not_logged_in:
+            return {"status": "needs_auth", "output": combined[:3000], "urls": urls,
+                    "message": "Not logged in — run the auth flow below to get an approval URL."}
         if proc.returncode == 0:
             return {"status": "authenticated", "output": combined[:3000], "urls": urls}
         return {"status": "needs_auth", "output": combined[:3000], "urls": urls}
