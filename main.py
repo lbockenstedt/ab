@@ -210,12 +210,53 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 
 
 def _get_provider_config(n, config):
-    """Return (provider, api_key, model, base_url) for provider slot n (1 or 2)."""
+    """Return (provider, api_key, model, base_url) for slot n.
+
+    Supports the new vault-based config (llm_credentials + llm_entries + llm_slots)
+    with a transparent fallback to the legacy flat LLM_PROVIDER_N / LLM_API_KEY_N keys.
+    """
+    slots = config.get("llm_slots") or {}
+    entry_id = slots.get(str(n))
+    if entry_id:
+        entries_list = config.get("llm_entries") or []
+        credentials = config.get("llm_credentials") or {}
+        entry = next((e for e in entries_list if e.get("id") == entry_id), None)
+        if entry:
+            provider = (entry.get("provider") or "openai").lower().strip()
+            model = (entry.get("model") or "").strip()
+            cred = credentials.get(provider) or {}
+            api_key = (cred.get("api_key") or "").strip()
+            base_url = (cred.get("base_url") or entry.get("base_url") or "").strip()
+            return provider, api_key, model, base_url
+
+    # Legacy flat config fallback.
     provider = (config.get(f"LLM_PROVIDER_{n}") or os.getenv(f"LLM_PROVIDER_{n}", "openai")).lower().strip()
     api_key = (config.get(f"LLM_API_KEY_{n}") or os.getenv(f"LLM_API_KEY_{n}", "")).strip()
     model = (config.get(f"LLM_MODEL_{n}") or os.getenv(f"LLM_MODEL_{n}", "")).strip()
     base_url = (config.get(f"LLM_BASE_URL_{n}") or os.getenv(f"LLM_BASE_URL_{n}", "")).strip()
     return provider, api_key, model, base_url
+
+
+def _get_provider_rpm(n, config):
+    """Return RPM cap for slot n, from vault entry or legacy LLM_RPM_N key."""
+    slots = config.get("llm_slots") or {}
+    entry_id = slots.get(str(n))
+    if entry_id:
+        for e in (config.get("llm_entries") or []):
+            if e.get("id") == entry_id:
+                return int(e.get("rpm") or 0)
+    return int(config.get(f"LLM_RPM_{n}") or 0)
+
+
+def _get_reviewer_model(n, config):
+    """Return reviewer model override for slot n, from vault entry or legacy key."""
+    slots = config.get("llm_slots") or {}
+    entry_id = slots.get(str(n))
+    if entry_id:
+        for e in (config.get("llm_entries") or []):
+            if e.get("id") == entry_id:
+                return (e.get("reviewer_model") or "").strip()
+    return (config.get(f"REVIEWER_MODEL_{n}") or "").strip()
 
 
 def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
@@ -1053,8 +1094,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             return None, "credit_cooldown"
         try:
             # Honour per-provider RPM cap (0 = unlimited).
-            rpm = int(config.get(f"LLM_RPM_{n}") or 0)
-            _provider_rate_limit_wait(n, rpm, provider)
+            _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
             state["active_llm"] = model
             result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config)
             # Successful call: clear any rate-limit cooldown for this provider.
@@ -2224,7 +2264,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         provider, key, model, _ = _get_provider_config(n, config)
         if not (key and model):
             continue
-        r_model = config.get(f"REVIEWER_MODEL_{n}") or model
+        r_model = _get_reviewer_model(n, config) or model
         reviewers.append({"name": f"Reviewer {n} ({provider})", "model": r_model, "provider_n": n})
 
     if not reviewers:
@@ -3611,12 +3651,24 @@ async def get_models():
 
 @app.post("/api/fetch-models")
 async def fetch_models_live(request: Request):
-    """Fetch available models for a provider using live (unsaved) credentials."""
+    """Fetch available models for a provider.
+
+    Accepts explicit api_key/base_url (for live testing), or just provider name
+    to look up credentials already saved in the vault.
+    """
     try:
         data = await request.json()
         provider = (data.get("provider") or "openai").strip()
         api_key = (data.get("api_key") or "").strip()
         base_url = (data.get("base_url") or "").strip()
+
+        # If no key supplied, try the vault.
+        if not api_key:
+            cfg = load_config()
+            cred = (cfg.get("llm_credentials") or {}).get(provider.lower()) or {}
+            api_key = (cred.get("api_key") or "").strip()
+            base_url = base_url or (cred.get("base_url") or "").strip()
+
         models = _fetch_models_for_provider(provider, api_key, base_url)
         return {"models": models}
     except Exception as e:
@@ -3890,6 +3942,99 @@ async def save_settings(request: Request):
 
     return RedirectResponse(url="/settings", status_code=303)
 
+@app.post("/api/llm/credentials")
+async def save_llm_credential(request: Request):
+    """Save or update a provider credential in the vault."""
+    data = await request.json()
+    provider = (data.get("provider") or "").lower().strip()
+    if not provider:
+        return JSONResponse(status_code=400, content={"error": "provider required"})
+    config = load_config()
+    creds = config.setdefault("llm_credentials", {})
+    creds[provider] = {
+        "api_key": (data.get("api_key") or "").strip(),
+        "base_url": (data.get("base_url") or "").strip(),
+    }
+    save_config(config)
+    return {"status": "ok", "provider": provider}
+
+
+@app.post("/api/llm/entries")
+async def create_llm_entry(request: Request):
+    """Create a new named provider/model entry."""
+    data = await request.json()
+    entry = {
+        "id": str(uuid.uuid4())[:12],
+        "label": (data.get("label") or "").strip(),
+        "provider": (data.get("provider") or "openai").lower().strip(),
+        "model": (data.get("model") or "").strip(),
+        "rpm": int(data.get("rpm") or 0),
+        "reviewer_model": (data.get("reviewer_model") or "").strip(),
+    }
+    if not entry["model"]:
+        return JSONResponse(status_code=400, content={"error": "model required"})
+    config = load_config()
+    config.setdefault("llm_entries", []).append(entry)
+    save_config(config)
+    return {"status": "ok", "entry": entry}
+
+
+@app.put("/api/llm/entries/{entry_id}")
+async def update_llm_entry(entry_id: str, request: Request):
+    """Update an existing named provider/model entry."""
+    data = await request.json()
+    config = load_config()
+    entries = config.get("llm_entries") or []
+    for e in entries:
+        if e.get("id") == entry_id:
+            e["label"] = (data.get("label") or e.get("label") or "").strip()
+            e["provider"] = (data.get("provider") or e.get("provider") or "openai").lower().strip()
+            e["model"] = (data.get("model") or e.get("model") or "").strip()
+            e["rpm"] = int(data.get("rpm") or e.get("rpm") or 0)
+            e["reviewer_model"] = (data.get("reviewer_model") or "").strip()
+            save_config(config)
+            return {"status": "ok", "entry": e}
+    return JSONResponse(status_code=404, content={"error": "entry not found"})
+
+
+@app.delete("/api/llm/entries/{entry_id}")
+async def delete_llm_entry(entry_id: str):
+    """Delete a named entry and clear it from any slot assignments."""
+    config = load_config()
+    config["llm_entries"] = [e for e in (config.get("llm_entries") or []) if e.get("id") != entry_id]
+    slots = config.get("llm_slots") or {}
+    for k in list(slots.keys()):
+        if slots[k] == entry_id:
+            slots[k] = None
+    config["llm_slots"] = slots
+    save_config(config)
+    return {"status": "ok"}
+
+
+@app.post("/api/llm/slots")
+async def update_llm_slots(request: Request):
+    """Update the slot→entry_id assignment for P1-P4."""
+    data = await request.json()  # {"1": "entry_id_or_null", ...}
+    config = load_config()
+    config["llm_slots"] = {str(k): (v or None) for k, v in data.items()}
+    save_config(config)
+    return {"status": "ok"}
+
+
+@app.get("/api/llm/config")
+async def get_llm_config():
+    """Return current vault credentials (keys redacted), entries, and slot assignments."""
+    config = load_config()
+    creds = config.get("llm_credentials") or {}
+    safe_creds = {p: {"configured": bool(v.get("api_key")), "base_url": v.get("base_url", "")}
+                  for p, v in creds.items()}
+    return {
+        "credentials": safe_creds,
+        "entries": config.get("llm_entries") or [],
+        "slots": config.get("llm_slots") or {},
+    }
+
+
 @app.post("/clear_history")
 async def clear_history():
     """Clears all processed issues and resets success/failure counters."""
@@ -4133,6 +4278,11 @@ def _secret_denylist(config):
         config.get("LLM_API_KEY_3"), os.getenv("LLM_API_KEY_3"),
         config.get("LLM_API_KEY_4"), os.getenv("LLM_API_KEY_4"),
     ]
+    # Also redact vault credentials.
+    for cred in (config.get("llm_credentials") or {}).values():
+        k = (cred.get("api_key") or "").strip()
+        if k:
+            candidates.append(k)
     for src in candidates:
         if src and isinstance(src, str):
             s = src.strip().strip('"').strip("'")

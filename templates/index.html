@@ -450,184 +450,103 @@
                             <h4 class="font-semibold text-slate-700">LLM Configuration</h4>
                         </div>
 
-                        <!-- Provider 1 -->
-                        <div class="mb-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                            <div class="flex items-center gap-2 mb-3">
-                                <span class="text-xs font-bold text-[#01A982] uppercase tracking-wider">Provider 1</span>
-                                <span class="text-xs text-slate-400">Primary — tried first on every request</span>
-                            </div>
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_1" id="llm-provider-1" onchange="loadProviderModels(1, true)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_1 == 'openai' else '' }}>OpenAI</option>
-                                        <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_1 == 'anthropic' else '' }}>Anthropic</option>
-                                        <option value="google" {{ 'selected' if settings.LLM_PROVIDER_1 == 'google' else '' }}>Google Gemini</option>
-                                        <option value="ollama" {{ 'selected' if settings.LLM_PROVIDER_1 == 'ollama' else '' }}>Ollama Cloud</option>
-                                    </select>
+                        <!-- Step A: Credentials Vault -->
+                        <div class="mb-6">
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
+                                {% for pname in ['google','anthropic','openai','ollama'] %}
+                                {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
+                                <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                                    <div class="flex items-center justify-between mb-2">
+                                        <span class="text-xs font-bold uppercase tracking-wider
+                                            {% if pname == 'google' %}text-blue-500
+                                            {% elif pname == 'anthropic' %}text-orange-500
+                                            {% elif pname == 'openai' %}text-green-600
+                                            {% else %}text-purple-500{% endif %}">{{ pname }}</span>
+                                        {% if cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
+                                    </div>
+                                    <div class="space-y-2">
+                                        <input type="password" id="vault-key-{{ pname }}" placeholder="API Key" value="{{ cred.get('api_key','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                        <input type="text" id="vault-url-{{ pname }}" placeholder="Base URL (optional)" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                        <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs bg-[#01A982] hover:bg-[#018f6e] text-white rounded font-bold transition-colors">Save {{ pname }} Credential</button>
+                                    </div>
                                 </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Model <span id="p1-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
-                                    <select name="LLM_MODEL_1" id="llm-model-1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        {% if settings.LLM_MODEL_1 %}<option value="{{ settings.LLM_MODEL_1 }}" selected>{{ settings.LLM_MODEL_1 }}</option>{% else %}<option value="">— load models —</option>{% endif %}
-                                    </select>
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">API Key</label>
-                                    <input type="password" name="LLM_API_KEY_1" id="llm-key-1" value="{{ settings.LLM_API_KEY_1 }}" placeholder="sk-..." onblur="loadProviderModels(1)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
-                                <div class="space-y-2 md:col-span-2">
-                                    <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional — leave blank for the provider default)</span></label>
-                                    <input type="text" name="LLM_BASE_URL_1" id="llm-url-1" value="{{ settings.LLM_BASE_URL_1 }}" placeholder="https://ollama.com" onblur="loadProviderModels(1)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Rate Limit <span class="text-slate-400 font-normal">(RPM, 0=unlimited)</span></label>
-                                    <input type="number" name="LLM_RPM_1" value="{{ settings.LLM_RPM_1 }}" min="0" placeholder="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
+                                {% endfor %}
                             </div>
                         </div>
 
-                        <!-- Provider 2 -->
-                        <div class="mb-6 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                            <div class="flex items-center gap-2 mb-3">
-                                <span class="text-xs font-bold text-indigo-500 uppercase tracking-wider">Provider 2</span>
-                                <span class="text-xs text-slate-400">Failover &amp; cross-check reviewer — used when Provider 1 fails</span>
+                        <!-- Step B: LLM Entries -->
+                        <div class="mb-6">
+                            <div class="flex items-center justify-between mb-3">
+                                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Step 2 — Provider / Model Entries</p>
+                                <button type="button" onclick="showAddEntry()" class="text-xs px-3 py-1 bg-[#01A982] hover:bg-[#018f6e] text-white rounded font-bold transition-colors">+ Add Entry</button>
                             </div>
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_2" id="llm-provider-2" onchange="loadProviderModels(2, true)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_2 == 'openai' else '' }}>OpenAI</option>
-                                        <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_2 == 'anthropic' else '' }}>Anthropic</option>
-                                        <option value="google" {{ 'selected' if settings.LLM_PROVIDER_2 == 'google' else '' }}>Google Gemini</option>
-                                        <option value="ollama" {{ 'selected' if settings.LLM_PROVIDER_2 == 'ollama' else '' }}>Ollama Cloud</option>
+
+                            <!-- Add entry form (hidden by default) -->
+                            <div id="add-entry-form" class="hidden mb-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                                <p class="text-xs font-bold text-blue-700 mb-2">New Entry</p>
+                                <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-2">
+                                    <input type="text" id="new-entry-label" placeholder="Label (e.g. Google Flash)" class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select id="new-entry-provider" onchange="loadVaultModels()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="google">Google</option>
+                                        <option value="anthropic">Anthropic</option>
+                                        <option value="openai">OpenAI</option>
+                                        <option value="ollama">Ollama</option>
                                     </select>
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Model <span id="p2-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
-                                    <select name="LLM_MODEL_2" id="llm-model-2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        {% if settings.LLM_MODEL_2 %}<option value="{{ settings.LLM_MODEL_2 }}" selected>{{ settings.LLM_MODEL_2 }}</option>{% else %}<option value="">— load models —</option>{% endif %}
+                                    <select id="new-entry-model" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="">— save credential first —</option>
                                     </select>
+                                    <input type="number" id="new-entry-rpm" placeholder="RPM (0=unlimited)" min="0" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="text" id="new-entry-reviewer" placeholder="Reviewer model (blank=same)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">API Key</label>
-                                    <input type="password" name="LLM_API_KEY_2" id="llm-key-2" value="{{ settings.LLM_API_KEY_2 }}" placeholder="sk-ant-..." onblur="loadProviderModels(2)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <div class="flex gap-2">
+                                    <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs bg-[#01A982] text-white rounded font-bold">Add</button>
+                                    <button type="button" onclick="document.getElementById('add-entry-form').classList.add('hidden')" class="px-3 py-1 text-xs bg-slate-200 text-slate-700 rounded font-bold">Cancel</button>
                                 </div>
-                                <div class="space-y-2 md:col-span-2">
-                                    <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
-                                    <input type="text" name="LLM_BASE_URL_2" id="llm-url-2" value="{{ settings.LLM_BASE_URL_2 }}" placeholder="https://ollama.com" onblur="loadProviderModels(2)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+
+                            <!-- Entries list -->
+                            <div id="entries-list" class="space-y-2">
+                                {% for entry in settings.llm_entries or [] %}
+                                <div class="flex items-center gap-2 p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" id="entry-row-{{ entry.id }}">
+                                    <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}</span>
+                                    <span class="text-xs text-slate-400">{{ entry.provider }} / {{ entry.model }}</span>
+                                    {% if entry.rpm %}<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{{ entry.rpm }} RPM</span>{% endif %}
+                                    <button type="button" onclick="deleteEntry('{{ entry.id }}')" class="text-red-400 hover:text-red-600 text-xs font-bold px-1">✕</button>
                                 </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Rate Limit <span class="text-slate-400 font-normal">(RPM, 0=unlimited)</span></label>
-                                    <input type="number" name="LLM_RPM_2" value="{{ settings.LLM_RPM_2 }}" min="0" placeholder="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
+                                {% else %}
+                                <p class="text-sm text-slate-400 italic" id="entries-empty">No entries yet — add one above.</p>
+                                {% endfor %}
                             </div>
                         </div>
 
-                        <!-- Provider 3 -->
-                        <div class="mb-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                            <div class="flex items-center gap-2 mb-3">
-                                <span class="text-xs font-bold text-purple-500 uppercase tracking-wider">Provider 3</span>
-                                <span class="text-xs text-slate-400">Second failover — reviewers auto-exclude the builder provider</span>
-                            </div>
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_3" id="llm-provider-3" onchange="loadProviderModels(3, true)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_3 == 'openai' else '' }}>OpenAI</option>
-                                        <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_3 == 'anthropic' else '' }}>Anthropic</option>
-                                        <option value="google" {{ 'selected' if settings.LLM_PROVIDER_3 == 'google' else '' }}>Google Gemini</option>
-                                        <option value="ollama" {{ 'selected' if settings.LLM_PROVIDER_3 == 'ollama' else '' }}>Ollama Cloud</option>
+                        <!-- Step C: Slot Assignment -->
+                        <div class="mb-6">
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 3 — Assign Slots (P1 → P2 → P3 → P4 failover order)</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {% for slot_n, slot_label, slot_color in [
+                                    (1, 'P1 — Primary', 'text-[#01A982]'),
+                                    (2, 'P2 — First Failover', 'text-indigo-500'),
+                                    (3, 'P3 — Second Failover', 'text-purple-500'),
+                                    (4, 'P4 — Third Failover', 'text-orange-500')
+                                ] %}
+                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
+                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="">— Not configured —</option>
+                                        {% for entry in settings.llm_entries or [] %}
+                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
+                                            {{ entry.label or entry.model }} ({{ entry.provider }})
+                                        </option>
+                                        {% endfor %}
                                     </select>
                                 </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Model <span id="p3-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
-                                    <select name="LLM_MODEL_3" id="llm-model-3" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        {% if settings.LLM_MODEL_3 %}<option value="{{ settings.LLM_MODEL_3 }}" selected>{{ settings.LLM_MODEL_3 }}</option>{% else %}<option value="">— load models —</option>{% endif %}
-                                    </select>
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">API Key</label>
-                                    <input type="password" name="LLM_API_KEY_3" id="llm-key-3" value="{{ settings.LLM_API_KEY_3 }}" placeholder="sk-..." onblur="loadProviderModels(3)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
-                                <div class="space-y-2 md:col-span-2">
-                                    <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
-                                    <input type="text" name="LLM_BASE_URL_3" id="llm-url-3" value="{{ settings.LLM_BASE_URL_3 }}" placeholder="https://api.openai.com/v1" onblur="loadProviderModels(3)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Rate Limit <span class="text-slate-400 font-normal">(RPM, 0=unlimited)</span></label>
-                                    <input type="number" name="LLM_RPM_3" value="{{ settings.LLM_RPM_3 }}" min="0" placeholder="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
+                                {% endfor %}
                             </div>
                         </div>
 
-                        <!-- Provider 4 -->
-                        <div class="mb-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                            <div class="flex items-center gap-2 mb-3">
-                                <span class="text-xs font-bold text-orange-500 uppercase tracking-wider">Provider 4</span>
-                                <span class="text-xs text-slate-400">Third failover — optional</span>
-                            </div>
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_4" id="llm-provider-4" onchange="loadProviderModels(4, true)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_4 == 'openai' else '' }}>OpenAI</option>
-                                        <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_4 == 'anthropic' else '' }}>Anthropic</option>
-                                        <option value="google" {{ 'selected' if settings.LLM_PROVIDER_4 == 'google' else '' }}>Google Gemini</option>
-                                        <option value="ollama" {{ 'selected' if settings.LLM_PROVIDER_4 == 'ollama' else '' }}>Ollama Cloud</option>
-                                    </select>
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Model <span id="p4-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
-                                    <select name="LLM_MODEL_4" id="llm-model-4" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        {% if settings.LLM_MODEL_4 %}<option value="{{ settings.LLM_MODEL_4 }}" selected>{{ settings.LLM_MODEL_4 }}</option>{% else %}<option value="">— load models —</option>{% endif %}
-                                    </select>
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">API Key</label>
-                                    <input type="password" name="LLM_API_KEY_4" id="llm-key-4" value="{{ settings.LLM_API_KEY_4 }}" placeholder="sk-..." onblur="loadProviderModels(4)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
-                                <div class="space-y-2 md:col-span-2">
-                                    <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
-                                    <input type="text" name="LLM_BASE_URL_4" id="llm-url-4" value="{{ settings.LLM_BASE_URL_4 }}" placeholder="https://api.openai.com/v1" onblur="loadProviderModels(4)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-sm font-medium text-slate-600">Rate Limit <span class="text-slate-400 font-normal">(RPM, 0=unlimited)</span></label>
-                                    <input type="number" name="LLM_RPM_4" value="{{ settings.LLM_RPM_4 }}" min="0" placeholder="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Reviewer overrides + timeout -->
+                        <!-- Timeout -->
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 1 <span class="text-slate-400 font-normal">(blank = use Provider 1 model)</span></label>
-                                <select name="REVIEWER_MODEL_1" id="reviewer-model-1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="">— same as Provider 1 —</option>
-                                    {% if settings.REVIEWER_MODEL_1 %}<option value="{{ settings.REVIEWER_MODEL_1 }}" selected>{{ settings.REVIEWER_MODEL_1 }}</option>{% endif %}
-                                </select>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 2 <span class="text-slate-400 font-normal">(blank = use Provider 2 model)</span></label>
-                                <select name="REVIEWER_MODEL_2" id="reviewer-model-2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="">— same as Provider 2 —</option>
-                                    {% if settings.REVIEWER_MODEL_2 %}<option value="{{ settings.REVIEWER_MODEL_2 }}" selected>{{ settings.REVIEWER_MODEL_2 }}</option>{% endif %}
-                                </select>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 3 <span class="text-slate-400 font-normal">(blank = use Provider 3 model)</span></label>
-                                <select name="REVIEWER_MODEL_3" id="reviewer-model-3" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="">— same as Provider 3 —</option>
-                                    {% if settings.REVIEWER_MODEL_3 %}<option value="{{ settings.REVIEWER_MODEL_3 }}" selected>{{ settings.REVIEWER_MODEL_3 }}</option>{% endif %}
-                                </select>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 4 <span class="text-slate-400 font-normal">(blank = use Provider 4 model)</span></label>
-                                <select name="REVIEWER_MODEL_4" id="reviewer-model-4" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="">— same as Provider 4 —</option>
-                                    {% if settings.REVIEWER_MODEL_4 %}<option value="{{ settings.REVIEWER_MODEL_4 }}" selected>{{ settings.REVIEWER_MODEL_4 }}</option>{% endif %}
-                                </select>
-                            </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
                                 <input type="number" name="LLM_TIMEOUT" value="{{ settings.LLM_TIMEOUT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
@@ -1160,6 +1079,89 @@
                 }
             });
         }
+
+        // ── LLM Vault UI ──────────────────────────────────────────────────────
+        async function saveCredential(provider) {
+            const key = document.getElementById(`vault-key-${provider}`)?.value || '';
+            const url = document.getElementById(`vault-url-${provider}`)?.value || '';
+            const resp = await fetch('/api/llm/credentials', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({provider, api_key: key, base_url: url})
+            });
+            if ((await resp.json()).status === 'ok') location.reload();
+            else alert('Failed to save credential.');
+        }
+
+        function showAddEntry() {
+            document.getElementById('add-entry-form').classList.remove('hidden');
+            loadVaultModels();
+        }
+
+        async function loadVaultModels() {
+            const provider = document.getElementById('new-entry-provider')?.value;
+            const sel = document.getElementById('new-entry-model');
+            if (!sel || !provider) return;
+            sel.innerHTML = '<option value="">Loading…</option>';
+            sel.disabled = true;
+            try {
+                const resp = await fetch('/api/fetch-models', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({provider})
+                });
+                const data = await resp.json();
+                const models = data.models || [];
+                sel.disabled = false;
+                if (models.length === 0) {
+                    sel.innerHTML = '<option value="">— save credential first —</option>';
+                } else {
+                    sel.innerHTML = '<option value="">— pick a model —</option>';
+                    models.forEach(m => {
+                        const o = document.createElement('option');
+                        o.value = m.name; o.textContent = m.name + (m.details ? ` (${m.details})` : '');
+                        sel.appendChild(o);
+                    });
+                }
+            } catch(e) { sel.disabled = false; sel.innerHTML = '<option value="">Error loading models</option>'; }
+        }
+
+        async function addEntry() {
+            const label = document.getElementById('new-entry-label')?.value.trim();
+            const provider = document.getElementById('new-entry-provider')?.value;
+            const model = document.getElementById('new-entry-model')?.value;
+            const rpm = parseInt(document.getElementById('new-entry-rpm')?.value || '0');
+            const reviewer_model = document.getElementById('new-entry-reviewer')?.value.trim() || '';
+            if (!model) { alert('Please select a model.'); return; }
+            const resp = await fetch('/api/llm/entries', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model})
+            });
+            if ((await resp.json()).status === 'ok') location.reload();
+            else alert('Failed to add entry.');
+        }
+
+        async function deleteEntry(entryId) {
+            if (!confirm('Remove this entry?')) return;
+            const resp = await fetch(`/api/llm/entries/${entryId}`, {method: 'DELETE'});
+            if ((await resp.json()).status === 'ok') location.reload();
+            else alert('Failed to delete entry.');
+        }
+
+        async function saveSlots() {
+            const slots = {};
+            [1,2,3,4].forEach(n => {
+                const sel = document.getElementById(`slot-${n}`);
+                if (sel) slots[n] = sel.value || null;
+            });
+            await fetch('/api/llm/slots', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(slots)
+            });
+        }
+        // ── End LLM Vault UI ──────────────────────────────────────────────────
 
         async function deleteIssue(issueId) {
             if (!confirm(`Delete ${issueId} from history and close it on GitHub?`)) return;
