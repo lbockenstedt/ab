@@ -618,7 +618,8 @@ def _any_provider_available(config):
     any_free = False
     for n in (1, 2, 3, 4):
         provider, key, model, _ = _get_provider_config(n, config)
-        if not (key and model):
+        configured = model and (key or provider == "claude_cli")
+        if not configured:
             continue  # not configured
         rem = _provider_credit_cb_remaining(n)
         if rem <= 0:
@@ -1030,6 +1031,58 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
     return full_response
 
 
+def _request_claude_cli(model, messages, task_id, config):
+    """Call the local `claude` CLI in non-interactive print mode.
+
+    Uses the Claude Code session auth — no API key required. The claude binary
+    must be in PATH. Tool calling is not supported; the full conversation is
+    serialised into a single prompt string.
+    """
+    import subprocess
+
+    # Build a plain-text conversation from the messages list.
+    system_parts = [m["content"] for m in messages if m.get("role") == "system"]
+    conv_lines = []
+    for m in messages:
+        role = m.get("role", "user")
+        if role == "system":
+            continue
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+        prefix = "Human" if role == "user" else "Assistant"
+        conv_lines.append(f"{prefix}: {content}")
+
+    prompt = "\n\n".join(conv_lines)
+    if system_parts:
+        prompt = system_parts[0] + "\n\n" + prompt
+
+    cmd = ["claude", "-p", prompt, "--output-format", "json", "--verbose"]
+    if model:
+        cmd += ["--model", model]
+
+    timeout_val = int(config.get("LLM_TIMEOUT", 900))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_val)
+        if proc.returncode != 0:
+            stderr = proc.stderr.strip()[:500]
+            raise Exception(f"claude CLI exited {proc.returncode}: {stderr}")
+        output = proc.stdout.strip()
+        try:
+            data = json.loads(output)
+            text = data.get("result") or data.get("text") or output
+        except json.JSONDecodeError:
+            text = output
+        state["llm_stream"] = text
+        if task_id and task_id in state.get("active_tasks", {}):
+            state["active_tasks"][task_id]["stream"] = text
+        return text
+    except subprocess.TimeoutExpired:
+        raise Exception(f"claude CLI timed out after {timeout_val}s")
+    except FileNotFoundError:
+        raise Exception("'claude' binary not found in PATH — install Claude Code on this server.")
+
+
 def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config):
     """Dispatch to the correct provider implementation."""
     p = (provider or "openai").lower().strip()
@@ -1040,9 +1093,10 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     if p == "ollama":
         return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if p == "groq":
-        # Groq is OpenAI-compatible; use their endpoint when no custom base_url is set.
         effective_url = base_url or "https://api.groq.com/openai/v1"
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
+    if p == "claude_cli":
+        return _request_claude_cli(model, messages, task_id, config)
     return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
 
 
@@ -1087,7 +1141,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     ]
 
     def _try_provider(n, provider, model, key, url):
-        if not (key and model):
+        # claude_cli authenticates via the Claude Code session, not an API key.
+        if provider == "claude_cli":
+            if not model:
+                return None, "not_configured"
+        elif not (key and model):
             return None, "not_configured"
         rem = _provider_credit_cb_remaining(n)
         if rem > 0:
@@ -2068,10 +2126,20 @@ def analyze_logs_for_errors(logs):
 def _check_provider_online(n, config):
     """Ping provider n and return True if reachable."""
     provider, api_key, model, base_url = _get_provider_config(n, config)
+    p = (provider or "openai").lower().strip()
+    # claude_cli authenticates via Claude Code session — just check the binary exists.
+    if p == "claude_cli":
+        if not model:
+            return False
+        try:
+            import subprocess
+            r = subprocess.run(["claude", "--version"], capture_output=True, timeout=5)
+            return r.returncode == 0
+        except Exception:
+            return False
     if not api_key or not model:
         return False
     try:
-        p = (provider or "openai").lower().strip()
         if p == "anthropic":
             base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
             url = f"{base}/models"
@@ -2088,6 +2156,11 @@ def _check_provider_online(n, config):
             if api_key:
                 clean = api_key.strip().replace("Bearer ", "").strip()
                 headers["Authorization"] = f"Bearer {clean}"
+            resp = requests.get(url, headers=headers, timeout=10)
+        elif p == "groq":
+            base = (base_url or "https://api.groq.com/openai/v1").rstrip("/")
+            url = f"{base}/models"
+            headers = {"Authorization": f"Bearer {api_key}"}
             resp = requests.get(url, headers=headers, timeout=10)
         else:
             base = (base_url or OPENAI_BASE_URL).rstrip("/")
@@ -3604,9 +3677,16 @@ def _fetch_models_for_provider(provider, api_key, base_url):
     """Fetch available model names from a provider's API using live credentials.
     Returns list of {"name": str, "details": str}.
     """
+    p = (provider or "openai").lower().strip()
+    # claude_cli needs no API key — return the current Claude model roster.
+    if p == "claude_cli":
+        return [
+            {"name": "claude-sonnet-4-6",         "details": "Claude Sonnet 4.6"},
+            {"name": "claude-opus-4-8",            "details": "Claude Opus 4.8"},
+            {"name": "claude-haiku-4-5-20251001",  "details": "Claude Haiku 4.5"},
+        ]
     if not api_key:
         return []
-    p = (provider or "openai").lower().strip()
     models = []
     try:
         if p == "ollama":
@@ -3640,6 +3720,13 @@ def _fetch_models_for_provider(provider, api_key, base_url):
                 name = m.get("name", "").replace("models/", "")
                 if "gemini" in name or "gemma" in name:
                     models.append({"name": name, "details": m.get("displayName", "")})
+        elif p == "groq":
+            base = (base_url or "https://api.groq.com/openai/v1").rstrip("/")
+            headers = {"Authorization": f"Bearer {api_key}"}
+            resp = requests.get(f"{base}/models", headers=headers, timeout=10)
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                models.append({"name": m.get("id", ""), "details": m.get("owned_by", "")})
         else:  # openai (and openai-compatible)
             base = (base_url or OPENAI_BASE_URL).rstrip("/")
             headers = {"Authorization": f"Bearer {api_key}"}

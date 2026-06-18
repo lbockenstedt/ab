@@ -257,7 +257,7 @@
                 <h3 class="text-lg font-semibold text-slate-800">Activity Feed</h3>
                 <div class="flex gap-2 items-center">
                     <div class="flex gap-2 items-center mr-4 border-r border-slate-200 pr-4">
-                        <button onclick="retryAll('cloud')" class="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-all border border-green-200">
+                        <button onclick="retryAll(null)" class="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-all border border-green-200">
                             <i class="fas fa-redo-alt mr-1"></i> Retry All
                         </button>
                         <button onclick="clearHistory()" class="px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-all border border-red-200">
@@ -301,7 +301,6 @@
                         </td>
                         <td class="px-6 py-4 text-center space-x-2">
                             <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-bold text-slate-700 transition-colors">Retry</button>
-                            <button onclick="triggerFix('{{ issue_id }}', 'cloud')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors">Retry (Cloud)</button>
                             <button onclick="deleteIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded font-bold text-red-700 transition-colors">Delete</button>
                         </td>
                     </tr>
@@ -467,7 +466,7 @@
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
-                                {% for pname in ['google','anthropic','openai','groq','ollama'] %}
+                                {% for pname in ['google','anthropic','openai','groq','ollama','claude_cli'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
                                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                                     <div class="flex items-center justify-between mb-2">
@@ -476,14 +475,23 @@
                                             {% elif pname == 'anthropic' %}text-orange-500
                                             {% elif pname == 'openai' %}text-green-600
                                             {% elif pname == 'groq' %}text-yellow-600
+                                            {% elif pname == 'claude_cli' %}text-violet-600
                                             {% else %}text-purple-500{% endif %}">{{ pname }}</span>
-                                        {% if cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
+                                        {% if pname == 'claude_cli' %}<span class="text-[10px] text-violet-600 font-bold">● Session Auth</span>
+                                        {% elif cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
                                     </div>
+                                    {% if pname == 'claude_cli' %}
+                                    <div class="space-y-2">
+                                        <p class="text-xs text-slate-500">Uses the <strong>Claude Code</strong> session already authenticated on this server — no API key needed. The <code class="bg-slate-100 px-1 rounded">claude</code> binary must be in PATH.</p>
+                                        <p class="text-[10px] text-slate-400">Add an entry in Step 2 with provider <em>claude_cli</em> to use it as a provider slot.</p>
+                                    </div>
+                                    {% else %}
                                     <div class="space-y-2">
                                         <input type="password" id="vault-key-{{ pname }}" placeholder="API Key" value="{{ cred.get('api_key','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <input type="text" id="vault-url-{{ pname }}" placeholder="Base URL (optional)" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs bg-[#01A982] hover:bg-[#018f6e] text-white rounded font-bold transition-colors">Save {{ pname }} Credential</button>
                                     </div>
+                                    {% endif %}
                                 </div>
                                 {% endfor %}
                             </div>
@@ -507,6 +515,7 @@
                                         <option value="openai">OpenAI</option>
                                         <option value="groq">Groq</option>
                                         <option value="ollama">Ollama</option>
+                                        <option value="claude_cli">Claude CLI (local)</option>
                                     </select>
                                     <select id="new-entry-model" onchange="updateDefaultRpm()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="">— save credential first —</option>
@@ -540,7 +549,9 @@
                                                 <option value="google" {{ 'selected' if entry.provider == 'google' else '' }}>Google</option>
                                                 <option value="anthropic" {{ 'selected' if entry.provider == 'anthropic' else '' }}>Anthropic</option>
                                                 <option value="openai" {{ 'selected' if entry.provider == 'openai' else '' }}>OpenAI</option>
+                                                <option value="groq" {{ 'selected' if entry.provider == 'groq' else '' }}>Groq</option>
                                                 <option value="ollama" {{ 'selected' if entry.provider == 'ollama' else '' }}>Ollama</option>
+                                                <option value="claude_cli" {{ 'selected' if entry.provider == 'claude_cli' else '' }}>Claude CLI (local)</option>
                                             </select>
                                             <select id="edit-model-{{ entry.id }}" onchange="updateEditRpm('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                                 <option value="{{ entry.model }}" selected>{{ entry.model }}</option>
@@ -1206,7 +1217,7 @@
             ['gemma2-9b',              30],
             ['qwen-qwq',               30],
         ];
-        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, groq: 30};
+        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, groq: 30, claude_cli: 10};
 
         function getDefaultRpm(provider, model) {
             if (model) {
