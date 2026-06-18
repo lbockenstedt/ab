@@ -962,7 +962,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             )
             return None, "credit_cooldown"
         try:
-            state["active_llm"] = f"Provider {n} ({provider}/{model})"
+            state["active_llm"] = model
             result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config)
             return result, None
         except LLMCreditExhausted as ce:
@@ -1981,15 +1981,15 @@ def heartbeat_worker():
             state["provider_credit_cb"] = _provider_credit_cb_snapshot()
 
             if state.get("force_cloud") and p2_configured:
-                state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
+                state["active_llm"] = p2_model
             elif state.get("force_local") and p1_configured:
-                state["active_llm"] = f"Provider 1 ({p1_provider}/{p1_model})"
+                state["active_llm"] = p1_model
             elif p1_configured:
-                state["active_llm"] = f"Provider 1 ({p1_provider}/{p1_model})"
+                state["active_llm"] = p1_model
             elif p2_configured:
-                state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
+                state["active_llm"] = p2_model
             else:
-                state["active_llm"] = "No LLM Configured"
+                state["active_llm"] = "Not configured"
         except Exception as e:
             logger.error(f"Heartbeat worker error: {e}")
         time.sleep(5)
