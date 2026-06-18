@@ -2261,12 +2261,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     failure_reason += f" Last attempt error: {error_context}"
 
                 try:
-                try:
                     issue.create_comment(f"🤖 **BugFixer Failure**\n\nI attempted to fix this issue {max_attempts} times, but I could not find a solution that passed verification.\n\n**Final Error:** `{failure_reason}`")
                 except Exception as ce:
                     logger.warning(f"Could not post failure comment to {issue_id}: {ce}")
-                except Exception as ge:
-                    logger.error(f"Failed to post failure comment to issue {issue_id}: {ge}")
 
                 processed = load_processed()
                 processed[f"{repo_name}:{issue_num}"] = {
