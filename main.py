@@ -464,6 +464,7 @@ _PROVIDER_CREDIT_CB_LOCK = threading.Lock()
 _PROVIDER_CREDIT_CB = {
     1: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
     2: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
+    3: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
 }
 _CREDIT_COOLDOWN_SECONDS = 3600  # 1 hour
 
@@ -490,7 +491,7 @@ def _provider_credit_cb_remaining(n):
 def _provider_credit_cb_snapshot():
     result = {}
     with _PROVIDER_CREDIT_CB_LOCK:
-        for n in (1, 2):
+        for n in (1, 2, 3):
             rem = max(0.0, _PROVIDER_CREDIT_CB[n]["cooldown_until"] - time.time())
             result[n] = {
                 "active": rem > 0,
@@ -913,30 +914,27 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
 
 
 # Shared LLM Utility
-def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None):
-    """Generic LLM caller with Provider-1 → Provider-2 failover and cross-provider checking.
+def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None):
+    """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
 
-    Provider 1 is tried first; on failure Provider 2 is the automatic fallback.
-    force_cloud=True routes directly to Provider 2 (the secondary provider).
-    force_cloud=False routes to Provider 1 only (no fallback to Provider 2).
+    Routing priority:
+      force_provider=N (int 1/2/3) — use that provider slot directly (no failover).
+      force_cloud=True             — start at Provider 2, fall to 1 then 3.
+      force_cloud=False            — Provider 1 only, no failover.
+      force_cloud=None (default)   — Provider 1 → 2 → 3 in order.
 
-    If `messages` is provided (a list of {role, content} dicts), the call is
-    multi-turn and `prompt`/`system_prompt` are ignored.
-
-    Tool-calling: when `tools` is provided the function returns
-    {"text": str, "tool_calls": list|None} instead of a bare string.
+    Providers in a 1-hour credit-exhaustion cooldown are skipped automatically.
     """
     global state
     config = load_config()
     p1_provider, p1_key, p1_model, p1_url = _get_provider_config(1, config)
     p2_provider, p2_key, p2_model, p2_url = _get_provider_config(2, config)
+    p3_provider, p3_key, p3_model, p3_url = _get_provider_config(3, config)
 
     if model_override:
-        p1_model = model_override
-        p2_model = model_override
+        p1_model = p2_model = p3_model = model_override
     if url_override:
-        p1_url = url_override
-        p2_url = url_override
+        p1_url = p2_url = p3_url = url_override
 
     effective_stream = True if stream is None else bool(stream)
 
@@ -946,20 +944,22 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             {"role": "user", "content": prompt},
         ]
 
-    use_p2_first = force_cloud if force_cloud is not None else state.get("force_cloud", False)
-    use_p1_only = (not use_p2_first) and state.get("force_local", False)
-
-    def _credit_skip_msg(n, provider):
-        rem = _provider_credit_cb_remaining(n)
-        return (
-            f"Provider {n} ({provider}) skipped — credit exhaustion cooldown active "
-            f"({rem/60:.0f} min remaining)."
-        )
+    # Build an ordered list of providers to try.
+    all_providers = [
+        (1, p1_provider, p1_model, p1_key, p1_url),
+        (2, p2_provider, p2_model, p2_key, p2_url),
+        (3, p3_provider, p3_model, p3_key, p3_url),
+    ]
 
     def _try_provider(n, provider, model, key, url):
+        if not (key and model):
+            return None, "not_configured"
         rem = _provider_credit_cb_remaining(n)
         if rem > 0:
-            logger.warning(_credit_skip_msg(n, provider))
+            logger.warning(
+                f"Provider {n} ({provider}) skipped — credit cooldown "
+                f"{rem/60:.0f} min remaining."
+            )
             return None, "credit_cooldown"
         try:
             state["active_llm"] = f"Provider {n} ({provider}/{model})"
@@ -973,48 +973,50 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             return None, e
 
     try:
-        if use_p2_first:
-            if p2_key and p2_model:
-                result, err = _try_provider(2, p2_provider, p2_model, p2_key, p2_url)
-                if result is not None:
-                    return result
-                if err == "credit_cooldown":
-                    logger.warning("Provider 2 in credit cooldown; trying Provider 1 as fallback.")
-                elif err == "credit_exhausted":
-                    logger.warning("Provider 2 credit exhausted; trying Provider 1 as fallback.")
-                else:
-                    raise err
-            else:
-                logger.warning("Provider 2 requested but not configured; falling back to Provider 1.")
+        # force_provider=N: use that slot only, no failover.
+        if force_provider in (1, 2, 3):
+            row = all_providers[force_provider - 1]
+            result, err = _try_provider(*row)
+            if result is not None:
+                return result
+            raise Exception(f"Provider {force_provider} unavailable: {err}")
 
-        if p1_key and p1_model:
+        # force_cloud=False: Provider 1 only.
+        use_p1_only = (not force_cloud) and state.get("force_local", False)
+        if force_cloud is False and not state.get("force_cloud", False):
             result, err = _try_provider(1, p1_provider, p1_model, p1_key, p1_url)
             if result is not None:
                 return result
-            if err == "credit_cooldown":
-                logger.warning("Provider 1 in credit cooldown; trying Provider 2 as fallback.")
-            elif err == "credit_exhausted":
-                logger.warning("Provider 1 credit exhausted; trying Provider 2 as fallback.")
-            elif use_p1_only:
-                logger.error(f"Provider 1 failed and force_local is set, no fallback: {err}")
-                raise err
-            else:
-                logger.warning(f"Provider 1 ({p1_provider}) failed: {err}. Falling back to Provider 2...")
+            if use_p1_only:
+                raise Exception(f"Provider 1 failed and force_local is set: {err}")
+            raise Exception(f"Provider 1 (force-only) unavailable: {err}")
 
-        if p2_key and p2_model:
-            result, err = _try_provider(2, p2_provider, p2_model, p2_key, p2_url)
+        # Determine starting provider.
+        use_p2_first = force_cloud is True or state.get("force_cloud", False)
+        order = [2, 1, 3] if use_p2_first else [1, 2, 3]
+        pmap = {n: row for n, *row in [(r[0], *r[1:]) for r in all_providers]}
+
+        last_err = None
+        for n in order:
+            provider, model, key, url = pmap[n]
+            result, err = _try_provider(n, provider, model, key, url)
             if result is not None:
                 return result
-            if err not in ("credit_cooldown", "credit_exhausted"):
-                raise err
-            raise Exception(
-                f"Provider 2 ({p2_provider}) also unavailable due to credit exhaustion. "
-                "Check billing on both providers."
-            )
+            if err == "not_configured":
+                continue
+            if err in ("credit_cooldown", "credit_exhausted"):
+                last_err = err
+                continue
+            # Real failure — log and keep trying remaining providers.
+            logger.warning(f"Provider {n} ({provider}) failed: {err}. Trying next provider...")
+            last_err = err
 
-        raise Exception("No LLM providers are configured. Set LLM_PROVIDER_1/LLM_API_KEY_1/LLM_MODEL_1 in settings.")
+        raise Exception(
+            f"All configured LLM providers failed or are unavailable. "
+            f"Last status: {last_err}. Check billing and API keys in settings."
+        )
     except Exception as e:
-        logger.error(f"LLM request failed after all attempts: {e}")
+        logger.error(f"LLM request failed after all providers: {e}")
         raise
 
 def run_sandboxed_command(command, cwd):
@@ -1125,7 +1127,7 @@ failure_count = sum(1 for info in processed_init.values() if info.get("status") 
 
 state = {
     "status": "Idle", "active_llm": "Unknown",
-    "provider_1_online": False, "provider_2_online": False,
+    "provider_1_online": False, "provider_2_online": False, "provider_3_online": False,
     "local_online": False, "cloud_online": False,
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
@@ -1947,17 +1949,19 @@ def _check_provider_online(n, config):
 
 
 def connectivity_worker():
-    """Periodic check to verify both cloud LLM providers are reachable."""
+    """Periodic check to verify all configured LLM providers are reachable."""
     while True:
         try:
             config = load_config()
             p1_online = _check_provider_online(1, config)
             p2_online = _check_provider_online(2, config)
+            p3_online = _check_provider_online(3, config)
             state["provider_1_online"] = p1_online
             state["provider_2_online"] = p2_online
+            state["provider_3_online"] = p3_online
             state["local_online"] = p1_online
             state["cloud_online"] = p2_online
-            logger.info(f"Connectivity Check: Provider1={p1_online}, Provider2={p2_online}")
+            logger.info(f"Connectivity Check: P1={p1_online}, P2={p2_online}, P3={p3_online}")
         except Exception as e:
             logger.error(f"Connectivity worker error: {e}")
         time.sleep(900)
@@ -2075,33 +2079,49 @@ def prepare_environment(repo_path):
     else:
         logger.info("No known dependency file detected. Skipping installation.")
 
-def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None):
+def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None, builder_n=None):
+    """Run a cross-provider reviewer panel on a proposed fix.
+
+    builder_n: which provider slot (1/2/3) generated the fix being reviewed.
+    Reviewers are all OTHER configured providers — the builder is never asked
+    to review its own work.  If builder_n is None, it's inferred from force_cloud.
+
+    If a reviewer provider is unavailable (offline, credit-exhausted, or errored):
+      - If surviving reviewers reach confidence >= 0.80 with Approve: skip missing reviewer, proceed.
+      - Otherwise: return {"status": "pending_review", "reason": ...} so the caller
+        can queue the issue for manual approval or retry once providers come back.
+    """
+    SKIP_CONFIDENCE_THRESHOLD = 0.80  # skip missing reviewer only above this confidence
+
     logger.info("Running Reviewer Panel pass...")
     config = load_config()
 
-    # Build reviewer panel: Reviewer 1 uses Provider 1, Reviewer 2 uses Provider 2.
-    # Each provider independently evaluates the fix — cross-provider disagreement raises confidence.
+    # Determine which provider built the fix.
+    if builder_n is None:
+        builder_n = 2 if force_cloud is True else 1
+
+    # Build reviewer panel from all providers EXCEPT the builder.
     reviewers = []
-    p1_provider, p1_key, p1_model, _ = _get_provider_config(1, config)
-    p2_provider, p2_key, p2_model, _ = _get_provider_config(2, config)
-
-    r1_mod = config.get("REVIEWER_MODEL_1") or p1_model
-    if r1_mod and p1_key:
-        reviewers.append({"name": f"Reviewer 1 ({p1_provider})", "model": r1_mod, "force_cloud": False})
-
-    r2_mod = config.get("REVIEWER_MODEL_2") or p2_model
-    if r2_mod and p2_key:
-        reviewers.append({"name": f"Reviewer 2 ({p2_provider})", "model": r2_mod, "force_cloud": True})
+    for n in (1, 2, 3):
+        if n == builder_n:
+            continue
+        provider, key, model, _ = _get_provider_config(n, config)
+        if not (key and model):
+            continue
+        r_model = config.get(f"REVIEWER_MODEL_{n}") or model
+        reviewers.append({"name": f"Reviewer {n} ({provider})", "model": r_model, "provider_n": n})
 
     if not reviewers:
         logger.warning("No reviewers configured. Falling back to default LLM review.")
-        reviewers = [{"name": "Default Reviewer", "model": None, "force_cloud": None}]
+        reviewers = [{"name": "Default Reviewer", "model": None, "provider_n": None}]
 
-    # If all configured reviewers are unavailable, queue for retry.
-    any_provider_online = state.get("provider_1_online", True) or state.get("provider_2_online", True)
+    # Check if any provider is online at all.
+    any_provider_online = any(
+        state.get(f"provider_{n}_online", True) for n in (1, 2, 3) if n != builder_n
+    )
     if not any_provider_online:
-        logger.warning("All LLM providers appear offline. Signaling retry queue.")
-        return {"status": "queue_for_retry"}
+        logger.warning("All reviewer LLM providers appear offline. Signaling retry queue.")
+        return {"status": "pending_review", "reason": "all_reviewers_offline"}
 
     fix_details = ""
     for path, code in proposed_fixes.items():
@@ -2120,32 +2140,55 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     )
 
     votes = []
+    failed_reviewers = []
     for r in reviewers:
         try:
-            logger.info(f"Reviewer {r['name']} analyzing...")
-            res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
-                           force_cloud=r["force_cloud"], task_id=task_id, model_override=r.get("model"))
-
-            import re
+            logger.info(f"{r['name']} analyzing fix...")
+            res = call_llm(
+                prompt,
+                system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
+                force_provider=r["provider_n"],
+                task_id=task_id,
+                model_override=r.get("model"),
+            )
             match = re.search(r'\{.*\}', res, re.DOTALL)
             if match:
-                votes.append(json.loads(match.group()))
+                votes.append({**json.loads(match.group()), "reviewer": r["name"]})
         except Exception as e:
-            logger.error(f"Reviewer {r['name']} error: {e}")
+            logger.error(f"{r['name']} failed: {e}")
+            failed_reviewers.append(r["name"])
 
     if not votes:
         return {"confidence": 0.0, "verdict": "Reject", "critique": "All reviewers failed."}
 
-    approvals = [v for v in votes if v.get("verdict") == "Approve"]
     avg_conf = sum(v.get("confidence", 0.0) for v in votes) / len(votes)
+    approvals = [v for v in votes if v.get("verdict") == "Approve"]
+    critiques = " | ".join(
+        f"[{v.get('reviewer', '?')}] {v.get('critique', '')}" for v in votes
+    )
 
-    if len(approvals) >= (len(votes) / 2 + 0.5):
-        final_verdict = "Approve"
-        critiques = " | ".join([v.get("critique", "") for v in votes])
-    else:
-        final_verdict = "Reject"
-        critiques = " | ".join([v.get("critique", "") for v in votes])
+    # If some reviewers were skipped, decide whether to proceed or queue.
+    if failed_reviewers:
+        if avg_conf >= SKIP_CONFIDENCE_THRESHOLD and len(approvals) == len(votes):
+            logger.warning(
+                f"Skipped unavailable reviewers {failed_reviewers} — "
+                f"surviving panel approved with confidence {avg_conf:.2f} (>= {SKIP_CONFIDENCE_THRESHOLD}). Proceeding."
+            )
+        else:
+            reason = (
+                f"Reviewers {failed_reviewers} unavailable and surviving panel confidence "
+                f"{avg_conf:.2f} < {SKIP_CONFIDENCE_THRESHOLD} or not unanimous."
+            )
+            logger.warning(f"Queuing for manual approval: {reason}")
+            return {
+                "status": "pending_review",
+                "reason": reason,
+                "partial_confidence": avg_conf,
+                "partial_votes": votes,
+                "critique": critiques,
+            }
 
+    final_verdict = "Approve" if len(approvals) >= (len(votes) / 2 + 0.5) else "Reject"
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques}
 
 def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None):
@@ -3501,6 +3544,10 @@ DEFAULT_ENV = {
     "LLM_API_KEY_2": "",
     "LLM_MODEL_2": "claude-opus-4-5",
     "LLM_BASE_URL_2": "",
+    "LLM_PROVIDER_3": "google",
+    "LLM_API_KEY_3": "",
+    "LLM_MODEL_3": "gemini-1.5-pro",
+    "LLM_BASE_URL_3": "",
     "QA_REPO": "",
     "QA_TEST_COMMAND": "pytest",
     "POLL_INTERVAL_SECONDS": "300",
@@ -3513,6 +3560,7 @@ DEFAULT_ENV = {
     "TRIAGE_STRICTNESS": "Moderate",
     "REVIEWER_MODEL_1": "",
     "REVIEWER_MODEL_2": "",
+    "REVIEWER_MODEL_3": "",
     "LLM_MAX_RETRIES": "5",
     "LLM_BACKOFF_BASE": "2.0",
     "LLM_BACKOFF_MAX": "600.0",
@@ -3609,11 +3657,16 @@ async def save_settings(request: Request):
         "LLM_API_KEY_2": lambda v: v,
         "LLM_MODEL_2": lambda v: v,
         "LLM_BASE_URL_2": lambda v: v,
+        "LLM_PROVIDER_3": lambda v: v,
+        "LLM_API_KEY_3": lambda v: v,
+        "LLM_MODEL_3": lambda v: v,
+        "LLM_BASE_URL_3": lambda v: v,
         "LLM_TIMEOUT": lambda v: v,
         "MAX_CONCURRENT_FIXES": lambda v: v,
         "TRIAGE_STRICTNESS": lambda v: v,
         "REVIEWER_MODEL_1": lambda v: v,
         "REVIEWER_MODEL_2": lambda v: v,
+        "REVIEWER_MODEL_3": lambda v: v,
         "LLM_MAX_RETRIES": lambda v: v,
         "LLM_BACKOFF_BASE": lambda v: v,
         "LLM_BACKOFF_MAX": lambda v: v,
@@ -3861,6 +3914,7 @@ def _secret_denylist(config):
         config.get("GITHUB_TOKEN"), os.getenv("GITHUB_TOKEN"),
         config.get("LLM_API_KEY_1"), os.getenv("LLM_API_KEY_1"),
         config.get("LLM_API_KEY_2"), os.getenv("LLM_API_KEY_2"),
+        config.get("LLM_API_KEY_3"), os.getenv("LLM_API_KEY_3"),
     ]
     for src in candidates:
         if src and isinstance(src, str):

@@ -519,6 +519,39 @@
                             </div>
                         </div>
 
+                        <!-- Provider 3 -->
+                        <div class="mb-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                            <div class="flex items-center gap-2 mb-3">
+                                <span class="text-xs font-bold text-purple-500 uppercase tracking-wider">Provider 3</span>
+                                <span class="text-xs text-slate-400">Second failover — reviewers auto-exclude the builder provider</span>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Provider</label>
+                                    <select name="LLM_PROVIDER_3" id="llm-provider-3" onchange="loadProviderModels(3)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_3 == 'openai' else '' }}>OpenAI</option>
+                                        <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_3 == 'anthropic' else '' }}>Anthropic</option>
+                                        <option value="google" {{ 'selected' if settings.LLM_PROVIDER_3 == 'google' else '' }}>Google Gemini</option>
+                                        <option value="ollama" {{ 'selected' if settings.LLM_PROVIDER_3 == 'ollama' else '' }}>Ollama Cloud</option>
+                                    </select>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Model <span id="p3-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
+                                    <select name="LLM_MODEL_3" id="llm-model-3" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        {% if settings.LLM_MODEL_3 %}<option value="{{ settings.LLM_MODEL_3 }}" selected>{{ settings.LLM_MODEL_3 }}</option>{% else %}<option value="">— load models —</option>{% endif %}
+                                    </select>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">API Key</label>
+                                    <input type="password" name="LLM_API_KEY_3" id="llm-key-3" value="{{ settings.LLM_API_KEY_3 }}" placeholder="sk-..." onblur="loadProviderModels(3)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2 md:col-span-3">
+                                    <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
+                                    <input type="text" name="LLM_BASE_URL_3" id="llm-url-3" value="{{ settings.LLM_BASE_URL_3 }}" placeholder="https://api.openai.com/v1" onblur="loadProviderModels(3)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Reviewer overrides + timeout -->
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
@@ -528,6 +561,10 @@
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Reviewer Model 2 <span class="text-slate-400 font-normal">(override, blank = Provider 2 model)</span></label>
                                 <input type="text" name="REVIEWER_MODEL_2" value="{{ settings.REVIEWER_MODEL_2 }}" placeholder="Leave blank to use Provider 2 model" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 3 <span class="text-slate-400 font-normal">(override, blank = Provider 3 model)</span></label>
+                                <input type="text" name="REVIEWER_MODEL_3" value="{{ settings.REVIEWER_MODEL_3 }}" placeholder="Leave blank to use Provider 3 model" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
@@ -1129,6 +1166,7 @@
             if (!document.getElementById('llm-provider-1')) return;
             loadProviderModels(1);
             loadProviderModels(2);
+            loadProviderModels(3);
         })();
 
 
