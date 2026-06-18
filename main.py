@@ -1345,6 +1345,7 @@ state = {
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "provider_credit_cb": _provider_credit_cb_snapshot(),
     "paused": False,
+    "blackout": False,
     "chat_streams": {}, "chat_fix_proposals": {},
     "daily_fixes_count": 0,
     "daily_budget_date": "",
@@ -2835,6 +2836,35 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 update_task_state(task_id=issue_id, action="end")
                 return False, failure_reason
 
+            # Triage-only mode: discard the generated changes, post a comment, defer fix.
+            if _is_triage_only():
+                try:
+                    repo_git.git.reset("--hard", "HEAD")
+                    repo_git.git.clean("-fd")
+                except Exception:
+                    pass
+                try:
+                    mode_reason = "Blackout active" if state.get("blackout") else "Triage-only mode enabled"
+                    issue.create_comment(
+                        f"🔍 **BugFixer Triage** — A fix has been identified for this issue.\n\n"
+                        f"Fix commit is being held back ({mode_reason}). "
+                        f"BugFixer will apply the fix automatically once restrictions are lifted."
+                    )
+                    issue.add_to_labels("bugfixer-triaged")
+                except Exception as ce:
+                    logger.warning(f"Could not post triage comment to {issue_id}: {ce}")
+                processed = load_processed()
+                processed[f"{repo_name}:{issue_num}"] = {
+                    "status": "triaged",
+                    "timestamp": datetime.now().isoformat(),
+                    "reason": "Fix identified; commit deferred (triage-only mode)",
+                    "original_body": issue.body or "",
+                }
+                save_processed(processed)
+                state["processed"] = processed
+                update_task_state(task_id=issue_id, action="end")
+                return True, "Triaged — fix identified, commit deferred"
+
             repo_git.git.add(A=True)
 
             confidence_threshold = 0.95
@@ -3142,7 +3172,11 @@ def scan_repo_issues(gh_current, config, processed):
                 else:
                     issues = repo_obj.get_issues(labels=labels, state="open")
 
+                sched = _schedule_check(config)
+                critical_label = (config.get("SCHEDULER_CRITICAL_LABEL") or "").strip()
+
                 to_fix = []
+                critical_to_fix = []
                 for issue in issues:
                     try:
                         if issue.state != 'open' or issue.pull_request:
@@ -3164,32 +3198,51 @@ def scan_repo_issues(gh_current, config, processed):
                                 pass
                             # For awaiting_review, we let it proceed to check the 1-hour timer in process_single_issue
 
-                        to_fix.append((repo_name, issue.number))
+                        issue_label_names = {lbl.name for lbl in issue.labels}
+                        if critical_label and critical_label in issue_label_names:
+                            critical_to_fix.append((repo_name, issue.number))
+                        else:
+                            to_fix.append((repo_name, issue.number))
                     except Exception as e:
                         logger.exception(f"Failed to triage issue {issue_id}: {e}")
 
-                if to_fix:
+                # Normal issues respect the scheduler; critical issues always run.
+                if not sched["allowed"] and to_fix:
+                    logger.info(
+                        f"Scheduler: deferring {len(to_fix)} issue(s) in {repo_name} — {sched['reason']}"
+                    )
+                    to_fix = []
+                if critical_to_fix:
+                    logger.info(
+                        f"Critical-label override: processing {len(critical_to_fix)} critical issue(s) "
+                        f"in {repo_name} regardless of schedule."
+                    )
+                all_to_fix = critical_to_fix + to_fix
+
+                if all_to_fix:
                     available, soonest_s = _any_provider_available(config)
                     if not available:
                         eta_min = round(soonest_s / 60, 1)
                         logger.warning(
-                            f"All LLM providers are in cooldown — skipping {len(to_fix)} issue(s) "
+                            f"All LLM providers are in cooldown — skipping {len(all_to_fix)} issue(s) "
                             f"in {repo_name}. Soonest provider available in ~{eta_min} min. "
                             f"Will retry on next scan cycle."
                         )
                     else:
                         max_per_cycle = int(config.get("MAX_ISSUES_PER_CYCLE") or 15)
-                        deferred = len(to_fix) - max_per_cycle
+                        # Cap applies to normal issues only; critical issues are always included.
+                        capped_normal = to_fix[:max_per_cycle]
+                        deferred = len(to_fix) - len(capped_normal)
                         if deferred > 0:
                             logger.info(
-                                f"Found {len(to_fix)} issues in {repo_name} — processing first {max_per_cycle} "
-                                f"this cycle, {deferred} deferred to next cycle (MAX_ISSUES_PER_CYCLE={max_per_cycle})."
+                                f"Found {len(all_to_fix)} issues in {repo_name} — processing first {max_per_cycle} "
+                                f"normal + {len(critical_to_fix)} critical this cycle, {deferred} deferred."
                             )
-                            to_fix = to_fix[:max_per_cycle]
                         else:
-                            logger.info(f"Found {len(to_fix)} issues to fix in {repo_name}. Processing concurrently (max {max_workers})...")
+                            logger.info(f"Found {len(all_to_fix)} issues to process in {repo_name} (max workers={max_workers}).")
+                        batch = critical_to_fix + capped_normal
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                            futures = [executor.submit(process_single_issue, r, n) for r, n in to_fix]
+                            futures = [executor.submit(process_single_issue, r, n) for r, n in batch]
                             for future in futures:
                                 future.result()
 
@@ -3557,6 +3610,14 @@ def scan_self_logs(gh_current, config):
     finally:
         update_task_state(task_id="SelfScan", action="end")
 
+def _is_triage_only():
+    """Return True when BugFixer should analyse issues but not push any fix commits."""
+    if state.get("blackout"):
+        return True
+    config = load_config()
+    return bool(config.get("TRIAGE_ONLY_MODE"))
+
+
 def _schedule_check(config):
     """Return the current scheduler status.
 
@@ -3695,12 +3756,11 @@ def poller_worker():
     while True:
         cfg = load_config()
         if not state["paused"]:
+            # Always run the scan cycle — triage, hub logs, prod verification, label discovery
+            # all run regardless of scheduler state.  The schedule/blackout gates are applied
+            # per-issue inside scan_repo_issues.
+            run_scan_cycle()
             sched = _schedule_check(cfg)
-            if sched["allowed"]:
-                run_scan_cycle()
-            else:
-                logger.info(f"Scheduler: skipping scan cycle — {sched['reason']}")
-            # Use a longer poll interval during work hours if configured.
             if sched.get("is_work_hours") and cfg.get("SCHEDULER_WORK_POLL_INTERVAL"):
                 interval = int(cfg.get("SCHEDULER_WORK_POLL_INTERVAL") or 600)
             else:
@@ -3720,6 +3780,12 @@ async def toggle_pause():
     state["paused"] = not state["paused"]
     logger.info(f"BugFixer autonomous operations {'PAUSED' if state['paused'] else 'RESUMED'}")
     return {"status": "success", "paused": state["paused"]}
+
+@app.post("/api/toggle-blackout")
+async def toggle_blackout():
+    state["blackout"] = not state.get("blackout", False)
+    logger.info(f"BugFixer blackout mode {'ON (triage only)' if state['blackout'] else 'OFF (fixes resumed)'}")
+    return {"status": "success", "blackout": state["blackout"]}
 
 @app.get("/")
 async def dashboard(request: Request):
@@ -4009,6 +4075,7 @@ DEFAULT_ENV = {
     "SCHEDULER_DAILY_BUDGET": "50",
     "SCHEDULER_WORK_CAP_PCT": "25",
     "SCHEDULER_WORK_POLL_INTERVAL": "600",
+    "SCHEDULER_CRITICAL_LABEL": "critical",
 }
 
 @app.get("/settings")
@@ -4143,6 +4210,7 @@ async def save_settings(request: Request):
         "SCHEDULER_DAILY_BUDGET": lambda v: int(v) if str(v).strip().isdigit() else 50,
         "SCHEDULER_WORK_CAP_PCT": lambda v: int(v) if str(v).strip().isdigit() else 25,
         "SCHEDULER_WORK_POLL_INTERVAL": lambda v: int(v) if str(v).strip().isdigit() else 600,
+        "SCHEDULER_CRITICAL_LABEL": lambda v: v.strip() if v else "critical",
     }
 
 
@@ -4160,6 +4228,7 @@ async def save_settings(request: Request):
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
     config_data["SCHEDULER_ENABLED"] = data.get("SCHEDULER_ENABLED") == "on"
     config_data["SCHEDULER_WEEKEND_FULL"] = data.get("SCHEDULER_WEEKEND_FULL") == "on"
+    config_data["TRIAGE_ONLY_MODE"] = data.get("TRIAGE_ONLY_MODE") == "on"
 
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:

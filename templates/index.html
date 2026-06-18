@@ -836,6 +836,21 @@
                                         <p class="text-xs text-slate-400">Ignore work-hours cap Sat &amp; Sun</p>
                                     </div>
                                 </label>
+                                <label class="flex items-center gap-3 cursor-pointer">
+                                    <input type="checkbox" name="TRIAGE_ONLY_MODE" {{ 'checked' if settings.get('TRIAGE_ONLY_MODE') else '' }} class="w-4 h-4 text-[#01A982] rounded">
+                                    <div>
+                                        <p class="text-sm font-medium text-slate-700">Always Triage Only</p>
+                                        <p class="text-xs text-slate-400">Analyse &amp; label every issue but never push fix commits — lowest LLM usage</p>
+                                    </div>
+                                </label>
+                            </div>
+
+                            <!-- Critical label -->
+                            <div class="space-y-2">
+                                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Critical Label Override</p>
+                                <p class="text-xs text-slate-400">Issues with this label bypass the work-hours cap and daily budget and are always fixed immediately.</p>
+                                <input type="text" name="SCHEDULER_CRITICAL_LABEL" value="{{ settings.get('SCHEDULER_CRITICAL_LABEL', 'critical') }}" placeholder="e.g. critical" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <p class="text-[10px] text-slate-400">Leave blank to disable the override.</p>
                             </div>
 
                             <!-- Work hours -->
@@ -985,6 +1000,10 @@
                         <i class="fas fa-network-wired mr-2"></i>Trigger Hub Update
                     </button>
                 </form>
+                <button onclick="toggleBlackout()" id="blackout-btn" class="py-2 px-4 rounded-lg font-bold transition-all duration-200 text-sm {% if state.blackout %}bg-violet-600 hover:bg-violet-700{% else %}bg-slate-600 hover:bg-slate-700{% endif %} text-white" title="Triage only — no fix commits pushed">
+                    {% if state.blackout %}<i class="fas fa-ban mr-2"></i>Blackout ON
+                    {% else %}<i class="fas fa-ban mr-2"></i>Blackout{% endif %}
+                </button>
                 <button onclick="togglePause()" id="pause-btn" class="py-2 px-4 rounded-lg font-bold transition-all duration-200 text-sm {% if state.paused %}bg-green-600 hover:bg-green-700{% else %}bg-orange-600 hover:bg-orange-700{% endif %} text-white">
                     {% if state.paused %}<i class="fas fa-play mr-2"></i>Resume BugFixer
                     {% else %}<i class="fas fa-pause mr-2"></i>Stop BugFixer{% endif %}
@@ -1198,6 +1217,23 @@
                 }
             } catch (e) {
                 alert('Failed to toggle pause state');
+            }
+        }
+
+        async function toggleBlackout() {
+            try {
+                const resp = await fetch('/api/toggle-blackout', { method: 'POST' });
+                const data = await resp.json();
+                const btn = document.getElementById('blackout-btn');
+                if (data.blackout) {
+                    btn.innerHTML = '<i class="fas fa-ban mr-2"></i>Blackout ON';
+                    btn.className = 'py-2 px-4 rounded-lg font-bold bg-violet-600 hover:bg-violet-700 text-white transition-all duration-200 text-sm';
+                } else {
+                    btn.innerHTML = '<i class="fas fa-ban mr-2"></i>Blackout';
+                    btn.className = 'py-2 px-4 rounded-lg font-bold bg-slate-600 hover:bg-slate-700 text-white transition-all duration-200 text-sm';
+                }
+            } catch (e) {
+                alert('Failed to toggle blackout');
             }
         }
 
