@@ -75,6 +75,21 @@
         @keyframes blink {
             50% { opacity: 0; }
         }
+        .chat-msg { display: flex; flex-direction: column; max-width: 85%; }
+        .chat-user { align-self: flex-end; align-items: flex-end; }
+        .chat-assistant { align-self: flex-start; align-items: flex-start; }
+        .chat-bubble { border-radius: 12px; padding: 10px 14px; font-size: 0.875rem; line-height: 1.4; }
+        .chat-user .chat-bubble { background-color: #334155; color: #fff; border-bottom-right-radius: 3px; }
+        .chat-assistant .chat-bubble { background-color: #1e293b; color: #4ade80; border-bottom-left-radius: 3px; }
+        .chat-role { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: #94a3b8; margin-bottom: 2px; }
+        .chat-pending { opacity: 0.7; }
+        .chat-cursor::after {
+            content: "▋";
+            display: inline-block;
+            margin-left: 2px;
+            animation: blink 1s step-end infinite;
+            color: #4ade80;
+        }
     </style>
 </head>
 <body class="h-screen flex flex-col overflow-hidden">
@@ -99,6 +114,9 @@
                 </a>
                 <a href="/settings" class="nav-link py-5 px-1 {{ 'active' if view == 'settings' else '' }}">
                     <i class="fas fa-cog mr-2"></i>Settings
+                </a>
+                <a href="/chat" class="nav-link py-5 px-1 {{ 'active' if view == 'chat' else '' }}">
+                    <i class="fas fa-comments mr-2"></i>Chat
                 </a>
             </div>
         </div>
@@ -599,6 +617,37 @@
             </div>
         </div>
         {% endif %}
+
+        {% if view == 'chat' %}
+        <div class="hpe-card p-6 flex flex-col" style="height: calc(100vh - 200px);">
+            <div class="flex items-center justify-between mb-4 flex-none">
+                <h3 class="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                    <i class="fas fa-comments text-[#01A982]"></i> Chat
+                    <span class="text-xs text-slate-400 font-normal">(auto LLM, persists across reboots)</span>
+                </h3>
+                <button onclick="clearChat()" class="text-sm text-red-600 hover:text-red-700 font-medium flex items-center gap-1">
+                    <i class="fas fa-trash"></i> Clear
+                </button>
+            </div>
+
+            <div id="chat-transcript" class="flex flex-col gap-3 overflow-y-auto bg-slate-900 rounded-lg p-4 flex-grow">
+                {% for msg in chat_history %}
+                <div class="chat-msg {{ 'chat-user' if msg.role == 'user' else 'chat-assistant' }}">
+                    <div class="chat-role">{{ msg.role }}</div>
+                    <div class="chat-bubble whitespace-pre-wrap">{{ msg.content }}</div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <div class="flex gap-2 mt-4 flex-none">
+                <textarea id="chat-input" rows="2" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+                    class="flex-grow p-3 rounded-lg resize-none text-sm"></textarea>
+                <button id="chat-send-btn" onclick="sendChat()" class="btn-primary px-6 py-2 rounded-lg font-medium flex items-center gap-2 self-stretch">
+                    <i class="fas fa-paper-plane"></i> Send
+                </button>
+            </div>
+        </div>
+        {% endif %}
     </main>
 
     <footer class="bg-[#263040] border-t border-slate-700 p-4 flex-none">
@@ -983,6 +1032,125 @@
             if (r1Select && enabledModels.includes(currentR1)) r1Select.value = currentR1;
             if (r2Select && enabledModels.includes(currentR2)) r2Select.value = currentR2;
         }
+
+        // ===== Chat =====
+        let currentChatTaskId = null;
+        let chatPollTimer = null;
+
+        function chatScrollBottom() {
+            const el = document.getElementById('chat-transcript');
+            if (el) el.scrollTop = el.scrollHeight;
+        }
+
+        function chatAppendBubble(role, content, opts = {}) {
+            const el = document.getElementById('chat-transcript');
+            if (!el) return null;
+            const wrap = document.createElement('div');
+            wrap.className = 'chat-msg ' + (role === 'user' ? 'chat-user' : 'chat-assistant');
+            if (opts.pending) wrap.classList.add('chat-pending');
+            const roleDiv = document.createElement('div');
+            roleDiv.className = 'chat-role';
+            roleDiv.textContent = role;
+            const bubble = document.createElement('div');
+            bubble.className = 'chat-bubble whitespace-pre-wrap';
+            bubble.textContent = content || '';
+            if (opts.cursor) bubble.classList.add('chat-cursor');
+            wrap.appendChild(roleDiv);
+            wrap.appendChild(bubble);
+            el.appendChild(wrap);
+            chatScrollBottom();
+            return bubble;
+        }
+
+        async function sendChat() {
+            const input = document.getElementById('chat-input');
+            const sendBtn = document.getElementById('chat-send-btn');
+            if (!input || currentChatTaskId) return;
+            const message = input.value.trim();
+            if (!message) return;
+
+            input.value = '';
+            if (sendBtn) sendBtn.disabled = true;
+            chatAppendBubble('user', message);
+
+            try {
+                const resp = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.message || 'Request failed');
+                }
+                const data = await resp.json();
+                currentChatTaskId = data.task_id;
+                pollChatStream(data.task_id);
+            } catch (e) {
+                alert('Chat send failed: ' + e);
+                if (sendBtn) sendBtn.disabled = false;
+            }
+        }
+
+        function pollChatStream(taskId) {
+            const bubble = chatAppendBubble('assistant', '', { pending: true, cursor: true });
+            if (chatPollTimer) clearInterval(chatPollTimer);
+            chatPollTimer = setInterval(async () => {
+                try {
+                    const resp = await fetch('/api/chat/stream?task_id=' + encodeURIComponent(taskId));
+                    const data = await resp.json();
+                    if (bubble) {
+                        bubble.textContent = data.stream || '';
+                        if (!data.done) bubble.classList.add('chat-cursor');
+                        else bubble.classList.remove('chat-cursor');
+                    }
+                    chatScrollBottom();
+                    if (data.done) {
+                        clearInterval(chatPollTimer);
+                        chatPollTimer = null;
+                        if (bubble) {
+                            bubble.classList.remove('chat-pending');
+                            if (data.error) {
+                                bubble.textContent = '⚠ ' + data.error;
+                                bubble.classList.add('text-red-400');
+                            }
+                        }
+                        currentChatTaskId = null;
+                        const sendBtn = document.getElementById('chat-send-btn');
+                        if (sendBtn) sendBtn.disabled = false;
+                    }
+                } catch (e) {
+                    clearInterval(chatPollTimer);
+                    chatPollTimer = null;
+                    currentChatTaskId = null;
+                    const sendBtn = document.getElementById('chat-send-btn');
+                    if (sendBtn) sendBtn.disabled = false;
+                }
+            }, 1200);
+        }
+
+        async function clearChat() {
+            if (!confirm('Clear the entire chat history? This cannot be undone.')) return;
+            try {
+                await fetch('/api/chat/clear', { method: 'POST' });
+                location.reload();
+            } catch (e) {
+                alert('Clear failed: ' + e);
+            }
+        }
+
+        // Chat view init: scroll to bottom, wire Enter-to-send.
+        (function initChatView() {
+            const input = document.getElementById('chat-input');
+            if (!input) return;
+            chatScrollBottom();
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendChat();
+                }
+            });
+        })();
     </script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random
+import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, itertools
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -63,6 +63,7 @@ ENV_FILE = os.path.join(CONFIG_DIR, ".env")
 STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
+CHAT_HISTORY_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
 class QueueLocalException(Exception):
@@ -366,8 +367,14 @@ def _get_llm_semaphore():
         return _LLM_SEMAPHORE
 
 # Shared LLM Utility
-def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None):
-    """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming."""
+def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None):
+    """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming.
+
+    If `messages` is provided (a list of {role, content} dicts), the call is
+    multi-turn: the local /api/chat path passes them through directly, and the
+    cloud /api/generate path flattens them into a transcript prompt string. When
+    `messages` is given, `prompt` and `system_prompt` are ignored.
+    """
     global state
     config = load_config()
     l_mod = model_override if model_override else (config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL"))
@@ -393,7 +400,19 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         timeout_val = int(load_config().get("LLM_TIMEOUT", 900))
 
         def attempt_request(endpoint, use_generate_api, timeout=900):
-            if use_generate_api:
+            if messages is not None:
+                # Multi-turn conversation. Cloud /api/generate takes a single
+                # prompt, so flatten the message history into a transcript; local
+                # /api/chat takes the messages array natively.
+                if use_generate_api:
+                    flattened = "\n\n".join(
+                        f"{str(m.get('role', 'user')).capitalize()}: {m.get('content', '')}"
+                        for m in messages
+                    )
+                    payload = {"model": model, "prompt": flattened, "stream": True}
+                else:
+                    payload = {"model": model, "messages": messages, "stream": True}
+            elif use_generate_api:
                 full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
                 payload = {"model": model, "prompt": full_prompt, "stream": True}
             else:
@@ -697,6 +716,30 @@ async def catch_exceptions_mid(request: Request, call_next):
         )
 
 _task_state_lock = threading.Lock()
+_chat_lock = threading.RLock()
+_chat_id_counter = itertools.count(1)
+
+def append_chat_message(msg):
+    """Atomically appends a message dict to the persisted chat history.
+
+    Reads-modifies-writes under _chat_lock so concurrent appends (e.g. a new
+    user message arriving while a chat reply finishes) never lose a turn.
+    """
+    with _chat_lock:
+        try:
+            with open(CHAT_HISTORY_FILE, "r") as f:
+                history = json.load(f)
+            if not isinstance(history, list):
+                history = []
+        except Exception:
+            history = []
+        history.append(msg)
+        try:
+            with open(CHAT_HISTORY_FILE, "w") as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not save chat history to {CHAT_HISTORY_FILE}: {e}")
+        return history
 
 def update_task_state(task_id, task_name="Unknown Task", action="start"):
     """Manages active tasks and their start times. action can be 'start' or 'end'."""
@@ -733,7 +776,8 @@ state = {
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
-    "paused": False, "local_configured": False
+    "paused": False, "local_configured": False,
+    "chat_streams": {}
 }
 
 try:
@@ -2434,6 +2478,28 @@ def save_self_scan_offset(offset, inode):
     except Exception as e:
         logger.debug(f"Could not save self-scan offset: {e}")
 
+def load_chat_history():
+    """Returns the persisted chat conversation as a list of message dicts.
+
+    Each entry is {"role": "user"|"assistant"|"system", "content": str, "ts": str}.
+    Returns [] when no history exists or the file is unreadable.
+    """
+    try:
+        with open(CHAT_HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def save_chat_history(messages):
+    """Persists the full chat conversation (list of message dicts) under _chat_lock."""
+    with _chat_lock:
+        try:
+            with open(CHAT_HISTORY_FILE, "w") as f:
+                json.dump(messages, f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not save chat history to {CHAT_HISTORY_FILE}: {e}")
+
 def scan_self_logs(gh_current, config):
     """Scans BugFixer's own logs and creates GitHub issues for internal errors.
 
@@ -3137,6 +3203,107 @@ async def trigger_hub_update():
     """Triggers an update on all spokes and agents via the Hub API."""
     result = trigger_infrastructure_update()
     return {"status": "success" if "SUCCESS" in result else "error", "message": result}
+
+def run_chat_reply(task_id):
+    """Background worker that streams an LLM reply for an interactive chat turn.
+
+    Builds a sliding multi-turn window from the persisted chat history (capped to
+    avoid context-overflow 500s), calls call_llm with the messages array, then
+    persists the assistant reply. Live progress is written into
+    state["active_tasks"][task_id]["stream"] by call_llm itself; completion/error
+    is tracked in state["chat_streams"][task_id].
+    """
+    try:
+        config = load_config()
+        window_size = int(config.get("CHAT_HISTORY_WINDOW", 20) or 20)
+        system_prompt = config.get("CHAT_SYSTEM_PROMPT") or "You are a helpful assistant."
+        history = load_chat_history()
+        # Keep the most recent `window_size` turns and prepend the system message.
+        window = [{"role": "system", "content": system_prompt}] + history[-window_size:]
+        reply = call_llm("", messages=window, task_id=task_id)
+        if reply and reply.strip():
+            append_chat_message({
+                "role": "assistant",
+                "content": reply,
+                "ts": datetime.now().isoformat(),
+            })
+        with _chat_lock:
+            if task_id in state["chat_streams"]:
+                state["chat_streams"][task_id].update({
+                    "stream": reply or "",
+                    "done": True,
+                    "error": None,
+                })
+    except Exception as e:
+        logger.error(f"run_chat_reply failed for {task_id}: {e}\n{traceback.format_exc()}")
+        with _chat_lock:
+            if task_id in state["chat_streams"]:
+                state["chat_streams"][task_id].update({
+                    "done": True,
+                    "error": f"LLM error: {e}",
+                })
+    finally:
+        # Remove the chat task from the Dashboard activity feed.
+        update_task_state(task_id, "Chat", action="end")
+
+@app.get("/chat")
+async def chat_page(request: Request):
+    """Server-rendered Chat view; renders the persisted conversation history."""
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"view": "chat", "state": state, "chat_history": load_chat_history()},
+    )
+
+@app.post("/api/chat")
+async def chat_send(request: Request):
+    """Accepts a user message, persists it, and kicks off an async LLM reply."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"message": "Invalid JSON body"})
+    message = (data.get("message") or "").strip() if isinstance(data, dict) else ""
+    if not message:
+        return JSONResponse(status_code=400, content={"message": "Message is required"})
+
+    append_chat_message({
+        "role": "user",
+        "content": message,
+        "ts": datetime.now().isoformat(),
+    })
+
+    task_id = f"chat-{next(_chat_id_counter)}"
+    with _chat_lock:
+        state["chat_streams"][task_id] = {"stream": "", "done": False, "error": None}
+    update_task_state(task_id, "Chat", action="start")
+
+    threading.Thread(target=run_chat_reply, args=(task_id,), daemon=True).start()
+    return {"task_id": task_id}
+
+@app.get("/api/chat/stream")
+async def chat_stream(task_id: str):
+    """Polls the live assistant stream and completion state for a chat turn."""
+    with _chat_lock:
+        entry = state["chat_streams"].get(task_id)
+        if entry is None:
+            return {"done": True, "stream": "", "error": "Unknown task_id"}
+        stream_text = entry.get("stream", "")
+        done = bool(entry.get("done"))
+        error = entry.get("error")
+    # Fold in any partial progress call_llm streamed into active_tasks.
+    with _task_state_lock:
+        task = state["active_tasks"].get(task_id)
+        if task and task.get("stream"):
+            stream_text = task["stream"]
+    return {"done": done, "stream": stream_text, "error": error}
+
+@app.post("/api/chat/clear")
+async def chat_clear():
+    """Clears the persisted chat history."""
+    save_chat_history([])
+    with _chat_lock:
+        state["chat_streams"].clear()
+    return {"ok": True}
 
 threading.Thread(target=connectivity_worker, daemon=True).start()
 threading.Thread(target=heartbeat_worker, daemon=True).start()
