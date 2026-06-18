@@ -122,7 +122,7 @@
         </div>
     </nav>
 
-    <main class="max-w-6xl mx-auto px-4 py-8 flex-grow overflow-y-auto">
+    <main class="{{ 'max-w-[90rem]' if view == 'chat' else 'max-w-6xl' }} mx-auto px-4 py-8 flex-grow overflow-y-auto">
         {% if view == 'status' %}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <!-- System Status Card -->
@@ -651,7 +651,7 @@
     </main>
 
     <footer class="bg-[#263040] border-t border-slate-700 p-4 flex-none">
-        <div class="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-4">
+        <div class="{{ 'max-w-[90rem]' if view == 'chat' else 'max-w-6xl' }} mx-auto flex flex-wrap items-center justify-between gap-4">
             <div class="flex gap-4 text-xs text-slate-400 font-mono">
                 <span>{{ state.version }}</span>
                 <span class="text-slate-600">|</span>
