@@ -471,8 +471,9 @@
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Model <span id="p1-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
-                                    <input type="text" name="LLM_MODEL_1" id="llm-model-1" value="{{ settings.LLM_MODEL_1 }}" placeholder="gpt-4o" list="model-list-1" autocomplete="off" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <datalist id="model-list-1"></datalist>
+                                    <select name="LLM_MODEL_1" id="llm-model-1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        {% if settings.LLM_MODEL_1 %}<option value="{{ settings.LLM_MODEL_1 }}" selected>{{ settings.LLM_MODEL_1 }}</option>{% else %}<option value="">— load models —</option>{% endif %}
+                                    </select>
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">API Key</label>
@@ -503,8 +504,9 @@
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Model <span id="p2-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
-                                    <input type="text" name="LLM_MODEL_2" id="llm-model-2" value="{{ settings.LLM_MODEL_2 }}" placeholder="claude-opus-4-5" list="model-list-2" autocomplete="off" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <datalist id="model-list-2"></datalist>
+                                    <select name="LLM_MODEL_2" id="llm-model-2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        {% if settings.LLM_MODEL_2 %}<option value="{{ settings.LLM_MODEL_2 }}" selected>{{ settings.LLM_MODEL_2 }}</option>{% else %}<option value="">— load models —</option>{% endif %}
+                                    </select>
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">API Key</label>
@@ -1066,13 +1068,14 @@
             const providerEl = document.getElementById(`llm-provider-${n}`);
             const keyEl      = document.getElementById(`llm-key-${n}`);
             const urlEl      = document.getElementById(`llm-url-${n}`);
-            const datalist   = document.getElementById(`model-list-${n}`);
+            const select     = document.getElementById(`llm-model-${n}`);
             const statusEl   = document.getElementById(`p${n}-model-status`);
-            if (!providerEl || !keyEl || !datalist) return;
+            if (!providerEl || !keyEl || !select) return;
 
-            const provider = providerEl.value;
-            const api_key  = keyEl.value.trim();
-            const base_url = urlEl ? urlEl.value.trim() : '';
+            const provider   = providerEl.value;
+            const api_key    = keyEl.value.trim();
+            const base_url   = urlEl ? urlEl.value.trim() : '';
+            const currentVal = select.value;
 
             if (!api_key) {
                 if (statusEl) statusEl.textContent = '';
@@ -1080,6 +1083,7 @@
             }
 
             if (statusEl) statusEl.textContent = '(loading…)';
+            select.disabled = true;
             try {
                 const resp = await fetch('/api/fetch-models', {
                     method: 'POST',
@@ -1088,11 +1092,35 @@
                 });
                 const data = await resp.json();
                 const models = data.models || [];
-                datalist.innerHTML = models.map(m => `<option value="${m.name}">`).join('');
-                if (statusEl) statusEl.textContent = models.length ? `(${models.length} available)` : '';
+
+                if (models.length === 0) {
+                    // Keep current value; just clear status
+                    if (statusEl) statusEl.textContent = '(no models returned)';
+                } else {
+                    select.innerHTML = '';
+                    let found = false;
+                    models.forEach(m => {
+                        const opt = document.createElement('option');
+                        opt.value = m.name;
+                        opt.textContent = m.details ? `${m.name} — ${m.details}` : m.name;
+                        if (m.name === currentVal) { opt.selected = true; found = true; }
+                        select.appendChild(opt);
+                    });
+                    // If saved model isn't in the list, prepend it so it stays selected
+                    if (currentVal && !found) {
+                        const opt = document.createElement('option');
+                        opt.value = currentVal;
+                        opt.textContent = `${currentVal} (current)`;
+                        opt.selected = true;
+                        select.insertBefore(opt, select.firstChild);
+                    }
+                    if (statusEl) statusEl.textContent = `(${models.length} available)`;
+                }
             } catch (e) {
                 if (statusEl) statusEl.textContent = '(fetch failed)';
                 console.error('loadProviderModels error:', e);
+            } finally {
+                select.disabled = false;
             }
         }
 
