@@ -531,6 +531,29 @@ def _provider_credit_cb_snapshot():
     return result
 
 
+def _any_provider_available(config):
+    """Return (available: bool, soonest_free_s: float).
+
+    available=True  → at least one configured provider is not in cooldown.
+    soonest_free_s  → seconds until the soonest cooldown expires (0 if available).
+    """
+    soonest = float("inf")
+    any_free = False
+    for n in (1, 2, 3, 4):
+        provider, key, model, _ = _get_provider_config(n, config)
+        if not (key and model):
+            continue  # not configured
+        rem = _provider_credit_cb_remaining(n)
+        if rem <= 0:
+            any_free = True
+            soonest = 0.0
+        else:
+            soonest = min(soonest, rem)
+    if soonest == float("inf"):
+        soonest = 0.0  # no providers configured at all
+    return any_free, soonest
+
+
 _LLM_CB_LOCK = threading.Lock()
 _LLM_CB = {
     "cooldown_until": 0.0,
@@ -2984,11 +3007,20 @@ def scan_repo_issues(gh_current, config, processed):
                         logger.exception(f"Failed to triage issue {issue_id}: {e}")
 
                 if to_fix:
-                    logger.info(f"Found {len(to_fix)} issues to fix in {repo_name}. Processing concurrently (max {max_workers})...")
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = [executor.submit(process_single_issue, r, n) for r, n in to_fix]
-                        for future in futures:
-                            future.result()
+                    available, soonest_s = _any_provider_available(config)
+                    if not available:
+                        eta_min = round(soonest_s / 60, 1)
+                        logger.warning(
+                            f"All LLM providers are in cooldown — skipping {len(to_fix)} issue(s) "
+                            f"in {repo_name}. Soonest provider available in ~{eta_min} min. "
+                            f"Will retry on next scan cycle."
+                        )
+                    else:
+                        logger.info(f"Found {len(to_fix)} issues to fix in {repo_name}. Processing concurrently (max {max_workers})...")
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            futures = [executor.submit(process_single_issue, r, n) for r, n in to_fix]
+                            for future in futures:
+                                future.result()
 
             except GithubException as ge:
                 if ge.status == 404:
