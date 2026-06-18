@@ -1,108 +1,127 @@
 #!/bin/bash
+# BugFixer Installer
+# Usage: curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | sudo bash
 set -e
+
 REPO_URL="https://github.com/lbockenstedt/bugfixer.git"
 INSTALL_DIR="/opt/bugfixer"
+CONFIG_DIR="/etc/bugfixer"
+LOG_FILE="/var/log/bugfixer.log"
 
-echo "🚀 Installing BugFixer..."
+echo "=== BugFixer Installer ==="
 
 # 1. System dependencies
-apt-get update && apt-get install -y curl git gnupg build-essential python3-pip python3-venv psmisc
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
-npm install -g @anthropic-ai/claude-code
+echo ">> Installing system dependencies..."
+apt-get update -qq
+apt-get install -y -qq curl git build-essential python3-pip python3-venv psmisc
 
-# 2. Clone or Update repository
-if [ ! -d "$INSTALL_DIR" ]; then
-    echo "Cloning repository to $INSTALL_DIR..."
-    git clone $REPO_URL $INSTALL_DIR
-else
-    echo "Repository directory already exists. Updating to latest version..."
-    cd $INSTALL_DIR
-    git fetch origin
-    git reset --hard origin/main
-    cd - > /dev/null
+# Install Node + Claude Code CLI (for claude_cli provider)
+if ! command -v node &>/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - &>/dev/null
+    apt-get install -y -qq nodejs
+fi
+if ! command -v claude &>/dev/null; then
+    echo ">> Installing Claude Code CLI..."
+    npm install -g @anthropic-ai/claude-code --silent
 fi
 
-# 2b. Persistent Config Setup
-echo "📁 Ensuring persistent configuration directory..."
-mkdir -p /etc/bugfixer
+# 2. Clone or update repo
+if [ ! -d "$INSTALL_DIR/.git" ]; then
+    echo ">> Cloning BugFixer to $INSTALL_DIR..."
+    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+else
+    echo ">> Updating existing install..."
+    git -C "$INSTALL_DIR" fetch origin
+    git -C "$INSTALL_DIR" reset --hard origin/main
+fi
 
-# Migrate local configs to persistent storage if not already there
-# config.json is gitignored (it holds runtime/personal values and must not be
-# committed), so fresh installs seed from the shipped config.json.example template.
-if [ ! -f "/etc/bugfixer/config.json" ]; then
+# 3. Persistent config directory
+echo ">> Setting up config directory $CONFIG_DIR..."
+mkdir -p "$CONFIG_DIR"
+
+if [ ! -f "$CONFIG_DIR/config.json" ]; then
     if [ -f "$INSTALL_DIR/config.json" ]; then
-        echo "Migrating local config.json to /etc/bugfixer..."
-        cp "$INSTALL_DIR/config.json" /etc/bugfixer/config.json
+        cp "$INSTALL_DIR/config.json" "$CONFIG_DIR/config.json"
     elif [ -f "$INSTALL_DIR/config.json.example" ]; then
-        echo "Seeding /etc/bugfixer/config.json from template..."
-        cp "$INSTALL_DIR/config.json.example" /etc/bugfixer/config.json
+        cp "$INSTALL_DIR/config.json.example" "$CONFIG_DIR/config.json"
+        echo "   Seeded config from template — configure via the WebUI at :8000/settings"
     fi
 fi
-if [ -f "$INSTALL_DIR/.env" ] && [ ! -f "/etc/bugfixer/.env" ]; then
-    echo "Migrating .env to /etc/bugfixer..."
-    cp "$INSTALL_DIR/.env" /etc/bugfixer/.env
-fi
-if [ -f "$INSTALL_DIR/processed_issues.json" ] && [ ! -f "/etc/bugfixer/processed_issues.json" ]; then
-    echo "Migrating processed_issues.json to /etc/bugfixer..."
-    cp "$INSTALL_DIR/processed_issues.json" /etc/bugfixer/processed_issues.json
-fi
 
-cd $INSTALL_DIR
+# Migrate legacy local files if present
+for f in processed_issues.json .env; do
+    if [ -f "$INSTALL_DIR/$f" ] && [ ! -f "$CONFIG_DIR/$f" ]; then
+        cp "$INSTALL_DIR/$f" "$CONFIG_DIR/$f"
+    fi
+done
 
-# 3. Setup environment
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
+# 4. Log file
+touch "$LOG_FILE"
+chmod 644 "$LOG_FILE"
+mkdir -p /var/log/lm
+
+# 5. Python virtualenv + deps
+echo ">> Installing Python dependencies..."
+cd "$INSTALL_DIR"
+if [ ! -d venv ]; then
     python3 -m venv venv
 fi
+./venv/bin/pip install --upgrade pip -q
+./venv/bin/pip install -r requirements.txt -q
 
-./venv/bin/pip install --upgrade pip
-./venv/bin/pip install -r requirements.txt
-
-# 4. .env creation
-if [ ! -f .env ]; then
-    echo "📝 Creating initial .env file..."
-    cat << 'SOTP' > .env
-GITHUB_TOKEN=
-LOCAL_OLLAMA_MODEL=gemma4:31b-coding-mtp-bf16
-CLOUD_OLLAMA_MODEL=gemma4:31b-cloud
-LOCAL_OLLAMA_URL=http://172.16.1.100:11434
-CLOUD_OLLAMA_URL=
-POLL_INTERVAL_SECONDS=3600
-UPDATE_API_URL=
-SOTP
-    echo "✅ Initial .env created. Please configure your keys via the WebUI."
-fi
-
-# 5. Systemd Service
-cat << 'SERVICE' > /etc/systemd/system/bugfixer.service
+# 6. Systemd service
+echo ">> Installing systemd service..."
+cat > /etc/systemd/system/bugfixer.service << SERVICE
 [Unit]
-Description=GitHub BugFixer Hybrid LLM
+Description=BugFixer Autonomous GitHub Issue Bot
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 User=root
-WorkingDirectory=/opt/bugfixer
-ExecStart=/opt/bugfixer/venv/bin/python3 main.py
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/venv/bin/python3 main.py
 Restart=always
+RestartSec=10
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+
 [Install]
 WantedBy=multi-user.target
 SERVICE
 
-# 6. Watchdog Service
-cat << 'WSERVICE' > /etc/systemd/system/bugfixer-watchdog.service
+# 7. Watchdog service
+cat > /etc/systemd/system/bugfixer-watchdog.service << WSERVICE
 [Unit]
-Description=BugFixer Watchdog for Update Recovery
-After=network.target
+Description=BugFixer Watchdog (auto-update recovery)
+After=bugfixer.service
+
 [Service]
 User=root
-WorkingDirectory=/opt/bugfixer
-ExecStart=/opt/bugfixer/venv/bin/python3 watchdog.py
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/venv/bin/python3 watchdog.py
 Restart=always
+RestartSec=15
+StandardOutput=append:$LOG_FILE
+StandardError=append:$LOG_FILE
+
 [Install]
 WantedBy=multi-user.target
 WSERVICE
 
-chmod +x update.sh
+chmod +x "$INSTALL_DIR/update.sh" 2>/dev/null || true
 
-systemctl daemon-reload && systemctl enable bugfixer && systemctl restart bugfixer
-systemctl enable bugfixer-watchdog && systemctl restart bugfixer-watchdog
-echo "✅ Installation complete. Dashboard at http://$(hostname -I | awk '{print $1}'):8000"
+systemctl daemon-reload
+systemctl enable bugfixer bugfixer-watchdog
+systemctl restart bugfixer bugfixer-watchdog
+
+IP=$(hostname -I | awk '{print $1}')
+echo ""
+echo "=== BugFixer installed successfully ==="
+echo "   Dashboard : http://$IP:8000"
+echo "   Config    : $CONFIG_DIR/config.json"
+echo "   Logs      : $LOG_FILE"
+echo "   Status    : sudo systemctl status bugfixer"
+echo ""
+echo "Open the dashboard and go to Settings to configure your GitHub token and LLM providers."
