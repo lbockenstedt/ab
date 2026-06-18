@@ -493,10 +493,10 @@
                                         <option value="openai">OpenAI</option>
                                         <option value="ollama">Ollama</option>
                                     </select>
-                                    <select id="new-entry-model" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select id="new-entry-model" onchange="updateDefaultRpm()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="">— save credential first —</option>
                                     </select>
-                                    <input type="number" id="new-entry-rpm" placeholder="RPM (0=unlimited)" min="0" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <input type="text" id="new-entry-reviewer" placeholder="Reviewer model (blank=same)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                                 <div class="flex gap-2">
@@ -1098,12 +1098,60 @@
             loadVaultModels();
         }
 
+        // Known RPM limits per model (free tier or Tier 1 where noted).
+        // Prefix-matched so version suffixes like "-preview-06-05" still resolve.
+        const _MODEL_RPM = [
+            // Google free tier
+            ['gemini-2.5-pro',          5],
+            ['gemini-2.5-flash',       15],
+            ['gemini-2.0-flash-lite',  30],
+            ['gemini-2.0-flash',       15],
+            ['gemini-1.5-flash-8b',    15],
+            ['gemini-1.5-flash',       15],
+            ['gemini-1.5-pro',          2],
+            ['gemini-1.0-pro',         15],
+            // Anthropic Tier 1 (requires ~$5 spend)
+            ['claude-opus',            50],
+            ['claude-sonnet',          50],
+            ['claude-haiku',           50],
+            // OpenAI Tier 1
+            ['gpt-4o-mini',           500],
+            ['gpt-4o',                500],
+            ['gpt-4-turbo',           500],
+            ['gpt-4',                 500],
+            ['gpt-3.5-turbo',        3500],
+            ['o3-mini',               500],
+            ['o3',                    100],
+            ['o1-mini',               500],
+            ['o1',                    500],
+        ];
+        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10};
+
+        function getDefaultRpm(provider, model) {
+            if (model) {
+                const m = model.toLowerCase();
+                for (const [prefix, rpm] of _MODEL_RPM) {
+                    if (m.startsWith(prefix)) return rpm;
+                }
+            }
+            return _PROVIDER_RPM[provider] || 10;
+        }
+
+        function updateDefaultRpm() {
+            const provider = document.getElementById('new-entry-provider')?.value;
+            const model = document.getElementById('new-entry-model')?.value;
+            const rpmEl = document.getElementById('new-entry-rpm');
+            if (rpmEl && model) rpmEl.value = getDefaultRpm(provider, model);
+        }
+
         async function loadVaultModels() {
             const provider = document.getElementById('new-entry-provider')?.value;
             const sel = document.getElementById('new-entry-model');
             if (!sel || !provider) return;
             sel.innerHTML = '<option value="">Loading…</option>';
             sel.disabled = true;
+            const rpmEl = document.getElementById('new-entry-rpm');
+            if (rpmEl) rpmEl.value = '';
             try {
                 const resp = await fetch('/api/fetch-models', {
                     method: 'POST',
