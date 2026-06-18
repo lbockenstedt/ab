@@ -27,9 +27,16 @@ echo "📁 Ensuring persistent configuration directory..."
 mkdir -p /etc/bugfixer
 
 # Migrate local configs to persistent storage if not already there
-if [ -f "$INSTALL_DIR/config.json" ] && [ ! -f "/etc/bugfixer/config.json" ]; then
-    echo "Migrating config.json to /etc/bugfixer..."
-    cp "$INSTALL_DIR/config.json" /etc/bugfixer/config.json
+# config.json is gitignored (it holds runtime/personal values and must not be
+# committed), so fresh installs seed from the shipped config.json.example template.
+if [ ! -f "/etc/bugfixer/config.json" ]; then
+    if [ -f "$INSTALL_DIR/config.json" ]; then
+        echo "Migrating local config.json to /etc/bugfixer..."
+        cp "$INSTALL_DIR/config.json" /etc/bugfixer/config.json
+    elif [ -f "$INSTALL_DIR/config.json.example" ]; then
+        echo "Seeding /etc/bugfixer/config.json from template..."
+        cp "$INSTALL_DIR/config.json.example" /etc/bugfixer/config.json
+    fi
 fi
 if [ -f "$INSTALL_DIR/.env" ] && [ ! -f "/etc/bugfixer/.env" ]; then
     echo "Migrating .env to /etc/bugfixer..."

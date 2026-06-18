@@ -10,3 +10,6 @@ bugfixer.log
 server.log
 server_debug.log
 server*.log
+# config.json holds runtime/personal values (monitored repos, tokens, etc.) and
+# must not be committed. Fresh installs seed from config.json.example instead.
+config.json
