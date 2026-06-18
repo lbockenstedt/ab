@@ -970,7 +970,7 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
 
     target_repo = error_data.get('repo')
 
-    def _search_repo(repo_name, require_strict_global=False):
+    def _search_repo(repo_name, require_strict_global=False, is_self_diag=False):
         try:
             repo = gh_current.get_repo(repo_name)
             # state='all' so we see recently-closed recurrences too; newest-first
@@ -985,6 +985,15 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
                     if closed_at and (now - closed_at).days > DEDUP_CLOSED_WINDOW_DAYS:
                         continue
                 issue_body = issue.body or ""
+
+                # Special case: Self-Diagnosis. Relax the match to rely primarily on title
+                # since JSON error messages often vary by exactly one character (line number).
+                if is_self_diag:
+                    nt = _normalize_for_dedup(new_title)
+                    et = _normalize_for_dedup(issue.title or "")
+                    if nt and et and _jaccard(set(nt.split()), set(et.split())) >= 0.7:
+                        return issue, repo_name, (issue.state == 'closed')
+
                 if _is_duplicate_match(new_title, new_body, issue.title or "", issue_body):
                     # Global fallback (non-target repo): require a strong
                     # title-level signal so we don't cross-match unrelated
@@ -1001,10 +1010,15 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
         return None
 
     # 1. Target repo first — the recurrence almost always lands in the same repo.
-    if target_repo and target_repo in monitored_repos:
-        hit = _search_repo(target_repo)
-        if hit:
-            return hit
+    if target_repo:
+        config = load_config()
+        self_diag_repo = config.get("self_diagnosis_repo")
+        is_self_diag = (target_repo == self_diag_repo)
+
+        if target_repo in monitored_repos:
+            hit = _search_repo(target_repo, is_self_diag=is_self_diag)
+            if hit:
+                return hit
 
     # 2. Global fallback across the other monitored repos, stricter threshold.
     for repo_name in monitored_repos:
@@ -1357,13 +1371,19 @@ def analyze_logs_for_errors(logs):
                 if not body_val or not str(body_val).strip():
                     logger.debug(f"Dropping malformed log-analysis entry (missing/empty body): {entry}")
                     continue
+
+                # Try to find the original source entry to preserve full context (host, path, etc.)
+                source_entry = next((log for log in logs if isinstance(log, dict)
+                                   and str(log.get('module')) == str(module_val)
+                                   and str(body_val) in str(log.get('log', ''))), {})
+
                 # Normalise all fields to strings so downstream code never receives None.
-                # 'repo' is an optional LLM hint; routing is resolved from 'module'.
                 cleaned.append({
                     'module': str(module_val),
                     'title': str(title_val),
                     'body': str(body_val),
                     'repo': str(entry.get('repo')) if entry.get('repo') and str(entry.get('repo')).strip() else '',
+                    'source_data': source_entry
                 })
             return cleaned
         return []
@@ -2055,7 +2075,17 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             if can_direct_push and final_verdict == "Approve":
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: can_direct_push=True AND verdict='Approve' ({final_verdict})")
                 decision_reason = "Trusted repo & approved"
-                repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                try:
+                    repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                except Exception as pe:
+                    logger.warning(f"Direct push failed for {repo_name} ({pe}). Attempting rebase...")
+                    try:
+                        repo_git.remotes.origin.pull(base_branch, rebase=True)
+                        repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                        logger.info(f"Push successful after rebase for {repo_name}")
+                    except Exception as re_err:
+                        logger.error(f"Critical push failure for {repo_name} after rebase attempt: {re_err}")
+                        raise Exception(f"Git push failed for {repo_name} despite rebase attempt: {re_err}")
                 commit_type = "Direct Commit"
                 detail_msg = f"The fix was verified and pushed directly to the {base_branch} branch. Avg Confidence: {final_confidence:.2%}"
             else:
@@ -2254,8 +2284,10 @@ def scan_hub_logs(gh_current, config):
                     if llm_repo and llm_repo in monitored_repos:
                         repo_name = llm_repo
                     else:
+                        source_info = error.get('source_data', {})
+                        host_info = source_info.get('host', 'unknown host') if isinstance(source_info, dict) else 'unknown source'
                         logger.warning(
-                            f"Skipping actionable error for module={module!r}: no monitored repo "
+                            f"Skipping actionable error for module={module!r} (source host: {host_info}): no monitored repo "
                             f"maps to this module (LLM repo hint={llm_repo!r}). Add a "
                             f"'module_repo_map' entry in Settings if this module should be tracked."
                         )
