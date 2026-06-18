@@ -374,16 +374,34 @@
 
         {% if view == 'hub-logs' %}
         <div class="hpe-card rounded-2xl overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
-                <h3 class="text-lg font-semibold text-slate-800">Hub Module Logs</h3>
-                <span class="text-xs text-slate-500 font-mono">Aggregate Hub View</span>
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-2">
+                <div>
+                    <h3 class="text-lg font-semibold text-slate-800">Hub Module Logs</h3>
+                    <p class="text-xs text-slate-400 mt-0.5">Newest entries first · Fetched {{ hub_fetch_time or 'now' }}
+                        {% if hub_logs %} · {{ hub_logs|length }} entries{% endif %}
+                        {% if hub_fetch_status %} · HTTP {{ hub_fetch_status }}{% endif %}
+                    </p>
+                </div>
+                <div class="flex gap-2 flex-wrap">
+                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300">↻ Refresh</button>
+                    <button onclick="showHubRaw()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300">Debug Raw</button>
+                </div>
+            </div>
+            {% if hub_fetch_error %}
+            <div class="px-6 py-3 bg-red-50 border-b border-red-200 text-xs text-red-700 font-mono">
+                ✗ {{ hub_fetch_error }}
+                {% if hub_url %} · URL: {{ hub_url }}/setup/logs/all{% endif %}
+            </div>
+            {% endif %}
+            <div id="hub-raw-output" class="hidden px-6 py-3 bg-slate-900 border-b border-slate-700">
+                <pre class="text-xs text-green-300 max-h-64 overflow-y-auto whitespace-pre-wrap" id="hub-raw-pre">Loading…</pre>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                    <thead class="bg-slate-50 text-slate-500 uppercase text-xs sticky top-0">
                         <tr class="border-b border-slate-200">
-                            <th class="px-6 py-3 font-medium">Module</th>
-                            <th class="px-6 py-3 font-medium">Timestamp</th>
+                            <th class="px-6 py-3 font-medium w-28">Module</th>
+                            <th class="px-6 py-3 font-medium w-40">Timestamp</th>
                             <th class="px-6 py-3 font-medium">Log Message</th>
                         </tr>
                     </thead>
@@ -391,20 +409,36 @@
                         {% if hub_logs %}
                             {% for log in hub_logs %}
                             <tr class="hover:bg-slate-50 transition-colors">
-                                <td class="px-6 py-4 font-mono text-xs text-slate-600">{{ log.module }}</td>
-                                <td class="px-6 py-4 text-slate-500 text-xs">{{ log.timestamp }}</td>
+                                <td class="px-6 py-4 font-mono text-xs text-slate-600 align-top">{{ log.module }}</td>
+                                <td class="px-6 py-4 text-slate-500 text-xs font-mono align-top whitespace-nowrap">{{ log.log[:19] if log.log and log.log[0].isdigit() else '' }}</td>
                                 <td class="px-6 py-4 text-slate-700 font-mono text-xs whitespace-pre-wrap">{{ log.log }}</td>
                             </tr>
                             {% endfor %}
                         {% else %}
                             <tr>
-                                <td colspan="3" class="px-6 py-8 text-center text-slate-400 italic">No logs retrieved from Hub. Check HUB_QUERY_URL in settings.</td>
+                                <td colspan="3" class="px-6 py-8 text-center text-slate-400 italic">
+                                    {% if hub_fetch_error %}{{ hub_fetch_error }}{% else %}No logs retrieved from Hub. Check HUB_QUERY_URL in settings.{% endif %}
+                                </td>
                             </tr>
                         {% endif %}
                     </tbody>
                 </table>
             </div>
         </div>
+        <script>
+        async function showHubRaw() {
+            const box = document.getElementById('hub-raw-output');
+            const pre = document.getElementById('hub-raw-pre');
+            box.classList.toggle('hidden');
+            if (!box.classList.contains('hidden')) {
+                pre.textContent = 'Loading…';
+                try {
+                    const d = await fetch('/api/hub-logs/raw').then(r => r.json());
+                    pre.textContent = `HTTP ${d.status_code}  Content-Type: ${d.content_type}  Length: ${d.body_length}\n\n${d.body_preview || d.error || '(empty)'}`;
+                } catch(e) { pre.textContent = 'Error: ' + e; }
+            }
+        }
+        </script>
         {% endif %}
 
         {% if view == 'settings' %}

@@ -1994,10 +1994,23 @@ def get_hub_logs():
             # Content-Type looks JSON-compatible — attempt to parse.
             try:
                 data = resp.json()
+                raw_logs = []
                 if isinstance(data, dict):
-                    logs = data.get('logs', [])
-                    return list(reversed(logs)) if isinstance(logs, list) else []
-                return list(reversed(data)) if isinstance(data, list) else []
+                    raw_logs = data.get('logs', [])
+                    if not isinstance(raw_logs, list):
+                        raw_logs = []
+                elif isinstance(data, list):
+                    raw_logs = data
+
+                # Try to parse a timestamp from each log line so we can sort
+                # newest-first.  Typical format: "2024-01-15 10:30:00 [INFO] …"
+                _TS_PAT = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
+                def _log_ts(entry):
+                    m = _TS_PAT.match((entry.get('log') or '').strip())
+                    return m.group(1) if m else ''
+
+                # Sort descending so newest entries are first.
+                return sorted(raw_logs, key=_log_ts, reverse=True)
             except Exception as e:
                 # Even with a JSON-ish Content-Type, parsing could fail (truncated
                 # body, BOM, etc.). Treat this as a soft failure (WARNING) and
@@ -4258,8 +4271,49 @@ async def get_logs(request: Request):
 
 @app.get("/hub-logs")
 async def get_hub_logs_page(request: Request):
-    logs = get_hub_logs()
-    return templates.TemplateResponse(request=request, name="index.html", context={"view": "hub-logs", "hub_logs": logs, "state": state})
+    config = load_config()
+    hub_url = (config.get("HUB_QUERY_URL") or "").strip()
+    fetch_error = None
+    fetch_status = None
+    logs = None
+    try:
+        if hub_url and "your-netbox" not in hub_url:
+            probe = requests.get(hub_url.rstrip("/") + "/setup/logs/all", timeout=15)
+            fetch_status = probe.status_code
+            if probe.status_code == 200:
+                logs = get_hub_logs()
+            else:
+                fetch_error = f"Hub returned HTTP {probe.status_code}"
+        else:
+            fetch_error = "HUB_QUERY_URL not configured"
+    except Exception as ex:
+        fetch_error = str(ex)
+    fetch_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return templates.TemplateResponse(
+        request=request, name="index.html",
+        context={"view": "hub-logs", "hub_logs": logs, "state": state,
+                 "hub_fetch_time": fetch_time, "hub_fetch_error": fetch_error,
+                 "hub_fetch_status": fetch_status, "hub_url": hub_url},
+    )
+
+
+@app.get("/api/hub-logs/raw")
+async def hub_logs_raw():
+    """Return the raw JSON from the Hub /setup/logs/all endpoint for debugging."""
+    config = load_config()
+    url = (config.get("HUB_QUERY_URL") or "").strip()
+    if not url or "your-netbox" in url:
+        return JSONResponse({"error": "HUB_QUERY_URL not configured"}, status_code=400)
+    try:
+        resp = requests.get(url.rstrip("/") + "/setup/logs/all", timeout=15)
+        return JSONResponse({
+            "status_code": resp.status_code,
+            "content_type": resp.headers.get("Content-Type", ""),
+            "body_preview": resp.text[:5000],
+            "body_length": len(resp.text),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 DEFAULT_ENV = {
     "GITHUB_TOKEN": "",
