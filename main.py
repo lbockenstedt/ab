@@ -3762,6 +3762,59 @@ async def clear_history():
 
     return {"status": "success", "message": "All history and tasks have been cleared."}
 
+
+@app.post("/delete_issue")
+async def delete_issue(request: Request):
+    """Remove an issue from local history and close it on GitHub."""
+    global state
+    data = await request.json()
+    issue_id = data.get("issue_id", "").strip()
+    if not issue_id or ":" not in issue_id:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
+
+    repo_name, issue_num_str = issue_id.rsplit(":", 1)
+    try:
+        issue_num = int(issue_num_str)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue number"})
+
+    # Remove from local processed history.
+    processed = load_processed()
+    was_in_history = issue_id in processed
+    if was_in_history:
+        entry = processed.pop(issue_id)
+        if entry.get("status") in ("fixed", "verified", "awaiting_prod_verification"):
+            state["success_count"] = max(0, state.get("success_count", 0) - 1)
+        elif entry.get("status") == "failed":
+            state["failure_count"] = max(0, state.get("failure_count", 0) - 1)
+        state["processed"] = processed
+        save_processed(processed)
+
+    # Close the issue on GitHub.
+    github_msg = ""
+    try:
+        config = load_config()
+        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+        if not token:
+            raise ValueError("No GitHub token configured")
+        gh = Github(token)
+        repo = gh.get_repo(repo_name)
+        issue = repo.get_issue(issue_num)
+        if issue.state != "closed":
+            issue.edit(state="closed")
+            github_msg = f"Issue #{issue_num} closed on GitHub."
+        else:
+            github_msg = f"Issue #{issue_num} was already closed on GitHub."
+        logger.info(f"Deleted issue {issue_id}: removed from history, {github_msg}")
+    except Exception as e:
+        github_msg = f"GitHub close failed: {e}"
+        logger.warning(f"Could not close {issue_id} on GitHub: {e}")
+
+    return {
+        "status": "success",
+        "message": f"{'Removed from history. ' if was_in_history else ''}{github_msg}",
+    }
+
 @app.post("/update_now")
 async def update_now():
     updated, msg = check_for_updates()
