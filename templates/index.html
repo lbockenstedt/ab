@@ -160,7 +160,7 @@
                     <div class="flex justify-between items-center">
                         <span class="text-slate-500">Providers</span>
                         <div class="flex gap-2 flex-wrap justify-end">
-                            {% for n in [1, 2, 3] %}
+                            {% for n in [1, 2, 3, 4] %}
                             {% set online_key = 'provider_' ~ n ~ '_online' %}
                             {% set cb = state.provider_credit_cb[n] if state.provider_credit_cb else {} %}
                             <div class="flex items-center gap-1">
@@ -542,6 +542,39 @@
                             </div>
                         </div>
 
+                        <!-- Provider 4 -->
+                        <div class="mb-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                            <div class="flex items-center gap-2 mb-3">
+                                <span class="text-xs font-bold text-orange-500 uppercase tracking-wider">Provider 4</span>
+                                <span class="text-xs text-slate-400">Third failover — optional</span>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Provider</label>
+                                    <select name="LLM_PROVIDER_4" id="llm-provider-4" onchange="loadProviderModels(4, true)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_4 == 'openai' else '' }}>OpenAI</option>
+                                        <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_4 == 'anthropic' else '' }}>Anthropic</option>
+                                        <option value="google" {{ 'selected' if settings.LLM_PROVIDER_4 == 'google' else '' }}>Google Gemini</option>
+                                        <option value="ollama" {{ 'selected' if settings.LLM_PROVIDER_4 == 'ollama' else '' }}>Ollama Cloud</option>
+                                    </select>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Model <span id="p4-model-status" class="text-[10px] text-slate-400 font-normal"></span></label>
+                                    <select name="LLM_MODEL_4" id="llm-model-4" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        {% if settings.LLM_MODEL_4 %}<option value="{{ settings.LLM_MODEL_4 }}" selected>{{ settings.LLM_MODEL_4 }}</option>{% else %}<option value="">— load models —</option>{% endif %}
+                                    </select>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">API Key</label>
+                                    <input type="password" name="LLM_API_KEY_4" id="llm-key-4" value="{{ settings.LLM_API_KEY_4 }}" placeholder="sk-..." onblur="loadProviderModels(4)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                                <div class="space-y-2 md:col-span-3">
+                                    <label class="text-sm font-medium text-slate-600">Base URL <span class="text-slate-400 font-normal">(optional)</span></label>
+                                    <input type="text" name="LLM_BASE_URL_4" id="llm-url-4" value="{{ settings.LLM_BASE_URL_4 }}" placeholder="https://api.openai.com/v1" onblur="loadProviderModels(4)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Reviewer overrides + timeout -->
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
@@ -563,6 +596,13 @@
                                 <select name="REVIEWER_MODEL_3" id="reviewer-model-3" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <option value="">— same as Provider 3 —</option>
                                     {% if settings.REVIEWER_MODEL_3 %}<option value="{{ settings.REVIEWER_MODEL_3 }}" selected>{{ settings.REVIEWER_MODEL_3 }}</option>{% endif %}
+                                </select>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 4 <span class="text-slate-400 font-normal">(blank = use Provider 4 model)</span></label>
+                                <select name="REVIEWER_MODEL_4" id="reviewer-model-4" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="">— same as Provider 4 —</option>
+                                    {% if settings.REVIEWER_MODEL_4 %}<option value="{{ settings.REVIEWER_MODEL_4 }}" selected>{{ settings.REVIEWER_MODEL_4 }}</option>{% endif %}
                                 </select>
                             </div>
                             <div class="space-y-2">
@@ -1016,7 +1056,7 @@
             try {
                 const successful = document.execCommand('copy');
                 if (successful) {
-                    alert('Logs copied to clipboard (via fallback)!');
+                    alert('Logs copied to clipboard!');
                 } else {
                     alert('Unable to copy logs.');
                 }
@@ -1218,6 +1258,7 @@
             loadProviderModels(1);
             loadProviderModels(2);
             loadProviderModels(3);
+            loadProviderModels(4);
         })();
 
 

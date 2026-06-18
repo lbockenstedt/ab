@@ -482,6 +482,7 @@ _PROVIDER_CREDIT_CB = {
     1: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
     2: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
     3: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
+    4: {"cooldown_until": 0.0, "tripped_at": None, "reason": None},
 }
 _CREDIT_COOLDOWN_SECONDS = 3600  # 1 hour
 
@@ -508,7 +509,7 @@ def _provider_credit_cb_remaining(n):
 def _provider_credit_cb_snapshot():
     result = {}
     with _PROVIDER_CREDIT_CB_LOCK:
-        for n in (1, 2, 3):
+        for n in (1, 2, 3, 4):
             rem = max(0.0, _PROVIDER_CREDIT_CB[n]["cooldown_until"] - time.time())
             result[n] = {
                 "active": rem > 0,
@@ -833,8 +834,8 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
     if not model:
         model = "gemini-1.5-pro"
     base = (base_url or GOOGLE_BASE_URL).rstrip("/")
-    endpoint = f"{base}/v1beta/models/{model}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
+    endpoint = f"{base}/v1beta/models/{model}:generateContent"
+    headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
 
     system_text, contents = _to_google_contents(messages)
     payload = {"contents": contents}
@@ -937,10 +938,10 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
 
     Routing priority:
-      force_provider=N (int 1/2/3) — use that provider slot directly (no failover).
-      force_cloud=True             — start at Provider 2, fall to 1 then 3.
-      force_cloud=False            — Provider 1 only, no failover.
-      force_cloud=None (default)   — Provider 1 → 2 → 3 in order.
+      force_provider=N (int 1/2/3/4) — use that provider slot directly (no failover).
+      force_cloud=True               — start at Provider 2, fall to 1 then 3 then 4.
+      force_cloud=False              — Provider 1 only, no failover.
+      force_cloud=None (default)     — Provider 1 → 2 → 3 → 4 in order.
 
     Providers in a 1-hour credit-exhaustion cooldown are skipped automatically.
     """
@@ -949,11 +950,12 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     p1_provider, p1_key, p1_model, p1_url = _get_provider_config(1, config)
     p2_provider, p2_key, p2_model, p2_url = _get_provider_config(2, config)
     p3_provider, p3_key, p3_model, p3_url = _get_provider_config(3, config)
+    p4_provider, p4_key, p4_model, p4_url = _get_provider_config(4, config)
 
     if model_override:
-        p1_model = p2_model = p3_model = model_override
+        p1_model = p2_model = p3_model = p4_model = model_override
     if url_override:
-        p1_url = p2_url = p3_url = url_override
+        p1_url = p2_url = p3_url = p4_url = url_override
 
     effective_stream = True if stream is None else bool(stream)
 
@@ -968,6 +970,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         (1, p1_provider, p1_model, p1_key, p1_url),
         (2, p2_provider, p2_model, p2_key, p2_url),
         (3, p3_provider, p3_model, p3_key, p3_url),
+        (4, p4_provider, p4_model, p4_key, p4_url),
     ]
 
     def _try_provider(n, provider, model, key, url):
@@ -993,7 +996,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
     try:
         # force_provider=N: use that slot only, no failover.
-        if force_provider in (1, 2, 3):
+        if force_provider in (1, 2, 3, 4):
             row = all_providers[force_provider - 1]
             result, err = _try_provider(*row)
             if result is not None:
@@ -1009,7 +1012,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
         # Determine starting provider.
         use_p2_first = force_cloud is True
-        order = [2, 1, 3] if use_p2_first else [1, 2, 3]
+        order = [2, 1, 3, 4] if use_p2_first else [1, 2, 3, 4]
         pmap = {n: row for n, *row in [(r[0], *r[1:]) for r in all_providers]}
 
         last_err = None
@@ -1143,7 +1146,7 @@ failure_count = sum(1 for info in processed_init.values() if info.get("status") 
 
 state = {
     "status": "Idle", "active_llm": "Unknown",
-    "provider_1_online": False, "provider_2_online": False, "provider_3_online": False,
+    "provider_1_online": False, "provider_2_online": False, "provider_3_online": False, "provider_4_online": False,
     "local_online": False, "cloud_online": False,
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
@@ -1945,8 +1948,8 @@ def _check_provider_online(n, config):
             resp = requests.get(url, headers=headers, timeout=10)
         elif p == "google":
             base = (base_url or GOOGLE_BASE_URL).rstrip("/")
-            url = f"{base}/v1beta/models?key={api_key}"
-            resp = requests.get(url, timeout=10)
+            url = f"{base}/v1beta/models"
+            resp = requests.get(url, headers={"x-goog-api-key": api_key}, timeout=10)
         elif p == "ollama":
             base = (base_url or "https://ollama.com").rstrip("/")
             url = f"{base}/api/tags"
@@ -1981,10 +1984,12 @@ def connectivity_worker():
             p1_online = _check_provider_online(1, config)
             p2_online = _check_provider_online(2, config)
             p3_online = _check_provider_online(3, config)
+            p4_online = _check_provider_online(4, config)
             state["provider_1_online"] = p1_online
             state["provider_2_online"] = p2_online
             state["provider_3_online"] = p3_online
-            logger.info(f"Connectivity Check: P1={p1_online}, P2={p2_online}, P3={p3_online}")
+            state["provider_4_online"] = p4_online
+            logger.info(f"Connectivity Check: P1={p1_online}, P2={p2_online}, P3={p3_online}, P4={p4_online}")
         except Exception as e:
             logger.error(f"Connectivity worker error: {e}")
         time.sleep(900)
@@ -2120,7 +2125,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
 
     # Build reviewer panel from all providers EXCEPT the builder.
     reviewers = []
-    for n in (1, 2, 3):
+    for n in (1, 2, 3, 4):
         if n == builder_n:
             continue
         provider, key, model, _ = _get_provider_config(n, config)
@@ -2135,7 +2140,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
 
     # Check if any provider is online at all.
     any_provider_online = any(
-        state.get(f"provider_{n}_online", True) for n in (1, 2, 3) if n != builder_n
+        state.get(f"provider_{n}_online", True) for n in (1, 2, 3, 4) if n != builder_n
     )
     if not any_provider_online:
         logger.warning("All reviewer LLM providers appear offline. Signaling retry queue.")
@@ -3469,7 +3474,7 @@ def _fetch_models_for_provider(provider, api_key, base_url):
                 models.append({"name": m.get("id", ""), "details": m.get("display_name", "")})
         elif p == "google":
             base = (base_url or GOOGLE_BASE_URL).rstrip("/")
-            resp = requests.get(f"{base}/v1beta/models?key={api_key}", timeout=10)
+            resp = requests.get(f"{base}/v1beta/models", headers={"x-goog-api-key": api_key}, timeout=10)
             resp.raise_for_status()
             for m in resp.json().get("models", []):
                 name = m.get("name", "").replace("models/", "")
@@ -3572,6 +3577,10 @@ DEFAULT_ENV = {
     "LLM_API_KEY_3": "",
     "LLM_MODEL_3": "gemini-1.5-pro",
     "LLM_BASE_URL_3": "",
+    "LLM_PROVIDER_4": "ollama",
+    "LLM_API_KEY_4": "",
+    "LLM_MODEL_4": "",
+    "LLM_BASE_URL_4": "",
     "QA_REPO": "",
     "QA_TEST_COMMAND": "pytest",
     "POLL_INTERVAL_SECONDS": "300",
@@ -3585,6 +3594,7 @@ DEFAULT_ENV = {
     "REVIEWER_MODEL_1": "",
     "REVIEWER_MODEL_2": "",
     "REVIEWER_MODEL_3": "",
+    "REVIEWER_MODEL_4": "",
     "LLM_MAX_RETRIES": "5",
     "LLM_BACKOFF_BASE": "2.0",
     "LLM_BACKOFF_MAX": "600.0",
@@ -3685,12 +3695,17 @@ async def save_settings(request: Request):
         "LLM_API_KEY_3": lambda v: v,
         "LLM_MODEL_3": lambda v: v,
         "LLM_BASE_URL_3": lambda v: v,
+        "LLM_PROVIDER_4": lambda v: v,
+        "LLM_API_KEY_4": lambda v: v,
+        "LLM_MODEL_4": lambda v: v,
+        "LLM_BASE_URL_4": lambda v: v,
         "LLM_TIMEOUT": lambda v: v,
         "MAX_CONCURRENT_FIXES": lambda v: v,
         "TRIAGE_STRICTNESS": lambda v: v,
         "REVIEWER_MODEL_1": lambda v: v,
         "REVIEWER_MODEL_2": lambda v: v,
         "REVIEWER_MODEL_3": lambda v: v,
+        "REVIEWER_MODEL_4": lambda v: v,
         "LLM_MAX_RETRIES": lambda v: v,
         "LLM_BACKOFF_BASE": lambda v: v,
         "LLM_BACKOFF_MAX": lambda v: v,
@@ -3868,8 +3883,8 @@ async def update_now():
 @app.post("/api/clear-credit-cooldown/{n}")
 async def clear_credit_cooldown(n: int):
     """Manually clear the 1-hour credit-exhaustion cooldown for provider n (1/2/3)."""
-    if n not in (1, 2, 3):
-        return JSONResponse(status_code=400, content={"error": "n must be 1, 2, or 3"})
+    if n not in (1, 2, 3, 4):
+        return JSONResponse(status_code=400, content={"error": "n must be 1, 2, 3, or 4"})
     with _PROVIDER_CREDIT_CB_LOCK:
         _PROVIDER_CREDIT_CB[n]["cooldown_until"] = 0.0
         _PROVIDER_CREDIT_CB[n]["tripped_at"] = None
@@ -4006,6 +4021,7 @@ def _secret_denylist(config):
         config.get("LLM_API_KEY_1"), os.getenv("LLM_API_KEY_1"),
         config.get("LLM_API_KEY_2"), os.getenv("LLM_API_KEY_2"),
         config.get("LLM_API_KEY_3"), os.getenv("LLM_API_KEY_3"),
+        config.get("LLM_API_KEY_4"), os.getenv("LLM_API_KEY_4"),
     ]
     for src in candidates:
         if src and isinstance(src, str):
