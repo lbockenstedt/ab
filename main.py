@@ -88,6 +88,10 @@ def save_config(config):
             os.makedirs(CONFIG_DIR, exist_ok=True)
             with open(CONFIG_FILE, "w") as f:
                 json.dump(config, f, indent=2)
+            try:
+                os.chmod(CONFIG_FILE, 0o600)
+            except Exception:
+                pass
             logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
         else:
             raise IOError("Persistent config directory not writable")
@@ -1035,6 +1039,10 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
         return _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if p == "ollama":
         return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+    if p == "groq":
+        # Groq is OpenAI-compatible; use their endpoint when no custom base_url is set.
+        effective_url = base_url or "https://api.groq.com/openai/v1"
+        return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
     return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
 
 
@@ -1487,7 +1495,7 @@ def parse_module_repo_map(value):
                 if not part or "=" not in part:
                     continue
                 mod, _, repo = part.partition("=")
-                pairs = [(mod.strip(), repo.strip())]
+                pairs.append((mod.strip(), repo.strip()))
     else:
         return result
 
@@ -2090,8 +2098,7 @@ def _check_provider_online(n, config):
             logger.warning(f"Provider {n} ({provider}) connectivity check: 401 — API key invalid or missing.")
             return False
         if resp.status_code == 429:
-            _llm_cb_trip(60.0, f"connectivity-worker provider-{n} 429")
-            logger.warning(f"Provider {n} ({provider}) connectivity check: 429 — rate-limited.")
+            logger.warning(f"Provider {n} ({provider}) connectivity check: 429 — rate-limited (not tripping CB).")
             return False
         return resp.status_code < 300
     except Exception as e:
@@ -2276,7 +2283,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     )
     if not any_provider_online:
         logger.warning("All reviewer LLM providers appear offline. Signaling retry queue.")
-        return {"status": "pending_review", "reason": "all_reviewers_offline"}
+        return {"status": "queue_for_retry", "reason": "all_reviewers_offline"}
 
     fix_details = ""
     for path, code in proposed_fixes.items():
@@ -2336,7 +2343,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             )
             logger.warning(f"Queuing for manual approval: {reason}")
             return {
-                "status": "pending_review",
+                "status": "queue_for_retry",
                 "reason": reason,
                 "partial_confidence": avg_conf,
                 "partial_votes": votes,
@@ -2653,6 +2660,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             max_attempts = 3
             success = False
             error_context = None
+            final_verdict = "Reject"
+            final_confidence = 0.0
+            base_branch = config.get("default_branch", "main")
 
             for attempt in range(1, max_attempts + 1):
                 try:
@@ -2670,7 +2680,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             processed[issue_id]["status"] = "processing"
                             save_processed(processed)
                     elif not pending_fix:
-                        fix_code = apply_ai_fix(path, issue.body, error_context, force_cloud=force_cloud, task_id=issue_id)
+                        fix_code = apply_ai_fix(path, issue.body or "", error_context, force_cloud=force_cloud, task_id=issue_id)
                         success_applied, fixes, confidence = parse_and_apply(fix_code, path)
 
                     if not success_applied:
@@ -2683,7 +2693,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             review_verdict = "Approve"
                         else:
                             update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
-                            review = review_fix(path, issue.body, fixes, force_cloud=force_cloud, task_id=issue_id)
+                            review = review_fix(path, issue.body or "", fixes, force_cloud=force_cloud, task_id=issue_id)
 
                             # --- Handle Queue for Retry ---
                             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
@@ -2791,8 +2801,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             if version_bumped:
                 commit_msg += f" (Version Bump to {new_v})"
             repo_git.index.commit(commit_msg)
-
-            base_branch = config.get("default_branch", "main")
 
             if can_actually_direct_push:
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: {decision_reason}")
@@ -2903,6 +2911,9 @@ def verify_production_fixes(gh_current, processed):
     config = load_config()
     days_required = int(config.get("PROD_VERIFICATION_DAYS", 7))
 
+    # Fetch hub logs once for the whole verification pass.
+    hub_logs_cache = get_hub_logs()
+
     for issue_id, info in list(processed.items()):
         if info.get("status") == "awaiting_prod_verification":
             repo_name, issue_num = issue_id.split(":")
@@ -2911,7 +2922,7 @@ def verify_production_fixes(gh_current, processed):
                 repo_obj = gh_current.get_repo(repo_name)
                 issue = repo_obj.get_issue(int(issue_num))
 
-                logs = get_hub_logs()
+                logs = hub_logs_cache
                 if logs:
                     module_name = repo_name.split('/')[-1]
                     relevant_logs = [l['log'] for l in logs if l.get('module') == module_name]
@@ -3514,13 +3525,11 @@ def run_scan_cycle():
         state["status"] = "Scanning"
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [
-                executor.submit(scan_hub_logs, gh_current, config),
-                executor.submit(scan_repo_issues, gh_current, config, processed)
+                executor.submit(scan_hub_logs, Github(token), config),
+                executor.submit(scan_repo_issues, Github(token), config, processed)
             ]
             for future in futures:
                 future.result()
-
-        save_processed(processed)
         state["status"] = "Idle"
         state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
@@ -3539,7 +3548,8 @@ def poller_worker():
             run_scan_cycle()
         else:
             logger.debug("Poller worker is paused. Skipping scan cycle.")
-        time.sleep(int(os.getenv("POLL_INTERVAL_SECONDS", 300)))
+        cfg = load_config()
+        time.sleep(int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 300)))
 
 @app.get("/api/health")
 async def health_check():
@@ -3767,6 +3777,11 @@ DEFAULT_ENV = {
     "LLM_MAX_CONCURRENT": "1",
     "PROD_VERIFICATION_DAYS": "7",
     "MAX_ISSUES_PER_CYCLE": "15",
+    "POLL_INTERVAL_SECONDS": "300",
+    "CHAT_SYSTEM_PROMPT": "",
+    "CHAT_HISTORY_WINDOW": "20",
+    "LLM_LOG_MAX_ENTRIES": "200",
+    "LLM_LOG_MAX_CHARS": "60000",
 }
 
 @app.get("/settings")
@@ -3883,6 +3898,7 @@ async def save_settings(request: Request):
         "LLM_MAX_CONCURRENT": lambda v: v,
         "PROD_VERIFICATION_DAYS": lambda v: v,
         "MAX_ISSUES_PER_CYCLE": lambda v: v,
+        "POLL_INTERVAL_SECONDS": lambda v: v,
         "self_diagnosis_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
         "module_repo_map": lambda v: parse_module_repo_map(v),
         # Chat-agent numeric settings (stored as strings by the form; coerce to int).
@@ -3891,6 +3907,10 @@ async def save_settings(request: Request):
         "CHAT_INDEX_ISSUE_LIMIT": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_INDEX_ISSUE_LIMIT"],
         "CHAT_INDEX_CACHE_TTL": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_INDEX_CACHE_TTL"],
         "CHAT_FIX_PROPOSAL_TTL": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_FIX_PROPOSAL_TTL"],
+        "CHAT_SYSTEM_PROMPT": lambda v: v.strip() if v else "",
+        "CHAT_HISTORY_WINDOW": lambda v: int(v) if str(v).strip().isdigit() else 20,
+        "LLM_LOG_MAX_ENTRIES": lambda v: int(v) if str(v).strip().isdigit() else 200,
+        "LLM_LOG_MAX_CHARS": lambda v: int(v) if str(v).strip().isdigit() else 60000,
     }
 
 
@@ -4227,9 +4247,19 @@ async def retry_all_failed(request: Request):
     logger.info(f"Bulk retry triggered for {len(to_retry)} issues with preference {llm_pref}: {to_retry}")
 
     def bulk_run():
-        for issue_id in to_retry:
-            repo_name, issue_num = issue_id.split(":")
-            process_single_issue(repo_name, int(issue_num), llm_preference=llm_pref)
+        config = load_config()
+        max_w = int(config.get("MAX_CONCURRENT_FIXES", 2))
+        with ThreadPoolExecutor(max_workers=max_w) as ex:
+            futs = [
+                ex.submit(process_single_issue, *issue_id.split(":"), llm_preference=llm_pref)
+                for issue_id in to_retry
+                if not state.get("paused")
+            ]
+            for f in futs:
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.error(f"Bulk retry error: {e}")
 
     threading.Thread(target=bulk_run, daemon=True).start()
     return {"status": "triggered", "message": f"Bulk retry started for {len(to_retry)} issues using {llm_pref} LLM."}

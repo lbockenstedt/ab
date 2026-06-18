@@ -287,7 +287,15 @@
                     {% for issue_id, info in state.processed.items() %}
                     <tr class="hover:bg-slate-50 transition-colors">
                         <td class="px-6 py-4 font-mono text-[#01A982]">{{ issue_id }}</td>
-                        <td class="px-6 py-4 text-slate-600">AI Correction applied & synced</td>
+                        <td class="px-6 py-4 text-slate-600">
+                            {% if info.status == 'fixed' %}AI fix pushed / PR opened
+                            {% elif info.status == 'verified' %}Verified clean in production
+                            {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
+                            {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
+                            {% elif info.status == 'non-actionable' %}Non-actionable: {{ (info.reason or '')[:80] }}
+                            {% elif info.status == 'failed' %}Failed: {{ (info.error or '')[:80] }}
+                            {% else %}{{ info.status }}{% endif %}
+                        </td>
                         <td class="px-6 py-4 text-right">
                             <span class="text-green-700 bg-green-100 px-2 py-1 rounded text-xs font-bold">{{ info.status.upper() }}</span>
                         </td>
@@ -440,6 +448,11 @@
                                 <label class="text-sm font-medium text-slate-600">Self-Diagnosis Repository (Where BugFixer files its own bugs)</label>
                                 <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. lbockenstedt/bugfixer">
                             </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-400 font-normal">(routes Hub log errors to the right repo)</span></label>
+                                <textarea name="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
+                                <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
+                            </div>
                         </div>
                     </section>
 
@@ -454,7 +467,7 @@
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
-                                {% for pname in ['google','anthropic','openai','ollama'] %}
+                                {% for pname in ['google','anthropic','openai','groq','ollama'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
                                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                                     <div class="flex items-center justify-between mb-2">
@@ -462,6 +475,7 @@
                                             {% if pname == 'google' %}text-blue-500
                                             {% elif pname == 'anthropic' %}text-orange-500
                                             {% elif pname == 'openai' %}text-green-600
+                                            {% elif pname == 'groq' %}text-yellow-600
                                             {% else %}text-purple-500{% endif %}">{{ pname }}</span>
                                         {% if cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
                                     </div>
@@ -491,6 +505,7 @@
                                         <option value="google">Google</option>
                                         <option value="anthropic">Anthropic</option>
                                         <option value="openai">OpenAI</option>
+                                        <option value="groq">Groq</option>
                                         <option value="ollama">Ollama</option>
                                     </select>
                                     <select id="new-entry-model" onchange="updateDefaultRpm()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
@@ -743,6 +758,22 @@
                                 <label class="text-sm font-medium text-slate-600">Fix Proposal TTL (seconds)</label>
                                 <input type="number" name="CHAT_FIX_PROPOSAL_TTL" value="{{ settings.CHAT_FIX_PROPOSAL_TTL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">History Window (messages)</label>
+                                <input type="number" name="CHAT_HISTORY_WINDOW" value="{{ settings.CHAT_HISTORY_WINDOW }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <label class="text-sm font-medium text-slate-600">System Prompt <span class="text-slate-400 font-normal">(blank = default assistant persona)</span></label>
+                                <textarea name="CHAT_SYSTEM_PROMPT" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="You are a helpful assistant.">{{ settings.CHAT_SYSTEM_PROMPT }}</textarea>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Hub Log Max Entries (LLM scrub)</label>
+                                <input type="number" name="LLM_LOG_MAX_ENTRIES" value="{{ settings.LLM_LOG_MAX_ENTRIES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Hub Log Max Chars (LLM scrub)</label>
+                                <input type="number" name="LLM_LOG_MAX_CHARS" value="{{ settings.LLM_LOG_MAX_CHARS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
                         </div>
                     </section>
 
@@ -852,8 +883,9 @@
                         <i class="fas fa-network-wired mr-2"></i>Trigger Hub Update
                     </button>
                 </form>
-                <button onclick="togglePause()" id="pause-btn" class="py-2 px-4 rounded-lg font-bold bg-orange-600 hover:bg-orange-700 text-white transition-all duration-200 text-sm">
-                    <i class="fas fa-pause mr-2"></i>Stop BugFixer
+                <button onclick="togglePause()" id="pause-btn" class="py-2 px-4 rounded-lg font-bold transition-all duration-200 text-sm {% if state.paused %}bg-green-600 hover:bg-green-700{% else %}bg-orange-600 hover:bg-orange-700{% endif %} text-white">
+                    {% if state.paused %}<i class="fas fa-play mr-2"></i>Resume BugFixer
+                    {% else %}<i class="fas fa-pause mr-2"></i>Stop BugFixer{% endif %}
                 </button>
             </div
 >
@@ -900,31 +932,42 @@
                 const data = await resp.json();
                 const container = document.getElementById('task-details-content');
 
+                // Build DOM safely — no innerHTML with user-controlled values (XSS prevention).
+                const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
                 container.innerHTML = `
                     <div class="space-y-3">
                         <div class="flex justify-between items-center border-b border-slate-100 pb-2">
                             <span class="text-slate-500">Task</span>
-                            <span class="font-mono text-xs font-bold">${data.task}</span>
+                            <span class="font-mono text-xs font-bold"></span>
                         </div>
                         <div class="flex justify-between items-center border-b border-slate-100 pb-2">
                             <span class="text-slate-500">Duration</span>
-                            <span class="text-slate-600 font-mono text-xs">${data.duration}</span>
+                            <span class="text-slate-600 font-mono text-xs"></span>
                         </div>
                         <div class="flex justify-between items-center border-b border-slate-100 pb-2">
                             <span class="text-slate-500">Status</span>
-                            <span class="text-slate-600 text-xs">${data.status}</span>
+                            <span class="text-slate-600 text-xs"></span>
                         </div>
                         <div class="pt-2">
                             <span class="text-slate-500 text-xs block mb-1 uppercase tracking-wider font-bold">AI Thought Process</span>
                             <div class="bg-slate-900 text-green-400 p-4 rounded-lg font-mono text-xs leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto border border-slate-700 shadow-inner relative">
-                                <div class="opacity-90 italic">
-                                    ${data.stream || 'Waiting for AI to start thinking...'}
-                                    <span class="cursor-blink"></span>
-                                </div>
+                                <div class="opacity-90 italic stream-text"><span class="cursor-blink"></span></div>
                             </div>
                         </div>
                     </div>
                 `;
+                // Populate text via textContent to prevent XSS.
+                const spans = container.querySelectorAll('span.font-bold, span.font-mono.text-xs, span.text-xs');
+                if (spans[0]) spans[0].textContent = data.task ?? '';
+                if (spans[1]) spans[1].textContent = data.duration ?? '';
+                if (spans[2]) spans[2].textContent = data.status ?? '';
+                const streamDiv = container.querySelector('.stream-text');
+                if (streamDiv) {
+                    streamDiv.textContent = data.stream || 'Waiting for AI to start thinking...';
+                    const blink = document.createElement('span');
+                    blink.className = 'cursor-blink';
+                    streamDiv.appendChild(blink);
+                }
 
                 // Auto-scroll to bottom of the stream
                 const streamDiv = container.querySelector('.max-h-64');
@@ -1153,8 +1196,17 @@
             ['o3',                    100],
             ['o1-mini',               500],
             ['o1',                    500],
+            // Groq free tier
+            ['llama-3.3-70b',          30],
+            ['llama-3.1-70b',          30],
+            ['llama-3.1-8b',           30],
+            ['llama-3-70b',            30],
+            ['llama-3-8b',             30],
+            ['mixtral-8x7b',           30],
+            ['gemma2-9b',              30],
+            ['qwen-qwq',               30],
         ];
-        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10};
+        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, groq: 30};
 
         function getDefaultRpm(provider, model) {
             if (model) {
@@ -1191,16 +1243,28 @@
                 const models = data.models || [];
                 sel.disabled = false;
                 if (models.length === 0) {
-                    sel.innerHTML = '<option value="">— save credential first —</option>';
+                    sel.innerHTML = '';
+                    const empty = document.createElement('option');
+                    empty.value = ''; empty.textContent = '— save credential first —';
+                    sel.appendChild(empty);
                 } else {
-                    sel.innerHTML = '<option value="">— pick a model —</option>';
+                    sel.innerHTML = '';
+                    const blank = document.createElement('option');
+                    blank.value = ''; blank.textContent = '— pick a model —';
+                    sel.appendChild(blank);
                     models.forEach(m => {
                         const o = document.createElement('option');
                         o.value = m.name; o.textContent = m.name + (m.details ? ` (${m.details})` : '');
                         sel.appendChild(o);
                     });
                 }
-            } catch(e) { sel.disabled = false; sel.innerHTML = '<option value="">Error loading models</option>'; }
+            } catch(e) {
+                sel.disabled = false;
+                sel.innerHTML = '';
+                const err = document.createElement('option');
+                err.value = ''; err.textContent = 'Error loading models';
+                sel.appendChild(err);
+            }
         }
 
         async function addEntry() {
@@ -1247,7 +1311,9 @@
                 const models = data.models || [];
                 sel.disabled = false;
                 if (models.length === 0) {
-                    sel.innerHTML = `<option value="${currentModel}">${currentModel}</option>`;
+                    const o = document.createElement('option');
+                    o.value = currentModel; o.textContent = currentModel;
+                    sel.innerHTML = ''; sel.appendChild(o);
                 } else {
                     sel.innerHTML = '';
                     let matched = false;
@@ -1266,7 +1332,9 @@
                 }
             } catch(e) {
                 sel.disabled = false;
-                sel.innerHTML = `<option value="${currentModel}">${currentModel}</option>`;
+                const o = document.createElement('option');
+                o.value = currentModel; o.textContent = currentModel;
+                sel.innerHTML = ''; sel.appendChild(o);
             }
         }
 
