@@ -1612,28 +1612,15 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
         if existing_issue:
             duplicate_repo_display = duplicate_repo_name or current_repo_name
 
-            # If the matching issue was previously dismissed, don't create a new
-            # duplicate — instead reopen the original with fresh evidence so the
-            # human can reconsider whether the error is now real.
+            # If the matching issue still carries the 'bugfixer-dismissed' label,
+            # it was intentionally marked as not a real issue — skip entirely.
+            # A human removing the label is the signal to resume normal processing.
             existing_labels = [lbl.name for lbl in (existing_issue.labels or [])]
             if "bugfixer-dismissed" in existing_labels:
                 logger.info(
-                    f"Previously dismissed issue #{existing_issue.number} in "
-                    f"{duplicate_repo_display} matched a new occurrence — reopening with new evidence."
+                    f"Suppressing new issue for #{existing_issue.number} in "
+                    f"{duplicate_repo_display} — 'bugfixer-dismissed' label is still present."
                 )
-                try:
-                    existing_issue.edit(state='open')
-                except Exception as reopen_err:
-                    logger.warning(f"Could not reopen dismissed issue #{existing_issue.number}: {reopen_err}")
-                try:
-                    existing_issue.create_comment(
-                        f"⚠️ **BugFixer**: This issue was previously dismissed, but the same error "
-                        f"has been detected again in **{current_repo_name}**.\n\n"
-                        f"New evidence:\n```\n{body_text}\n```\n\n"
-                        f"Please review whether this is now a real issue."
-                    )
-                except Exception as comment_err:
-                    logger.warning(f"Could not comment on reopened dismissed issue #{existing_issue.number}: {comment_err}")
                 return existing_issue
 
             if was_closed:
@@ -2936,11 +2923,10 @@ def scan_repo_issues(gh_current, config, processed):
                         if issue.state != 'open' or issue.pull_request:
                             continue
 
-                        # Skip issues that are still closed+dismissed (not yet reopened).
-                        # If bugfixer-dismissed is present but the issue is open, it has
-                        # been reopened with new evidence — process it normally.
-                        if issue.state != "open" and any(lbl.name == "bugfixer-dismissed" for lbl in issue.labels):
-                            logger.debug(f"Skipping {repo_name}#{issue.number} — closed and 'bugfixer-dismissed'.")
+                        # Skip issues carrying the 'bugfixer-dismissed' label — they were
+                        # intentionally marked as not real. Remove the label to resume processing.
+                        if any(lbl.name == "bugfixer-dismissed" for lbl in issue.labels):
+                            logger.debug(f"Skipping {repo_name}#{issue.number} — 'bugfixer-dismissed' label present.")
                             continue
 
                         issue_id = f"{repo_name}:{issue.number}"
