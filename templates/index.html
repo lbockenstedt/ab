@@ -763,14 +763,12 @@
 
     <footer class="bg-[#263040] border-t border-slate-700 p-4 flex-none">
         <div class="{{ 'max-w-[90rem]' if view == 'chat' else 'max-w-6xl' }} mx-auto flex flex-wrap items-center justify-between gap-4">
-            <div class="flex gap-4 text-xs text-slate-400 font-mono">
+            <div class="flex flex-col items-end gap-1 text-xs text-slate-400 font-mono order-2 text-right">
                 <span>{{ state.version }}</span>
-                <span class="text-slate-600">|</span>
                 <span>LLM: <span class="text-slate-200">{{ state.active_llm }}</span></span>
-                <span class="text-slate-600">|</span>
                 <span>Last Run: <span class="text-slate-200">{{ state.last_run }}</span></span>
             </div>
-            <div class="flex flex-wrap justify-center gap-4">
+            <div class="flex flex-wrap justify-center gap-4 order-1">
                 <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')">
                     <button type="submit" class="py-2 px-4 rounded-lg font-bold bg-slate-600 hover:bg-slate-700 text-white transition-all duration-200 text-sm">
                         <i class="fas fa-cloud-download-alt mr-2"></i>Check for Updates

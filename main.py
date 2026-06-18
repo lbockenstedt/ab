@@ -2143,7 +2143,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
         if not actionable:
             logger.info(f"Issue {repo_name}:{issue_num} is non-actionable: {request_msg}")
-            issue.create_comment(f"🤖 **BugFixer Triage**\n\nThis issue is currently non-actionable. To help me fix this, please provide: {request_msg}")
+            try:
+                issue.create_comment(f"🤖 **BugFixer Triage**\n\nThis issue is currently non-actionable. To help me fix this, please provide: {request_msg}")
+            except Exception as ce:
+                logger.warning(f"Could not post non-actionable comment to {issue_id}: {ce}")
             processed = load_processed()
             processed[f"{repo_name}:{issue_num}"] = {
                 "status": "non-actionable",
@@ -2258,7 +2261,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     failure_reason += f" Last attempt error: {error_context}"
 
                 try:
+                try:
                     issue.create_comment(f"🤖 **BugFixer Failure**\n\nI attempted to fix this issue {max_attempts} times, but I could not find a solution that passed verification.\n\n**Final Error:** `{failure_reason}`")
+                except Exception as ce:
+                    logger.warning(f"Could not post failure comment to {issue_id}: {ce}")
                 except Exception as ge:
                     logger.error(f"Failed to post failure comment to issue {issue_id}: {ge}")
 
@@ -2385,7 +2391,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 f"**Changes:**\n- Files modified: `{files_list}`\n- Commit: `{commit_hash[:7]}`\n\n"
                 f"Verification: ✅ Tests passed successfully."
             )
-            issue.create_comment(comment_body)
+            try:
+                issue.create_comment(comment_body)
+            except Exception as ce:
+                logger.warning(f"Could not post success comment to {issue_id}: {ce}")
 
             is_log_detected = "log-detected" in [lbl.name for lbl in issue.get_labels()]
             if not is_log_detected:
@@ -2458,7 +2467,10 @@ def verify_production_fixes(gh_current, processed):
                                 days_clean = (now - first_clean_ts).days
                                 if days_clean >= days_required:
                                     logger.info(f"Verified: Issue {issue_id} has been clean for {days_clean} days. Closing issue.")
-                                    issue.create_comment(f"🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
+                                    try:
+                                        issue.create_comment(f"🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
+                                    except Exception as ce:
+                                        logger.warning(f"Could not post verification comment to {issue_id}: {ce}")
                                     issue.edit(state='closed')
                                     processed[issue_id]["status"] = "verified"
                                     state["success_count"] += 1
