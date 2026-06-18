@@ -1345,7 +1345,10 @@ state = {
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "provider_credit_cb": _provider_credit_cb_snapshot(),
     "paused": False,
-    "chat_streams": {}, "chat_fix_proposals": {}
+    "chat_streams": {}, "chat_fix_proposals": {},
+    "daily_fixes_count": 0,
+    "daily_budget_date": "",
+    "scheduler_mode": "full",
 }
 
 try:
@@ -2964,6 +2967,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             save_processed(processed)
             state["processed"] = processed
+            state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
 
             update_task_state(task_id=issue_id, action="end")
             return True, f"Fixed via {commit_type}"
@@ -3553,6 +3557,78 @@ def scan_self_logs(gh_current, config):
     finally:
         update_task_state(task_id="SelfScan", action="end")
 
+def _schedule_check(config):
+    """Return the current scheduler status.
+
+    Returns a dict:
+      allowed      – bool: whether a full scan cycle should run
+      mode         – "full" | "restricted" | "paused_work_cap" | "paused_budget"
+      reason       – human-readable explanation
+      is_work_hours– bool
+      is_weekend   – bool
+      daily_used   – int: issues fixed today
+      daily_cap    – int: effective cap right now (work-cap or full budget)
+      daily_budget – int: total daily budget
+    """
+    if not config.get("SCHEDULER_ENABLED"):
+        return {
+            "allowed": True, "mode": "full", "reason": "Scheduler disabled",
+            "is_work_hours": False, "is_weekend": False,
+            "daily_used": state.get("daily_fixes_count", 0),
+            "daily_cap": 0, "daily_budget": 0,
+        }
+
+    now = datetime.now()
+    is_weekend = now.weekday() >= 5  # Saturday=5, Sunday=6
+    weekend_full = config.get("SCHEDULER_WEEKEND_FULL", True)
+
+    work_start = int(config.get("SCHEDULER_WORK_START_HOUR", 7))
+    work_end   = int(config.get("SCHEDULER_WORK_END_HOUR", 18))
+    # Work-hours restriction is lifted on weekends when weekend_full is on.
+    is_work_hours = (work_start <= now.hour < work_end) and not (is_weekend and weekend_full)
+
+    daily_budget  = max(1, int(config.get("SCHEDULER_DAILY_BUDGET", 50) or 50))
+    work_cap_pct  = max(1, min(100, int(config.get("SCHEDULER_WORK_CAP_PCT", 25) or 25)))
+    work_cap      = max(1, int(daily_budget * work_cap_pct / 100))
+
+    # Reset daily counter if it's a new day.
+    today_str = now.strftime("%Y-%m-%d")
+    if state.get("daily_budget_date") != today_str:
+        state["daily_budget_date"] = today_str
+        state["daily_fixes_count"] = 0
+
+    daily_used  = state.get("daily_fixes_count", 0)
+    current_cap = work_cap if is_work_hours else daily_budget
+
+    if daily_used >= daily_budget:
+        mode = "paused_budget"
+        state["scheduler_mode"] = mode
+        return {
+            "allowed": False, "mode": mode,
+            "reason": f"Daily budget reached ({daily_used}/{daily_budget} issues today)",
+            "is_work_hours": is_work_hours, "is_weekend": is_weekend,
+            "daily_used": daily_used, "daily_cap": current_cap, "daily_budget": daily_budget,
+        }
+
+    if is_work_hours and daily_used >= work_cap:
+        mode = "paused_work_cap"
+        state["scheduler_mode"] = mode
+        return {
+            "allowed": False, "mode": mode,
+            "reason": f"Work-hours cap reached ({daily_used}/{work_cap} — {work_cap_pct}% of {daily_budget} daily budget)",
+            "is_work_hours": is_work_hours, "is_weekend": is_weekend,
+            "daily_used": daily_used, "daily_cap": current_cap, "daily_budget": daily_budget,
+        }
+
+    mode = "restricted" if is_work_hours else "full"
+    state["scheduler_mode"] = mode
+    return {
+        "allowed": True, "mode": mode, "reason": "OK",
+        "is_work_hours": is_work_hours, "is_weekend": is_weekend,
+        "daily_used": daily_used, "daily_cap": current_cap, "daily_budget": daily_budget,
+    }
+
+
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
     global state
@@ -3617,12 +3693,22 @@ def run_scan_cycle():
 def poller_worker():
     global state
     while True:
+        cfg = load_config()
         if not state["paused"]:
-            run_scan_cycle()
+            sched = _schedule_check(cfg)
+            if sched["allowed"]:
+                run_scan_cycle()
+            else:
+                logger.info(f"Scheduler: skipping scan cycle — {sched['reason']}")
+            # Use a longer poll interval during work hours if configured.
+            if sched.get("is_work_hours") and cfg.get("SCHEDULER_WORK_POLL_INTERVAL"):
+                interval = int(cfg.get("SCHEDULER_WORK_POLL_INTERVAL") or 600)
+            else:
+                interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 300))
         else:
             logger.debug("Poller worker is paused. Skipping scan cycle.")
-        cfg = load_config()
-        time.sleep(int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 300)))
+            interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 300))
+        time.sleep(interval)
 
 @app.get("/api/health")
 async def health_check():
@@ -3780,6 +3866,12 @@ async def fetch_models_live(request: Request):
         logger.error(f"fetch-models error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e), "models": []})
 
+@app.get("/api/scheduler/status")
+async def scheduler_status():
+    config = load_config()
+    return _schedule_check(config)
+
+
 @app.get("/api/claude-cli/status")
 async def claude_cli_status():
     """Check whether the local claude CLI is installed and reachable."""
@@ -3912,6 +4004,11 @@ DEFAULT_ENV = {
     "CHAT_HISTORY_WINDOW": "20",
     "LLM_LOG_MAX_ENTRIES": "200",
     "LLM_LOG_MAX_CHARS": "60000",
+    "SCHEDULER_WORK_START_HOUR": "7",
+    "SCHEDULER_WORK_END_HOUR": "18",
+    "SCHEDULER_DAILY_BUDGET": "50",
+    "SCHEDULER_WORK_CAP_PCT": "25",
+    "SCHEDULER_WORK_POLL_INTERVAL": "600",
 }
 
 @app.get("/settings")
@@ -4041,6 +4138,11 @@ async def save_settings(request: Request):
         "CHAT_HISTORY_WINDOW": lambda v: int(v) if str(v).strip().isdigit() else 20,
         "LLM_LOG_MAX_ENTRIES": lambda v: int(v) if str(v).strip().isdigit() else 200,
         "LLM_LOG_MAX_CHARS": lambda v: int(v) if str(v).strip().isdigit() else 60000,
+        "SCHEDULER_WORK_START_HOUR": lambda v: int(v) if str(v).strip().isdigit() else 7,
+        "SCHEDULER_WORK_END_HOUR": lambda v: int(v) if str(v).strip().isdigit() else 18,
+        "SCHEDULER_DAILY_BUDGET": lambda v: int(v) if str(v).strip().isdigit() else 50,
+        "SCHEDULER_WORK_CAP_PCT": lambda v: int(v) if str(v).strip().isdigit() else 25,
+        "SCHEDULER_WORK_POLL_INTERVAL": lambda v: int(v) if str(v).strip().isdigit() else 600,
     }
 
 
@@ -4056,6 +4158,8 @@ async def save_settings(request: Request):
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
     config_data["skip_review"] = data.get("skip_review") == "on"
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
+    config_data["SCHEDULER_ENABLED"] = data.get("SCHEDULER_ENABLED") == "on"
+    config_data["SCHEDULER_WEEKEND_FULL"] = data.get("SCHEDULER_WEEKEND_FULL") == "on"
 
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:

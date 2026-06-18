@@ -707,11 +707,11 @@
                                 </label>
                             </div>
                             <div class="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
-                                <div class="grid grid-cols-2 gap-2">
+                                <div class="grid grid-cols-3 gap-x-4 gap-y-1">
                                     {% for label in available_labels %}
-                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982]">
-                                        <input type="checkbox" name="monitored_labels" value="{{ label }}" {{ 'checked' if label in settings.monitored_labels else '' }} class="w-3 h-3 text-[#01A982]">
-                                        {{ label }}
+                                    <label class="flex items-center gap-1.5 text-xs cursor-pointer hover:text-[#01A982] truncate">
+                                        <input type="checkbox" name="monitored_labels" value="{{ label }}" {{ 'checked' if label in settings.monitored_labels else '' }} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                        <span class="truncate">{{ label }}</span>
                                     </label>
                                     {% endfor %}
                                 </div>
@@ -792,6 +792,89 @@
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub Log Max Chars (LLM scrub)</label>
                                 <input type="number" name="LLM_LOG_MAX_CHARS" value="{{ settings.LLM_LOG_MAX_CHARS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Scheduler -->
+                    <section>
+                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                            <i class="fas fa-clock text-[#01A982]"></i>
+                            <h3 class="font-bold text-slate-700">Scheduler</h3>
+                        </div>
+
+                        <!-- Live status widget -->
+                        <div id="sched-status-box" class="mb-4 p-3 rounded-lg border bg-slate-50 border-slate-200 flex items-center gap-3 text-xs">
+                            <span id="sched-mode-dot" class="w-2.5 h-2.5 rounded-full bg-slate-300 flex-shrink-0"></span>
+                            <div class="flex-1 min-w-0">
+                                <span id="sched-mode-label" class="font-bold text-slate-500">Loading…</span>
+                                <span id="sched-reason" class="text-slate-400 ml-2"></span>
+                            </div>
+                            <div id="sched-usage-wrap" class="hidden flex items-center gap-2">
+                                <div class="w-24 h-2 bg-slate-200 rounded-full overflow-hidden">
+                                    <div id="sched-usage-bar" class="h-full rounded-full bg-[#01A982] transition-all" style="width:0%"></div>
+                                </div>
+                                <span id="sched-usage-text" class="text-slate-500 whitespace-nowrap"></span>
+                            </div>
+                            <button type="button" onclick="refreshSchedStatus()" class="text-[10px] text-slate-400 hover:text-slate-600 flex-shrink-0">↻</button>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <!-- Enable + booleans -->
+                            <div class="space-y-3">
+                                <label class="flex items-center gap-3 cursor-pointer">
+                                    <input type="checkbox" name="SCHEDULER_ENABLED" {{ 'checked' if settings.get('SCHEDULER_ENABLED') else '' }} class="w-4 h-4 text-[#01A982] rounded">
+                                    <div>
+                                        <p class="text-sm font-medium text-slate-700">Enable Scheduler</p>
+                                        <p class="text-xs text-slate-400">Enforce work-hours cap and daily budget</p>
+                                    </div>
+                                </label>
+                                <label class="flex items-center gap-3 cursor-pointer">
+                                    <input type="checkbox" name="SCHEDULER_WEEKEND_FULL" {{ 'checked' if settings.get('SCHEDULER_WEEKEND_FULL', True) else '' }} class="w-4 h-4 text-[#01A982] rounded">
+                                    <div>
+                                        <p class="text-sm font-medium text-slate-700">Full Speed on Weekends</p>
+                                        <p class="text-xs text-slate-400">Ignore work-hours cap Sat &amp; Sun</p>
+                                    </div>
+                                </label>
+                            </div>
+
+                            <!-- Work hours -->
+                            <div class="space-y-2">
+                                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Work Hours (24h)</p>
+                                <div class="flex items-center gap-2">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-slate-500 mb-1 block">Start Hour</label>
+                                        <input type="number" name="SCHEDULER_WORK_START_HOUR" min="0" max="23" value="{{ settings.get('SCHEDULER_WORK_START_HOUR', 7) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                    </div>
+                                    <span class="text-slate-400 mt-4">→</span>
+                                    <div class="flex-1">
+                                        <label class="text-xs text-slate-500 mb-1 block">End Hour</label>
+                                        <input type="number" name="SCHEDULER_WORK_END_HOUR" min="0" max="23" value="{{ settings.get('SCHEDULER_WORK_END_HOUR', 18) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                    </div>
+                                </div>
+                                <p class="text-[10px] text-slate-400">e.g. 7 → 18 means 7 AM to 6 PM</p>
+                            </div>
+
+                            <!-- Budget -->
+                            <div class="space-y-2">
+                                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Daily Budget</p>
+                                <div class="space-y-1">
+                                    <label class="text-xs text-slate-500">Max issues fixed per day (all hours)</label>
+                                    <input type="number" name="SCHEDULER_DAILY_BUDGET" min="1" value="{{ settings.get('SCHEDULER_DAILY_BUDGET', 50) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                </div>
+                                <div class="space-y-1">
+                                    <label class="text-xs text-slate-500">Work-hours cap (% of daily budget)</label>
+                                    <input type="number" name="SCHEDULER_WORK_CAP_PCT" min="1" max="100" value="{{ settings.get('SCHEDULER_WORK_CAP_PCT', 25) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                    <p class="text-[10px] text-slate-400">25% of 50 = 12 fixes before BugFixer goes quiet during work hours</p>
+                                </div>
+                            </div>
+
+                            <!-- Work-hours poll interval -->
+                            <div class="space-y-2">
+                                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Work-Hours Poll Interval</p>
+                                <label class="text-xs text-slate-500">Seconds between scans during work hours</label>
+                                <input type="number" name="SCHEDULER_WORK_POLL_INTERVAL" min="60" value="{{ settings.get('SCHEDULER_WORK_POLL_INTERVAL', 600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <p class="text-[10px] text-slate-400">Default 600s (10 min). After hours uses the main Poll Interval setting.</p>
                             </div>
                         </div>
                     </section>
@@ -1204,6 +1287,50 @@
                 urlDiv.classList.add('hidden');
             }
         }
+
+        async function refreshSchedStatus() {
+            const box = document.getElementById('sched-status-box');
+            const dot = document.getElementById('sched-mode-dot');
+            const label = document.getElementById('sched-mode-label');
+            const reason = document.getElementById('sched-reason');
+            const wrap = document.getElementById('sched-usage-wrap');
+            const bar = document.getElementById('sched-usage-bar');
+            const txt = document.getElementById('sched-usage-text');
+            if (!box) return;
+            try {
+                const d = await fetch('/api/scheduler/status').then(r => r.json());
+                const colors = {
+                    full: ['bg-green-500', 'text-green-700', '● Full speed'],
+                    restricted: ['bg-yellow-400', 'text-yellow-700', '● Work-hours restricted'],
+                    paused_work_cap: ['bg-orange-400', 'text-orange-700', '● Work-hours cap reached'],
+                    paused_budget: ['bg-red-500', 'text-red-700', '● Daily budget reached'],
+                };
+                const [dotCls, lblCls, lblTxt] = colors[d.mode] || ['bg-slate-300', 'text-slate-500', d.mode];
+                dot.className = 'w-2.5 h-2.5 rounded-full flex-shrink-0 ' + dotCls;
+                label.textContent = lblTxt;
+                label.className = 'font-bold ' + lblCls;
+                reason.textContent = d.mode === 'full' ? '' : d.reason || '';
+                if (d.daily_budget > 0) {
+                    wrap.classList.remove('hidden');
+                    const pct = Math.min(100, Math.round(d.daily_used / d.daily_cap * 100));
+                    bar.style.width = pct + '%';
+                    bar.className = 'h-full rounded-full transition-all ' + (pct >= 100 ? 'bg-red-500' : pct >= 75 ? 'bg-orange-400' : 'bg-[#01A982]');
+                    txt.textContent = d.daily_used + ' / ' + d.daily_cap + ' fixes';
+                } else {
+                    wrap.classList.add('hidden');
+                    label.textContent = 'Scheduler disabled';
+                    label.className = 'font-bold text-slate-400';
+                    dot.className = 'w-2.5 h-2.5 rounded-full flex-shrink-0 bg-slate-300';
+                    reason.textContent = '';
+                }
+            } catch(e) {
+                label.textContent = 'Error loading status';
+                label.className = 'font-bold text-red-500';
+            }
+        }
+
+        // Load scheduler status on page load if on settings view.
+        if (document.getElementById('sched-status-box')) refreshSchedStatus();
 
         async function checkClaudeStatus() {
             _showClaudeCliResult('Checking…', 'text-slate-500', '', []);
