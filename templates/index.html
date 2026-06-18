@@ -651,6 +651,10 @@
                                 <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max Issues Per Cycle <span class="text-slate-400 font-normal">(per repo — rest defer to next scan)</span></label>
+                                <input type="number" name="MAX_ISSUES_PER_CYCLE" value="{{ settings.MAX_ISSUES_PER_CYCLE }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Prod Verification Days</label>
                                 <input type="number" name="PROD_VERIFICATION_DAYS" value="{{ settings.PROD_VERIFICATION_DAYS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>

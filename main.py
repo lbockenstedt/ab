@@ -743,7 +743,6 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
 
             if resp.status_code == 429:
                 wait_time = _parse_retry_after(resp.headers.get("Retry-After"), backoff_base, backoff_max, attempt)
-                _llm_cb_trip(wait_time, f"429 attempt {attempt+1}/{max_retries+1}")
                 if is_last:
                     logger.error(f"LLM 429 at {endpoint} after {max_retries+1} attempts.")
                     resp.close()
@@ -3091,7 +3090,16 @@ def scan_repo_issues(gh_current, config, processed):
                             f"Will retry on next scan cycle."
                         )
                     else:
-                        logger.info(f"Found {len(to_fix)} issues to fix in {repo_name}. Processing concurrently (max {max_workers})...")
+                        max_per_cycle = int(config.get("MAX_ISSUES_PER_CYCLE") or 15)
+                        deferred = len(to_fix) - max_per_cycle
+                        if deferred > 0:
+                            logger.info(
+                                f"Found {len(to_fix)} issues in {repo_name} — processing first {max_per_cycle} "
+                                f"this cycle, {deferred} deferred to next cycle (MAX_ISSUES_PER_CYCLE={max_per_cycle})."
+                            )
+                            to_fix = to_fix[:max_per_cycle]
+                        else:
+                            logger.info(f"Found {len(to_fix)} issues to fix in {repo_name}. Processing concurrently (max {max_workers})...")
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(process_single_issue, r, n) for r, n in to_fix]
                             for future in futures:
@@ -3758,6 +3766,7 @@ DEFAULT_ENV = {
     "LLM_BACKOFF_MAX": "600.0",
     "LLM_MAX_CONCURRENT": "1",
     "PROD_VERIFICATION_DAYS": "7",
+    "MAX_ISSUES_PER_CYCLE": "15",
 }
 
 @app.get("/settings")
@@ -3873,6 +3882,7 @@ async def save_settings(request: Request):
         "LLM_BACKOFF_MAX": lambda v: v,
         "LLM_MAX_CONCURRENT": lambda v: v,
         "PROD_VERIFICATION_DAYS": lambda v: v,
+        "MAX_ISSUES_PER_CYCLE": lambda v: v,
         "self_diagnosis_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
         "module_repo_map": lambda v: parse_module_repo_map(v),
         # Chat-agent numeric settings (stored as strings by the form; coerce to int).
