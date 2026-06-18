@@ -20,7 +20,6 @@ from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.exceptions import RequestValidationError
 from github import Github, GithubException
-import ollama
 import git
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -79,7 +78,7 @@ CHAT_CONFIG_DEFAULTS = {
 }
 
 class QueueLocalException(Exception):
-    """Raised when a task should be deferred to the local LLM's allowed window."""
+    """Kept for backward compatibility with persisted 'awaiting_local' issue states."""
     pass
 
 def save_config(config):
@@ -200,108 +199,210 @@ def get_version():
         with open(VERSION_FILE, "r") as f: return f.read().strip()
     except: return "Unknown"
 
-def is_cloud_url(url):
-    """Checks if a given URL is a managed cloud Ollama instance."""
-    return ("ollama.com" in url) and ("local" not in url)
+# ============================================================================
+# Multi-Provider LLM Routing
+# ============================================================================
+
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com"
+ANTHROPIC_API_VERSION = "2023-06-01"
+
+
+def _get_provider_config(n, config):
+    """Return (provider, api_key, model, base_url) for provider slot n (1 or 2)."""
+    provider = (config.get(f"LLM_PROVIDER_{n}") or os.getenv(f"LLM_PROVIDER_{n}", "openai")).lower().strip()
+    api_key = (config.get(f"LLM_API_KEY_{n}") or os.getenv(f"LLM_API_KEY_{n}", "")).strip()
+    model = (config.get(f"LLM_MODEL_{n}") or os.getenv(f"LLM_MODEL_{n}", "")).strip()
+    base_url = (config.get(f"LLM_BASE_URL_{n}") or os.getenv(f"LLM_BASE_URL_{n}", "")).strip()
+    return provider, api_key, model, base_url
+
+
+def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
+    """Parse a Retry-After header into a wait time in seconds."""
+    if retry_after_header:
+        try:
+            return min(float(retry_after_header), backoff_max)
+        except ValueError:
+            try:
+                from email.utils import parsedate_to_datetime
+                retry_date = parsedate_to_datetime(retry_after_header)
+                if retry_date:
+                    wait = retry_date.timestamp() - datetime.now().timestamp()
+                    return min(max(0, wait), backoff_max)
+            except Exception:
+                pass
+    return min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.0)
+
+
+def _tools_to_openai(tools):
+    """Convert Ollama-style tool list to OpenAI function-calling format."""
+    return [
+        {"type": "function", "function": {"name": t["name"], "description": t.get("description", ""), "parameters": t.get("parameters", {})}}
+        for t in (tools or [])
+    ]
+
+
+def _tools_to_anthropic(tools):
+    """Convert Ollama-style tool list to Anthropic tool format."""
+    return [
+        {"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("parameters", {"type": "object", "properties": {}, "required": []})}
+        for t in (tools or [])
+    ]
+
+
+def _to_openai_messages(messages):
+    """Adapt internal messages for the OpenAI API (normalises tool roles and tool_calls)."""
+    result = []
+    for m in messages:
+        role = m.get("role")
+        if role == "tool":
+            result.append({
+                "role": "tool",
+                "tool_call_id": m.get("tool_call_id") or m.get("name") or "unknown",
+                "content": m.get("content") or "",
+            })
+        elif role == "assistant" and m.get("tool_calls"):
+            tcs = []
+            for idx, tc in enumerate(m["tool_calls"]):
+                fn = tc.get("function") or {}
+                args = fn.get("arguments") or {}
+                if isinstance(args, dict):
+                    args = json.dumps(args)
+                tcs.append({
+                    "id": tc.get("id") or f"call_{fn.get('name', 'unknown')}_{idx}",
+                    "type": "function",
+                    "function": {"name": fn.get("name") or "", "arguments": args},
+                })
+            result.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": tcs})
+        else:
+            result.append({"role": role, "content": m.get("content") or ""})
+    return result
+
+
+def _to_anthropic_messages(messages):
+    """Convert internal messages to Anthropic format. Returns (system_str, messages_list)."""
+    system = ""
+    converted = []
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        role = m.get("role")
+        if role == "system":
+            system += ("\n" if system else "") + (m.get("content") or "")
+            i += 1
+            continue
+        if role == "assistant":
+            content = m.get("content") or ""
+            tcs = m.get("tool_calls") or []
+            if tcs:
+                parts = []
+                if content:
+                    parts.append({"type": "text", "text": content})
+                for tc in tcs:
+                    fn = tc.get("function") or {}
+                    args = fn.get("arguments") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {}
+                    parts.append({
+                        "type": "tool_use",
+                        "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:8]}",
+                        "name": fn.get("name") or "",
+                        "input": args,
+                    })
+                converted.append({"role": "assistant", "content": parts})
+            else:
+                converted.append({"role": "assistant", "content": content})
+            i += 1
+        elif role == "tool":
+            tool_results = []
+            while i < len(messages) and messages[i].get("role") == "tool":
+                tm = messages[i]
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tm.get("tool_call_id") or tm.get("name") or "unknown",
+                    "content": tm.get("content") or "",
+                })
+                i += 1
+            if converted and converted[-1].get("role") == "user" and isinstance(converted[-1].get("content"), list):
+                converted[-1]["content"].extend(tool_results)
+            else:
+                converted.append({"role": "user", "content": tool_results})
+        else:
+            converted.append({"role": role, "content": m.get("content") or ""})
+            i += 1
+    return system, converted
+
+
+def _to_google_contents(messages):
+    """Convert internal messages to Google Gemini contents format. Returns (system_text, contents)."""
+    system_text = ""
+    contents = []
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            system_text += ("\n" if system_text else "") + (m.get("content") or "")
+            continue
+        if role == "assistant":
+            tcs = m.get("tool_calls") or []
+            if tcs:
+                parts = []
+                if m.get("content"):
+                    parts.append({"text": m["content"]})
+                for tc in tcs:
+                    fn = tc.get("function") or {}
+                    args = fn.get("arguments") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {}
+                    parts.append({"functionCall": {"name": fn.get("name") or "", "args": args}})
+                contents.append({"role": "model", "parts": parts})
+            else:
+                contents.append({"role": "model", "parts": [{"text": m.get("content") or ""}]})
+        elif role == "tool":
+            contents.append({"role": "user", "parts": [{"functionResponse": {
+                "name": m.get("name") or m.get("tool_call_id") or "unknown",
+                "response": {"content": m.get("content") or ""},
+            }}]})
+        elif role == "user":
+            contents.append({"role": "user", "parts": [{"text": m.get("content") or ""}]})
+    return system_text, contents
 
 
 def validate_llm_config_on_startup():
-    """Validates LLM configuration on startup and provides clear, actionable guidance."""
+    """Validates that at least one LLM provider is fully configured."""
     config = load_config()
-    c_url = (config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL") or "").strip()
-    api_key = (config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY") or "").strip().strip('"').strip("'")
-
-    if not c_url:
-        logger.info("Startup LLM validation: No cloud Ollama URL configured. Skipping API key check.")
-        return True
-
-    is_cloud_host = ("ollama.com" in c_url) or ("api.ollama" in c_url)
-
-    if is_cloud_host and not api_key:
-        logger.error(
+    ok = False
+    for n in (1, 2):
+        provider, api_key, model, _ = _get_provider_config(n, config)
+        if api_key and model:
+            logger.info(f"LLM Provider {n}: provider={provider!r} model={model!r} — configured.")
+            ok = True
+        else:
+            logger.info(f"LLM Provider {n}: not fully configured (provider={provider!r} model={model!r} key_set={bool(api_key)}).")
+    if not ok:
+        logger.warning(
             "\n" + "=" * 78 + "\n"
-            "!!  CRITICAL LLM CONFIGURATION WARNING  !!\n"
-            "A Cloud Ollama URL is configured but OLLAMA_API_KEY is MISSING or EMPTY.\n"
-            f"  Cloud URL : {c_url}\n"
-            "Every cloud LLM request will fail with HTTP 401 Unauthorized.\n\n"
+            "!!  LLM CONFIGURATION WARNING  !!\n"
+            "Neither LLM provider is fully configured.\n"
             "HOW TO FIX:\n"
             "  1. Open the BugFixer dashboard: http://localhost:8000/settings\n"
-            "  2. Enter your OLLAMA_API_KEY in the Settings form and click Save, OR\n"
-            "  3. Manually add this line to /etc/bugfixer/.env :\n"
-            "       OLLAMA_API_KEY=<your-secret-key>\n"
-            "  4. Restart the service: sudo systemctl restart bugfixer\n"
+            "  2. Set LLM_PROVIDER_1, LLM_API_KEY_1, and LLM_MODEL_1\n"
+            "  3. Optionally set LLM_PROVIDER_2, LLM_API_KEY_2, LLM_MODEL_2 for failover.\n"
             + "=" * 78
         )
-        return False
-
-    if is_cloud_host:
-        try:
-            token_only = api_key.replace("Bearer ", "").strip()
-            headers = {"Authorization": f"Bearer {token_only}"}
-            test_resp = requests.get(f"{c_url.rstrip('/')}/api/tags", headers=headers, timeout=15)
-            if test_resp.status_code == 401:
-                logger.error(
-                    "\n" + "=" * 78 + "\n"
-                    "!!  CRITICAL LLM CONFIGURATION WARNING  !!\n"
-                    "OLLAMA_API_KEY is set but the Cloud Ollama API rejected it (401 Unauthorized).\n"
-                    f"  Cloud URL : {c_url}\n"
-                    "The key may be expired, revoked, or pasted incorrectly.\n\n"
-                    "HOW TO FIX:\n"
-                    "  1. Verify the key is correct and still active in your Ollama account.\n"
-                    "  2. Update it via http://localhost:8000/settings, OR\n"
-                    "  3. Edit /etc/bugfixer/.env and restart: sudo systemctl restart bugfixer\n"
-                    + "=" * 78
-                )
-                return False
-            elif test_resp.status_code == 200:
-                logger.info("Startup LLM validation: Cloud OLLAMA_API_KEY is valid and reachable.")
-                return True
-            else:
-                logger.warning(
-                    f"Startup LLM validation: Cloud returned unexpected status "
-                    f"{test_resp.status_code}. Proceeding, but watch the logs."
-                )
-                return True
-        except requests.exceptions.ConnectionError:
-            logger.warning(
-                f"Startup LLM validation: Could not reach cloud URL {c_url} (connection error). "
-                f"The key will be validated on the first real LLM request."
-            )
-            return True
-        except Exception as e:
-            logger.warning(
-                f"Startup LLM validation: Skipping live key check due to error: {e}. "
-                f"The key will be validated on the first real LLM request."
-            )
-            return True
-
-    logger.info(f"Startup LLM validation: Cloud URL '{c_url}' is not a managed cloud host; skipping API key check.")
-    return True
+    return ok
 
 load_dotenv(ENV_FILE)
 app = FastAPI()
 
 template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
-
-def is_local_llm_allowed():
-    """Checks if the local LLM is allowed to be used based on the configured schedule."""
-    config = load_config()
-    schedule_str = config.get("LOCAL_LLM_SCHEDULE") or os.getenv("LOCAL_LLM_SCHEDULE", "9-16,1-5")
-
-    try:
-        now = datetime.now().hour
-        ranges = schedule_str.split(',')
-        for r in ranges:
-            if '-' in r:
-                start, end = map(int, r.split('-'))
-                if start <= now < end:
-                    return True
-    except Exception as e:
-        logger.error(f"Error parsing LLM schedule '{schedule_str}': {e}")
-        if (9 <= now < 16) or (1 <= now < 5):
-            return True
-    return False
 
 # ============================================================================
 # LLM Circuit Breaker & Global Rate Limiter
@@ -386,352 +487,333 @@ def _get_llm_semaphore():
             logger.info(f"LLM global concurrency limiter initialised: max_concurrent={max(1, max_conc)}")
         return _LLM_SEMAPHORE
 
+def _llm_retry_post(endpoint, payload, headers, config, stream=False):
+    """POST to endpoint with retry/backoff. Returns the response object on success."""
+    max_retries = int(config.get("LLM_MAX_RETRIES", 5))
+    backoff_base = float(config.get("LLM_BACKOFF_BASE", 2.0))
+    backoff_max = float(config.get("LLM_BACKOFF_MAX", 60.0))
+    timeout_val = int(config.get("LLM_TIMEOUT", 900))
+
+    last_exception = None
+    for attempt in range(max_retries + 1):
+        is_last = attempt == max_retries
+        _llm_cb_wait()
+        try:
+            sem = _get_llm_semaphore()
+            sem.acquire()
+            try:
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout_val, stream=stream)
+            finally:
+                sem.release()
+
+            if resp.status_code == 429:
+                wait_time = _parse_retry_after(resp.headers.get("Retry-After"), backoff_base, backoff_max, attempt)
+                _llm_cb_trip(wait_time, f"429 attempt {attempt+1}/{max_retries+1}")
+                if is_last:
+                    logger.error(f"LLM 429 at {endpoint} after {max_retries+1} attempts.")
+                    resp.close()
+                    resp.raise_for_status()
+                logger.warning(f"LLM 429 at {endpoint}. Backing off {wait_time:.1f}s (attempt {attempt+1}/{max_retries+1}).")
+                resp.close()
+                time.sleep(wait_time)
+                continue
+
+            if resp.status_code == 401:
+                logger.error(f"LLM 401 Unauthorized at {endpoint}. Check API key in settings.")
+                resp.raise_for_status()
+
+            if resp.status_code == 400:
+                err_body = ""
+                try:
+                    err_body = resp.text[:1000]
+                except Exception:
+                    pass
+                logger.error(f"LLM 400 Bad Request at {endpoint}. Body: {err_body!r}")
+                resp.close()
+                resp.raise_for_status()
+
+            if 500 <= resp.status_code < 600:
+                wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
+                _llm_cb_trip(wait_time, f"{resp.status_code} attempt {attempt+1}/{max_retries+1}")
+                err_body = ""
+                try:
+                    err_body = resp.text[:1000]
+                except Exception:
+                    pass
+                if is_last:
+                    logger.error(f"LLM {resp.status_code} at {endpoint} after {max_retries+1} attempts. body={err_body!r}")
+                    resp.close()
+                    resp.raise_for_status()
+                logger.warning(f"LLM {resp.status_code} at {endpoint}. Backing off {wait_time:.1f}s. body={err_body!r}")
+                resp.close()
+                time.sleep(wait_time)
+                continue
+
+            resp.raise_for_status()
+            _llm_cb_reset()
+            return resp
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if not is_last and status and (status == 429 or 500 <= status < 600):
+                wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
+                _llm_cb_trip(wait_time, f"HTTPError {status}")
+                logger.warning(f"LLM HTTPError {status} at {endpoint}. Backing off {wait_time:.1f}s.")
+                last_exception = e
+                time.sleep(wait_time)
+                continue
+            raise
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
+            last_exception = e
+            if not is_last:
+                wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
+                _llm_cb_trip(wait_time, f"transient {type(e).__name__}")
+                logger.warning(f"LLM transient error at {endpoint} (attempt {attempt+1}): {e}. Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                continue
+            raise
+        except Exception as e:
+            last_exception = e
+            if not is_last:
+                wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
+                logger.warning(f"LLM error at {endpoint} (attempt {attempt+1}): {e}. Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                continue
+            raise
+
+    if last_exception:
+        raise last_exception
+    raise Exception(f"LLM request to {endpoint} exhausted all {max_retries+1} attempts")
+
+
+def _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+    """Call an OpenAI-compatible endpoint. Returns text string or tool-call dict."""
+    base = (base_url or OPENAI_BASE_URL).rstrip("/")
+    endpoint = f"{base}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    msgs = _to_openai_messages(messages)
+    use_stream = False if tools else effective_stream
+    payload = {"model": model, "messages": msgs, "stream": use_stream}
+    if tools:
+        payload["tools"] = _tools_to_openai(tools)
+
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream)
+
+    if tools:
+        data = resp.json()
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        text = msg.get("content") or ""
+        raw_tcs = msg.get("tool_calls") or None
+        tool_calls = None
+        if raw_tcs:
+            tool_calls = [
+                {"id": tc.get("id") or f"call_{i}", "function": {
+                    "name": (tc.get("function") or {}).get("name") or "",
+                    "arguments": (tc.get("function") or {}).get("arguments") or "{}",
+                }}
+                for i, tc in enumerate(raw_tcs)
+            ]
+        return {"text": text, "tool_calls": tool_calls}
+
+    full_response = ""
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        line = line.decode("utf-8") if isinstance(line, bytes) else line
+        if line.startswith("data: "):
+            line = line[6:]
+        if line.strip() == "[DONE]":
+            break
+        try:
+            chunk = json.loads(line)
+            for ch in chunk.get("choices", []):
+                full_response += (ch.get("delta") or {}).get("content") or ""
+            state["llm_stream"] = full_response
+            if task_id and task_id in state.get("active_tasks", {}):
+                state["active_tasks"][task_id]["stream"] = full_response
+        except json.JSONDecodeError:
+            pass
+    return full_response
+
+
+def _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+    """Call the Anthropic Messages API. Returns text string or tool-call dict."""
+    base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
+    endpoint = f"{base}/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key or "",
+        "anthropic-version": ANTHROPIC_API_VERSION,
+    }
+
+    system, msgs = _to_anthropic_messages(messages)
+    use_stream = False if tools else effective_stream
+    payload = {"model": model, "messages": msgs, "max_tokens": 8192, "stream": use_stream}
+    if system:
+        payload["system"] = system
+    if tools:
+        payload["tools"] = _tools_to_anthropic(tools)
+
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream)
+
+    if tools or not use_stream:
+        data = resp.json()
+        content_blocks = data.get("content") or []
+        text = ""
+        tool_calls = []
+        for block in content_blocks:
+            if block.get("type") == "text":
+                text += block.get("text") or ""
+            elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": block.get("id") or f"toolu_{uuid.uuid4().hex[:8]}",
+                    "function": {"name": block.get("name") or "", "arguments": block.get("input") or {}},
+                })
+        if tools:
+            return {"text": text, "tool_calls": tool_calls or None}
+        state["llm_stream"] = text
+        if task_id and task_id in state.get("active_tasks", {}):
+            state["active_tasks"][task_id]["stream"] = text
+        return text
+
+    full_response = ""
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        line = line.decode("utf-8") if isinstance(line, bytes) else line
+        if not line.startswith("data: "):
+            continue
+        try:
+            chunk = json.loads(line[6:])
+            full_response += (chunk.get("delta") or {}).get("text") or ""
+            state["llm_stream"] = full_response
+            if task_id and task_id in state.get("active_tasks", {}):
+                state["active_tasks"][task_id]["stream"] = full_response
+        except json.JSONDecodeError:
+            pass
+    return full_response
+
+
+def _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+    """Call the Google Gemini API. Returns text string or tool-call dict."""
+    if not model:
+        model = "gemini-1.5-pro"
+    base = (base_url or GOOGLE_BASE_URL).rstrip("/")
+    endpoint = f"{base}/v1beta/models/{model}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+
+    system_text, contents = _to_google_contents(messages)
+    payload = {"contents": contents}
+    if system_text:
+        payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+    if tools:
+        payload["tools"] = [{"function_declarations": [
+            {"name": t["name"], "description": t.get("description", ""), "parameters": t.get("parameters", {})}
+            for t in tools
+        ]}]
+
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=False)
+    data = resp.json()
+    candidates = data.get("candidates") or []
+    parts = ((candidates[0].get("content") or {}) if candidates else {}).get("parts") or []
+
+    text = ""
+    tool_calls = []
+    for part in parts:
+        if "text" in part:
+            text += part["text"]
+        elif "functionCall" in part:
+            fc = part["functionCall"]
+            tool_calls.append({
+                "id": f"call_{fc.get('name', 'fn')}_{uuid.uuid4().hex[:8]}",
+                "function": {"name": fc.get("name") or "", "arguments": fc.get("args") or {}},
+            })
+
+    state["llm_stream"] = text
+    if task_id and task_id in state.get("active_tasks", {}):
+        state["active_tasks"][task_id]["stream"] = text
+
+    if tools:
+        return {"text": text, "tool_calls": tool_calls or None}
+    return text
+
+
+def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+    """Dispatch to the correct provider implementation."""
+    p = (provider or "openai").lower().strip()
+    if p == "anthropic":
+        return _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+    if p == "google":
+        return _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+    return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+
+
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None):
-    """Generic LLM caller with Local -> Cloud failover and JSON extraction. Now supports per-task streaming.
+    """Generic LLM caller with Provider-1 → Provider-2 failover and cross-provider checking.
+
+    Provider 1 is tried first; on failure Provider 2 is the automatic fallback.
+    force_cloud=True routes directly to Provider 2 (the secondary provider).
+    force_cloud=False routes to Provider 1 only (no fallback to Provider 2).
 
     If `messages` is provided (a list of {role, content} dicts), the call is
-    multi-turn: the local /api/chat path passes them through directly, and the
-    cloud /api/generate path flattens them into a transcript prompt string. When
-    `messages` is given, `prompt` and `system_prompt` are ignored.
+    multi-turn and `prompt`/`system_prompt` are ignored.
 
-    Tool-calling (chat agent): when `tools` (a list of Ollama tool-schema dicts) is
-    provided, the call is forced to /api/chat for BOTH local and cloud (never
-    /api/generate, which has no tool support), the `tools` field is included in the
-    payload, the request is made non-streaming so `message.tool_calls` parses
-    cleanly, and a structured dict {"text": str, "tool_calls": list|None} is
-    returned instead of a bare string. `stream` overrides the streaming flag
-    (default True for legacy callers). Existing callers pass no `tools`/`stream`
-    and are byte-identical to prior behavior.
+    Tool-calling: when `tools` is provided the function returns
+    {"text": str, "tool_calls": list|None} instead of a bare string.
     """
     global state
     config = load_config()
-    l_mod = model_override if model_override else (config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL"))
-    c_mod = model_override if model_override else (config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL"))
-    l_url = url_override if url_override else (config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL"))
-    c_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
-    api_key = config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
+    p1_provider, p1_key, p1_model, p1_url = _get_provider_config(1, config)
+    p2_provider, p2_key, p2_model, p2_url = _get_provider_config(2, config)
 
-    def _request(url, model):
-        if "api.ollama.com" in url:
-            logger.warning(f"Detected potentially incorrect Cloud LLM URL: {url}. Official Ollama Cloud host is 'https://ollama.com'. Please check your settings.")
+    if model_override:
+        p1_model = model_override
+        p2_model = model_override
+    if url_override:
+        p1_url = url_override
+        p2_url = url_override
 
-        is_cloud = is_cloud_url(url)
+    effective_stream = True if stream is None else bool(stream)
 
-        is_cloud = is_cloud_url(url)
-        primary_endpoint = url.rstrip('/')
+    if messages is None:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
 
-        if tools is not None:
-            # Tool-calling REQUIRES /api/chat. If the user provided a base URL
-            # or /api/generate, we force it to /api/chat.
-            if not primary_endpoint.endswith('/api/chat'):
-                base = primary_endpoint.split('/api/')[0] if '/api/' in primary_endpoint else primary_endpoint
-                primary_endpoint = f"{base}/api/chat"
-            primary_use_generate = False
-        else:
-            # Infer payload format from the URL provided in settings.
-            if "/api/generate" in primary_endpoint:
-                primary_use_generate = True
-            elif "/api/chat" in primary_endpoint:
-                primary_use_generate = False
-            else:
-                # Default fallback if the user provided a base URL without an endpoint.
-                primary_use_generate = is_cloud
-
-        # Effective streaming flag: legacy callers (stream is None) stream as
-        # before. Tool turns pass stream=False so the full JSON message (with
-        # tool_calls) is parsed in one shot.
-        effective_stream = True if stream is None else bool(stream)
-
-        timeout_val = int(load_config().get("LLM_TIMEOUT", 900))
-
-        def attempt_request(endpoint, use_generate_api, timeout=900):
-            if tools is not None:
-                # Tool-capable turn: always /api/chat with the messages array +
-                # tools schema. messages MUST be supplied by the caller (the chat
-                # agent loop always does). Honor effective_stream (False for tool
-                # turns so tool_calls parse cleanly).
-                payload = {
-                    "model": model,
-                    "messages": messages if messages is not None else [{"role": "user", "content": prompt}],
-                    "stream": effective_stream,
-                }
-                if tools:
-                    payload["tools"] = tools
-            elif messages is not None:
-                # Multi-turn conversation. Cloud /api/generate takes a single
-                # prompt, so flatten the message history into a transcript; local
-                # /api/chat takes the messages array natively.
-                if use_generate_api:
-                    flattened = "\n\n".join(
-                        f"{str(m.get('role', 'user')).capitalize()}: {m.get('content', '')}"
-                        for m in messages
-                    )
-                    payload = {"model": model, "prompt": flattened, "stream": effective_stream}
-                else:
-                    payload = {"model": model, "messages": messages, "stream": effective_stream}
-            elif use_generate_api:
-                full_prompt = f"System: {system_prompt}\n\nUser: {prompt}"
-                payload = {"model": model, "prompt": full_prompt, "stream": effective_stream}
-            else:
-                payload = {
-                    "model": model,
-                    "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-                    "stream": effective_stream
-                }
-
-            headers = {}
-            if api_key:
-                clean_key = api_key.strip().strip('"').strip("'")
-                token_only = clean_key.replace("Bearer ", "").strip()
-                headers["Authorization"] = f"Bearer {token_only}"
-
-            cfg = load_config()
-            max_retries = int(cfg.get("LLM_MAX_RETRIES", 5))
-            backoff_base = float(cfg.get("LLM_BACKOFF_BASE", 2.0))
-            backoff_max = float(cfg.get("LLM_BACKOFF_MAX", 60.0))
-
-            last_exception = None
-            for attempt_num in range(max_retries + 1):
-                is_last_attempt = (attempt_num == max_retries)
-
-                _llm_cb_wait()
-
-                try:
-                    sem = _get_llm_semaphore()
-                    sem.acquire()
-                    try:
-                        resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout, stream=effective_stream)
-                    finally:
-                        sem.release()
-
-                    if resp.status_code == 429:
-                        retry_after = resp.headers.get("Retry-After")
-                        wait_time = None
-                        if retry_after:
-                            try:
-                                wait_time = float(retry_after)
-                            except ValueError:
-                                try:
-                                    from email.utils import parsedate_to_datetime
-                                    retry_date = parsedate_to_datetime(retry_after)
-                                    if retry_date:
-                                        wait_time = retry_date.timestamp() - datetime.now().timestamp()
-                                except Exception:
-                                    wait_time = None
-
-                        if wait_time is None or wait_time < 0:
-                            raw_backoff = min(backoff_base ** attempt_num, backoff_max)
-                            wait_time = raw_backoff * random.uniform(0.5, 1.0)
-                        else:
-                            wait_time = min(wait_time, backoff_max)
-
-                        _llm_cb_trip(wait_time, f"429 attempt {attempt_num + 1}/{max_retries + 1}")
-
-                        if is_last_attempt:
-                            logger.error(
-                                f"LLM 429 Too Many Requests at {endpoint} "
-                                f"after {max_retries + 1} attempts (including initial). "
-                                f"Reporting as permanently failed."
-                            )
-                            resp.close()
-                            resp.raise_for_status()
-
-                        logger.warning(
-                            f"LLM 429 Too Many Requests at {endpoint}. "
-                            f"Backing off {wait_time:.1f}s before retry "
-                            f"(attempt {attempt_num + 1}/{max_retries + 1}). "
-                            f"Global circuit breaker tripped."
-                        )
-                        resp.close()
-                        time.sleep(wait_time)
-                        continue
-
-                    if resp.status_code == 401:
-                        key_state = "MISSING" if not api_key else f"set but INVALID (length={len(api_key)})"
-                        logger.error(
-                            f"LLM 401 Unauthorized at {endpoint}. "
-                            f"OLLAMA_API_KEY is {key_state}. "
-                            f"To fix: open http://localhost:8000/settings and set OLLAMA_API_KEY, "
-                            f"or add 'OLLAMA_API_KEY=<your-key>' to {ENV_FILE}, "
-                            f"then run: sudo systemctl restart bugfixer"
-                        )
-                        resp.raise_for_status()
-                    if resp.status_code == 400:
-                        err_body = ""
-                        try:
-                            err_body = resp.text or ""
-                        except Exception:
-                            err_body = "<unreadable body>"
-                        err_body = err_body.strip().replace("\n", " ")[:1000]
-                        logger.error(f"LLM 400 Bad Request at {endpoint}. Body: {err_body!r}")
-                        resp.close()
-                        resp.raise_for_status()
-
-                    if 500 <= resp.status_code < 600:
-                        raw_backoff = min(backoff_base ** attempt_num, backoff_max)
-                        wait_time = raw_backoff * random.uniform(0.5, 1.0)
-
-                        _llm_cb_trip(wait_time, f"{resp.status_code} attempt {attempt_num + 1}/{max_retries + 1}")
-
-                        # Capture the upstream error body so we can actually root-cause
-                        # 5xx failures (e.g. context-length exceeded, model not found,
-                        # account/quota errors). The body is not streamed for error
-                        # responses, so reading it here is cheap; we truncate to bound log size.
-                        err_body = ""
-                        try:
-                            err_body = resp.text or ""
-                        except Exception as be:
-                            err_body = f"<unreadable body: {be}>"
-                        err_body = err_body.strip().replace("\n", " ")[:1000]
-                        # full_prompt/prompt length helps distinguish a model-mismatch
-                        # failure from a prompt-size (context-overflow) failure.
-                        try:
-                            prompt_len = len(full_prompt) if use_generate_api else len(prompt)
-                        except Exception:
-                            prompt_len = -1
-
-                        if is_last_attempt:
-                            logger.error(
-                                f"LLM {resp.status_code} server error at {endpoint} "
-                                f"after {max_retries + 1} attempts. Reporting as permanently failed. "
-                                f"model={model!r} prompt_len={prompt_len} body={err_body!r}"
-                            )
-                            resp.close()
-                            resp.raise_for_status()
-                        logger.warning(
-                            f"LLM {resp.status_code} server error at {endpoint}. "
-                            f"Backing off {wait_time:.1f}s before retry "
-                            f"(attempt {attempt_num + 1}/{max_retries + 1}). "
-                            f"model={model!r} prompt_len={prompt_len} body={err_body!r}"
-                        )
-                        resp.close()
-                        time.sleep(wait_time)
-                        continue
-
-                    resp.raise_for_status()
-
-                    # --- Tool-capable turn: parse the full JSON message (non-streaming) ---
-                    # Ollama /api/chat returns {"message":{"role","content","tool_calls":[...]}}
-                    # in one JSON object when stream=false. tool_calls entries use
-                    # {"function":{"name":..,"arguments":<dict|str>}}. Return a structured
-                    # dict so the agent loop can dispatch. content may be empty when the
-                    # model emits only tool_calls.
-                    if tools is not None:
-                        try:
-                            data = resp.json()
-                        except Exception as je:
-                            # Non-JSON body on a tool turn (e.g. proxy error page): degrade
-                            # to an empty-text, no-tool-calls result so the agent loop ends.
-                            logger.warning(f"Tool-turn response was not JSON at {endpoint}: {je}")
-                            data = {}
-                        msg = (data.get("message") or {}) if isinstance(data, dict) else {}
-                        text = msg.get("content") or ""
-                        raw_tcs = msg.get("tool_calls") or None
-                        tool_calls = raw_tcs if isinstance(raw_tcs, list) and raw_tcs else None
-                        _llm_cb_reset()
-                        return {"text": text, "tool_calls": tool_calls}
-
-                    # --- Legacy streaming accumulation (unchanged) ---
-                    full_response = ""
-                    for line in resp.iter_lines():
-                        if line:
-                            chunk = json.loads(line.decode('utf-8'))
-                            content = chunk.get('response') or chunk.get('message', {}).get('content', '')
-                            full_response += content
-                            state["llm_stream"] = full_response
-                            if task_id and task_id in state["active_tasks"]:
-                                state["active_tasks"][task_id]["stream"] = full_response
-
-                    _llm_cb_reset()
-                    return full_response
-
-                except requests.exceptions.HTTPError as e:
-                    resp_status = e.response.status_code if e.response is not None else None
-                    if not is_last_attempt and resp_status is not None and (resp_status == 429 or 500 <= resp_status < 600):
-                        raw_backoff = min(backoff_base ** attempt_num, backoff_max)
-                        wait_time = raw_backoff * random.uniform(0.5, 1.0)
-                        _llm_cb_trip(wait_time, f"HTTPError {resp_status} attempt {attempt_num + 1}/{max_retries + 1}")
-                        logger.warning(
-                            f"LLM {resp_status} (via HTTPError) at {endpoint}. "
-                            f"Backing off {wait_time:.1f}s (attempt {attempt_num + 1}/{max_retries + 1})."
-                        )
-                        time.sleep(wait_time)
-                        continue
-                    raise
-                except (requests.exceptions.ConnectionError,
-                        requests.exceptions.Timeout,
-                        requests.exceptions.ChunkedEncodingError) as e:
-                    last_exception = e
-                    if not is_last_attempt:
-                        raw_backoff = min(backoff_base ** attempt_num, backoff_max)
-                        wait_time = raw_backoff * random.uniform(0.5, 1.0)
-                        _llm_cb_trip(wait_time, f"transient {type(e).__name__} attempt {attempt_num + 1}/{max_retries + 1}")
-                        logger.warning(
-                            f"LLM transient error (attempt {attempt_num + 1}/{max_retries + 1}) "
-                            f"at {endpoint}: {e}. Retrying in {wait_time:.1f}s..."
-                        )
-                        time.sleep(wait_time)
-                        continue
-                    raise
-                except Exception as e:
-                    last_exception = e
-                    if not is_last_attempt:
-                        raw_backoff = min(backoff_base ** attempt_num, backoff_max)
-                        wait_time = raw_backoff * random.uniform(0.5, 1.0)
-                        _llm_cb_trip(wait_time, f"error {type(e).__name__} attempt {attempt_num + 1}/{max_retries + 1}")
-                        logger.warning(
-                            f"LLM error (attempt {attempt_num + 1}/{max_retries + 1}) "
-                            f"at {endpoint}: {e}. Retrying in {wait_time:.1f}s..."
-                        )
-                        time.sleep(wait_time)
-                        continue
-                    raise
-
-            if last_exception:
-                raise last_exception
-            raise Exception(f"LLM request to {endpoint} exhausted all {max_retries + 1} attempts")
-
-        try:
-            return attempt_request(primary_endpoint, primary_use_generate, timeout=timeout_val)
-        except Exception as e:
-            # Never fall back to /api/generate on a tool turn — generate has no
-            # tool support, so retrying there would just fail differently. Let the
-            # caller (agent loop) catch and degrade to an index-only answer.
-            if not is_cloud and tools is None:
-                fallback_endpoint = f"{url.rstrip('/')}/api/generate"
-                if fallback_endpoint != primary_endpoint:
-                    logger.info(f"Local /api/chat failed ({e}). Attempting fallback to /api/generate...")
-                    try:
-                        return attempt_request(fallback_endpoint, True, timeout=timeout_val)
-                    except Exception as fe:
-                        logger.error(f"Local fallback to /api/generate also failed: {fe}")
-                        raise e
-            raise e
-
-    use_cloud = force_cloud if force_cloud is not None else state["force_cloud"]
-
-    if not use_cloud and not is_local_llm_allowed():
-        if config.get("queue_local_llm", False):
-            logger.info("Local LLM not allowed at this hour and 'Queue for Local LLM' is enabled. Signaling queue.")
-            raise QueueLocalException("Local LLM off-hours: queuing for later.")
-        logger.info("Local LLM not allowed at this hour. Forcing fallback to Cloud.")
-        use_cloud = True
+    use_p2_first = force_cloud if force_cloud is not None else state.get("force_cloud", False)
+    use_p1_only = (not use_p2_first) and state.get("force_local", False)
 
     try:
-        if use_cloud:
-            state["active_llm"] = f"Cloud ({c_url})"
-            return _request(c_url, c_mod)
-        try:
-            state["active_llm"] = f"Local ({l_url})"
-            return _request(l_url, l_mod)
-        except Exception as e:
-            logger.warning(f"Local LLM failed: {e}. Falling back to Cloud...")
-            state["active_llm"] = f"Cloud ({c_url})"
-            return _request(c_url, c_mod)
+        if use_p2_first:
+            if p2_key and p2_model:
+                state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
+                return _call_provider(p2_provider, p2_model, p2_key, p2_url, messages, tools, effective_stream, task_id, config)
+            logger.warning("Provider 2 requested but not configured; falling back to Provider 1.")
+
+        if p1_key and p1_model:
+            try:
+                state["active_llm"] = f"Provider 1 ({p1_provider}/{p1_model})"
+                return _call_provider(p1_provider, p1_model, p1_key, p1_url, messages, tools, effective_stream, task_id, config)
+            except Exception as e1:
+                if use_p1_only:
+                    logger.error(f"Provider 1 failed and force_local is set, no fallback: {e1}")
+                    raise
+                logger.warning(f"Provider 1 ({p1_provider}) failed: {e1}. Falling back to Provider 2...")
+
+        if p2_key and p2_model:
+            state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
+            return _call_provider(p2_provider, p2_model, p2_key, p2_url, messages, tools, effective_stream, task_id, config)
+
+        raise Exception("No LLM providers are configured. Set LLM_PROVIDER_1/LLM_API_KEY_1/LLM_MODEL_1 in settings.")
     except Exception as e:
         logger.error(f"LLM request failed after all attempts: {e}")
-        raise e
+        raise
 
 def run_sandboxed_command(command, cwd):
     """Executes a command in a Docker sandbox. Fails closed (returns an error result)
@@ -840,9 +922,14 @@ success_count = sum(1 for info in processed_init.values() if info.get("status") 
 failure_count = sum(1 for info in processed_init.values() if info.get("status") == "failed")
 
 state = {
-    "status": "Idle", "active_llm": "Unknown", "local_online": False, "cloud_online": False,
+    "status": "Idle", "active_llm": "Unknown",
+    "provider_1_online": False, "provider_2_online": False,
+    "local_online": False, "cloud_online": False,
     "last_run": "Never", "api_status": "Not Triggered",
-    "processed": processed_init, "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"), "version": get_version(), "llm_stream": "",
+    "processed": processed_init,
+    "force_cloud": config_on_start.get("force_cloud", os.getenv("FORCE_CLOUD", "False").lower() == "true"),
+    "force_local": config_on_start.get("force_local", os.getenv("FORCE_LOCAL", "False").lower() == "true"),
+    "version": get_version(), "llm_stream": "",
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
@@ -1614,94 +1701,81 @@ def analyze_logs_for_errors(logs):
         logger.error(f"Error analyzing logs: {e}")
         return []
 
+def _check_provider_online(n, config):
+    """Ping provider n and return True if reachable."""
+    provider, api_key, model, base_url = _get_provider_config(n, config)
+    if not api_key or not model:
+        return False
+    try:
+        p = (provider or "openai").lower().strip()
+        if p == "anthropic":
+            base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
+            url = f"{base}/models"
+            headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_API_VERSION}
+            resp = requests.get(url, headers=headers, timeout=10)
+        elif p == "google":
+            base = (base_url or GOOGLE_BASE_URL).rstrip("/")
+            url = f"{base}/v1beta/models?key={api_key}"
+            resp = requests.get(url, timeout=10)
+        else:
+            base = (base_url or OPENAI_BASE_URL).rstrip("/")
+            url = f"{base}/models"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 401:
+            logger.warning(f"Provider {n} ({provider}) connectivity check: 401 — API key invalid or missing.")
+            return False
+        if resp.status_code == 429:
+            _llm_cb_trip(60.0, f"connectivity-worker provider-{n} 429")
+            logger.warning(f"Provider {n} ({provider}) connectivity check: 429 — rate-limited.")
+            return False
+        return resp.status_code < 300
+    except Exception as e:
+        logger.debug(f"Provider {n} ({provider}) connectivity check error: {e}")
+        return False
+
+
 def connectivity_worker():
-    """Hourly check to verify both local and cloud LLM responses."""
+    """Periodic check to verify both cloud LLM providers are reachable."""
     while True:
         try:
             config = load_config()
-            l_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
-            c_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
-            l_mod = config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL")
-            c_mod = config.get("CLOUD_OLLAMA_MODEL") or os.getenv("CLOUD_OLLAMA_MODEL")
-            api_key = config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
-
-            if l_url:
-                try:
-                    payload = {"model": l_mod, "prompt": "ping", "stream": False}
-                    resp = requests.post(f"{l_url.rstrip('/')}/api/generate", json=payload, timeout=10)
-                    state["local_online"] = (resp.status_code == 200)
-                except:
-                    state["local_online"] = False
-
-            if c_url:
-                try:
-                    headers = {}
-                    if api_key:
-                        clean_key = api_key.strip().strip('"').strip("'")
-                        token_only = clean_key.replace("Bearer ", "").strip()
-                        headers["Authorization"] = f"Bearer {token_only}"
-                    payload = {"model": c_mod, "prompt": "ping", "stream": False}
-                    resp = requests.post(f"{c_url.rstrip('/')}/api/generate", json=payload, headers=headers, timeout=10)
-                    if resp.status_code == 401:
-                        state["cloud_online"] = False
-                        key_state = "MISSING" if not api_key else "INVALID (rejected by cloud)"
-                        logger.error(
-                            f"Hourly Cloud LLM connectivity check: 401 Unauthorized at {c_url}. "
-                            f"OLLAMA_API_KEY is {key_state}. "
-                            f"Fix at http://localhost:8000/settings or in {ENV_FILE}, "
-                            f"then restart: sudo systemctl restart bugfixer"
-                        )
-                    elif resp.status_code == 429:
-                        state["cloud_online"] = False
-                        _llm_cb_trip(60.0, "connectivity-worker 429")
-                        logger.warning(
-                            f"Hourly Cloud LLM connectivity check: 429 at {c_url}. "
-                            f"Tripping circuit breaker for 60s."
-                        )
-                    else:
-                        state["cloud_online"] = (resp.status_code == 200)
-                except Exception as e:
-                    state["cloud_online"] = False
-                    logger.debug(f"Cloud connectivity check error: {e}")
-
-            logger.info(f"Hourly Connectivity Check: Local={state['local_online']}, Cloud={state['cloud_online']}")
+            p1_online = _check_provider_online(1, config)
+            p2_online = _check_provider_online(2, config)
+            state["provider_1_online"] = p1_online
+            state["provider_2_online"] = p2_online
+            state["local_online"] = p1_online
+            state["cloud_online"] = p2_online
+            logger.info(f"Connectivity Check: Provider1={p1_online}, Provider2={p2_online}")
         except Exception as e:
             logger.error(f"Connectivity worker error: {e}")
-
         time.sleep(900)
+
 
 def heartbeat_worker():
     while True:
         try:
             config = load_config()
-            local_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
-            cloud_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
+            p1_provider, p1_key, p1_model, _ = _get_provider_config(1, config)
+            p2_provider, p2_key, p2_model, _ = _get_provider_config(2, config)
 
-            if local_url:
-                state["local_configured"] = True
-                try:
-                    requests.get(f"{local_url}/api/tags", timeout=2)
-                    state["local_online"] = True
-                except:
-                    state["local_online"] = False
-            else:
-                state["local_online"] = False
-                state["local_configured"] = False
-
+            p1_configured = bool(p1_key and p1_model)
+            p2_configured = bool(p2_key and p2_model)
+            state["local_configured"] = p1_configured
             state["llm_circuit_breaker"] = _llm_cb_snapshot()
 
-            if state["force_cloud"]:
-                state["active_llm"] = "Cloud"
-            elif state["local_online"]:
-                state["active_llm"] = "Local"
+            if state.get("force_cloud") and p2_configured:
+                state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
+            elif state.get("force_local") and p1_configured:
+                state["active_llm"] = f"Provider 1 ({p1_provider}/{p1_model})"
+            elif p1_configured:
+                state["active_llm"] = f"Provider 1 ({p1_provider}/{p1_model})"
+            elif p2_configured:
+                state["active_llm"] = f"Provider 2 ({p2_provider}/{p2_model})"
             else:
-                if cloud_url:
-                    state["active_llm"] = "Cloud"
-                else:
-                    state["active_llm"] = "No LLM Available"
+                state["active_llm"] = "No LLM Configured"
         except Exception as e:
             logger.error(f"Heartbeat worker error: {e}")
-
         time.sleep(5)
 
 def analyze_issue(issue):
@@ -1793,34 +1867,29 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     logger.info("Running Reviewer Panel pass...")
     config = load_config()
 
+    # Build reviewer panel: Reviewer 1 uses Provider 1, Reviewer 2 uses Provider 2.
+    # Each provider independently evaluates the fix — cross-provider disagreement raises confidence.
     reviewers = []
-    r1_mod = config.get("REVIEWER_MODEL_1")
-    if r1_mod: reviewers.append({"name": "Reviewer 1", "model": r1_mod, "force_cloud": True})
+    p1_provider, p1_key, p1_model, _ = _get_provider_config(1, config)
+    p2_provider, p2_key, p2_model, _ = _get_provider_config(2, config)
 
-    r2_mod = config.get("REVIEWER_MODEL_2")
-    if r2_mod: reviewers.append({"name": "Reviewer 2", "model": r2_mod, "force_cloud": True})
+    r1_mod = config.get("REVIEWER_MODEL_1") or p1_model
+    if r1_mod and p1_key:
+        reviewers.append({"name": f"Reviewer 1 ({p1_provider})", "model": r1_mod, "force_cloud": False})
 
-    l_mod = config.get("LOCAL_OLLAMA_MODEL") or os.getenv("LOCAL_OLLAMA_MODEL")
-    if l_mod and state["local_online"]:
-        active_cloud_models = [r["model"] for r in reviewers]
-        is_duplicate = any(l_mod == cm for cm in active_cloud_models)
-        if not is_duplicate:
-            reviewers.append({"name": "Reviewer 3 (Local)", "model": l_mod, "force_cloud": False})
-        else:
-            logger.info(f"Skipping Reviewer 3 (Local) as it is a duplicate of a cloud model: {l_mod}")
+    r2_mod = config.get("REVIEWER_MODEL_2") or p2_model
+    if r2_mod and p2_key:
+        reviewers.append({"name": f"Reviewer 2 ({p2_provider})", "model": r2_mod, "force_cloud": True})
 
     if not reviewers:
-        logger.warning("No active reviewers found. Falling back to default LLM review.")
+        logger.warning("No reviewers configured. Falling back to default LLM review.")
         reviewers = [{"name": "Default Reviewer", "model": None, "force_cloud": None}]
 
-    # --- Cloud Availability Check for Reviewers ---
-    # If we have cloud reviewers configured but the cloud is offline,
-    # signal that we should queue for a retry.
-    cloud_reviewers_configured = any(r["force_cloud"] is True for r in reviewers)
-    if cloud_reviewers_configured and not state["cloud_online"]:
-        logger.warning("Cloud reviewers configured but cloud is offline. Signaling retry queue.")
+    # If all configured reviewers are unavailable, queue for retry.
+    any_provider_online = state.get("provider_1_online", True) or state.get("provider_2_online", True)
+    if not any_provider_online:
+        logger.warning("All LLM providers appear offline. Signaling retry queue.")
         return {"status": "queue_for_retry"}
-    # ----------------------------------------------
 
     fix_details = ""
     for path, code in proposed_fixes.items():
@@ -2240,19 +2309,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             break
                         else:
                             error_context = failure_msg
-                except QueueLocalException as qle:
-                    logger.info(f"Queuing issue {issue_id} for Local LLM: {qle}")
-                    processed = load_processed()
-                    processed[issue_id] = {
-                        "status": "awaiting_local",
-                        "timestamp": datetime.now().isoformat(),
-                        "reason": "Queued for local LLM window",
-                        "original_body": issue.body.strip() if issue.body else ""
-                    }
-                    save_processed(processed)
-                    state["processed"] = processed
-                    update_task_state(task_id=issue_id, action="end")
-                    return False, "Queued for local LLM"
+                except Exception as inner_e:
+                    if "No LLM providers" in str(inner_e):
+                        logger.error(f"No LLM providers configured for issue {issue_id}: {inner_e}")
+                        update_task_state(task_id=issue_id, action="end")
+                        return False, "No LLM providers configured"
+                    raise
 
             if not success:
                 state["failure_count"] += 1
@@ -2595,8 +2657,7 @@ def scan_repo_issues(gh_current, config, processed):
                                 if status != "awaiting_review": # Allow resuming reviews
                                     continue
                             if status == "awaiting_local":
-                                if not (is_local_llm_allowed() or state["force_cloud"]):
-                                    continue
+                                pass
                             # For awaiting_review, we let it proceed to check the 1-hour timer in process_single_issue
 
                         to_fix.append((repo_name, issue.number))
@@ -3097,59 +3158,46 @@ async def get_task_details(task_id: str = None):
 
 @app.get("/api/models")
 async def get_models():
-    """Fetches available models from both local and cloud Ollama instances."""
+    """Fetches available models from both configured LLM providers."""
     config = load_config()
-    l_url = config.get("LOCAL_OLLAMA_URL") or os.getenv("LOCAL_OLLAMA_URL")
-    c_url = config.get("CLOUD_OLLAMA_URL") or os.getenv("CLOUD_OLLAMA_URL")
-    api_key = config.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
+
+    def _fetch_provider_models(n):
+        provider, api_key, model, base_url = _get_provider_config(n, config)
+        if not api_key:
+            return []
+        models = []
+        try:
+            p = (provider or "openai").lower().strip()
+            if p == "anthropic":
+                base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
+                headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_API_VERSION}
+                resp = requests.get(f"{base}/models", headers=headers, timeout=10)
+                resp.raise_for_status()
+                for m in resp.json().get("data", []):
+                    models.append({"name": m.get("id", ""), "details": m.get("display_name", "")})
+            elif p == "google":
+                base = (base_url or GOOGLE_BASE_URL).rstrip("/")
+                resp = requests.get(f"{base}/v1beta/models?key={api_key}", timeout=10)
+                resp.raise_for_status()
+                for m in resp.json().get("models", []):
+                    models.append({"name": m.get("name", "").replace("models/", ""), "details": m.get("displayName", "")})
+            else:
+                base = (base_url or OPENAI_BASE_URL).rstrip("/")
+                headers = {"Authorization": f"Bearer {api_key}"}
+                resp = requests.get(f"{base}/models", headers=headers, timeout=10)
+                resp.raise_for_status()
+                for m in resp.json().get("data", []):
+                    if "gpt" in m.get("id", "") or "o1" in m.get("id", "") or "o3" in m.get("id", ""):
+                        models.append({"name": m.get("id", ""), "details": m.get("owned_by", "")})
+        except Exception as e:
+            logger.error(f"Error fetching models for provider {n}: {e}")
+        return models
 
     results = {
-        "local_models": [],
-        "cloud_models": [],
-        "enabled_models": config.get("enabled_models", [])
+        "local_models": _fetch_provider_models(1),
+        "cloud_models": _fetch_provider_models(2),
+        "enabled_models": config.get("enabled_models", []),
     }
-
-    if l_url:
-        try:
-            resp = requests.get(f"{l_url.rstrip('/')}/api/tags", timeout=10)
-            resp.raise_for_status()
-            tags_data = resp.json()
-            for m in tags_data.get("models", []):
-                name = m["name"]
-                if "bf16" in name:
-                    name = name[:name.find("bf16") + 4]
-                details = m.get("details", "No description available")
-                if not isinstance(details, str):
-                    details = details.get("description", str(details)) if isinstance(details, dict) else str(details)
-                results["local_models"].append({
-                    "name": name,
-                    "details": details
-                })
-        except Exception as e:
-            logger.error(f"Error fetching local models: {e}")
-
-    if c_url:
-        try:
-            headers = {}
-            if api_key:
-                clean_key = api_key.strip().strip('"').strip("'")
-                token_only = clean_key.replace("Bearer ", "").strip()
-                headers["Authorization"] = f"Bearer {token_only}"
-
-            resp = requests.get(f"{c_url.rstrip('/')}/api/tags", headers=headers, timeout=10)
-            resp.raise_for_status()
-            tags_data = resp.json()
-            for m in tags_data.get("models", []):
-                details = m.get("details", "No description available")
-                if not isinstance(details, str):
-                    details = details.get("description", str(details)) if isinstance(details, dict) else str(details)
-                results["cloud_models"].append({
-                    "name": m["name"],
-                    "details": details
-                })
-        except Exception as e:
-            logger.error(f"Error fetching cloud models: {e}")
-
     return results
 
 @app.post("/api/toggle-model")
@@ -3196,11 +3244,14 @@ async def get_hub_logs_page(request: Request):
 
 DEFAULT_ENV = {
     "GITHUB_TOKEN": "",
-    "LOCAL_OLLAMA_MODEL": "gemma4:31b-coding-mtp-bf16",
-    "CLOUD_OLLAMA_MODEL": "gemma4:31b-cloud",
-    "LOCAL_OLLAMA_URL": "http://172.16.1.100:11434",
-    "CLOUD_OLLAMA_URL": "",
-    "OLLAMA_API_KEY": "",
+    "LLM_PROVIDER_1": "openai",
+    "LLM_API_KEY_1": "",
+    "LLM_MODEL_1": "gpt-4o",
+    "LLM_BASE_URL_1": "",
+    "LLM_PROVIDER_2": "anthropic",
+    "LLM_API_KEY_2": "",
+    "LLM_MODEL_2": "claude-opus-4-5",
+    "LLM_BASE_URL_2": "",
     "QA_REPO": "",
     "QA_TEST_COMMAND": "pytest",
     "POLL_INTERVAL_SECONDS": "300",
@@ -3210,16 +3261,14 @@ DEFAULT_ENV = {
     "DEV_BRANCH": "dev",
     "LLM_TIMEOUT": "900",
     "MAX_CONCURRENT_FIXES": "5",
-    "LOCAL_LLM_SCHEDULE": "9-16,1-5",
     "TRIAGE_STRICTNESS": "Moderate",
-    "REVIEWER_MODEL_1": "gemma4:31b-cloud",
-    "REVIEWER_MODEL_2": "gemma4:31b-cloud",
+    "REVIEWER_MODEL_1": "",
+    "REVIEWER_MODEL_2": "",
     "LLM_MAX_RETRIES": "5",
     "LLM_BACKOFF_BASE": "2.0",
     "LLM_BACKOFF_MAX": "600.0",
     "LLM_MAX_CONCURRENT": "1",
     "PROD_VERIFICATION_DAYS": "7",
-    "QUEUE_LOCAL_LLM": "False",
 }
 
 @app.get("/settings")
@@ -3309,14 +3358,16 @@ async def save_settings(request: Request):
         "default_branch": lambda v: v,
         "dev_branch": lambda v: v,
         "GITHUB_TOKEN": lambda v: v,
-        "OLLAMA_API_KEY": lambda v: v,
-        "CLOUD_OLLAMA_URL": lambda v: v,
-        "LOCAL_OLLAMA_URL": lambda v: v,
-        "CLOUD_OLLAMA_MODEL": lambda v: v,
-        "LOCAL_OLLAMA_MODEL": lambda v: v,
+        "LLM_PROVIDER_1": lambda v: v,
+        "LLM_API_KEY_1": lambda v: v,
+        "LLM_MODEL_1": lambda v: v,
+        "LLM_BASE_URL_1": lambda v: v,
+        "LLM_PROVIDER_2": lambda v: v,
+        "LLM_API_KEY_2": lambda v: v,
+        "LLM_MODEL_2": lambda v: v,
+        "LLM_BASE_URL_2": lambda v: v,
         "LLM_TIMEOUT": lambda v: v,
         "MAX_CONCURRENT_FIXES": lambda v: v,
-        "LOCAL_LLM_SCHEDULE": lambda v: v,
         "TRIAGE_STRICTNESS": lambda v: v,
         "REVIEWER_MODEL_1": lambda v: v,
         "REVIEWER_MODEL_2": lambda v: v,
@@ -3351,9 +3402,6 @@ async def save_settings(request: Request):
 
     if "skip_review" in data:
         config_data["skip_review"] = data.get("skip_review") == "on"
-
-    if "queue_local_llm" in data:
-        config_data["queue_local_llm"] = data.get("queue_local_llm") == "on"
 
     # Chat-agent boolean toggles (checkboxes: present+"on" => True, absent => False).
     if "CHAT_TOOLS_ENABLED" in data:
@@ -3419,13 +3467,30 @@ async def update_now():
 
 @app.post("/toggle_cloud")
 async def toggle_cloud():
+    """Force Provider 2 (secondary provider) for all requests."""
     state["force_cloud"] = not state["force_cloud"]
-
+    if state["force_cloud"]:
+        state["force_local"] = False
     config = load_config()
     config["force_cloud"] = state["force_cloud"]
+    config["force_local"] = state["force_local"]
     save_config(config)
+    status = "enabled" if state["force_cloud"] else "disabled"
+    return {"status": "success", "message": f"Force Provider 2 {status}."}
 
-    return {"status": "success", "message": "Cloud override toggled successfully."}
+@app.post("/toggle_local")
+async def toggle_local():
+    """Force Provider 1 (primary provider) for all requests with no fallback."""
+    state["force_local"] = not state["force_local"]
+    if state["force_local"]:
+        state["force_cloud"] = False
+    config = load_config()
+    config["force_local"] = state["force_local"]
+    config["force_cloud"] = state["force_cloud"]
+    save_config(config)
+    status = "enabled" if state["force_local"] else "disabled"
+    return {"status": "success", "message": f"Force Provider 1 {status}."}
+
 
 @app.post("/trigger_fix")
 async def trigger_fix(request: Request):
@@ -3530,12 +3595,11 @@ async def trigger_hub_update():
 # fix run (process_single_issue) is launched only after the user clicks Confirm
 # and the server validates a single-use token (see /api/chat/confirm_fix).
 #
-# SECURITY: API keys (GITHUB_TOKEN, OLLAMA_API_KEY) live only on the server and
-# are used solely to authenticate GitHub calls inside the executors. They never
-# enter chat messages, the system-prompt index, tool results, the streamed
-# response, or logs. Every tool result is passed through _sanitize_tool_result,
-# which redacts any accidental secret (e.g. a token pasted into an issue body or
-# a file the assistant read) before it is appended to the conversation.
+# SECURITY: API keys (GITHUB_TOKEN, LLM_API_KEY_1, LLM_API_KEY_2) live only on
+# the server and are used solely to authenticate calls. They never enter chat
+# messages, the system-prompt index, tool results, the streamed response, or logs.
+# Every tool result is passed through _sanitize_tool_result, which redacts any
+# accidental secret before it is appended to the conversation.
 # =============================================================================
 
 # GitHub token prefix patterns (classic PATs + fine-grained PATs). Redacted on
@@ -3550,8 +3614,12 @@ _CHAT_FILE_SKIP = (".git", "node_modules", "__pycache__", "venv", ".env")
 def _secret_denylist(config):
     """Builds the set of literal secret strings to redact from tool results."""
     dl = set()
-    for src in (config.get("GITHUB_TOKEN"), os.getenv("GITHUB_TOKEN"),
-                config.get("OLLAMA_API_KEY"), os.getenv("OLLAMA_API_KEY")):
+    candidates = [
+        config.get("GITHUB_TOKEN"), os.getenv("GITHUB_TOKEN"),
+        config.get("LLM_API_KEY_1"), os.getenv("LLM_API_KEY_1"),
+        config.get("LLM_API_KEY_2"), os.getenv("LLM_API_KEY_2"),
+    ]
+    for src in candidates:
         if src and isinstance(src, str):
             s = src.strip().strip('"').strip("'")
             if len(s) >= 8:
@@ -3593,7 +3661,7 @@ def _trunc(s, n):
     return s if len(s) <= n else s[:n] + " …[truncated]"
 
 
-# --- Ollama tool schemas -----------------------------------------------------
+# --- Chat tool schemas (Ollama-compatible format; converted per-provider at call time) ---
 CHAT_TOOLS = [
     {
         "name": "list_repos",
@@ -4089,7 +4157,8 @@ def run_chat_reply(chat_id):
                 if used_chars + len(out_str) > max_result_chars:
                     out_str = json.dumps({"error": "tool result budget exceeded; narrow your query", "truncated": True})
                 used_chars += len(out_str)
-                messages.append({"role": "tool", "name": name or "unknown", "content": out_str})
+                tool_call_id = tc.get("id") or f"call_{name}_{iteration}"
+                messages.append({"role": "tool", "name": name or "unknown", "content": out_str, "tool_call_id": tool_call_id})
 
                 # propose_fix is non-mutating: surface a Confirm button and stop.
                 if name == "propose_fix" and isinstance(out, dict) and out.get("kind") == "confirm_fix":

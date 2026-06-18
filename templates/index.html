@@ -766,7 +766,7 @@
             <div class="flex flex-col items-end gap-1 text-xs text-slate-400 font-mono ml-auto flex-shrink-0 order-2 text-right">
                 <span>{{ state.version }}</span>
                 <span>LLM: <span class="text-slate-200">{{ state.active_llm }}</span></span>
-                <span>Last Run: <span class="text-slate-200">{{ state.last_run }}</span></span>
+                <span>Last Run: <span class="text-slate-200">{% if state.last_run and state.last_run != 'Never' and state.last_run|length >= 16 %}{{ state.last_run[5:16] }}{% else %}{{ state.last_run }}{% endif %}</span></span>
             </div>
             <div class="flex flex-wrap justify-center gap-4 order-1">
                 <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')">
