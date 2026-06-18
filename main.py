@@ -886,12 +886,78 @@ def trigger_infrastructure_update():
         return "SUCCESS: Sync Triggered" if resp.status_code == 200 else f"FAILED: {resp.status_code}"
     except Exception as e: return f"ERROR: {str(e)}"
 
+def _normalize_for_dedup(text):
+    """Aggressively normalize text for duplicate comparison.
+
+    Lowercases, strips timestamps and standalone numbers, drops punctuation, and
+    collapses whitespace. Log snippets that differ only by timestamp /
+    issue-number / byte-offset then compare equal, so the SAME recurring error
+    (rephrased by the LLM or logged at a new time) is detected as a duplicate
+    instead of creating a fresh issue every cycle.
+    """
+    import re
+    if not text:
+        return ""
+    t = str(text).lower()
+    # ISO-style timestamps: 2026-06-18 00:02:06,054  (with optional comma-ms, T or space sep)
+    t = re.sub(r'\b\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}:\d{2}(?:,\d+)?\b', ' ', t)
+    t = re.sub(r'\b\d+\b', ' ', t)        # standalone numbers -> space
+    t = re.sub(r'[^\w\s]', ' ', t)        # punctuation -> space
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+def _token_set(text):
+    return set(_normalize_for_dedup(text).split())
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    return len(a & b) / float(len(a | b))
+
+def _is_duplicate_match(new_title, new_body, ex_title, ex_body):
+    """Returns True if a new error matches an existing issue, using normalized +
+    fuzzy comparison so LLM rephrasing and timestamp drift don't defeat dedup."""
+    nt = _normalize_for_dedup(new_title)
+    nb = _normalize_for_dedup(new_body)
+    et = _normalize_for_dedup(ex_title)
+    eb = _normalize_for_dedup(ex_body)
+
+    nt_tokens = nt.split()
+    nb_tokens = nb.split()
+    et_tokens = et.split()
+    eb_tokens = eb.split()
+
+    # Exact normalized title match (guard against tiny/generic titles).
+    if nt and et and len(nt_tokens) >= 3 and len(et_tokens) >= 3 and nt == et:
+        return True
+    # Title containment (LLM added/trimmed a few words) — guard against tiny titles.
+    if nt and et and len(nt_tokens) >= 3 and len(et_tokens) >= 3 and (nt in et or et in nt):
+        return True
+    # High title token overlap.
+    if nt and et and len(nt_tokens) >= 2 and _jaccard(set(nt_tokens), set(et_tokens)) >= 0.7:
+        return True
+    # Body containment — the most reliable signal for recurring LOG errors: the
+    # normalized log-snippet core matches even though timestamps differ. Guard
+    # against very short bodies causing spurious substring matches.
+    if nb and eb and len(nb_tokens) >= 5 and len(eb_tokens) >= 5 and (nb in eb or eb in nb):
+        return True
+    # High body token overlap.
+    if nb and eb and len(nb_tokens) >= 5 and len(eb_tokens) >= 5 and \
+            _jaccard(set(nb_tokens), set(eb_tokens)) >= 0.7:
+        return True
+    return False
+
 def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     """Searches across all monitored repositories for an existing open issue that matches the error.
 
     Returns a tuple (issue, repo_name) where repo_name is the repository in which the
     duplicate issue was found. The repo_name is returned explicitly so callers do NOT
     need to read repository metadata off the Issue object itself.
+
+    Uses normalized + fuzzy matching (see _is_duplicate_match) so that a recurring
+    error — which the LLM may rephrase each cycle and whose log snippet carries a new
+    timestamp — is detected as a duplicate of the existing issue rather than filed as a
+    new issue every cycle. This is what previously caused the self-diagnosis storm.
 
     Safely handles error_data payloads that may be missing the 'title' or 'body' keys
     (the LLM may omit them). Missing fields are treated as empty strings so that the
@@ -902,10 +968,10 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
         logger.warning(f"find_global_duplicate_issue received non-dict error_data: {type(error_data)}")
         return None, None
 
-    title_text = (error_data.get('title') or '').lower()
-    body_text = (error_data.get('body') or '').lower()
+    new_title = error_data.get('title') or ''
+    new_body = error_data.get('body') or ''
 
-    if not title_text and not body_text:
+    if not str(new_title).strip() and not str(new_body).strip():
         return None, None
 
     for repo_name in monitored_repos:
@@ -914,7 +980,7 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
             open_issues = repo.get_issues(state='open')
             for issue in open_issues:
                 issue_body = issue.body or ""
-                if title_text in issue.title.lower() or body_text in issue_body.lower():
+                if _is_duplicate_match(new_title, new_body, issue.title or "", issue_body):
                     return issue, repo_name
         except Exception as e:
             logger.debug(f"Could not search for duplicates in {repo_name}: {e}")
