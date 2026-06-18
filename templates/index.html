@@ -390,6 +390,10 @@
                                 <label class="text-sm font-medium text-slate-600">Trusted Repositories (Allow Direct Push)</label>
                                 <textarea name="trusted_repos" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">{{ settings.trusted_repos | join(', ') }}</textarea>
                             </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <label class="text-sm font-medium text-slate-600">Self-Diagnosis Repository (Where BugFixer files its own bugs)</label>
+                                <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. lbockenstedt/bugfixer">
+                            </div>
                         </div>
                     </section>
 
@@ -516,6 +520,12 @@
                                 <input type="checkbox" name="skip_review" id="skip_review" {{ 'checked' if settings.skip_review else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
                                 <label for="skip_review" class="text-xs font-medium text-slate-700">
                                     Bypass Skeptical Reviewer
+                                </label>
+                            </div>
+                            <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                                <input type="checkbox" name="queue_local_llm" id="queue_local_llm" {{ 'checked' if settings.queue_local_llm else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="queue_local_llm" class="text-xs font-medium text-slate-700">
+                                    Queue for Local LLM
                                 </label>
                             </div>
                         </div>

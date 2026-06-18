@@ -1,6 +1,19 @@
 import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+# Pure, stdlib-only duplicate-detection helpers. Importable standalone for tests
+# (unlike this module, which initializes FastAPI/logging at import time). The
+# script dir is prepended to sys.path so the import resolves regardless of cwd.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dedup import (
+    _normalize_for_dedup as _normalize_for_dedup_impl,
+    _token_set as _token_set_impl,
+    _jaccard as _jaccard_impl,
+    _is_duplicate_match as _is_duplicate_match_impl,
+    MODULE_ALIASES,
+    strip_boilerplate,
+)
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -889,102 +902,119 @@ def trigger_infrastructure_update():
 def _normalize_for_dedup(text):
     """Aggressively normalize text for duplicate comparison.
 
-    Lowercases, strips timestamps and standalone numbers, drops punctuation, and
-    collapses whitespace. Log snippets that differ only by timestamp /
-    issue-number / byte-offset then compare equal, so the SAME recurring error
-    (rephrased by the LLM or logged at a new time) is detected as a duplicate
-    instead of creating a fresh issue every cycle.
+    Thin wrapper around the strengthened implementation in ``dedup.py`` (which
+    additionally strips the automated-issue boilerplate wrapper and applies
+    module aliases such as ``opns`` -> ``opnsense``). Kept here as a shim so
+    existing call sites that import it from main continue to work.
     """
-    import re
-    if not text:
-        return ""
-    t = str(text).lower()
-    # ISO-style timestamps: 2026-06-18 00:02:06,054  (with optional comma-ms, T or space sep)
-    t = re.sub(r'\b\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}:\d{2}(?:,\d+)?\b', ' ', t)
-    t = re.sub(r'\b\d+\b', ' ', t)        # standalone numbers -> space
-    t = re.sub(r'[^\w\s]', ' ', t)        # punctuation -> space
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t
+    return _normalize_for_dedup_impl(text)
 
 def _token_set(text):
-    return set(_normalize_for_dedup(text).split())
+    return _token_set_impl(text)
 
 def _jaccard(a, b):
-    if not a or not b:
-        return 0.0
-    return len(a & b) / float(len(a | b))
+    return _jaccard_impl(a, b)
 
 def _is_duplicate_match(new_title, new_body, ex_title, ex_body):
     """Returns True if a new error matches an existing issue, using normalized +
-    fuzzy comparison so LLM rephrasing and timestamp drift don't defeat dedup."""
-    nt = _normalize_for_dedup(new_title)
-    nb = _normalize_for_dedup(new_body)
-    et = _normalize_for_dedup(ex_title)
-    eb = _normalize_for_dedup(ex_body)
+    fuzzy comparison so LLM rephrasing, timestamp drift, boilerplate wrapper,
+    and module-name variants (opns/opnsense) don't defeat dedup."""
+    return _is_duplicate_match_impl(new_title, new_body, ex_title, ex_body)
 
-    nt_tokens = nt.split()
-    nb_tokens = nb.split()
-    et_tokens = et.split()
-    eb_tokens = eb.split()
-
-    # Exact normalized title match (guard against tiny/generic titles).
-    if nt and et and len(nt_tokens) >= 3 and len(et_tokens) >= 3 and nt == et:
-        return True
-    # Title containment (LLM added/trimmed a few words) — guard against tiny titles.
-    if nt and et and len(nt_tokens) >= 3 and len(et_tokens) >= 3 and (nt in et or et in nt):
-        return True
-    # High title token overlap.
-    if nt and et and len(nt_tokens) >= 2 and _jaccard(set(nt_tokens), set(et_tokens)) >= 0.7:
-        return True
-    # Body containment — the most reliable signal for recurring LOG errors: the
-    # normalized log-snippet core matches even though timestamps differ. Guard
-    # against very short bodies causing spurious substring matches.
-    if nb and eb and len(nb_tokens) >= 5 and len(eb_tokens) >= 5 and (nb in eb or eb in nb):
-        return True
-    # High body token overlap.
-    if nb and eb and len(nb_tokens) >= 5 and len(eb_tokens) >= 5 and \
-            _jaccard(set(nb_tokens), set(eb_tokens)) >= 0.7:
-        return True
-    return False
+# --- Duplicate issue detection configuration ---------------------------------
+# How far back to look at CLOSED issues when searching for a recurrence. The bot
+# previously only searched OPEN issues, so once a "fix" was merged and the issue
+# closed, the next cycle's identical error was filed as a brand-new issue +
+# spawned a new ai-fix-issue-* branch — the #25 -> #55 -> #78 -> #90 storm.
+# Searching recently-closed issues lets us REOPEN the original instead.
+DEDUP_CLOSED_WINDOW_DAYS = 60
+# When the target repo has no match and we fall back to searching the OTHER
+# monitored repos globally, require a stricter title-level signal to avoid
+# cross-module false positives (e.g. an opnsense error matching a pxmx issue on
+# incidental wording overlap).
+GLOBAL_FALLBACK_JACCARD = 0.8
 
 def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
-    """Searches across all monitored repositories for an existing open issue that matches the error.
+    """Searches across monitored repositories for an existing issue matching the error.
 
-    Returns a tuple (issue, repo_name) where repo_name is the repository in which the
-    duplicate issue was found. The repo_name is returned explicitly so callers do NOT
-    need to read repository metadata off the Issue object itself.
+    Searches OPEN issues AND recently-CLOSED issues (within
+    DEDUP_CLOSED_WINDOW_DAYS), because a recurring error whose prior issue was
+    closed (the bot merged a "fix") must still be recognised so it can be
+    REOPENED rather than re-filed — this is what previously caused the
+    opnsense 'time' import storm (#25 -> #55 -> #78 -> #90).
 
-    Uses normalized + fuzzy matching (see _is_duplicate_match) so that a recurring
-    error — which the LLM may rephrase each cycle and whose log snippet carries a new
-    timestamp — is detected as a duplicate of the existing issue rather than filed as a
-    new issue every cycle. This is what previously caused the self-diagnosis storm.
+    The target repository (error_data['repo']) is searched first; other
+    monitored repos are searched as a fallback with a stricter title-level
+    threshold (GLOBAL_FALLBACK_JACCARD) to avoid cross-module false positives.
 
-    Safely handles error_data payloads that may be missing the 'title' or 'body' keys
-    (the LLM may omit them). Missing fields are treated as empty strings so that the
-    deduplication search degrades gracefully instead of raising a KeyError.
+    Returns a tuple (issue, repo_name, was_closed). ``was_closed`` is True when
+    the matched issue is currently closed, signalling the caller to reopen it
+    rather than treat it as an open duplicate. Returns (None, None, False) when
+    no duplicate is found.
+
+    Safely handles error_data payloads that may be missing the 'title' or 'body'
+    keys (the LLM may omit them). Missing fields are treated as empty strings so
+    that the deduplication search degrades gracefully instead of raising a
+    KeyError.
     """
     # Defensive: ensure error_data is a dict before calling .get()
     if not isinstance(error_data, dict):
         logger.warning(f"find_global_duplicate_issue received non-dict error_data: {type(error_data)}")
-        return None, None
+        return None, None, False
 
     new_title = error_data.get('title') or ''
     new_body = error_data.get('body') or ''
 
     if not str(new_title).strip() and not str(new_body).strip():
-        return None, None
+        return None, None, False
 
-    for repo_name in monitored_repos:
+    target_repo = error_data.get('repo')
+
+    def _search_repo(repo_name, require_strict_global=False):
         try:
             repo = gh_current.get_repo(repo_name)
-            open_issues = repo.get_issues(state='open')
-            for issue in open_issues:
+            # state='all' so we see recently-closed recurrences too; newest-first
+            # so the most relevant (recently updated) issues are scanned first.
+            issues = repo.get_issues(state='all', sort='updated', direction='desc')
+            now = datetime.utcnow()
+            for issue in issues:
+                # Skip closed issues older than the recurrence window — they are
+                # unlikely to be the same recurrence and would risk stale matches.
+                if issue.state == 'closed':
+                    closed_at = getattr(issue, 'closed_at', None) or issue.updated_at
+                    if closed_at and (now - closed_at).days > DEDUP_CLOSED_WINDOW_DAYS:
+                        continue
                 issue_body = issue.body or ""
                 if _is_duplicate_match(new_title, new_body, issue.title or "", issue_body):
-                    return issue, repo_name
+                    # Global fallback (non-target repo): require a strong
+                    # title-level signal so we don't cross-match unrelated
+                    # modules on incidental body-wording overlap.
+                    if require_strict_global:
+                        nt = _normalize_for_dedup(new_title)
+                        et = _normalize_for_dedup(issue.title or "")
+                        if not (nt and et and
+                                _jaccard(set(nt.split()), set(et.split())) >= GLOBAL_FALLBACK_JACCARD):
+                            continue
+                    return issue, repo_name, (issue.state == 'closed')
         except Exception as e:
             logger.debug(f"Could not search for duplicates in {repo_name}: {e}")
-    return None, None
+        return None
+
+    # 1. Target repo first — the recurrence almost always lands in the same repo.
+    if target_repo and target_repo in monitored_repos:
+        hit = _search_repo(target_repo)
+        if hit:
+            return hit
+
+    # 2. Global fallback across the other monitored repos, stricter threshold.
+    for repo_name in monitored_repos:
+        if repo_name == target_repo:
+            continue
+        hit = _search_repo(repo_name, require_strict_global=True)
+        if hit:
+            return hit
+
+    return None, None, False
 
 def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
     """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos.
@@ -1032,10 +1062,39 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
 
         current_repo_name = error_data.get('repo') or gh_repo.full_name
 
-        existing_issue, duplicate_repo_name = find_global_duplicate_issue(gh_current, monitored_repos, error_data)
+        existing_issue, duplicate_repo_name, was_closed = find_global_duplicate_issue(
+            gh_current, monitored_repos, error_data
+        )
 
         if existing_issue:
             duplicate_repo_display = duplicate_repo_name or current_repo_name
+
+            if was_closed:
+                # The matching issue was closed (typically the bot merged a "fix"
+                # for it). Reopen it and record the recurrence instead of filing a
+                # brand-new issue + spawning another ai-fix-issue-* branch. This
+                # is the core fix for the recurring-error storm.
+                logger.info(
+                    f"Recurring CLOSED issue #{existing_issue.number} in "
+                    f"{duplicate_repo_display} matched; reopening instead of filing a duplicate."
+                )
+                try:
+                    existing_issue.edit(state='open')
+                except Exception as reopen_err:
+                    logger.warning(f"Could not reopen issue #{existing_issue.number}: {reopen_err}")
+                try:
+                    existing_issue.create_comment(
+                        f"🔁 **Recurrence detected — reopening instead of filing a duplicate**\n\n"
+                        f"BugFixer re-detected this error in **{current_repo_name}** after the "
+                        f"issue was closed.\n\n"
+                        f"```\n{body_text}\n```"
+                    )
+                    logger.info(f"Reopened issue #{existing_issue.number} for {current_repo_name}")
+                except Exception as comment_err:
+                    logger.warning(f"Could not add recurrence comment to #{existing_issue.number}: {comment_err}")
+                return existing_issue
+
+            # OPEN duplicate — keep the existing evidence-comment behavior.
             logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {duplicate_repo_display}. Adding info.")
 
             existing_body = existing_issue.body or ""
