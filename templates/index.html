@@ -698,7 +698,7 @@
                                     <input type="radio" name="label_mode" value="SPECIFIC" {{ 'checked' if 'ANY' not in settings.monitored_labels and 'NONE' not in settings.monitored_labels else '' }} class="w-3 h-3 text-[#01A982]"> Specific Labels
                                 </label>
                             </div>
-                            <div class="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2 max-h-48 overflow-y-auto">
+                            <div class="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
                                 <div class="grid grid-cols-2 gap-2">
                                     {% for label in available_labels %}
                                     <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982]">
@@ -1236,6 +1236,37 @@
             if (rpmEl && model) rpmEl.value = getDefaultRpm(provider, model);
         }
 
+        const _CLAUDE_CLI_MODELS = [
+            {name: 'claude-sonnet-4-6',        details: 'Claude Sonnet 4.6'},
+            {name: 'claude-opus-4-8',           details: 'Claude Opus 4.8'},
+            {name: 'claude-haiku-4-5-20251001', details: 'Claude Haiku 4.5'},
+        ];
+
+        function _fillModelSelect(sel, models, currentModel) {
+            sel.innerHTML = '';
+            if (models.length === 0) {
+                const o = document.createElement('option');
+                o.value = ''; o.textContent = '— save credential first —';
+                sel.appendChild(o);
+                return;
+            }
+            const blank = document.createElement('option');
+            blank.value = ''; blank.textContent = '— pick a model —';
+            sel.appendChild(blank);
+            let matched = false;
+            models.forEach(m => {
+                const o = document.createElement('option');
+                o.value = m.name; o.textContent = m.name + (m.details ? ` (${m.details})` : '');
+                if (m.name === currentModel) { o.selected = true; matched = true; }
+                sel.appendChild(o);
+            });
+            if (!matched && currentModel) {
+                const o = document.createElement('option');
+                o.value = currentModel; o.textContent = currentModel; o.selected = true;
+                sel.insertBefore(o, sel.firstChild);
+            }
+        }
+
         async function loadVaultModels() {
             const provider = document.getElementById('new-entry-provider')?.value;
             const sel = document.getElementById('new-entry-model');
@@ -1244,6 +1275,13 @@
             sel.disabled = true;
             const rpmEl = document.getElementById('new-entry-rpm');
             if (rpmEl) rpmEl.value = '';
+            // claude_cli has a fixed model roster — no server call needed.
+            if (provider === 'claude_cli') {
+                sel.disabled = false;
+                _fillModelSelect(sel, _CLAUDE_CLI_MODELS, '');
+                updateDefaultRpm();
+                return;
+            }
             try {
                 const resp = await fetch('/api/fetch-models', {
                     method: 'POST',
@@ -1251,24 +1289,8 @@
                     body: JSON.stringify({provider})
                 });
                 const data = await resp.json();
-                const models = data.models || [];
                 sel.disabled = false;
-                if (models.length === 0) {
-                    sel.innerHTML = '';
-                    const empty = document.createElement('option');
-                    empty.value = ''; empty.textContent = '— save credential first —';
-                    sel.appendChild(empty);
-                } else {
-                    sel.innerHTML = '';
-                    const blank = document.createElement('option');
-                    blank.value = ''; blank.textContent = '— pick a model —';
-                    sel.appendChild(blank);
-                    models.forEach(m => {
-                        const o = document.createElement('option');
-                        o.value = m.name; o.textContent = m.name + (m.details ? ` (${m.details})` : '');
-                        sel.appendChild(o);
-                    });
-                }
+                _fillModelSelect(sel, data.models || [], '');
             } catch(e) {
                 sel.disabled = false;
                 sel.innerHTML = '';
@@ -1312,6 +1334,12 @@
             const currentModel = sel.value;
             sel.innerHTML = '<option value="">Loading…</option>';
             sel.disabled = true;
+            // claude_cli has a fixed model roster — no server call needed.
+            if (provider === 'claude_cli') {
+                sel.disabled = false;
+                _fillModelSelect(sel, _CLAUDE_CLI_MODELS, currentModel);
+                return;
+            }
             try {
                 const resp = await fetch('/api/fetch-models', {
                     method: 'POST',
@@ -1319,33 +1347,14 @@
                     body: JSON.stringify({provider})
                 });
                 const data = await resp.json();
-                const models = data.models || [];
                 sel.disabled = false;
-                if (models.length === 0) {
-                    const o = document.createElement('option');
-                    o.value = currentModel; o.textContent = currentModel;
-                    sel.innerHTML = ''; sel.appendChild(o);
-                } else {
-                    sel.innerHTML = '';
-                    let matched = false;
-                    models.forEach(m => {
-                        const o = document.createElement('option');
-                        o.value = m.name;
-                        o.textContent = m.name + (m.details ? ` (${m.details})` : '');
-                        if (m.name === currentModel) { o.selected = true; matched = true; }
-                        sel.appendChild(o);
-                    });
-                    if (!matched && currentModel) {
-                        const o = document.createElement('option');
-                        o.value = currentModel; o.textContent = currentModel; o.selected = true;
-                        sel.insertBefore(o, sel.firstChild);
-                    }
-                }
+                _fillModelSelect(sel, data.models || [], currentModel);
             } catch(e) {
                 sel.disabled = false;
+                sel.innerHTML = '';
                 const o = document.createElement('option');
                 o.value = currentModel; o.textContent = currentModel;
-                sel.innerHTML = ''; sel.appendChild(o);
+                sel.appendChild(o);
             }
         }
 
