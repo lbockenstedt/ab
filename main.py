@@ -400,8 +400,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             primary_use_generate = False
 
         # Overlap: If we have conversation history (messages),
-        # we MUST use /api/chat regardless of Local/Cloud.
-        if messages is not None:
+        # we prefer /api/chat, but if it's a cloud provider, we fall back
+        # to /api/generate via flattening in attempt_request to avoid 500s.
+        if messages is not None and not is_cloud:
             primary_endpoint = f"{url.rstrip('/')}/api/chat"
             primary_use_generate = False
 
@@ -1961,7 +1962,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             processed[f"{repo_name}:{issue_num}"] = {
                 "status": "non-actionable",
                 "timestamp": datetime.now().isoformat(),
-                "reason": request_msg
+                "reason": request_msg,
+                "original_body": issue.body
             }
             save_processed(processed)
             state["processed"] = processed
@@ -2022,7 +2024,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 processed[issue_id] = {
                                     "status": "awaiting_review",
                                     "timestamp": datetime.now().isoformat(),
-                                    "pending_fix": {"confidence": confidence, "fixes": fixes}
+                                    "pending_fix": {"confidence": confidence, "fixes": fixes},
+                                    "original_body": issue.body
                                 }
                                 save_processed(processed)
                                 state["processed"] = processed
@@ -2054,7 +2057,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     processed[issue_id] = {
                         "status": "awaiting_local",
                         "timestamp": datetime.now().isoformat(),
-                        "reason": "Queued for local LLM window"
+                        "reason": "Queued for local LLM window",
+                        "original_body": issue.body
                     }
                     save_processed(processed)
                     state["processed"] = processed
@@ -2076,7 +2080,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 processed[f"{repo_name}:{issue_num}"] = {
                     "status": "failed",
                     "timestamp": datetime.now().isoformat(),
-                    "error": failure_reason
+                    "error": failure_reason,
+                    "original_body": issue.body
                 }
                 save_processed(processed)
                 state["processed"] = processed
@@ -2202,7 +2207,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 "commit_msg": commit_msg,
                 "files": list(fixes.keys()),
                 "commit_type": commit_type,
-                "decision_reason": decision_reason
+                "decision_reason": decision_reason,
+                "original_body": issue.body
             }
 
             save_processed(processed)

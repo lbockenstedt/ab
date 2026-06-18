@@ -302,30 +302,39 @@
                     </tr>
                     <tr class="bg-slate-50/50">
                         <td colspan="4" class="px-6 py-2 text-slate-500 text-[10px] italic border-b border-slate-100">
-                            {% if info.status == 'fixed' or info.status == 'verified' %}
-                                <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
-                                <span class="mx-2 text-slate-300">|</span>
-                                <span class="font-semibold">Method:</span> {{ info.commit_type if info.commit_type else 'N/A' }}
-                                <span class="mx-2 text-slate-300">|</span>
-                                <span class="font-semibold">Reason:</span> {{ info.decision_reason if info.decision_reason else 'N/A' }}
-                                <span class="mx-2 text-slate-300">|</span>
-                                <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
-                                <span class="mx-2 text-slate-300">|</span>
-                                <span class="font-semibold">Date:</span> {{ info.timestamp }}
-                            {% elif info.status == 'non-actionable' %}
+                            <div class="flex flex-col gap-1">
+                                <div>
+                                    {% if info.status == 'fixed' or info.status == 'verified' %}
+                                        <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Method:</span> {{ info.commit_type if info.commit_type else 'N/A' }}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Reason:</span> {{ info.decision_reason if info.decision_reason else 'N/A' }}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                                    {% elif info.status == 'non-actionable' %}
 
-                                <span class="font-semibold text-orange-600">Reason:</span> {{ info.reason if info.reason else 'No details provided.' }}
-                                <span class="mx-2 text-slate-300">|</span>
-                                <span class="font-semibold">Date:</span> {{ info.timestamp }}
-                            {% elif info.status == 'failed' %}
-                                <span class="font-semibold text-red-600">Error:</span> {{ info.error if info.error else 'AI failed to find a verified fix.' }}
-                                <span class="mx-2 text-slate-300">|</span>
-                                <span class="font-semibold">Date:</span> {{ info.timestamp }}
-                            {% else %}
-                                <span class="font-semibold">Status:</span> {{ info.status }}
-                                <span class="mx-2 text-slate-300">|</span>
-                                <span class="font-semibold">Date:</span> {{ info.timestamp }}
-                            {% endif %}
+                                        <span class="font-semibold text-orange-600">Reason:</span> {{ info.reason if info.reason else 'No details provided.' }}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                                    {% elif info.status == 'failed' %}
+                                        <span class="font-semibold text-red-600">Error:</span> {{ info.error if info.error else 'AI failed to find a verified fix.' }}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                                    {% else %}
+                                        <span class="font-semibold">Status:</span> {{ info.status }}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                                    {% endif %}
+                                </div>
+                                {% if info.original_body %}
+                                <div class="text-slate-400 font-mono not-italic whitespace-pre-wrap opacity-80">
+                                    <span class="font-semibold text-slate-500">Original Report:</span> {{ info.original_body }}
+                                </div>
+                                {% endif %}
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}
