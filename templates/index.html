@@ -90,6 +90,25 @@
             animation: blink 1s step-end infinite;
             color: #4ade80;
         }
+        .chat-side-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            color: #475569;
+            font-size: 0.85rem;
+            transition: all 0.15s ease;
+            cursor: pointer;
+        }
+        .chat-side-item:hover { background-color: #f1f5f9; color: #1e293b; }
+        .chat-side-item.active { background-color: #dcfce7; color: #065f46; font-weight: 600; }
+        .chat-side-title { flex: 1; min-width: 0; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; }
+        .chat-side-actions { display: flex; align-items: center; gap: 0.25rem; }
+        .chat-side-del { flex: none; color: #94a3b8; opacity: 0; transition: opacity 0.15s ease; background: none; border: none; padding: 2px 4px; cursor: pointer; }
+        .chat-side-item:hover .chat-side-del { opacity: 1; }
+        .chat-side-del:hover { color: #dc2626; }
     </style>
 </head>
 <body class="h-screen flex flex-col overflow-hidden">
@@ -619,33 +638,69 @@
         {% endif %}
 
         {% if view == 'chat' %}
-        <div class="hpe-card p-6 flex flex-col" style="height: calc(100vh - 200px);">
-            <div class="flex items-center justify-between mb-4 flex-none">
-                <h3 class="text-lg font-semibold text-slate-800 flex items-center gap-2">
-                    <i class="fas fa-comments text-[#01A982]"></i> Chat
-                    <span class="text-xs text-slate-400 font-normal">(auto LLM, persists across reboots)</span>
-                </h3>
-                <button onclick="clearChat()" class="text-sm text-red-600 hover:text-red-700 font-medium flex items-center gap-1">
-                    <i class="fas fa-trash"></i> Clear
-                </button>
-            </div>
-
-            <div id="chat-transcript" class="flex flex-col gap-3 overflow-y-auto bg-slate-900 rounded-lg p-4 flex-grow">
-                {% for msg in chat_history %}
-                <div class="chat-msg {{ 'chat-user' if msg.role == 'user' else 'chat-assistant' }}">
-                    <div class="chat-role">{{ msg.role }}</div>
-                    <div class="chat-bubble whitespace-pre-wrap">{{ msg.content }}</div>
+        <div class="hpe-card flex overflow-hidden" style="height: calc(100vh - 200px);">
+            <!-- Sidebar: conversation list -->
+            <aside class="w-56 flex-none border-r border-slate-200 flex flex-col bg-slate-50">
+                <div class="p-3 flex-none">
+                    <button onclick="newChat()" class="btn-primary w-full py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-2">
+                        <i class="fas fa-plus"></i> New Chat
+                    </button>
                 </div>
-                {% endfor %}
-            </div>
+                <nav class="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
+                    {% for c in chats %}
+                    <div class="chat-side-item {{ 'active' if c.id == active_chat_id else '' }}" data-chat-id="{{ c.id }}">
+                        <a href="/chat?chat_id={{ c.id }}" class="chat-side-title" title="{{ c.title or 'New chat' }}">
+                            {{ c.title or 'New chat' }}
+                        </a>
+                        <span class="chat-side-actions flex-none">
+                            <button onclick="event.preventDefault(); event.stopPropagation(); renameChat('{{ c.id }}')"
+                                    class="chat-side-del" title="Rename conversation" aria-label="Rename">
+                                <i class="fas fa-pen text-xs"></i>
+                            </button>
+                            <button onclick="event.preventDefault(); event.stopPropagation(); deleteChat('{{ c.id }}')"
+                                    class="chat-side-del" title="Delete conversation" aria-label="Delete">
+                                <i class="fas fa-trash text-xs"></i>
+                            </button>
+                        </span>
+                    </div>
+                    {% endfor %}
+                </nav>
+                <div class="p-2 flex-none text-[10px] text-slate-400 border-t border-slate-200">
+                    Hover a chat to rename or delete it
+                </div>
+            </aside>
 
-            <div class="flex gap-2 mt-4 flex-none">
-                <textarea id="chat-input" rows="2" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
-                    class="flex-grow p-3 rounded-lg resize-none text-sm"></textarea>
-                <button id="chat-send-btn" onclick="sendChat()" class="btn-primary px-6 py-2 rounded-lg font-medium flex items-center gap-2 self-stretch">
-                    <i class="fas fa-paper-plane"></i> Send
-                </button>
-            </div>
+            <!-- Main: active conversation -->
+            <section class="flex-1 flex flex-col p-6 min-w-0">
+                <div class="flex items-center justify-between mb-4 flex-none">
+                    <h3 class="text-lg font-semibold text-slate-800 flex items-center gap-2 truncate">
+                        <i class="fas fa-comments text-[#01A982]"></i>
+                        <span id="chat-title" class="truncate">{{ active_chat_title }}</span>
+                        <span class="text-xs text-slate-400 font-normal">(auto LLM, persists across reboots)</span>
+                    </h3>
+                    <button onclick="clearChat()" class="text-sm text-red-600 hover:text-red-700 font-medium flex items-center gap-1 flex-none">
+                        <i class="fas fa-eraser"></i> Clear
+                    </button>
+                </div>
+
+                <div id="chat-transcript" class="flex flex-col gap-3 overflow-y-auto bg-slate-900 rounded-lg p-4 flex-grow min-h-0">
+                    {% for msg in chat_history %}
+                    <div class="chat-msg {{ 'chat-user' if msg.role == 'user' else 'chat-assistant' }}">
+                        <div class="chat-role">{{ msg.role }}</div>
+                        <div class="chat-bubble whitespace-pre-wrap">{{ msg.content }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <div class="flex gap-2 mt-4 flex-none">
+                    <textarea id="chat-input" rows="2" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+                        class="flex-grow p-3 rounded-lg resize-none text-sm"></textarea>
+                    <button id="chat-send-btn" onclick="sendChat()" class="btn-primary px-6 py-2 rounded-lg font-medium flex items-center gap-2 self-stretch">
+                        <i class="fas fa-paper-plane"></i> Send
+                    </button>
+                </div>
+            </section>
+            <input type="hidden" id="active-chat-id" value="{{ active_chat_id }}">
         </div>
         {% endif %}
     </main>
@@ -1068,6 +1123,8 @@
             if (!input || currentChatTaskId) return;
             const message = input.value.trim();
             if (!message) return;
+            const chatId = document.getElementById('active-chat-id');
+            if (!chatId || !chatId.value) return;
 
             input.value = '';
             if (sendBtn) sendBtn.disabled = true;
@@ -1077,27 +1134,27 @@
                 const resp = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message })
+                    body: JSON.stringify({ message, chat_id: chatId.value })
                 });
                 if (!resp.ok) {
                     const err = await resp.json().catch(() => ({}));
                     throw new Error(err.message || 'Request failed');
                 }
                 const data = await resp.json();
-                currentChatTaskId = data.task_id;
-                pollChatStream(data.task_id);
+                currentChatTaskId = data.chat_id;
+                pollChatStream(data.chat_id);
             } catch (e) {
                 alert('Chat send failed: ' + e);
                 if (sendBtn) sendBtn.disabled = false;
             }
         }
 
-        function pollChatStream(taskId) {
+        function pollChatStream(chatId) {
             const bubble = chatAppendBubble('assistant', '', { pending: true, cursor: true });
             if (chatPollTimer) clearInterval(chatPollTimer);
             chatPollTimer = setInterval(async () => {
                 try {
-                    const resp = await fetch('/api/chat/stream?task_id=' + encodeURIComponent(taskId));
+                    const resp = await fetch('/api/chat/stream?chat_id=' + encodeURIComponent(chatId));
                     const data = await resp.json();
                     if (bubble) {
                         bubble.textContent = data.stream || '';
@@ -1129,8 +1186,50 @@
             }, 1200);
         }
 
+        async function newChat() {
+            try {
+                const resp = await fetch('/api/chat/new', { method: 'POST' });
+                const data = await resp.json();
+                if (data.chat_id) location.href = '/chat?chat_id=' + encodeURIComponent(data.chat_id);
+            } catch (e) {
+                alert('New chat failed: ' + e);
+            }
+        }
+
+        async function renameChat(chatId) {
+            const item = document.querySelector('.chat-side-item[data-chat-id="' + chatId + '"]');
+            const current = item ? item.querySelector('.chat-side-title').textContent.trim() : '';
+            const title = prompt('Rename conversation:', current);
+            if (title === null) return;
+            try {
+                await fetch('/api/chat/rename', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: chatId, title: title.trim() })
+                });
+                location.reload();
+            } catch (e) {
+                alert('Rename failed: ' + e);
+            }
+        }
+
+        async function deleteChat(chatId) {
+            if (!confirm('Delete this conversation? This cannot be undone.')) return;
+            try {
+                const resp = await fetch('/api/chat/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: chatId })
+                });
+                const data = await resp.json();
+                location.href = '/chat?chat_id=' + encodeURIComponent(data.active_chat_id || '');
+            } catch (e) {
+                alert('Delete failed: ' + e);
+            }
+        }
+
         async function clearChat() {
-            if (!confirm('Clear the entire chat history? This cannot be undone.')) return;
+            if (!confirm('Clear this conversation\'s messages? The conversation stays, but its history is wiped.')) return;
             try {
                 await fetch('/api/chat/clear', { method: 'POST' });
                 location.reload();

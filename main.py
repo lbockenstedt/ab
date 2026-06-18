@@ -1,4 +1,4 @@
-import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, itertools
+import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -391,9 +391,17 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
 
         if is_cloud:
+            # Cloud Ollama instances now use /api/chat for multi-turn (messages)
+            # and /api/generate for single-shot (prompt).
             primary_endpoint = f"{url.rstrip('/')}/api/generate"
             primary_use_generate = True
         else:
+            primary_endpoint = f"{url.rstrip('/')}/api/chat"
+            primary_use_generate = False
+
+        # Overlap: If we have conversation history (messages),
+        # we MUST use /api/chat regardless of Local/Cloud.
+        if messages is not None:
             primary_endpoint = f"{url.rstrip('/')}/api/chat"
             primary_use_generate = False
 
@@ -717,29 +725,6 @@ async def catch_exceptions_mid(request: Request, call_next):
 
 _task_state_lock = threading.Lock()
 _chat_lock = threading.RLock()
-_chat_id_counter = itertools.count(1)
-
-def append_chat_message(msg):
-    """Atomically appends a message dict to the persisted chat history.
-
-    Reads-modifies-writes under _chat_lock so concurrent appends (e.g. a new
-    user message arriving while a chat reply finishes) never lose a turn.
-    """
-    with _chat_lock:
-        try:
-            with open(CHAT_HISTORY_FILE, "r") as f:
-                history = json.load(f)
-            if not isinstance(history, list):
-                history = []
-        except Exception:
-            history = []
-        history.append(msg)
-        try:
-            with open(CHAT_HISTORY_FILE, "w") as f:
-                json.dump(history, f, indent=2)
-        except Exception as e:
-            logger.error(f"Could not save chat history to {CHAT_HISTORY_FILE}: {e}")
-        return history
 
 def update_task_state(task_id, task_name="Unknown Task", action="start"):
     """Manages active tasks and their start times. action can be 'start' or 'end'."""
@@ -1063,6 +1048,13 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
             hit = _search_repo(target_repo, is_self_diag=is_self_diag)
             if hit:
                 return hit
+        elif is_self_diag:
+            # If it's the self-diagnosis repo, search it even if it's not explicitly
+            # in the monitored_repos list (though it usually is).
+            hit = _search_repo(target_repo, is_self_diag=True)
+            if hit:
+                return hit
+
 
     # 2. Global fallback across the other monitored repos, stricter threshold.
     for repo_name in monitored_repos:
@@ -2480,27 +2472,145 @@ def save_self_scan_offset(offset, inode):
     except Exception as e:
         logger.debug(f"Could not save self-scan offset: {e}")
 
-def load_chat_history():
-    """Returns the persisted chat conversation as a list of message dicts.
+def _empty_chats_store():
+    """Returns a fresh multi-conversation store with one untitled, active chat."""
+    conv = {"id": "c1", "title": "", "created": datetime.now().isoformat(), "messages": []}
+    return {"next_id": 2, "active_id": "c1", "conversations": [conv]}
 
-    Each entry is {"role": "user"|"assistant"|"system", "content": str, "ts": str}.
-    Returns [] when no history exists or the file is unreadable.
+def _title_from_message(content):
+    """Derives a short conversation title from the first user message."""
+    title = (content or "").strip().splitlines()[0] if content else ""
+    return title[:60]
+
+def load_chats():
+    """Returns the persisted multi-conversation store.
+
+    Schema: {"next_id": int, "active_id": str|None, "conversations": [
+        {"id": str, "title": str, "created": str, "messages": [{role,content,ts}]}
+    ]}. Transparently migrates a legacy flat message list (pre-V.48 single-thread
+    chat_history.json) into the first conversation so no history is lost.
     """
-    try:
-        with open(CHAT_HISTORY_FILE, "r") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+    with _chat_lock:
+        try:
+            with open(CHAT_HISTORY_FILE, "r") as f:
+                data = json.load(f)
+        except Exception:
+            return _empty_chats_store()
 
-def save_chat_history(messages):
-    """Persists the full chat conversation (list of message dicts) under _chat_lock."""
+        if isinstance(data, list):
+            # Legacy flat single-thread history -> wrap into one conversation.
+            first_user = next((m.get("content", "") for m in data
+                               if isinstance(m, dict) and m.get("role") == "user"), "")
+            store = {
+                "next_id": 2,
+                "active_id": "c1",
+                "conversations": [{
+                    "id": "c1",
+                    "title": _title_from_message(first_user) or "Chat 1",
+                    "created": datetime.now().isoformat(),
+                    "messages": [m for m in data if isinstance(m, dict)],
+                }],
+            }
+            save_chats(store)
+            return store
+
+        if not isinstance(data, dict) or not isinstance(data.get("conversations"), list):
+            return _empty_chats_store()
+
+        store = {
+            "next_id": int(data.get("next_id", 1) or 1),
+            "active_id": data.get("active_id"),
+            "conversations": [c for c in data["conversations"] if isinstance(c, dict)],
+        }
+        if not store["conversations"]:
+            return _empty_chats_store()
+        if not store["active_id"] or not get_conversation(store, store["active_id"]):
+            store["active_id"] = store["conversations"][-1]["id"]
+        return store
+
+def save_chats(store):
+    """Persists the whole multi-conversation store under _chat_lock."""
     with _chat_lock:
         try:
             with open(CHAT_HISTORY_FILE, "w") as f:
-                json.dump(messages, f, indent=2)
+                json.dump(store, f, indent=2)
         except Exception as e:
-            logger.error(f"Could not save chat history to {CHAT_HISTORY_FILE}: {e}")
+            logger.error(f"Could not save chats to {CHAT_HISTORY_FILE}: {e}")
+
+def get_conversation(store, chat_id):
+    """Returns the conversation dict for chat_id, or None if not found."""
+    for c in store.get("conversations", []):
+        if c.get("id") == chat_id:
+            return c
+    return None
+
+def append_chat_message(chat_id, msg):
+    """Atomically appends a message to a conversation and persists the store.
+
+    Auto-titles the conversation from the first user message if it is untitled.
+    Sets the conversation as active. Returns the message dict, or None if the
+    conversation does not exist.
+    """
+    with _chat_lock:
+        store = load_chats()
+        conv = get_conversation(store, chat_id)
+        if conv is None:
+            return None
+        conv["messages"].append(msg)
+        if msg.get("role") == "user" and not conv.get("title"):
+            conv["title"] = _title_from_message(msg.get("content", ""))
+        store["active_id"] = chat_id
+        save_chats(store)
+        return msg
+
+def create_conversation():
+    """Creates a new empty conversation, makes it active, and persists. Returns its id."""
+    with _chat_lock:
+        store = load_chats()
+        cid = f"c{store['next_id']}"
+        store["next_id"] += 1
+        store["conversations"].append({
+            "id": cid,
+            "title": "",
+            "created": datetime.now().isoformat(),
+            "messages": [],
+        })
+        store["active_id"] = cid
+        save_chats(store)
+        return cid
+
+def rename_conversation(chat_id, title):
+    """Renames a conversation. Returns True if found and updated."""
+    with _chat_lock:
+        store = load_chats()
+        conv = get_conversation(store, chat_id)
+        if conv is None:
+            return False
+        conv["title"] = (title or "").strip()[:120]
+        save_chats(store)
+        return True
+
+def delete_conversation(chat_id):
+    """Deletes a conversation and selects a new active one. Returns the new active id."""
+    with _chat_lock:
+        store = load_chats()
+        store["conversations"] = [c for c in store["conversations"] if c.get("id") != chat_id]
+        if not store["conversations"]:
+            store = _empty_chats_store()
+        else:
+            store["active_id"] = store["conversations"][-1]["id"]
+        save_chats(store)
+        return store["active_id"]
+
+def set_active_chat(chat_id):
+    """Sets the active conversation if chat_id exists. Returns True on success."""
+    with _chat_lock:
+        store = load_chats()
+        if not get_conversation(store, chat_id):
+            return False
+        store["active_id"] = chat_id
+        save_chats(store)
+        return True
 
 def scan_self_logs(gh_current, config):
     """Scans BugFixer's own logs and creates GitHub issues for internal errors.
@@ -3206,60 +3316,86 @@ async def trigger_hub_update():
     result = trigger_infrastructure_update()
     return {"status": "success" if "SUCCESS" in result else "error", "message": result}
 
-def run_chat_reply(task_id):
-    """Background worker that streams an LLM reply for an interactive chat turn.
+def run_chat_reply(chat_id):
+    """Background worker that streams an LLM reply for one conversation turn.
 
-    Builds a sliding multi-turn window from the persisted chat history (capped to
-    avoid context-overflow 500s), calls call_llm with the messages array, then
-    persists the assistant reply. Live progress is written into
-    state["active_tasks"][task_id]["stream"] by call_llm itself; completion/error
-    is tracked in state["chat_streams"][task_id].
+    Builds a sliding multi-turn window from that conversation's persisted
+    messages (capped to avoid context-overflow 500s), calls call_llm with the
+    messages array, then persists the assistant reply. Live progress is written
+    into state["active_tasks"][chat_id]["stream"] by call_llm itself;
+    completion/error is tracked in state["chat_streams"][chat_id].
     """
     try:
         config = load_config()
         window_size = int(config.get("CHAT_HISTORY_WINDOW", 20) or 20)
         system_prompt = config.get("CHAT_SYSTEM_PROMPT") or "You are a helpful assistant."
-        history = load_chat_history()
+        store = load_chats()
+        conv = get_conversation(store, chat_id)
+        if conv is None:
+            with _chat_lock:
+                if chat_id in state["chat_streams"]:
+                    state["chat_streams"][chat_id].update({"done": True, "error": "Conversation not found"})
+            return
+        messages = conv.get("messages", [])
         # Keep the most recent `window_size` turns and prepend the system message.
-        window = [{"role": "system", "content": system_prompt}] + history[-window_size:]
-        reply = call_llm("", messages=window, task_id=task_id)
+        window = [{"role": "system", "content": system_prompt}] + messages[-window_size:]
+        reply = call_llm("", messages=window, task_id=chat_id)
         if reply and reply.strip():
-            append_chat_message({
+            append_chat_message(chat_id, {
                 "role": "assistant",
                 "content": reply,
                 "ts": datetime.now().isoformat(),
             })
         with _chat_lock:
-            if task_id in state["chat_streams"]:
-                state["chat_streams"][task_id].update({
+            if chat_id in state["chat_streams"]:
+                state["chat_streams"][chat_id].update({
                     "stream": reply or "",
                     "done": True,
                     "error": None,
                 })
     except Exception as e:
-        logger.error(f"run_chat_reply failed for {task_id}: {e}\n{traceback.format_exc()}")
+        logger.error(f"run_chat_reply failed for {chat_id}: {e}\n{traceback.format_exc()}")
         with _chat_lock:
-            if task_id in state["chat_streams"]:
-                state["chat_streams"][task_id].update({
+            if chat_id in state["chat_streams"]:
+                state["chat_streams"][chat_id].update({
                     "done": True,
                     "error": f"LLM error: {e}",
                 })
     finally:
         # Remove the chat task from the Dashboard activity feed.
-        update_task_state(task_id, "Chat", action="end")
+        update_task_state(chat_id, "Chat", action="end")
 
 @app.get("/chat")
-async def chat_page(request: Request):
-    """Server-rendered Chat view; renders the persisted conversation history."""
+async def chat_page(request: Request, chat_id: str = None):
+    """Server-rendered Chat view; renders the sidebar + the active conversation."""
+    store = load_chats()
+    if chat_id and set_active_chat(chat_id):
+        store = load_chats()
+    active_id = store["active_id"]
+    conv = get_conversation(store, active_id) or store["conversations"][0]
+    chats_list = [{"id": c["id"], "title": c.get("title", "")} for c in store["conversations"]]
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"view": "chat", "state": state, "chat_history": load_chat_history()},
+        context={
+            "view": "chat",
+            "state": state,
+            "chats": chats_list,
+            "active_chat_id": conv["id"],
+            "active_chat_title": conv.get("title", "") or "New chat",
+            "chat_history": conv.get("messages", []),
+        },
     )
+
+@app.post("/api/chat/new")
+async def chat_new():
+    """Creates a new empty conversation and makes it active."""
+    cid = create_conversation()
+    return {"chat_id": cid}
 
 @app.post("/api/chat")
 async def chat_send(request: Request):
-    """Accepts a user message, persists it, and kicks off an async LLM reply."""
+    """Accepts a user message for a conversation, persists it, kicks off a reply."""
     try:
         data = await request.json()
     except Exception:
@@ -3267,44 +3403,82 @@ async def chat_send(request: Request):
     message = (data.get("message") or "").strip() if isinstance(data, dict) else ""
     if not message:
         return JSONResponse(status_code=400, content={"message": "Message is required"})
+    chat_id = (data.get("chat_id") or "").strip() if isinstance(data, dict) else ""
+    if not chat_id:
+        chat_id = load_chats()["active_id"]
 
-    append_chat_message({
+    appended = append_chat_message(chat_id, {
         "role": "user",
         "content": message,
         "ts": datetime.now().isoformat(),
     })
+    if appended is None:
+        return JSONResponse(status_code=404, content={"message": "Conversation not found"})
 
-    task_id = f"chat-{next(_chat_id_counter)}"
     with _chat_lock:
-        state["chat_streams"][task_id] = {"stream": "", "done": False, "error": None}
-    update_task_state(task_id, "Chat", action="start")
+        state["chat_streams"][chat_id] = {"stream": "", "done": False, "error": None}
+    update_task_state(chat_id, "Chat", action="start")
 
-    threading.Thread(target=run_chat_reply, args=(task_id,), daemon=True).start()
-    return {"task_id": task_id}
+    threading.Thread(target=run_chat_reply, args=(chat_id,), daemon=True).start()
+    return {"chat_id": chat_id}
 
 @app.get("/api/chat/stream")
-async def chat_stream(task_id: str):
-    """Polls the live assistant stream and completion state for a chat turn."""
+async def chat_stream(chat_id: str):
+    """Polls the live assistant stream and completion state for a conversation."""
     with _chat_lock:
-        entry = state["chat_streams"].get(task_id)
+        entry = state["chat_streams"].get(chat_id)
         if entry is None:
-            return {"done": True, "stream": "", "error": "Unknown task_id"}
+            return {"done": True, "stream": "", "error": "Unknown chat_id"}
         stream_text = entry.get("stream", "")
         done = bool(entry.get("done"))
         error = entry.get("error")
     # Fold in any partial progress call_llm streamed into active_tasks.
     with _task_state_lock:
-        task = state["active_tasks"].get(task_id)
+        task = state["active_tasks"].get(chat_id)
         if task and task.get("stream"):
             stream_text = task["stream"]
     return {"done": done, "stream": stream_text, "error": error}
 
+@app.post("/api/chat/rename")
+async def chat_rename(request: Request):
+    """Renames a conversation."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"message": "Invalid JSON body"})
+    chat_id = (data.get("chat_id") or "").strip() if isinstance(data, dict) else ""
+    title = (data.get("title") or "").strip() if isinstance(data, dict) else ""
+    if not chat_id:
+        return JSONResponse(status_code=400, content={"message": "chat_id is required"})
+    ok = rename_conversation(chat_id, title)
+    return {"ok": ok}
+
+@app.post("/api/chat/delete")
+async def chat_delete(request: Request):
+    """Deletes a conversation and selects a new active one."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"message": "Invalid JSON body"})
+    chat_id = (data.get("chat_id") or "").strip() if isinstance(data, dict) else ""
+    if not chat_id:
+        return JSONResponse(status_code=400, content={"message": "chat_id is required"})
+    new_active = delete_conversation(chat_id)
+    with _chat_lock:
+        state["chat_streams"].pop(chat_id, None)
+    return {"active_chat_id": new_active}
+
 @app.post("/api/chat/clear")
 async def chat_clear():
-    """Clears the persisted chat history."""
-    save_chat_history([])
+    """Clears the active conversation's messages (keeps the conversation shell)."""
     with _chat_lock:
-        state["chat_streams"].clear()
+        store = load_chats()
+        conv = get_conversation(store, store["active_id"])
+        if conv:
+            conv["messages"] = []
+            conv["title"] = ""
+        save_chats(store)
+        state["chat_streams"].pop(store["active_id"], None)
     return {"ok": True}
 
 threading.Thread(target=connectivity_worker, daemon=True).start()
