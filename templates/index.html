@@ -1418,17 +1418,12 @@
                     _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', [], false);
                     return;
                 }
-                if (data.url) {
-                    _showClaudeCliResult(
-                        'Step 1: Open URL below and approve · Step 2: Copy the authorization code · Step 3: Paste it below',
-                        'text-violet-700', data.output || '', [data.url], true
-                    );
-                } else {
-                    _showClaudeCliResult(
-                        'Auth process started but no URL yet — polling…',
-                        'text-violet-600', data.output || '', [], false
-                    );
-                }
+                // Always show code input — the URL may take a moment to appear via polling.
+                const urls = data.url ? [data.url] : [];
+                const msg = data.url
+                    ? 'Step 1: Open the URL below in your browser and approve · Step 2: Paste the authorization code below'
+                    : 'Auth process running — waiting for URL… Paste the authorization code once you have it.';
+                _showClaudeCliResult(msg, 'text-violet-700', data.output || '', urls, true);
                 // Poll every 4 s so we pick up the URL if it wasn't ready yet,
                 // and detect when the OAuth callback completes.
                 _claudeAuthPollTimer = setInterval(pollClaudeAuth, 4000);
@@ -1447,11 +1442,11 @@
                     clearInterval(_claudeAuthPollTimer);
                     _showClaudeCliResult('✗ Auth error: ' + (data.detail || ''), 'text-red-600', '', [], false);
                 } else if (data.status === 'pending' && data.url) {
-                    // Update the URL display if we got it late.
+                    // Update the URL display if we got it late — keep code input visible.
                     const urlDiv = document.getElementById('claude-cli-urls');
                     if (urlDiv && urlDiv.classList.contains('hidden')) {
                         _showClaudeCliResult(
-                            'Step 1: Open URL below and approve · Step 2: Copy the authorization code · Step 3: Paste it below',
+                            'Step 1: Open the URL below in your browser and approve · Step 2: Paste the authorization code below',
                             'text-violet-700', '', [data.url], true
                         );
                     }

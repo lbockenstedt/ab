@@ -4041,19 +4041,25 @@ async def claude_cli_auth_start():
     state["claude_auth_done"] = False
 
     try:
+        # BROWSER=/bin/echo prevents claude from opening a real browser window
+        # (which hangs on headless servers) and instead prints the OAuth URL to
+        # stdout so we can capture and display it.
+        env = os.environ.copy()
+        env["BROWSER"] = "/bin/echo"
+
         proc = subprocess.Popen(
             ["claude", "auth", "login"],
             stdin=subprocess.PIPE,   # kept open so we can pipe the approval code back
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,
+            text=True, bufsize=1, env=env,
         )
         state["claude_auth_proc"] = proc
 
-        # Read output for up to 20 s to capture the OAuth URL, then return.
-        # The process is NOT killed — it must stay alive for the browser callback.
+        # Read output for up to 15 s to capture the OAuth URL (printed by /bin/echo).
+        # The process is NOT killed — it must stay alive to receive the auth code.
         lines = []
         url_found = ""
-        deadline = time.time() + 20
+        deadline = time.time() + 15
         while time.time() < deadline:
             ready, _, _ = _select.select([proc.stdout, proc.stderr], [], [], 0.5)
             for stream in ready:
@@ -4068,24 +4074,26 @@ async def claude_cli_auth_start():
                             break
             if url_found:
                 break
-            if proc.poll() is not None:  # exited early
+            if proc.poll() is not None:  # exited early (already authenticated?)
                 break
 
         combined = "".join(lines)
-        # Scan all captured output for URLs if line-by-line didn't find one.
         if not url_found:
             all_urls = re.findall(r'https?://\S+', combined)
             url_found = all_urls[0].rstrip(".,;)") if all_urls else ""
-
         state["claude_auth_url"] = url_found
+
         if proc.poll() == 0:
             state["claude_auth_done"] = True
             return {"status": "authenticated", "url": "", "output": combined[:3000]}
-        if url_found:
-            return {"status": "pending", "url": url_found, "output": combined[:3000],
-                    "message": "Open the URL above in your browser to authenticate, then click 'Check Status'."}
-        return {"status": "pending", "url": "", "output": combined[:3000] or "(no output yet — process running)",
-                "message": "Auth process started but no URL captured yet. Wait a moment and click 'Check Status'."}
+
+        # Always return pending with the code-input flag set to True so the user
+        # can paste their authorization code regardless of whether we captured a URL.
+        return {
+            "status": "pending",
+            "url": url_found,
+            "output": combined[:3000] or "(waiting for claude auth login output…)",
+        }
 
     except FileNotFoundError:
         return {"status": "not_found", "detail": "'claude' binary not found in PATH"}
