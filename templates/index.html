@@ -462,7 +462,7 @@
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_1" id="llm-provider-1" onchange="loadProviderModels(1)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select name="LLM_PROVIDER_1" id="llm-provider-1" onchange="loadProviderModels(1, true)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_1 == 'openai' else '' }}>OpenAI</option>
                                         <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_1 == 'anthropic' else '' }}>Anthropic</option>
                                         <option value="google" {{ 'selected' if settings.LLM_PROVIDER_1 == 'google' else '' }}>Google Gemini</option>
@@ -495,7 +495,7 @@
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_2" id="llm-provider-2" onchange="loadProviderModels(2)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select name="LLM_PROVIDER_2" id="llm-provider-2" onchange="loadProviderModels(2, true)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_2 == 'openai' else '' }}>OpenAI</option>
                                         <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_2 == 'anthropic' else '' }}>Anthropic</option>
                                         <option value="google" {{ 'selected' if settings.LLM_PROVIDER_2 == 'google' else '' }}>Google Gemini</option>
@@ -528,7 +528,7 @@
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Provider</label>
-                                    <select name="LLM_PROVIDER_3" id="llm-provider-3" onchange="loadProviderModels(3)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select name="LLM_PROVIDER_3" id="llm-provider-3" onchange="loadProviderModels(3, true)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="openai" {{ 'selected' if settings.LLM_PROVIDER_3 == 'openai' else '' }}>OpenAI</option>
                                         <option value="anthropic" {{ 'selected' if settings.LLM_PROVIDER_3 == 'anthropic' else '' }}>Anthropic</option>
                                         <option value="google" {{ 'selected' if settings.LLM_PROVIDER_3 == 'google' else '' }}>Google Gemini</option>
@@ -555,16 +555,25 @@
                         <!-- Reviewer overrides + timeout -->
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 1 <span class="text-slate-400 font-normal">(override, blank = Provider 1 model)</span></label>
-                                <input type="text" name="REVIEWER_MODEL_1" value="{{ settings.REVIEWER_MODEL_1 }}" placeholder="Leave blank to use Provider 1 model" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 1 <span class="text-slate-400 font-normal">(blank = use Provider 1 model)</span></label>
+                                <select name="REVIEWER_MODEL_1" id="reviewer-model-1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="">— same as Provider 1 —</option>
+                                    {% if settings.REVIEWER_MODEL_1 %}<option value="{{ settings.REVIEWER_MODEL_1 }}" selected>{{ settings.REVIEWER_MODEL_1 }}</option>{% endif %}
+                                </select>
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 2 <span class="text-slate-400 font-normal">(override, blank = Provider 2 model)</span></label>
-                                <input type="text" name="REVIEWER_MODEL_2" value="{{ settings.REVIEWER_MODEL_2 }}" placeholder="Leave blank to use Provider 2 model" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 2 <span class="text-slate-400 font-normal">(blank = use Provider 2 model)</span></label>
+                                <select name="REVIEWER_MODEL_2" id="reviewer-model-2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="">— same as Provider 2 —</option>
+                                    {% if settings.REVIEWER_MODEL_2 %}<option value="{{ settings.REVIEWER_MODEL_2 }}" selected>{{ settings.REVIEWER_MODEL_2 }}</option>{% endif %}
+                                </select>
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Reviewer Model 3 <span class="text-slate-400 font-normal">(override, blank = Provider 3 model)</span></label>
-                                <input type="text" name="REVIEWER_MODEL_3" value="{{ settings.REVIEWER_MODEL_3 }}" placeholder="Leave blank to use Provider 3 model" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <label class="text-sm font-medium text-slate-600">Reviewer Model 3 <span class="text-slate-400 font-normal">(blank = use Provider 3 model)</span></label>
+                                <select name="REVIEWER_MODEL_3" id="reviewer-model-3" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="">— same as Provider 3 —</option>
+                                    {% if settings.REVIEWER_MODEL_3 %}<option value="{{ settings.REVIEWER_MODEL_3 }}" selected>{{ settings.REVIEWER_MODEL_3 }}</option>{% endif %}
+                                </select>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
@@ -1101,7 +1110,7 @@
 
         async function fetchModels() { /* kept for compat — delegates to loadProviderModels */ }
 
-        async function loadProviderModels(n) {
+        async function loadProviderModels(n, providerChanged = false) {
             const providerEl = document.getElementById(`llm-provider-${n}`);
             const keyEl      = document.getElementById(`llm-key-${n}`);
             const urlEl      = document.getElementById(`llm-url-${n}`);
@@ -1109,10 +1118,17 @@
             const statusEl   = document.getElementById(`p${n}-model-status`);
             if (!providerEl || !keyEl || !select) return;
 
-            const provider   = providerEl.value;
-            const api_key    = keyEl.value.trim();
-            const base_url   = urlEl ? urlEl.value.trim() : '';
-            const currentVal = select.value;
+            const provider = providerEl.value;
+            const api_key  = keyEl.value.trim();
+            const base_url = urlEl ? urlEl.value.trim() : '';
+
+            // When the provider changes, clear the model list immediately so stale
+            // options from the previous provider don't linger while we fetch.
+            const prevVal = providerChanged ? '' : select.value;
+            if (providerChanged) {
+                select.innerHTML = '<option value="">— enter API key to load models —</option>';
+                if (statusEl) statusEl.textContent = '';
+            }
 
             if (!api_key) {
                 if (statusEl) statusEl.textContent = '';
@@ -1121,6 +1137,10 @@
 
             if (statusEl) statusEl.textContent = '(loading…)';
             select.disabled = true;
+
+            // Clear the list and show a loading placeholder before the network call.
+            select.innerHTML = '<option value="" disabled selected>Loading…</option>';
+
             try {
                 const resp = await fetch('/api/fetch-models', {
                     method: 'POST',
@@ -1130,30 +1150,48 @@
                 const data = await resp.json();
                 const models = data.models || [];
 
+                select.innerHTML = '';
                 if (models.length === 0) {
-                    // Keep current value; just clear status
-                    if (statusEl) statusEl.textContent = '(no models returned)';
+                    const opt = document.createElement('option');
+                    opt.value = '';
+                    opt.textContent = '— no models returned (check API key) —';
+                    select.appendChild(opt);
+                    if (statusEl) statusEl.textContent = '(check API key)';
                 } else {
-                    select.innerHTML = '';
                     let found = false;
                     models.forEach(m => {
                         const opt = document.createElement('option');
                         opt.value = m.name;
                         opt.textContent = m.details ? `${m.name} — ${m.details}` : m.name;
-                        if (m.name === currentVal) { opt.selected = true; found = true; }
+                        if (m.name === prevVal) { opt.selected = true; found = true; }
                         select.appendChild(opt);
                     });
-                    // If saved model isn't in the list, prepend it so it stays selected
-                    if (currentVal && !found) {
+                    // Keep the previously saved model selected even if not in the new list.
+                    if (prevVal && !found) {
                         const opt = document.createElement('option');
-                        opt.value = currentVal;
-                        opt.textContent = `${currentVal} (current)`;
+                        opt.value = prevVal;
+                        opt.textContent = `${prevVal} (current)`;
                         opt.selected = true;
                         select.insertBefore(opt, select.firstChild);
                     }
                     if (statusEl) statusEl.textContent = `(${models.length} available)`;
                 }
+
+                // Mirror the same options into the matching Reviewer Model dropdown.
+                const reviewerSel = document.getElementById(`reviewer-model-${n}`);
+                if (reviewerSel && models.length > 0) {
+                    const savedReviewer = reviewerSel.value;
+                    reviewerSel.innerHTML = '<option value="">— same as Provider ' + n + ' —</option>';
+                    models.forEach(m => {
+                        const opt = document.createElement('option');
+                        opt.value = m.name;
+                        opt.textContent = m.details ? `${m.name} — ${m.details}` : m.name;
+                        if (m.name === savedReviewer) opt.selected = true;
+                        reviewerSel.appendChild(opt);
+                    });
+                }
             } catch (e) {
+                select.innerHTML = '<option value="">— fetch failed —</option>';
                 if (statusEl) statusEl.textContent = '(fetch failed)';
                 console.error('loadProviderModels error:', e);
             } finally {
