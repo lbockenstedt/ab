@@ -49,6 +49,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ENV_FILE = os.path.join(CONFIG_DIR, ".env")
 STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
+SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
 class QueueLocalException(Exception):
@@ -2251,6 +2252,30 @@ def resolve_self_diagnosis_repo(config):
 
     return clean_repo_name(self_repo_name)
 
+def _file_inode(path):
+    """Returns the inode of a file, or None if it cannot be stat'd."""
+    try:
+        return os.stat(path).st_ino
+    except Exception:
+        return None
+
+def load_self_scan_offset():
+    """Returns (offset, inode) of the last self-scan read position, or (None, None)."""
+    try:
+        with open(SELF_SCAN_OFFSET_FILE, "r") as f:
+            data = json.load(f)
+        return data.get("offset"), data.get("inode")
+    except Exception:
+        return None, None
+
+def save_self_scan_offset(offset, inode):
+    """Persists the last-read byte offset and inode for incremental self-scans."""
+    try:
+        with open(SELF_SCAN_OFFSET_FILE, "w") as f:
+            json.dump({"offset": offset, "inode": inode}, f)
+    except Exception as e:
+        logger.debug(f"Could not save self-scan offset: {e}")
+
 def scan_self_logs(gh_current, config):
     """Scans BugFixer's own logs and creates GitHub issues for internal errors.
 
@@ -2314,10 +2339,37 @@ def scan_self_logs(gh_current, config):
         return
 
     try:
+        # Only analyze log lines appended SINCE the last self-scan, not the
+        # entire historical log. Previously this read the whole file every
+        # cycle, so stale errors (old 500s/401s, already-fixed exceptions) were
+        # re-analyzed and re-filed as new GitHub issues every single cycle — the
+        # "self-diagnosis issue storm" (#400-#409 etc.). We persist a byte offset
+        # + inode; on first run or log rotation we skip straight to the current
+        # end so historical content is never reported.
+        current_size = os.path.getsize(log_path)
+        current_inode = _file_inode(log_path)
+        last_offset, last_inode = load_self_scan_offset()
+
+        if last_inode is None or last_offset is None or last_inode != current_inode:
+            # First ever scan, or the log was rotated/recreated: start at the
+            # current end so we only capture errors logged from now on.
+            start_offset = current_size
+        elif last_offset > current_size:
+            # Same file but it shrank (truncated in place): skip to the new end.
+            start_offset = current_size
+        else:
+            start_offset = last_offset
+
         with open(log_path, "r") as f:
-            lines = f.readlines()
+            f.seek(start_offset)
+            new_text = f.read()
+
+        # Persist the new read position. Saved immediately after reading so a
+        # crash or filing failure never causes the same lines to be re-read.
+        save_self_scan_offset(os.path.getsize(log_path), current_inode)
+
         formatted_logs = []
-        for line in lines:
+        for line in new_text.splitlines():
             if "[ERROR]" in line or "[CRITICAL]" in line:
                 ts = line[:23] if len(line) > 23 else "Unknown"
                 formatted_logs.append({
@@ -2325,6 +2377,12 @@ def scan_self_logs(gh_current, config):
                     "timestamp": ts,
                     "log": line.strip()
                 })
+
+        logger.info(
+            f"Self-scan read {len(new_text)} new byte(s) from offset {start_offset} "
+            f"(file size {current_size}, inode {current_inode}); "
+            f"{len(formatted_logs)} new error line(s) this cycle."
+        )
 
         if not formatted_logs:
             update_task_state(task_id="SelfScan", action="end")
