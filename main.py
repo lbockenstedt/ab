@@ -4043,6 +4043,7 @@ async def claude_cli_auth_start():
     try:
         proc = subprocess.Popen(
             ["claude", "auth", "login"],
+            stdin=subprocess.PIPE,   # kept open so we can pipe the approval code back
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
@@ -4154,6 +4155,60 @@ async def claude_cli_auth_poll():
         remaining = ""
     state["claude_auth_proc"] = None
     return {"status": "error", "detail": f"auth login exited {rc}: {remaining[:300]}", "url": url}
+
+
+@app.post("/api/claude-cli/auth/submit-code")
+async def claude_cli_auth_submit_code(request: Request):
+    """Send an authorization code to the waiting 'claude auth login' process via stdin.
+
+    After the user visits the OAuth URL, claude.ai shows an approval code.
+    The user pastes it here and we forward it to the subprocess's stdin.
+    """
+    data = await request.json()
+    code = (data.get("code") or "").strip()
+    if not code:
+        return {"status": "error", "detail": "No code provided."}
+
+    proc = state.get("claude_auth_proc")
+    if proc is None or proc.poll() is not None:
+        return {"status": "error", "detail": "No active auth process — click 'Start Login Flow' first."}
+
+    try:
+        proc.stdin.write(code + "\n")
+        proc.stdin.flush()
+    except Exception as e:
+        return {"status": "error", "detail": f"Failed to send code to auth process: {e}"}
+
+    # Collect any immediate output and check if the process finished.
+    import select as _select
+    lines = []
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            ready, _, _ = _select.select([proc.stdout, proc.stderr], [], [], 0.5)
+            for s in ready:
+                line = s.readline()
+                if line:
+                    lines.append(line)
+        except Exception:
+            break
+        if proc.poll() is not None:
+            break
+
+    rc = proc.poll()
+    output = "".join(lines)
+
+    if rc == 0:
+        state["claude_auth_done"] = True
+        state["claude_auth_proc"] = None
+        return {"status": "authenticated", "output": output}
+    if rc is not None:
+        state["claude_auth_proc"] = None
+        return {"status": "error", "detail": f"Auth process exited {rc}: {output[:300]}"}
+
+    return {"status": "pending",
+            "output": output,
+            "message": "Code submitted — authentication in progress. Click 'Check Status' in a moment."}
 
 
 @app.post("/api/toggle-model")

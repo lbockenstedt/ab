@@ -491,6 +491,15 @@
                                             <div id="claude-cli-status-line" class="font-medium"></div>
                                             <pre id="claude-cli-output" class="whitespace-pre-wrap break-all text-[10px] text-slate-500 max-h-48 overflow-y-auto hidden"></pre>
                                             <div id="claude-cli-urls" class="hidden space-y-1"></div>
+                                            <div id="claude-cli-code-input" class="hidden pt-1 space-y-1">
+                                                <p class="text-[11px] font-semibold text-violet-700">After approving in your browser, paste the authorization code here:</p>
+                                                <div class="flex gap-2">
+                                                    <input type="text" id="claude-cli-code" placeholder="Paste authorization code…"
+                                                           class="flex-1 p-1.5 text-xs rounded border border-violet-300 outline-none focus:ring-2 focus:ring-violet-400 bg-white font-mono">
+                                                    <button type="button" onclick="submitClaudeCode()"
+                                                            class="py-1 px-3 text-xs bg-violet-600 hover:bg-violet-700 text-white rounded font-bold transition-colors">Submit</button>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                     {% else %}
@@ -1289,11 +1298,12 @@
         }
 
         // ── LLM Vault UI ──────────────────────────────────────────────────────
-        function _showClaudeCliResult(statusText, statusColor, output, urls) {
+        function _showClaudeCliResult(statusText, statusColor, output, urls, showCodeInput) {
             const box = document.getElementById('claude-cli-status');
             const line = document.getElementById('claude-cli-status-line');
             const pre = document.getElementById('claude-cli-output');
             const urlDiv = document.getElementById('claude-cli-urls');
+            const codeDiv = document.getElementById('claude-cli-code-input');
             box.classList.remove('hidden');
             line.textContent = statusText;
             line.className = 'font-medium ' + statusColor;
@@ -1308,7 +1318,7 @@
                 urlDiv.innerHTML = '';
                 const label = document.createElement('p');
                 label.className = 'font-bold text-violet-700 text-[11px]';
-                label.textContent = 'Open this URL in your browser to approve:';
+                label.textContent = 'Step 1 — Open this URL in your browser and approve:';
                 urlDiv.appendChild(label);
                 urls.forEach(u => {
                     const a = document.createElement('a');
@@ -1319,6 +1329,13 @@
                 });
             } else {
                 urlDiv.classList.add('hidden');
+            }
+            if (codeDiv) {
+                if (showCodeInput) {
+                    codeDiv.classList.remove('hidden');
+                } else {
+                    codeDiv.classList.add('hidden');
+                }
             }
         }
 
@@ -1389,34 +1406,34 @@
         }
 
         async function startClaudeAuth() {
-            _showClaudeCliResult('Starting login flow — scanning for auth URL (up to 20s)…', 'text-violet-600', '', []);
+            _showClaudeCliResult('Starting login flow — scanning for auth URL (up to 20s)…', 'text-violet-600', '', [], false);
             clearInterval(_claudeAuthPollTimer);
             try {
                 const data = await fetch('/api/claude-cli/auth/start', {method: 'POST'}).then(r => r.json());
                 if (data.status === 'authenticated') {
-                    _showClaudeCliResult('✓ Already authenticated — Claude CLI is ready.', 'text-green-700', '', []);
+                    _showClaudeCliResult('✓ Already authenticated — Claude CLI is ready.', 'text-green-700', '', [], false);
                     return;
                 }
                 if (data.status === 'not_found') {
-                    _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', []);
+                    _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', [], false);
                     return;
                 }
                 if (data.url) {
                     _showClaudeCliResult(
-                        '1. Open the URL below in your browser and approve  2. Return here and click "Check Status"',
-                        'text-violet-700', data.output || '', [data.url]
+                        'Step 1: Open URL below and approve · Step 2: Copy the authorization code · Step 3: Paste it below',
+                        'text-violet-700', data.output || '', [data.url], true
                     );
                 } else {
                     _showClaudeCliResult(
                         'Auth process started but no URL yet — polling…',
-                        'text-violet-600', data.output || '', []
+                        'text-violet-600', data.output || '', [], false
                     );
                 }
                 // Poll every 4 s so we pick up the URL if it wasn't ready yet,
                 // and detect when the OAuth callback completes.
                 _claudeAuthPollTimer = setInterval(pollClaudeAuth, 4000);
             } catch(e) {
-                _showClaudeCliResult('Error starting auth: ' + e, 'text-red-600', '', []);
+                _showClaudeCliResult('Error starting auth: ' + e, 'text-red-600', '', [], false);
             }
         }
 
@@ -1425,21 +1442,46 @@
                 const data = await fetch('/api/claude-cli/auth/poll').then(r => r.json());
                 if (data.status === 'authenticated') {
                     clearInterval(_claudeAuthPollTimer);
-                    _showClaudeCliResult('✓ Authentication complete — Claude CLI is ready!', 'text-green-700', '', []);
+                    _showClaudeCliResult('✓ Authentication complete — Claude CLI is ready!', 'text-green-700', '', [], false);
                 } else if (data.status === 'error') {
                     clearInterval(_claudeAuthPollTimer);
-                    _showClaudeCliResult('✗ Auth error: ' + (data.detail || ''), 'text-red-600', '', []);
+                    _showClaudeCliResult('✗ Auth error: ' + (data.detail || ''), 'text-red-600', '', [], false);
                 } else if (data.status === 'pending' && data.url) {
                     // Update the URL display if we got it late.
                     const urlDiv = document.getElementById('claude-cli-urls');
                     if (urlDiv && urlDiv.classList.contains('hidden')) {
                         _showClaudeCliResult(
-                            '1. Open the URL below in your browser and approve  2. Return here and click "Check Status"',
-                            'text-violet-700', '', [data.url]
+                            'Step 1: Open URL below and approve · Step 2: Copy the authorization code · Step 3: Paste it below',
+                            'text-violet-700', '', [data.url], true
                         );
                     }
                 }
             } catch(e) { /* network blip — keep polling */ }
+        }
+
+        async function submitClaudeCode() {
+            const input = document.getElementById('claude-cli-code');
+            const code = (input?.value || '').trim();
+            if (!code) { alert('Paste the authorization code first.'); return; }
+            _showClaudeCliResult('Submitting code…', 'text-violet-600', '', [], false);
+            clearInterval(_claudeAuthPollTimer);
+            try {
+                const data = await fetch('/api/claude-cli/auth/submit-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({code}),
+                }).then(r => r.json());
+                if (data.status === 'authenticated') {
+                    _showClaudeCliResult('✓ Authentication complete — Claude CLI is ready!', 'text-green-700', data.output || '', [], false);
+                } else if (data.status === 'pending') {
+                    _showClaudeCliResult('Code submitted — waiting for confirmation…', 'text-violet-600', data.output || '', [], false);
+                    _claudeAuthPollTimer = setInterval(pollClaudeAuth, 3000);
+                } else {
+                    _showClaudeCliResult('✗ ' + (data.detail || data.status), 'text-red-600', data.output || '', [], false);
+                }
+            } catch(e) {
+                _showClaudeCliResult('Error submitting code: ' + e, 'text-red-600', '', [], false);
+            }
         }
 
         async function saveCredential(provider) {
