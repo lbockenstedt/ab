@@ -508,11 +508,36 @@
                             <!-- Entries list -->
                             <div id="entries-list" class="space-y-2">
                                 {% for entry in settings.llm_entries or [] %}
-                                <div class="flex items-center gap-2 p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" id="entry-row-{{ entry.id }}">
-                                    <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}</span>
-                                    <span class="text-xs text-slate-400">{{ entry.provider }} / {{ entry.model }}</span>
-                                    {% if entry.rpm %}<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{{ entry.rpm }} RPM</span>{% endif %}
-                                    <button type="button" onclick="deleteEntry('{{ entry.id }}')" class="text-red-400 hover:text-red-600 text-xs font-bold px-1">✕</button>
+                                <div class="bg-slate-50 border border-slate-200 rounded-lg text-sm" id="entry-row-{{ entry.id }}">
+                                    <!-- Summary row -->
+                                    <div class="flex items-center gap-2 p-2" id="entry-view-{{ entry.id }}">
+                                        <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}</span>
+                                        <span class="text-xs text-slate-400">{{ entry.provider }} / {{ entry.model }}</span>
+                                        {% if entry.rpm %}<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{{ entry.rpm }} RPM</span>{% endif %}
+                                        <button type="button" onclick="editEntry('{{ entry.id }}')" class="text-slate-400 hover:text-slate-700 text-xs px-1" title="Edit">✏</button>
+                                        <button type="button" onclick="deleteEntry('{{ entry.id }}')" class="text-red-400 hover:text-red-600 text-xs font-bold px-1">✕</button>
+                                    </div>
+                                    <!-- Inline edit form -->
+                                    <div class="hidden p-3 border-t border-slate-200 bg-white rounded-b-lg" id="entry-edit-{{ entry.id }}">
+                                        <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-2">
+                                            <input type="text" id="edit-label-{{ entry.id }}" value="{{ entry.label or '' }}" placeholder="Label" class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <select id="edit-provider-{{ entry.id }}" onchange="loadEditModels('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                                <option value="google" {{ 'selected' if entry.provider == 'google' else '' }}>Google</option>
+                                                <option value="anthropic" {{ 'selected' if entry.provider == 'anthropic' else '' }}>Anthropic</option>
+                                                <option value="openai" {{ 'selected' if entry.provider == 'openai' else '' }}>OpenAI</option>
+                                                <option value="ollama" {{ 'selected' if entry.provider == 'ollama' else '' }}>Ollama</option>
+                                            </select>
+                                            <select id="edit-model-{{ entry.id }}" onchange="updateEditRpm('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                                <option value="{{ entry.model }}" selected>{{ entry.model }}</option>
+                                            </select>
+                                            <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="text" id="edit-reviewer-{{ entry.id }}" value="{{ entry.reviewer_model or '' }}" placeholder="Reviewer model (blank=same)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        </div>
+                                        <div class="flex gap-2">
+                                            <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs bg-[#01A982] text-white rounded font-bold">Save</button>
+                                            <button type="button" onclick="cancelEdit('{{ entry.id }}')" class="px-3 py-1 text-xs bg-slate-200 text-slate-700 rounded font-bold">Cancel</button>
+                                        </div>
+                                    </div>
                                 </div>
                                 {% else %}
                                 <p class="text-sm text-slate-400 italic" id="entries-empty">No entries yet — add one above.</p>
@@ -1188,6 +1213,80 @@
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else alert('Failed to add entry.');
+        }
+
+        function editEntry(id) {
+            document.getElementById(`entry-view-${id}`)?.classList.add('hidden');
+            document.getElementById(`entry-edit-${id}`)?.classList.remove('hidden');
+            loadEditModels(id);
+        }
+
+        function cancelEdit(id) {
+            document.getElementById(`entry-view-${id}`)?.classList.remove('hidden');
+            document.getElementById(`entry-edit-${id}`)?.classList.add('hidden');
+        }
+
+        async function loadEditModels(id) {
+            const provider = document.getElementById(`edit-provider-${id}`)?.value;
+            const sel = document.getElementById(`edit-model-${id}`);
+            if (!sel || !provider) return;
+            const currentModel = sel.value;
+            sel.innerHTML = '<option value="">Loading…</option>';
+            sel.disabled = true;
+            try {
+                const resp = await fetch('/api/fetch-models', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({provider})
+                });
+                const data = await resp.json();
+                const models = data.models || [];
+                sel.disabled = false;
+                if (models.length === 0) {
+                    sel.innerHTML = `<option value="${currentModel}">${currentModel}</option>`;
+                } else {
+                    sel.innerHTML = '';
+                    let matched = false;
+                    models.forEach(m => {
+                        const o = document.createElement('option');
+                        o.value = m.name;
+                        o.textContent = m.name + (m.details ? ` (${m.details})` : '');
+                        if (m.name === currentModel) { o.selected = true; matched = true; }
+                        sel.appendChild(o);
+                    });
+                    if (!matched && currentModel) {
+                        const o = document.createElement('option');
+                        o.value = currentModel; o.textContent = currentModel; o.selected = true;
+                        sel.insertBefore(o, sel.firstChild);
+                    }
+                }
+            } catch(e) {
+                sel.disabled = false;
+                sel.innerHTML = `<option value="${currentModel}">${currentModel}</option>`;
+            }
+        }
+
+        function updateEditRpm(id) {
+            const provider = document.getElementById(`edit-provider-${id}`)?.value;
+            const model = document.getElementById(`edit-model-${id}`)?.value;
+            const rpmEl = document.getElementById(`edit-rpm-${id}`);
+            if (rpmEl && model) rpmEl.value = getDefaultRpm(provider, model);
+        }
+
+        async function saveEntry(id) {
+            const label = document.getElementById(`edit-label-${id}`)?.value.trim();
+            const provider = document.getElementById(`edit-provider-${id}`)?.value;
+            const model = document.getElementById(`edit-model-${id}`)?.value;
+            const rpm = parseInt(document.getElementById(`edit-rpm-${id}`)?.value || '0');
+            const reviewer_model = document.getElementById(`edit-reviewer-${id}`)?.value.trim() || '';
+            if (!model) { alert('Please select a model.'); return; }
+            const resp = await fetch(`/api/llm/entries/${id}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model})
+            });
+            if ((await resp.json()).status === 'ok') location.reload();
+            else alert('Failed to save entry.');
         }
 
         async function deleteEntry(entryId) {
