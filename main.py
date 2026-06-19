@@ -2554,13 +2554,37 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
         raise Exception(f"Fix generation failed: {e}")
 
 def parse_and_apply(content, repo_path):
+    import re as _re, ast as _ast
+    # --- Locate a JSON / Python-dict object in the LLM response ---
+    if not content or not content.strip():
+        logger.debug("parse_and_apply: empty content — expected retry case.")
+        return False, {}, 0.0
+
     try:
-        import re
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-        if match:
-            data = json.loads(match.group())
-        else:
-            data = json.loads(content)
+        match = _re.search(r'\{.*\}', content, _re.DOTALL)
+        if not match:
+            # LLM returned prose / "None" / refusal — no JSON object present.
+            # This is a non-error transient failure; caller will retry.
+            logger.debug(f"parse_and_apply: no JSON object in response (first 120 chars: {content[:120]!r})")
+            return False, {}, 0.0
+
+        raw = match.group()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            # Fallback: some LLMs (Gemini Flash) return Python-style dicts with
+            # single quotes instead of JSON double quotes.  ast.literal_eval is
+            # safe (only evaluates literals) and handles those cleanly.
+            try:
+                parsed = _ast.literal_eval(raw)
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"Expected dict, got {type(parsed).__name__}")
+                data = parsed
+            except Exception as ast_err:
+                logger.error(f"Error parsing or applying JSON fix: {ast_err}")
+                logger.debug(f"Failed content: {content[:500]}")
+                return False, {}, 0.0
+
         fixes = data.get("fixes", {})
         confidence = data.get("confidence", 0.0)
         repo_root = os.path.abspath(repo_path)
@@ -2598,11 +2622,8 @@ def parse_and_apply(content, repo_path):
             return False, {}, 0.0
         return True, applied, confidence
     except Exception as e:
-        if content and content.strip():
-            logger.error(f"Error parsing or applying JSON fix: {e}")
-            logger.debug(f"Failed content: {content[:500]}")
-        else:
-            logger.debug(f"parse_and_apply received empty content — provider returned blank response (expected retry case).")
+        logger.error(f"Error parsing or applying JSON fix: {e}")
+        logger.debug(f"Failed content: {content[:500]}")
         return False, {}, 0.0
 
 def _trigger_spoke_updates(config):
