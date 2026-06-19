@@ -1088,6 +1088,15 @@ def _request_claude_cli(model, messages, task_id, config):
         try:
             data = json.loads(output)
             text = data.get("result") or data.get("text") or output
+            combined_text = (text or "") + " " + stderr
+            # Session-limit is NOT an auth failure — the CLI is authenticated but
+            # has exhausted its per-session quota.  Raise a rate-limit style error
+            # so _try_provider applies a short cooldown rather than demanding re-login.
+            if "session limit" in combined_text.lower() or "resets " in combined_text.lower():
+                import re as _re
+                resets_match = _re.search(r"resets (.+?)[\s·]", combined_text, _re.IGNORECASE)
+                resets_at = resets_match.group(1).strip() if resets_match else "soon"
+                raise Exception(f"claude_cli_rate_limit:Session limit reached (resets {resets_at})")
             # Detect auth failure from the JSON payload.
             if data.get("is_error") or ("Not logged in" in (text or "") or "/login" in (text or "")):
                 raise Exception(
@@ -1097,6 +1106,8 @@ def _request_claude_cli(model, messages, task_id, config):
                 )
         except json.JSONDecodeError:
             text = output or stderr
+            if "session limit" in text.lower():
+                raise Exception(f"claude_cli_rate_limit:Session limit reached")
 
         if proc.returncode != 0:
             if "Not logged in" in (output + stderr) or "/login" in (output + stderr):
@@ -1207,6 +1218,15 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             return None, "credit_exhausted"
         except Exception as e:
             err_str = str(e)
+            # claude_cli session limit — authenticated but per-session quota hit.
+            # Apply a short rate-limit cooldown (15 min) and fall through so the
+            # next provider is tried without logging a spurious auth warning.
+            if err_str.startswith("claude_cli_rate_limit:"):
+                reason = err_str[len("claude_cli_rate_limit:"):]
+                logger.warning(f"Provider {n} ({provider}) session limit — applying 15-min cooldown. ({reason})")
+                _provider_credit_cb_trip(n, reason, duration_s=900, cause="rate_limit")
+                state["provider_credit_cb"] = _provider_credit_cb_snapshot()
+                return None, "rate_limited"
             # Some models (e.g. certain Groq models) reject tool-calling with a 400.
             # Retry the same provider without tools before giving up.
             if tools and "400" in err_str and "tool" in err_str.lower() and "not supported" in err_str.lower():
@@ -1406,6 +1426,7 @@ state = {
     "claude_auth_proc": None,    # background subprocess running `claude auth login`
     "claude_auth_url": "",       # OAuth URL captured from that process
     "claude_auth_done": False,   # True once the process exits 0
+    "restart_pending": False,    # True when an update was pulled; restart deferred until cycle end
 }
 
 try:
@@ -2795,8 +2816,11 @@ def check_for_updates():
             except Exception as e:
                 logger.warning(f"Could not create update_pending signal: {e}")
 
-            import subprocess
-            subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
+            # Signal the main loop to restart once the current scan cycle completes
+            # rather than killing the process immediately.  Immediate SIGTERM kills
+            # in-flight git clone / fix operations and generates spurious self-diagnosis issues.
+            state["restart_pending"] = True
+            logger.info("Restart deferred — will apply after current scan cycle completes.")
             return True, f"Update found: {cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
 
         return False, "No updates available."
@@ -3733,9 +3757,21 @@ def scan_self_logs(gh_current, config):
         # crash or filing failure never causes the same lines to be re-read.
         save_self_scan_offset(os.path.getsize(log_path), current_inode)
 
+        # Patterns that are transient/expected and should never become GitHub issues.
+        _SELF_SCAN_SKIP = (
+            "exit code(-15)",   # SIGTERM from a planned restart — not a real bug
+            "exit code(-9)",    # SIGKILL (watchdog kill) — symptom not cause
+            "GitCommandError",  # git killed by restart signal (covered by -15 above)
+            "systemctl restart",
+            "Update pending signal",
+            "Triggering restart",
+        )
+
         formatted_logs = []
         for line in new_text.splitlines():
             if "[ERROR]" in line or "[CRITICAL]" in line:
+                if any(skip in line for skip in _SELF_SCAN_SKIP):
+                    continue
                 ts = line[:23] if len(line) > 23 else "Unknown"
                 formatted_logs.append({
                     "module": "bugfixer-core",
@@ -3946,6 +3982,15 @@ def poller_worker():
             # all run regardless of scheduler state.  The schedule/blackout gates are applied
             # per-issue inside scan_repo_issues.
             run_scan_cycle()
+            # Apply any deferred restart NOW — the cycle just finished so no tasks are
+            # in flight.  This avoids SIGTERM killing git clone / LLM calls mid-operation.
+            if state.get("restart_pending"):
+                logger.info("Deferred restart: scan cycle complete, no tasks in flight — restarting now.")
+                state["restart_pending"] = False
+                import subprocess as _sp
+                _sp.Popen(["sudo", "systemctl", "restart", "bugfixer"])
+                time.sleep(5)  # give systemd time to send SIGTERM cleanly
+                return
             sched = _schedule_check(cfg)
             if sched.get("is_work_hours") and cfg.get("SCHEDULER_WORK_POLL_INTERVAL"):
                 interval = int(cfg.get("SCHEDULER_WORK_POLL_INTERVAL") or 600)
