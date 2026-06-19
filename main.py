@@ -1184,9 +1184,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             with _PROVIDER_CREDIT_CB_LOCK:
                 cause = _PROVIDER_CREDIT_CB[n].get("cause", "credit")
             label = "rate-limit" if cause == "rate_limit" else "credit"
+            trip_reason = (_PROVIDER_CREDIT_CB[n].get("reason") or "")[:120]
             logger.warning(
                 f"Provider {n} ({provider}) skipped — {label} cooldown "
-                f"{rem/60:.0f} min remaining."
+                f"{rem/60:.0f} min remaining"
+                + (f" (tripped by: {trip_reason})" if trip_reason else "") + "."
             )
             return None, "credit_cooldown"
         try:
@@ -1252,8 +1254,14 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         for n in order:
             provider, model, key, url = pmap[n]
             result, err = _try_provider(n, provider, model, key, url)
-            if result is not None:
+            if result is not None and str(result).strip():
                 return result
+            if result is not None and not str(result).strip():
+                # Provider returned an empty body — treat as a transient failure so we
+                # fall through to the next provider instead of passing "" to the caller.
+                logger.warning(f"Provider {n} ({provider}) returned empty response. Trying next provider...")
+                last_err = "empty_response"
+                continue
             if err == "not_configured":
                 continue
             if err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
@@ -2569,8 +2577,11 @@ def parse_and_apply(content, repo_path):
             return False, {}, 0.0
         return True, applied, confidence
     except Exception as e:
-        logger.error(f"Error parsing or applying JSON fix: {e}")
-        logger.debug(f"Failed content: {content}")
+        if content and content.strip():
+            logger.error(f"Error parsing or applying JSON fix: {e}")
+            logger.debug(f"Failed content: {content[:500]}")
+        else:
+            logger.debug(f"parse_and_apply received empty content — provider returned blank response (expected retry case).")
         return False, {}, 0.0
 
 def _trigger_spoke_updates(config):
