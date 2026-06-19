@@ -214,6 +214,15 @@ GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
 
+def _find_claude_cli_slot(config):
+    """Return the provider slot number (1-4) configured as claude_cli, or None."""
+    for n in (1, 2, 3, 4):
+        provider, _, _, _ = _get_provider_config(n, config)
+        if provider == "claude_cli":
+            return n
+    return None
+
+
 def _get_provider_config(n, config):
     """Return (provider, api_key, model, base_url) for slot n.
 
@@ -582,6 +591,35 @@ _PROVIDER_REQUEST_TIMES = {n: collections.deque() for n in (1, 2, 3, 4)}
 # Tracks when each provider slot last emitted an RPM-throttle log line.
 # Prevents duplicate log pairs when two threads throttle on the same provider.
 _PROVIDER_RPM_LAST_LOG: dict = {}
+
+# ---------------------------------------------------------------------------
+# Post-update cooldown — suppresses issue filing for a configurable window
+# after hub/spoke updates fire, so transient "service offline" errors that
+# occur during restarts don't flood GitHub with spurious issues.
+# ---------------------------------------------------------------------------
+_UPDATE_COOLDOWN_LOCK = threading.Lock()
+_update_cooldown_until: float = 0.0
+
+
+def _set_update_cooldown(config):
+    global _update_cooldown_until
+    minutes = float(config.get("POST_UPDATE_COOLDOWN_MINUTES") or 10)
+    deadline = time.time() + minutes * 60
+    with _UPDATE_COOLDOWN_LOCK:
+        _update_cooldown_until = deadline
+    logger.info(
+        f"Post-update cooldown active for {minutes:.0f} min — "
+        f"issue filing suppressed until {time.strftime('%H:%M:%S', time.localtime(deadline))}"
+    )
+
+
+def _in_update_cooldown():
+    """Return (in_cooldown: bool, remaining_seconds: float)."""
+    with _UPDATE_COOLDOWN_LOCK:
+        remaining = _update_cooldown_until - time.time()
+    if remaining > 0:
+        return True, remaining
+    return False, 0.0
 
 
 def _provider_rate_limit_wait(n, rpm, provider_name):
@@ -1843,6 +1881,14 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
     'body' are present and non-empty strings before any GitHub API call is made.
     """
     try:
+        in_cooldown, remaining = _in_update_cooldown()
+        if in_cooldown:
+            logger.info(
+                f"Post-update cooldown active ({remaining / 60:.1f} min remaining) — "
+                f"suppressing issue: {error_data.get('title', 'unknown') if isinstance(error_data, dict) else repr(error_data)}"
+            )
+            return None
+
         # Defensive: ensure error_data is a dict; if the LLM returned a malformed
         # payload (e.g., a string or None), .get() would itself raise AttributeError.
         if not isinstance(error_data, dict):
@@ -2520,7 +2566,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     final_verdict = "Approve" if len(approvals) >= (len(votes) / 2 + 0.5) else "Reject"
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques}
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None):
+def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None):
     relevant_files = identify_files_to_fix(repo_path, issue_body)
     if not relevant_files:
         logger.warning(f"No specific files identified for issue. Attempting general fix.")
@@ -2549,7 +2595,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
             "Example: {\"confidence\": 0.98, \"fixes\": {\"src/main.py\": \"full code here\"}}"
         )
     try:
-        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id)
+        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider)
     except Exception as e:
         raise Exception(f"Fix generation failed: {e}")
 
@@ -2627,16 +2673,27 @@ def parse_and_apply(content, repo_path):
         return False, {}, 0.0
 
 def _trigger_spoke_updates(config):
-    """POST /setup/update/spokes on the Hub to git-pull and restart every approved spoke.
+    """Trigger a self-update on the Hub, then fan out SPOKE_UPDATE to every approved spoke.
 
     Called immediately after a fix is pushed to GitHub so services are running the
-    new code before the QA service verifies the fix.  Fire-and-forget: queues the
-    messages and returns; actual spoke restarts are asynchronous.
+    new code before the QA service verifies the fix.  Both calls are fire-and-forget;
+    actual restarts are asynchronous.  A post-update cooldown is started so transient
+    "service offline" errors during restarts don't produce spurious GitHub issues.
     """
     hub_url = (config.get("HUB_QUERY_URL") or "").rstrip("/")
     if not hub_url:
         logger.debug("_trigger_spoke_updates: HUB_QUERY_URL not configured, skipping")
         return
+    # Update the Hub itself first so it is on the latest code before spokes reconnect.
+    try:
+        r = requests.post(f"{hub_url}/setup/update", timeout=30)
+        if r.status_code == 200:
+            logger.info("Hub self-update triggered successfully")
+        else:
+            logger.warning(f"Hub /setup/update returned HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"Could not trigger Hub self-update: {e}")
+    # Fan out to all approved spokes.
     try:
         r = requests.post(f"{hub_url}/setup/update/spokes", timeout=30)
         if r.status_code == 200:
@@ -2646,6 +2703,8 @@ def _trigger_spoke_updates(config):
             logger.warning(f"Hub /setup/update/spokes returned HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
         logger.warning(f"Could not trigger Hub spoke update: {e}")
+    # Suppress issue filing while services are restarting.
+    _set_update_cooldown(config)
 
 
 def _wait_for_spokes_online(config, min_count=1, timeout=90):
@@ -2950,10 +3009,19 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             return False, f"Non-actionable: {request_msg}"
 
         force_cloud = None
+        force_provider = None
         if llm_preference == "cloud":
             force_cloud = True
         elif llm_preference == "local":
             force_cloud = False
+        elif llm_preference == "claude":
+            slot = _find_claude_cli_slot(config)
+            if slot is None:
+                logger.error("Claude CLI fix requested but no claude_cli provider is configured.")
+                update_task_state(task_id=issue_id, action="end")
+                return False, "Claude CLI is not configured in the LLM Vault."
+            force_provider = slot
+            logger.info(f"Claude CLI fix requested for {issue_id} — using provider slot {slot}")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = os.path.join(tmp_dir, "repo")
@@ -2984,7 +3052,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             processed[issue_id]["status"] = "processing"
                             save_processed(processed)
                     elif not pending_fix:
-                        fix_code = apply_ai_fix(path, issue.body or "", error_context, force_cloud=force_cloud, task_id=issue_id)
+                        fix_code = apply_ai_fix(path, issue.body or "", error_context, force_cloud=force_cloud, task_id=issue_id, force_provider=force_provider)
                         success_applied, fixes, confidence = parse_and_apply(fix_code, path)
 
                     if not success_applied:
@@ -2997,7 +3065,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             review_verdict = "Approve"
                         else:
                             update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
-                            review = review_fix(path, issue.body or "", fixes, force_cloud=force_cloud, task_id=issue_id)
+                            review = review_fix(path, issue.body or "", fixes, force_cloud=force_cloud, task_id=issue_id, builder_n=force_provider)
 
                             # --- Handle Queue for Retry ---
                             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
@@ -4599,6 +4667,7 @@ DEFAULT_ENV = {
     "POLL_INTERVAL_SECONDS": "300",
     "UPDATE_API_URL": "",
     "HUB_QUERY_URL": "",
+    "POST_UPDATE_COOLDOWN_MINUTES": "10",
     "LOG_FILE_PATH": "/var/log/bugfixer.log",
     "DEV_BRANCH": "dev",
     "LLM_TIMEOUT": "900",
@@ -4768,6 +4837,7 @@ async def save_settings(request: Request):
         "QA_REPO": lambda v: v.strip() if v else "",
         "QA_TEST_COMMAND": lambda v: v.strip() if v else "pytest",
         "HUB_QUERY_URL": lambda v: v.strip() if v else "",
+        "POST_UPDATE_COOLDOWN_MINUTES": lambda v: max(0, int(v)) if str(v).isdigit() else 10,
     }
 
 
