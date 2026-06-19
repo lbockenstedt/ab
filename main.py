@@ -2573,6 +2573,54 @@ def parse_and_apply(content, repo_path):
         logger.debug(f"Failed content: {content}")
         return False, {}, 0.0
 
+def _trigger_spoke_updates(config):
+    """POST /setup/update/spokes on the Hub to git-pull and restart every approved spoke.
+
+    Called immediately after a fix is pushed to GitHub so services are running the
+    new code before the QA service verifies the fix.  Fire-and-forget: queues the
+    messages and returns; actual spoke restarts are asynchronous.
+    """
+    hub_url = (config.get("HUB_QUERY_URL") or "").rstrip("/")
+    if not hub_url:
+        logger.debug("_trigger_spoke_updates: HUB_QUERY_URL not configured, skipping")
+        return
+    try:
+        r = requests.post(f"{hub_url}/setup/update/spokes", timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            logger.info(f"Hub spoke update queued: {data.get('message', '')}")
+        else:
+            logger.warning(f"Hub /setup/update/spokes returned HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.warning(f"Could not trigger Hub spoke update: {e}")
+
+
+def _wait_for_spokes_online(config, min_count=1, timeout=90):
+    """Poll Hub GET /status until at least min_count spokes appear in active_connections.
+
+    Spokes reconnect after their systemd unit restarts (~10–20 s).  Returns the list
+    of connected spoke IDs, or an empty list on timeout.
+    """
+    hub_url = (config.get("HUB_QUERY_URL") or "").rstrip("/")
+    if not hub_url:
+        return []
+    deadline = time.time() + timeout
+    logger.info(f"Waiting for ≥{min_count} spoke(s) to reconnect (timeout {timeout}s)…")
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{hub_url}/status", timeout=10)
+            if r.status_code == 200:
+                conns = r.json().get("active_connections", [])
+                if len(conns) >= min_count:
+                    logger.info(f"Spokes online: {conns}")
+                    return conns
+        except Exception:
+            pass
+        time.sleep(5)
+    logger.warning(f"Timed out after {timeout}s waiting for spokes to come back online")
+    return []
+
+
 def _qa_service_verify(repo_name, config, timeout=120):
     """Call the QA service API to run targeted tests for a repo/module.
 
@@ -3035,6 +3083,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: {decision_reason}")
                 commit_type = "Direct Commit"
                 detail_msg = f"The fix was verified and pushed directly to the {base_branch} branch. Avg Confidence: {final_confidence:.2%}"
+                # Fix is live on main — tell every spoke to pull and restart, then let
+                # the QA service verify against the updated code.
+                _trigger_spoke_updates(config)
+                _wait_for_spokes_online(config, min_count=1, timeout=90)
             else:
                 reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (decision_reason if not can_direct_push or "Direct push failed" in decision_reason else "Trust/Ownership requirements not met")
                 decision_reason = reason
