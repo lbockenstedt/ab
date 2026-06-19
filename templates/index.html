@@ -1445,7 +1445,7 @@
         }
 
         async function startClaudeAuth() {
-            _showClaudeCliResult('Starting login flow — scanning for auth URL (up to 20s)…', 'text-violet-600', '', [], false);
+            _showClaudeCliResult('Starting login flow — waiting up to 25s for auth URL…', 'text-violet-600', '', [], false);
             clearInterval(_claudeAuthPollTimer);
             try {
                 const data = await fetch('/api/claude-cli/auth/start', {method: 'POST'}).then(r => r.json());
@@ -1457,15 +1457,17 @@
                     _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', [], false);
                     return;
                 }
-                // Always show code input — the URL may take a moment to appear via polling.
                 const urls = data.url ? [data.url] : [];
-                const msg = data.url
-                    ? 'Step 1: Open the URL below in your browser and approve · Step 2: Paste the authorization code below'
-                    : 'Auth process running — waiting for URL… Paste the authorization code once you have it.';
+                let msg;
+                if (data.url) {
+                    msg = 'Step 1: Open the URL below in your browser and approve · Step 2: Paste the authorization code below';
+                } else if (data.output) {
+                    msg = 'Auth process running — no URL detected yet. Check the raw output below for a link, then paste the authorization code.';
+                } else {
+                    msg = 'Auth process started — waiting for URL… Paste the authorization code once you have it.';
+                }
                 _showClaudeCliResult(msg, 'text-violet-700', data.output || '', urls, true);
-                // Poll every 4 s so we pick up the URL if it wasn't ready yet,
-                // and detect when the OAuth callback completes.
-                _claudeAuthPollTimer = setInterval(pollClaudeAuth, 4000);
+                _claudeAuthPollTimer = setInterval(pollClaudeAuth, 3000);
             } catch(e) {
                 _showClaudeCliResult('Error starting auth: ' + e, 'text-red-600', '', [], false);
             }
@@ -1477,17 +1479,24 @@
                 if (data.status === 'authenticated') {
                     clearInterval(_claudeAuthPollTimer);
                     _showClaudeCliResult('✓ Authentication complete — Claude CLI is ready!', 'text-green-700', '', [], false);
-                } else if (data.status === 'error') {
+                    return;
+                }
+                if (data.status === 'error') {
                     clearInterval(_claudeAuthPollTimer);
-                    _showClaudeCliResult('✗ Auth error: ' + (data.detail || ''), 'text-red-600', '', [], false);
-                } else if (data.status === 'pending' && data.url) {
-                    // Update the URL display if we got it late — keep code input visible.
-                    const urlDiv = document.getElementById('claude-cli-urls');
-                    if (urlDiv && urlDiv.classList.contains('hidden')) {
+                    _showClaudeCliResult('✗ Auth error: ' + (data.detail || ''), 'text-red-600', data.output || '', [], false);
+                    return;
+                }
+                if (data.status === 'pending') {
+                    if (data.url) {
+                        // URL arrived late — update the link and keep code input visible.
                         _showClaudeCliResult(
                             'Step 1: Open the URL below in your browser and approve · Step 2: Paste the authorization code below',
-                            'text-violet-700', '', [data.url], true
+                            'text-violet-700', data.output || '', [data.url], true
                         );
+                    } else if (data.output) {
+                        // Still no URL — show what claude is printing so the user can see it.
+                        const pre = document.getElementById('claude-cli-output');
+                        if (pre) { pre.textContent = data.output; pre.classList.remove('hidden'); }
                     }
                 }
             } catch(e) { /* network blip — keep polling */ }

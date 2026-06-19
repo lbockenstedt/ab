@@ -4162,11 +4162,11 @@ def claude_cli_status():
 def claude_cli_auth_start():
     """Start 'claude auth login' as a background process and capture the OAuth URL.
 
-    The subprocess must stay alive so its local callback server can receive the
-    browser redirect after the user approves.  Call /api/claude-cli/auth/poll to
-    check progress.
+    Uses a throwaway shell script as BROWSER so the URL is written to a temp file
+    AND printed to claude's stderr — two independent capture paths.  The process
+    stays alive (stdin=PIPE) so the approval code can be piped back later.
     """
-    import subprocess, select as _select
+    import subprocess, select as _select, tempfile, stat
 
     # Kill any existing auth process first.
     old = state.get("claude_auth_proc")
@@ -4180,58 +4180,105 @@ def claude_cli_auth_start():
     state["claude_auth_done"] = False
 
     try:
-        # BROWSER=/bin/echo prevents claude from opening a real browser window
-        # (which hangs on headless servers) and instead prints the OAuth URL to
-        # stdout so we can capture and display it.
+        # Write a tiny browser-wrapper script.  When claude calls $BROWSER URL it:
+        #   1. Writes the URL to a temp file (readable even if pipe buffering delays it)
+        #   2. Prints it to stdout (inherited from claude → our pipe)
+        url_file = "/tmp/_claude_auth_url.txt"
+        browser_script = "/tmp/_claude_browser.sh"
+        try:
+            with open(url_file, "w") as f:
+                f.write("")
+            with open(browser_script, "w") as f:
+                f.write(f'#!/bin/sh\nprintf "%s\\n" "$@" | tee "{url_file}" >&2\n')
+            os.chmod(browser_script, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+        except Exception:
+            browser_script = "/bin/echo"   # fallback to original approach
+
         env = os.environ.copy()
-        env["BROWSER"] = "/bin/echo"
+        env["BROWSER"] = browser_script
+        # Some distributions also check BROWSER_OPENER / OPENER
+        env["BROWSER_OPENER"] = browser_script
+        # Suppress any DISPLAY so electron-based openers fall back to $BROWSER
+        env.pop("DISPLAY", None)
+        env.pop("WAYLAND_DISPLAY", None)
 
         proc = subprocess.Popen(
             ["claude", "auth", "login"],
-            stdin=subprocess.PIPE,   # kept open so we can pipe the approval code back
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
         )
         state["claude_auth_proc"] = proc
 
-        # Read output for up to 15 s to capture the OAuth URL (printed by /bin/echo).
-        # The process is NOT killed — it must stay alive to receive the auth code.
+        # If claude prompts "Open browser? [y/N]" we answer yes immediately.
+        # This is non-blocking — if stdin isn't being read, write() still returns.
+        try:
+            proc.stdin.write("y\n")
+            proc.stdin.flush()
+        except Exception:
+            pass
+
+        # Read stdout+stderr for up to 25 s, scanning every half-second for a URL.
+        # Also poll the temp file as a second capture path.
         lines = []
         url_found = ""
-        deadline = time.time() + 15
+        deadline = time.time() + 25
         while time.time() < deadline:
             ready, _, _ = _select.select([proc.stdout, proc.stderr], [], [], 0.5)
             for stream in ready:
                 line = stream.readline()
                 if line:
                     lines.append(line)
-                    urls = re.findall(r'https?://\S+', line)
-                    for u in urls:
-                        u = u.rstrip(".,;)")
-                        if u:
+                    for u in re.findall(r'https?://\S+', line):
+                        u = u.rstrip(".,;)\"'")
+                        if "claude.ai" in u or "anthropic.com" in u or "oauth" in u.lower() or "auth" in u.lower():
                             url_found = u
                             break
             if url_found:
                 break
-            if proc.poll() is not None:  # exited early (already authenticated?)
+            # Check the temp file written by the browser script
+            try:
+                with open(url_file) as f:
+                    raw = f.read().strip()
+                if raw:
+                    url_found = raw.splitlines()[0].strip()
+                    break
+            except Exception:
+                pass
+            if proc.poll() is not None:
                 break
 
+        # Final pass: scan everything captured for any URL (less targeted)
         combined = "".join(lines)
         if not url_found:
-            all_urls = re.findall(r'https?://\S+', combined)
-            url_found = all_urls[0].rstrip(".,;)") if all_urls else ""
+            for u in re.findall(r'https?://\S+', combined):
+                u = u.rstrip(".,;)\"'")
+                if u:
+                    url_found = u
+                    break
+        # Also try the temp file one more time
+        if not url_found:
+            try:
+                with open(url_file) as f:
+                    raw = f.read().strip()
+                if raw:
+                    url_found = raw.splitlines()[0].strip()
+            except Exception:
+                pass
+
         state["claude_auth_url"] = url_found
 
         if proc.poll() == 0:
             state["claude_auth_done"] = True
             return {"status": "authenticated", "url": "", "output": combined[:3000]}
 
-        # Always return pending with the code-input flag set to True so the user
-        # can paste their authorization code regardless of whether we captured a URL.
         return {
             "status": "pending",
             "url": url_found,
-            "output": combined[:3000] or "(waiting for claude auth login output…)",
+            "output": combined[:3000] or "(no output yet — process is running, waiting for claude auth login…)",
         }
 
     except FileNotFoundError:
@@ -4269,7 +4316,7 @@ def claude_cli_auth_poll():
 
     rc = proc.poll()
     if rc is None:
-        # Still running — try to pick up any new URL lines from stdout
+        # Still running — drain any new output and look for a URL.
         extra = []
         try:
             import select as _select
@@ -4284,11 +4331,31 @@ def claude_cli_auth_poll():
         except Exception:
             pass
         combined = "".join(extra)
-        new_urls = re.findall(r'https?://\S+', combined)
-        if new_urls and not url:
-            url = new_urls[0].rstrip(".,;)")
-            state["claude_auth_url"] = url
-        return {"status": "pending", "url": url}
+        if not url:
+            for u in re.findall(r'https?://\S+', combined):
+                u = u.rstrip(".,;)\"'")
+                if u:
+                    url = u
+                    state["claude_auth_url"] = url
+                    break
+        # Also check the temp file written by the browser wrapper script.
+        if not url:
+            try:
+                with open("/tmp/_claude_auth_url.txt") as f:
+                    raw = f.read().strip()
+                if raw:
+                    url = raw.splitlines()[0].strip()
+                    state["claude_auth_url"] = url
+            except Exception:
+                pass
+        # Re-send "y\n" in case claude is still prompting for browser confirmation.
+        if not url:
+            try:
+                proc.stdin.write("y\n")
+                proc.stdin.flush()
+            except Exception:
+                pass
+        return {"status": "pending", "url": url, "output": combined[:500]}
 
     # Process exited.
     if rc == 0:
