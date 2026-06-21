@@ -2684,21 +2684,27 @@ def _trigger_spoke_updates(config):
     if not hub_url:
         logger.debug("_trigger_spoke_updates: HUB_QUERY_URL not configured, skipping")
         return
+    admin_token = config.get("LM_ADMIN_TOKEN") or os.getenv("LM_ADMIN_TOKEN", "")
+    headers = {"X-Admin-Token": admin_token} if admin_token else {}
     # Update the Hub itself first so it is on the latest code before spokes reconnect.
     try:
-        r = requests.post(f"{hub_url}/setup/update", timeout=30)
+        r = requests.post(f"{hub_url}/setup/update", headers=headers, timeout=30)
         if r.status_code == 200:
             logger.info("Hub self-update triggered successfully")
+        elif r.status_code == 401:
+            logger.warning("Hub /setup/update returned 401 — set LM_ADMIN_TOKEN in bugfixer config")
         else:
             logger.warning(f"Hub /setup/update returned HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
         logger.warning(f"Could not trigger Hub self-update: {e}")
-    # Fan out to all approved spokes.
+    # Fan out to all approved spokes (including local lm-dns / lm-dhcp restart).
     try:
-        r = requests.post(f"{hub_url}/setup/update/spokes", timeout=30)
+        r = requests.post(f"{hub_url}/setup/update/spokes", headers=headers, timeout=30)
         if r.status_code == 200:
             data = r.json()
             logger.info(f"Hub spoke update queued: {data.get('message', '')}")
+        elif r.status_code == 401:
+            logger.warning("Hub /setup/update/spokes returned 401 — set LM_ADMIN_TOKEN in bugfixer config")
         else:
             logger.warning(f"Hub /setup/update/spokes returned HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
@@ -4667,6 +4673,7 @@ DEFAULT_ENV = {
     "POLL_INTERVAL_SECONDS": "300",
     "UPDATE_API_URL": "",
     "HUB_QUERY_URL": "",
+    "LM_ADMIN_TOKEN": "",
     "POST_UPDATE_COOLDOWN_MINUTES": "10",
     "LOG_FILE_PATH": "/var/log/bugfixer.log",
     "DEV_BRANCH": "dev",
@@ -4711,6 +4718,7 @@ async def settings_page(request: Request):
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
     settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
+    settings["LM_ADMIN_TOKEN"] = config.get("LM_ADMIN_TOKEN") or settings.get("LM_ADMIN_TOKEN", "")
     settings["LLM_TIMEOUT"] = config.get("LLM_TIMEOUT") or settings.get("LLM_TIMEOUT", "900")
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
@@ -4837,6 +4845,7 @@ async def save_settings(request: Request):
         "QA_REPO": lambda v: v.strip() if v else "",
         "QA_TEST_COMMAND": lambda v: v.strip() if v else "pytest",
         "HUB_QUERY_URL": lambda v: v.strip() if v else "",
+        "LM_ADMIN_TOKEN": lambda v: v.strip() if v else "",
         "POST_UPDATE_COOLDOWN_MINUTES": lambda v: max(0, int(v)) if str(v).isdigit() else 10,
     }
 

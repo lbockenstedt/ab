@@ -698,7 +698,11 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub Query URL (Verification)</label>
-                                <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="URL to check hub state">
+                                <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="http://your-hub:8000">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Hub Admin Token</label>
+                                <input type="password" name="LM_ADMIN_TOKEN" value="{{ settings.LM_ADMIN_TOKEN }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="LM_ADMIN_TOKEN from hub /opt/lm/.env">
                             </div>
                         </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
