@@ -5089,6 +5089,43 @@ def _ollama_bin_path():
     return None
 
 
+def _ensure_zstd(log_fn):
+    """Ensure the zstd binary is available.
+
+    The official Ollama installer extracts its release tarball with zstd, so a
+    box without zstd fails with "This version requires zstd for extraction".
+    Installs it via the system package manager when missing; logs clear manual
+    instructions if that is not possible. Returns True when zstd is available.
+    """
+    import subprocess, shutil
+    if shutil.which("zstd"):
+        log_fn("  zstd already available")
+        return True
+    log_fn("  zstd not found — attempting to install via apt-get (requires root)…")
+    apt = shutil.which("apt-get")
+    if not apt:
+        log_fn("  ✗ apt-get not found. Install zstd manually, then retry:")
+        log_fn("     Debian/Ubuntu: sudo apt-get install -y zstd")
+        log_fn("     RHEL/CentOS/Fedora: sudo dnf install -y zstd")
+        log_fn("     Arch: sudo pacman -S zstd")
+        return False
+    try:
+        r = subprocess.run([apt, "install", "-y", "zstd"],
+                           capture_output=True, text=True, timeout=300)
+    except Exception as e:
+        log_fn(f"  ✗ apt-get install zstd raised: {e}")
+        return False
+    if r.returncode != 0:
+        log_fn(f"  ✗ apt-get install zstd failed (exit {r.returncode}): "
+               f"{((r.stderr or '') + (r.stdout or '')).strip()[-400:]}")
+        return False
+    if shutil.which("zstd"):
+        log_fn("  ✓ zstd installed")
+        return True
+    log_fn("  ⚠ apt-get reported success but zstd still not on PATH; installer may fail")
+    return True
+
+
 def _ollama_http_pull(model, log_fn, base_url=OLLAMA_BASE_URL):
     """Pull a model via POST /api/pull, streaming JSON progress into the log.
 
@@ -5185,7 +5222,13 @@ def run_local_llm_setup(model, num_ctx, cores):
         # Installed = the HTTP API answers OR the binary exists at a known path.
         # We do NOT rely on `which("ollama")` alone because the bugfixer service
         # runs under systemd with a minimal PATH that omits /usr/local/bin.
-        _llm_setup_log("▶ Stage 1/7 — Checking for Ollama…")
+        _llm_setup_log("▶ Stage 1/7 — Prerequisites + checking for Ollama…")
+        # zstd is required by the Ollama installer to extract its tarball; ensure
+        # it is present up front (no-op if already installed) so the install path
+        # works when needed.
+        if not _ensure_zstd(_llm_setup_log):
+            raise RuntimeError("zstd is required by the Ollama installer and could not be "
+                               "installed automatically. Install zstd, then click Setup again.")
         already_up = _ollama_reachable(base_url, timeout=5)
         bin_path = _ollama_bin_path()
         if already_up or bin_path:
