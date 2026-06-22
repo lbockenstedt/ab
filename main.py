@@ -1467,6 +1467,8 @@ state = {
     "restart_pending": False,    # True when an update was pulled; restart deferred until cycle end
     "refresh_status_seconds": config_on_start.get("refresh_status_seconds", 30),
     "refresh_logs_seconds": config_on_start.get("refresh_logs_seconds", 10),
+    "cpu_count": os.cpu_count() or 4,  # detected core count, surfaced in the Local LLM setup UI
+    "local_llm_setup": {},             # last-run summary for the one-click Local LLM setup
 }
 
 try:
@@ -4996,6 +4998,290 @@ async def get_llm_config():
         "credentials": safe_creds,
         "entries": config.get("llm_entries") or [],
         "slots": config.get("llm_slots") or {},
+    }
+
+
+# ---------------------------------------------------------------------------
+# One-click local (CPU-only) LLM setup
+#
+# Installs Ollama (if missing), pulls a model, applies CPU tuning (systemd
+# override + a context-tuned derived model), wires it into BugFixer provider
+# slot 4, restarts the ollama service, and verifies. Streams staged progress
+# into state["active_tasks"]["LocalLLMSetup"] so the UI can poll
+# /api/task-details?task_id=LocalLLMSetup. Idempotent: each stage skips when
+# its end state is already present, so it is safe to click repeatedly.
+# ---------------------------------------------------------------------------
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_OVERRIDE_DIR = "/etc/systemd/system/ollama.service.d"
+OLLAMA_OVERRIDE_PATH = os.path.join(OLLAMA_OVERRIDE_DIR, "bugfixer-tuning.conf")
+
+
+def _llm_setup_log(line, replace_last=False):
+    """Append a line to the LocalLLMSetup task stream.
+
+    With replace_last=True the previous line is overwritten in place — used for
+    `ollama pull` carriage-return progress bars so the bar updates instead of
+    scrolling. Mirrors the overwrite-the-stream approach the _request_* handlers
+    use, but keeps a growing log for staged steps.
+    """
+    with _task_state_lock:
+        task = state["active_tasks"].get("LocalLLMSetup")
+        if task is None:
+            return
+        s = task["stream"]
+        if replace_last and s:
+            idx = s.rfind("\n")
+            task["stream"] = (s[:idx + 1] if idx != -1 else "") + line + "\n"
+        else:
+            task["stream"] = s + line + "\n"
+
+
+def _ollama_list_names():
+    """Return the set of model names from `ollama list` (empty on failure)."""
+    import subprocess
+    try:
+        r = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=60)
+        names = set()
+        for line in (r.stdout or "").splitlines()[1:]:  # skip the header row
+            cols = line.split()
+            if cols:
+                names.add(cols[0])
+        return names
+    except Exception as e:
+        logger.debug(f"ollama list failed: {e}")
+        return set()
+
+
+def _wait_for_ollama(base_url, timeout=60):
+    """Poll {base_url}/api/tags until it answers 200 (or timeout). Returns True if reachable."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            resp = requests.get(base_url.rstrip("/") + "/api/tags", timeout=5)
+            if resp.status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+    return False
+
+
+def _ollama_pull_streaming(model, log_fn):
+    """Run `ollama pull <model>`, streaming progress into the task log.
+
+    ollama emits carriage-return-delimited progress bars; we read one char at a
+    time so each \\r segment replaces the last log line (bar updates in place),
+    while newline-terminated lines append normally.
+    """
+    import subprocess
+    proc = subprocess.Popen(
+        ["ollama", "pull", model],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, newline="",
+    )
+    buf = ""
+    try:
+        assert proc.stdout is not None
+        while True:
+            ch = proc.stdout.read(1)
+            if not ch:
+                break
+            if ch in ("\r", "\n"):
+                line = buf
+                buf = ""
+                if line.strip():
+                    log_fn("  " + line.strip(), replace_last=(ch == "\r"))
+            else:
+                buf += ch
+        if buf.strip():
+            log_fn("  " + buf.strip())
+    finally:
+        proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ollama pull exited {proc.returncode}")
+
+
+def run_local_llm_setup(model, num_ctx, cores):
+    """Background pipeline for the one-click local (CPU-only) LLM setup.
+
+    Stages: install Ollama → ensure service → pull model → create context-tuned
+    derived model → write systemd override + restart → configure slot 4 →
+    verify. Each stage is idempotent. Progress is streamed via
+    _llm_setup_log() into state['active_tasks']['LocalLLMSetup'].
+    """
+    import subprocess, shutil
+    task_id = "LocalLLMSetup"
+    update_task_state(task_id, "Local LLM Setup", action="start")
+    base_url = OLLAMA_BASE_URL
+    derived_tag = model
+    summary = {"state": "failed", "message": "not started"}
+    try:
+        # ---- Stage 1: detect / install Ollama ----
+        _llm_setup_log("▶ Stage 1/7 — Checking for Ollama…")
+        if shutil.which("ollama"):
+            try:
+                ver = subprocess.run(["ollama", "--version"], capture_output=True, text=True, timeout=15)
+                vline = ((ver.stdout or ver.stderr or "installed").strip().splitlines() or ["installed"])[0]
+            except Exception:
+                vline = "installed"
+            _llm_setup_log(f"✓ Ollama already installed ({vline})")
+        else:
+            _llm_setup_log("  Ollama not found — running official installer (requires root)…")
+            inst = subprocess.run(["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
+                                  capture_output=True, text=True, timeout=900)
+            if inst.returncode != 0:
+                raise RuntimeError(f"installer exited {inst.returncode}: {(inst.stderr or '').strip()[-500:]}")
+            _llm_setup_log("✓ Ollama installed")
+
+        # ---- Stage 2: ensure the ollama service is up ----
+        _llm_setup_log("▶ Stage 2/7 — Ensuring the ollama service is running…")
+        active = subprocess.run(["systemctl", "is-active", "ollama"], capture_output=True, text=True, timeout=15)
+        if (active.stdout or "").strip() != "active":
+            subprocess.run(["systemctl", "start", "ollama"], capture_output=True, text=True, timeout=30)
+        if not _wait_for_ollama(base_url):
+            raise RuntimeError(f"ollama service did not become reachable at {base_url}")
+        _llm_setup_log(f"✓ ollama service reachable at {base_url}")
+
+        # ---- Stage 3: pull the model (skip if already present) ----
+        _llm_setup_log(f"▶ Stage 3/7 — Pulling model {model} (skip if present)…")
+        present = _ollama_list_names()
+        if model in present:
+            _llm_setup_log(f"✓ Model {model} already present")
+        else:
+            _ollama_pull_streaming(model, _llm_setup_log)
+            _llm_setup_log(f"✓ Model {model} pulled")
+
+        # ---- Stage 4: create a context-tuned derived model ----
+        if num_ctx and int(num_ctx) > 0:
+            ctx_k = int(num_ctx) // 1024
+            derived_tag = f"{model}-{ctx_k}k" if ctx_k else f"{model}-{int(num_ctx)}"
+            _llm_setup_log(f"▶ Stage 4/7 — Creating context-tuned model {derived_tag} (num_ctx={int(num_ctx)}, num_thread={int(cores)})…")
+            modelfile = f"FROM {model}\nPARAMETER num_ctx {int(num_ctx)}\nPARAMETER num_thread {int(cores)}\n"
+            with tempfile.NamedTemporaryFile("w", suffix=".Modelfile", delete=False) as mf:
+                mf.write(modelfile)
+                mfile = mf.name
+            try:
+                cr = subprocess.run(["ollama", "create", derived_tag, "-f", mfile],
+                                    capture_output=True, text=True, timeout=900)
+                if cr.returncode != 0:
+                    raise RuntimeError(f"ollama create failed: {(cr.stderr or '').strip()[-500:]}")
+            finally:
+                try:
+                    os.unlink(mfile)
+                except Exception:
+                    pass
+            _llm_setup_log(f"✓ Derived model {derived_tag} created")
+        else:
+            _llm_setup_log("▶ Stage 4/7 — num_ctx unset; using base model as-is")
+            _llm_setup_log("✓ Skipped derived-model step")
+
+        # ---- Stage 5: write the systemd override + restart ollama ----
+        _llm_setup_log("▶ Stage 5/7 — Applying systemd CPU tuning (daemon-reload + restart ollama)…")
+        wanted = (
+            "[Service]\n"
+            'Environment="OLLAMA_NUM_PARALLEL=1"\n'
+            'Environment="OLLAMA_KEEP_ALIVE=30m"\n'
+            f'Environment="OLLAMA_NUM_THREAD={int(cores)}"\n'
+        )
+        current = ""
+        if os.path.exists(OLLAMA_OVERRIDE_PATH):
+            try:
+                with open(OLLAMA_OVERRIDE_PATH) as f:
+                    current = f.read()
+            except Exception:
+                current = ""
+        if current.strip() == wanted.strip():
+            _llm_setup_log("✓ systemd override already matches")
+        else:
+            os.makedirs(OLLAMA_OVERRIDE_DIR, exist_ok=True)
+            with open(OLLAMA_OVERRIDE_PATH, "w") as f:
+                f.write(wanted)
+            _llm_setup_log(f"  Wrote {OLLAMA_OVERRIDE_PATH}")
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True, text=True, timeout=30)
+        rs = subprocess.run(["systemctl", "restart", "ollama"], capture_output=True, text=True, timeout=30)
+        if rs.returncode != 0:
+            raise RuntimeError(f"systemctl restart ollama failed: {(rs.stderr or '').strip()}")
+        if not _wait_for_ollama(base_url):
+            raise RuntimeError("ollama did not come back after restart")
+        _llm_setup_log("✓ systemd tuned and ollama restarted")
+
+        # ---- Stage 6: configure BugFixer provider slot 4 ----
+        _llm_setup_log("▶ Stage 6/7 — Configuring BugFixer provider slot 4 (P4)…")
+        config = load_config()
+        config.setdefault("llm_credentials", {})["ollama"] = {"api_key": "", "base_url": base_url}
+        entries = config.setdefault("llm_entries", [])
+        entry = next((e for e in entries if e.get("provider") == "ollama" and e.get("model") == derived_tag), None)
+        if entry is None:
+            entry = {
+                "id": str(uuid.uuid4())[:12],
+                "label": "Local Ollama (CPU)",
+                "provider": "ollama",
+                "model": derived_tag,
+                "rpm": 0,
+                "reviewer_model": "",
+            }
+            entries.append(entry)
+        else:
+            entry["label"] = "Local Ollama (CPU)"
+            entry["model"] = derived_tag
+        config.setdefault("llm_slots", {})["4"] = entry["id"]
+        save_config(config)
+        _llm_setup_log(f"✓ Slot 4 → {entry['label']} / {derived_tag}")
+
+        # ---- Stage 7: verify ----
+        _llm_setup_log("▶ Stage 7/7 — Verifying Ollama responds with the model…")
+        names = _ollama_list_names()
+        if derived_tag in names:
+            _llm_setup_log(f"✓ Verified — {len(names)} model(s) available, {derived_tag} present")
+            _llm_setup_log(f"\n✅ Setup complete. Slot 4 = {derived_tag} @ {base_url}")
+            summary = {"state": "complete", "model": derived_tag, "base_url": base_url, "message": "Setup complete"}
+        else:
+            _llm_setup_log(f"⚠ Verify: {derived_tag} not yet in ollama list ({len(names)} models); slot 4 still configured.")
+            _llm_setup_log(f"\n✅ Setup complete with a warning. Slot 4 = {derived_tag} @ {base_url}")
+            summary = {"state": "warning", "model": derived_tag, "base_url": base_url, "message": "Configured but model not yet listed"}
+    except Exception as e:
+        logger.exception("Local LLM setup failed")
+        _llm_setup_log(f"\n✗ Setup failed: {e}")
+        summary = {"state": "failed", "message": str(e)}
+    finally:
+        state["local_llm_setup"] = {**summary, "updated": datetime.now().isoformat()}
+        update_task_state(task_id, action="end")
+
+
+@app.post("/api/local-llm/setup")
+async def local_llm_setup(request: Request):
+    """Kick off the one-click local (CPU-only) LLM setup in the background.
+
+    Body (all optional, defaults applied): {model, num_ctx, cores}.
+    Returns immediately with the task_id the UI polls via /api/task-details.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    model = (data.get("model") or "qwen2.5-coder:32b").strip()
+    try:
+        num_ctx = int(data.get("num_ctx") or 32768)
+    except (TypeError, ValueError):
+        num_ctx = 32768
+    try:
+        cores = int(data.get("cores") or state.get("cpu_count") or os.cpu_count() or 4)
+    except (TypeError, ValueError):
+        cores = os.cpu_count() or 4
+    if "LocalLLMSetup" in state.get("active_tasks", {}):
+        return JSONResponse(status_code=409, content={"status": "busy", "message": "A local LLM setup is already running."})
+    threading.Thread(target=run_local_llm_setup, args=(model, num_ctx, cores), daemon=True).start()
+    return {"status": "started", "task_id": "LocalLLMSetup"}
+
+
+@app.get("/api/local-llm/status")
+async def local_llm_status():
+    """Whether a setup is running + the last-run summary + detected core count."""
+    return {
+        "running": "LocalLLMSetup" in state.get("active_tasks", {}),
+        "last": state.get("local_llm_setup") or {},
+        "cpu_count": state.get("cpu_count") or os.cpu_count() or 4,
     }
 
 

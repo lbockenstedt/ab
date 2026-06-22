@@ -662,6 +662,52 @@
                         </div>
                     </section>
 
+                    <!-- Local LLM (CPU-only) Setup -->
+                    <section>
+                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                            <i class="fas fa-microchip text-slate-400"></i>
+                            <h4 class="font-semibold text-slate-700">Local LLM (CPU-only) Setup</h4>
+                        </div>
+                        <p class="text-xs text-slate-500 mb-4">
+                            One click installs <strong>Ollama</strong> (if missing), pulls a local CPU model,
+                            applies CPU tuning (a systemd override + a context-tuned model), restarts the
+                            <code class="bg-slate-100 px-1 rounded">ollama</code> service, and wires it into BugFixer
+                            provider slot <strong>P4</strong>. Min: ~24 GB RAM, 8+ cores, ~22 GB disk, no GPU.
+                            <span class="text-slate-400">Requires root (the app already runs privileged systemctl).</span>
+                        </p>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-4">
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Model</label>
+                                <input type="text" id="local-llm-model" value="qwen2.5-coder:32b"
+                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Context length (num_ctx)</label>
+                                <input type="number" id="local-llm-ctx" value="32768" min="0" step="1024"
+                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                <span class="text-xs text-slate-400">0 = use the model's default context.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">CPU cores (num_thread)</label>
+                                <input type="number" id="local-llm-cores" value="{{ state.cpu_count }}" min="1"
+                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                <span class="text-xs text-slate-400">Detected {{ state.cpu_count }} cores.</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <button type="button" onclick="startLocalLLMSetup()"
+                                    id="local-llm-setup-btn"
+                                    class="py-2 px-4 rounded-lg font-bold bg-[#01A982] hover:bg-[#018f6e] text-white transition-all duration-200 text-sm">
+                                <i class="fas fa-bolt mr-2"></i>Setup Local LLM
+                            </button>
+                            <span id="local-llm-setup-state" class="text-xs text-slate-400"></span>
+                        </div>
+                        <div id="local-llm-setup-status" class="hidden mt-4 text-xs rounded p-3 bg-slate-900 border border-slate-700">
+                            <div id="local-llm-setup-status-line" class="font-medium text-slate-200 mb-2"></div>
+                            <pre id="local-llm-setup-log" class="whitespace-pre-wrap break-all text-[11px] text-green-400 max-h-80 overflow-y-auto font-mono"></pre>
+                        </div>
+                    </section>
+
                     <!-- 3. QA & Verification -->
                     <section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
@@ -1822,6 +1868,96 @@
             });
         }
         // ── End LLM Vault UI ──────────────────────────────────────────────────
+
+        // ── One-click Local LLM (CPU-only) Setup ──────────────────────────────
+        let localLLMPollInterval = null;
+
+        async function startLocalLLMSetup() {
+            const model = (document.getElementById('local-llm-model')?.value || 'qwen2.5-coder:32b').trim();
+            const num_ctx = parseInt(document.getElementById('local-llm-ctx')?.value || '32768', 10) || 0;
+            const cores = parseInt(document.getElementById('local-llm-cores')?.value || '1', 10) || 1;
+
+            if (!confirm(
+                `This will:\n` +
+                `  • install Ollama (if not already installed)\n` +
+                `  • pull ${model} (~20 GB download, several minutes)\n` +
+                `  • create a context-tuned model (num_ctx=${num_ctx || 'default'})\n` +
+                `  • write a systemd override + restart the ollama service\n` +
+                `  • configure BugFixer slot P4 → ${model}\n\n` +
+                `Continue?`
+            )) return;
+
+            const btn = document.getElementById('local-llm-setup-btn');
+            const status = document.getElementById('local-llm-setup-status');
+            const stateLbl = document.getElementById('local-llm-setup-state');
+            const log = document.getElementById('local-llm-setup-log');
+            const line = document.getElementById('local-llm-setup-status-line');
+            if (btn) { btn.disabled = true; btn.classList.add('opacity-50', 'cursor-not-allowed'); }
+            if (log) log.textContent = '';
+            if (line) line.textContent = 'Starting…';
+            if (stateLbl) stateLbl.textContent = 'running…';
+            if (status) status.classList.remove('hidden');
+
+            try {
+                const resp = await fetch('/api/local-llm/setup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model, num_ctx, cores })
+                });
+                const data = await resp.json();
+                if (!resp.ok || data.status === 'busy') {
+                    if (line) line.textContent = data.message || 'Could not start setup.';
+                    if (stateLbl) stateLbl.textContent = data.status === 'busy' ? 'already running' : 'error';
+                    if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                    return;
+                }
+                if (localLLMPollInterval) clearInterval(localLLMPollInterval);
+                localLLMPollInterval = setInterval(pollLocalLLMSetup, 2000);
+                pollLocalLLMSetup();  // immediate first poll
+            } catch (e) {
+                if (line) line.textContent = 'Request failed: ' + e;
+                if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+            }
+        }
+
+        async function pollLocalLLMSetup() {
+            try {
+                const resp = await fetch('/api/task-details?task_id=LocalLLMSetup');
+                if (resp.status === 404) {
+                    // task ended — fetch the last-run summary for a final verdict
+                    clearInterval(localLLMPollInterval);
+                    localLLMPollInterval = null;
+                    const btn = document.getElementById('local-llm-setup-btn');
+                    if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                    try {
+                        const sr = await fetch('/api/local-llm/status');
+                        const sd = await sr.json();
+                        const last = sd.last || {};
+                        const line = document.getElementById('local-llm-setup-status-line');
+                        const stateLbl = document.getElementById('local-llm-setup-state');
+                        const map = { complete: '✅ complete', warning: '⚠ complete (with warning)', failed: '✗ failed' };
+                        const verdict = map[last.state] || last.state || 'finished';
+                        if (line) line.textContent = `${verdict}${last.message ? ' — ' + last.message : ''}`;
+                        if (stateLbl) stateLbl.textContent = last.state || 'finished';
+                    } catch (_) { /* ignore */ }
+                    return;
+                }
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const log = document.getElementById('local-llm-setup-log');
+                const line = document.getElementById('local-llm-setup-status-line');
+                const stateLbl = document.getElementById('local-llm-setup-state');
+                if (log) {
+                    log.textContent = data.stream || '';
+                    log.scrollTop = log.scrollHeight;
+                }
+                if (line) line.textContent = `Running — ${data.duration || ''}`;
+                if (stateLbl) stateLbl.textContent = 'running…';
+            } catch (e) {
+                console.error('local-llm poll failed:', e);
+            }
+        }
+        // ── End Local LLM Setup ────────────────────────────────────────────────
 
         async function deleteIssue(issueId) {
             if (!confirm(`Delete ${issueId} from history and close it on GitHub?`)) return;
