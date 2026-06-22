@@ -1469,6 +1469,11 @@ state = {
     "refresh_logs_seconds": config_on_start.get("refresh_logs_seconds", 10),
     "cpu_count": os.cpu_count() or 4,  # detected core count, surfaced in the Local LLM setup UI
     "local_llm_setup": {},             # last-run summary for the one-click Local LLM setup
+    # Hub agent (WebSocket) status — BugFixer authenticates to the LM Hub as an
+    # agent like any other system, instead of the removed static admin token.
+    "hub_agent_status": "not_registered",  # not_registered | pending | approved | error
+    "hub_agent_message": "",
+    "hub_agent_last_seen": "",
 }
 
 try:
@@ -2004,108 +2009,30 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
         return None
 
 def get_hub_logs():
-    """Fetches recent logs from the Hub for all modules. Returns a list of log entries.
+    """Fetches recent logs from the Hub for all modules via the Hub agent.
 
-    Robustly handles non-JSON 200 responses (e.g., HTML login pages or error pages
-    served by reverse proxies). The Hub endpoint may return HTTP 200 with an HTML
-    body when an authentication redirect, maintenance page, or upstream error
-    page is served. In such cases we detect the mismatch via the Content-Type
-    header (and as a fallback by inspecting the body for HTML markers) and return
-    None gracefully — logging a single WARNING instead of an ERROR — so we do
-    not generate recurring error-log noise that itself triggers automated issue
-    creation in a feedback loop.
+    BugFixer is now an authenticated WebSocket agent of the Hub (see hub_agent.py),
+    so it no longer hits the admin-cookie-gated HTTP /setup/logs/all endpoint that
+    always returned 401 for a static token. Logs come back as a signed HUB_RESPONSE
+    to a GET_LOGS request. Returns a list of {"module","log"} entries sorted
+    newest-first, or None when the agent isn't approved/connected yet.
     """
-    config = load_config()
-    url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
-    if not url or "your-netbox" in url:
-        logger.debug("Hub Query URL not configured. Skipping log fetch.")
+    client = _get_hub_agent_client()
+    if not client:
         return None
-    try:
-        log_url = url.rstrip('/') + "/setup/logs/all"
-        logger.debug(f"Fetching Hub logs from: {log_url}")
-        resp = requests.get(log_url, timeout=15)
-        if resp.status_code == 200:
-            body = resp.text
-
-            # Empty body — nothing to parse.
-            if not body or not body.strip():
-                logger.warning(
-                    f"Hub returned 200 OK but empty response body for {log_url}. "
-                    f"Skipping JSON parse to avoid json.decode error."
-                )
-                return None
-
-            # --- Content-Type guard for non-JSON 200 responses ---
-            # The Hub endpoint may serve an HTML error page or login redirect with
-            # HTTP 200 (e.g., behind a reverse proxy like nginx/traefik/caddy that
-            # intercepts the request, or when an upstream app serves a custom
-            # error page). We check the Content-Type header first, and as a
-            # fallback inspect the body for HTML markers. This prevents the
-            # recurring "Hub returned 200 OK but body was not valid JSON" ERROR
-            # log entries that previously spammed the logs and triggered
-            # automated issue creation in a noisy feedback loop.
-            content_type = (resp.headers.get("Content-Type") or "").lower()
-            stripped_body = body.lstrip()
-            looks_like_html = (
-                "text/html" in content_type
-                or "application/xhtml" in content_type
-                or stripped_body.startswith("<!DOCTYPE")
-                or stripped_body.startswith("<html")
-                or stripped_body.startswith("<?xml")
-                or (stripped_body.startswith("<") and "<head" in stripped_body[:512].lower())
-            )
-
-            if looks_like_html:
-                # The endpoint is serving an HTML page instead of JSON. This is
-                # typically a login redirect, a maintenance page, or an upstream
-                # error page. Log a single WARNING (not ERROR) so we do not
-                # generate recurring error-log noise that itself triggers
-                # automated issue creation. Return None so callers skip this
-                # cycle gracefully. We also include a short content preview to
-                # aid debugging without flooding the logs.
-                logger.warning(
-                    f"Hub returned 200 OK but received non-JSON content "
-                    f"(Content-Type={content_type or 'unknown'}) for {log_url}. "
-                    f"The endpoint may be serving an error page or login redirect. "
-                    f"Skipping this cycle. First 200 chars: {body[:200]!r}"
-                )
-                return None
-
-            # Content-Type looks JSON-compatible — attempt to parse.
-            try:
-                data = resp.json()
-                raw_logs = []
-                if isinstance(data, dict):
-                    raw_logs = data.get('logs', [])
-                    if not isinstance(raw_logs, list):
-                        raw_logs = []
-                elif isinstance(data, list):
-                    raw_logs = data
-
-                # Try to parse a timestamp from each log line so we can sort
-                # newest-first.  Typical format: "2024-01-15 10:30:00 [INFO] …"
-                _TS_PAT = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
-                def _log_ts(entry):
-                    m = _TS_PAT.match((entry.get('log') or '').strip())
-                    return m.group(1) if m else ''
-
-                # Sort descending so newest entries are first.
-                return sorted(raw_logs, key=_log_ts, reverse=True)
-            except Exception as e:
-                # Even with a JSON-ish Content-Type, parsing could fail (truncated
-                # body, BOM, etc.). Treat this as a soft failure (WARNING) and
-                # return None so we don't crash the scan cycle or generate noise.
-                logger.warning(
-                    f"Hub returned 200 OK but failed to parse JSON: {e}. "
-                    f"Content-Type={content_type}. Content: {body[:200]!r}"
-                )
-                return None
-
-        logger.warning(f"Hub returned unexpected status code {resp.status_code} for {log_url}")
+    result = client.request_sync("GET_LOGS", {}, timeout=20)
+    if not isinstance(result, dict):
         return None
-    except Exception as e:
-        logger.error(f"Hub Log Fetch Error: {e}")
-        return None
+    raw_logs = result.get("logs", [])
+    if not isinstance(raw_logs, list):
+        raw_logs = []
+    # Try to parse a timestamp from each log line so we can sort newest-first.
+    # Typical format: "2024-01-15 10:30:00 [INFO] …"
+    _TS_PAT = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
+    def _log_ts(entry):
+        m = _TS_PAT.match((entry.get('log') or '').strip())
+        return m.group(1) if m else ''
+    return sorted(raw_logs, key=_log_ts, reverse=True)
 
 def get_hub_state():
     """Fetches the current state of the hub for verification."""
@@ -2677,67 +2604,212 @@ def parse_and_apply(content, repo_path):
         return False, {}, 0.0
 
 def _trigger_spoke_updates(config):
-    """Trigger a self-update on the Hub, then fan out SPOKE_UPDATE to every approved spoke.
+    """Trigger updates across the Hub, its spokes, and its agents after a fix push.
 
-    Called immediately after a fix is pushed to GitHub so services are running the
-    new code before the QA service verifies the fix.  Both calls are fire-and-forget;
-    actual restarts are asynchronous.  A post-update cooldown is started so transient
-    "service offline" errors during restarts don't produce spurious GitHub issues.
+    BugFixer is an authenticated WebSocket agent of the Hub, so it issues a single
+    TRIGGER_ALL_UPDATES request rather than the old admin-token HTTP calls (which
+    the Hub never actually honored and always returned 401). The Hub self-updates,
+    fans SPOKE_UPDATE to every approved spoke, and queues updates for every
+    approved agent. Fire-and-forget; actual restarts are asynchronous. A post-update
+    cooldown is started so transient "service offline" errors during restarts don't
+    produce spurious GitHub issues.
     """
-    hub_url = (config.get("HUB_QUERY_URL") or "").rstrip("/")
-    if not hub_url:
-        logger.debug("_trigger_spoke_updates: HUB_QUERY_URL not configured, skipping")
+    client = _get_hub_agent_client()
+    if not client:
+        logger.debug("_trigger_spoke_updates: Hub agent not configured/approved, skipping")
+        _set_update_cooldown(config)
         return
-    admin_token = config.get("LM_ADMIN_TOKEN") or os.getenv("LM_ADMIN_TOKEN", "")
-    headers = {"X-Admin-Token": admin_token} if admin_token else {}
-    # Update the Hub itself first so it is on the latest code before spokes reconnect.
-    try:
-        r = requests.post(f"{hub_url}/setup/update", headers=headers, timeout=30)
-        if r.status_code == 200:
-            logger.info("Hub self-update triggered successfully")
-        elif r.status_code == 401:
-            logger.warning("Hub /setup/update returned 401 — set LM_ADMIN_TOKEN in bugfixer config")
-        else:
-            logger.warning(f"Hub /setup/update returned HTTP {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        logger.warning(f"Could not trigger Hub self-update: {e}")
-    # Fan out to all approved spokes (including local lm-dns / lm-dhcp restart).
-    try:
-        r = requests.post(f"{hub_url}/setup/update/spokes", headers=headers, timeout=30)
-        if r.status_code == 200:
-            data = r.json()
-            logger.info(f"Hub spoke update queued: {data.get('message', '')}")
-        elif r.status_code == 401:
-            logger.warning("Hub /setup/update/spokes returned 401 — set LM_ADMIN_TOKEN in bugfixer config")
-        else:
-            logger.warning(f"Hub /setup/update/spokes returned HTTP {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        logger.warning(f"Could not trigger Hub spoke update: {e}")
+    result = client.request_sync("TRIGGER_ALL_UPDATES", {}, timeout=60)
+    if not isinstance(result, dict):
+        logger.warning("Hub agent not approved/connected — skipping update trigger")
+        _set_update_cooldown(config)
+        return
+    hub = result.get("hub") or {}
+    spokes = result.get("spokes") or {}
+    agents = result.get("agents") or {}
+    logger.info(
+        f"Hub update triggered: hub={_upd_summary(hub)} | spokes={_upd_summary(spokes)} | agents={_upd_summary(agents)}"
+    )
     # Suppress issue filing while services are restarting.
     _set_update_cooldown(config)
 
 
-def _wait_for_spokes_online(config, min_count=1, timeout=90):
-    """Poll Hub GET /status until at least min_count spokes appear in active_connections.
+def _upd_summary(d):
+    """Compact one-line summary of a Hub update-method result dict."""
+    if not isinstance(d, dict):
+        return str(d)
+    msg = d.get("message") or d.get("status") or ""
+    trig = d.get("triggered") or []
+    if isinstance(trig, list) and trig:
+        return f"{msg} (triggered: {', '.join(map(str, trig))})"
+    return msg
 
-    Spokes reconnect after their systemd unit restarts (~10–20 s).  Returns the list
-    of connected spoke IDs, or an empty list on timeout.
+
+# ---------------------------------------------------------------------------
+# Hub agent (WebSocket) — BugFixer authenticates to the LM Hub as an agent.
+# See hub_agent.py for the protocol. The helpers below bridge the async agent
+# client to BugFixer's sync state dict + config file.
+# ---------------------------------------------------------------------------
+
+def _derive_ws_url(http_url):
+    """Derive a Hub WebSocket URL (ws://host:8765) from an HTTP Hub URL.
+
+    The Hub's HTTP API and its WebSocket server run on different ports (8000 vs
+    8765), so we can't just swap the scheme — we take the host and rebuild.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse((http_url or "").strip())
+        host = parsed.hostname
+        if not host:
+            return ""
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        return f"{scheme}://{host}:8765"
+    except Exception:
+        return ""
+
+
+def _hub_agent_on_status(status, message):
+    """Callback: the agent client updated its connection/approval status."""
+    state["hub_agent_status"] = status
+    state["hub_agent_message"] = message or ""
+    state["hub_agent_last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _persist_config_key(key, value):
+    """Callback helper: upsert a single key into config.json (agent-managed secrets)."""
+    try:
+        cfg = load_config()
+        cfg[key] = value
+        save_config(cfg)
+    except Exception as e:
+        logger.warning(f"Could not persist {key} to config: {e}")
+
+
+def _hub_agent_on_secret(secret):
+    """Callback: the Hub pushed a (possibly empty) session secret."""
+    _persist_config_key("HUB_AGENT_SECRET", secret or "")
+
+
+def _hub_agent_on_hub_secret(hub_secret):
+    """Callback: the Hub pushed its (rotated) identity secret for mutual auth."""
+    _persist_config_key("HUB_SECRET", hub_secret or "")
+
+
+def _get_hub_agent_client():
+    """Return the running Hub agent singleton, or None if not started."""
+    try:
+        import hub_agent
+        return hub_agent.hub_agent_client
+    except Exception:
+        return None
+
+
+def _start_hub_agent():
+    """Start the Hub agent at app startup if a Hub WebSocket URL is configured.
+
+    HUB_WS_URL is authoritative; if it's empty we try to derive it from
+    HUB_QUERY_URL (host + :8765). If still empty, the agent stays unstarted and
+    state reports "not_registered" — BugFixer runs fine without Hub integration.
+    """
+    try:
+        import hub_agent
+        cfg = load_config()
+        ws_url = (cfg.get("HUB_WS_URL") or "").strip()
+        if not ws_url:
+            hq = (cfg.get("HUB_QUERY_URL") or "").strip()
+            if hq and "your-netbox" not in hq:
+                ws_url = _derive_ws_url(hq)
+        if not ws_url:
+            state["hub_agent_status"] = "not_registered"
+            state["hub_agent_message"] = "HUB_WS_URL not configured"
+            return
+        # Pass the resolved WS URL into the config dict the client reads.
+        cfg_with_ws = dict(cfg)
+        cfg_with_ws["HUB_WS_URL"] = ws_url
+        hub_agent.start_agent_from_config(
+            cfg_with_ws,
+            on_status=_hub_agent_on_status,
+            on_secret=_hub_agent_on_secret,
+            on_hub_secret=_hub_agent_on_hub_secret,
+        )
+    except Exception as e:
+        logger.warning(f"Could not start Hub agent: {e}")
+        state["hub_agent_status"] = "error"
+        state["hub_agent_message"] = str(e)
+
+
+@app.get("/api/hub-agent/status")
+async def hub_agent_status():
+    """Current Hub agent connection/approval status + config (for the Settings UI badge)."""
+    cfg = load_config()
+    return JSONResponse({
+        "status": state.get("hub_agent_status", "not_registered"),
+        "message": state.get("hub_agent_message", ""),
+        "last_seen": state.get("hub_agent_last_seen", ""),
+        "hub_ws_url": (cfg.get("HUB_WS_URL") or "").strip(),
+        "hub_agent_id": (cfg.get("HUB_AGENT_ID") or "bugfixer").strip(),
+        "has_secret": bool((cfg.get("HUB_AGENT_SECRET") or "").strip()),
+        "has_hub_secret": bool((cfg.get("HUB_SECRET") or "").strip()),
+    })
+
+
+@app.post("/api/hub-agent/reregister")
+async def hub_agent_reregister():
+    """Force re-onboarding: clear the stored session secret and restart the agent.
+
+    Used after a key revoke/re-approval, or to re-trigger the pending-approval
+    flow. Returns immediately; the agent reconnects zero-touch in the background.
+    """
+    try:
+        _persist_config_key("HUB_AGENT_SECRET", "")
+        client = _get_hub_agent_client()
+        if client:
+            try:
+                client.stop()
+            except Exception:
+                pass
+        # Brief pause so the old loop closes before we start a fresh one.
+        time.sleep(1)
+        _start_hub_agent()
+        return JSONResponse({"status": "restarted", "message": "Hub agent re-registering (approve bugfixer in the Hub WebUI)"})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+def _wait_for_spokes_online(config, min_count=1, timeout=90):
+    """Poll until at least min_count spokes appear online, then return their IDs.
+
+    Prefers the Hub agent's GET_SPOKE_STATUS (signed, authenticated). Falls back
+    to the public HTTP GET /status endpoint if the agent isn't approved yet —
+    that endpoint is ungated and never 401s. Spokes reconnect after their systemd
+    unit restarts (~10–20 s). Returns the list of connected spoke IDs, or an
+    empty list on timeout.
     """
     hub_url = (config.get("HUB_QUERY_URL") or "").rstrip("/")
-    if not hub_url:
+    client = _get_hub_agent_client()
+    if not hub_url and not client:
         return []
     deadline = time.time() + timeout
     logger.info(f"Waiting for ≥{min_count} spoke(s) to reconnect (timeout {timeout}s)…")
     while time.time() < deadline:
-        try:
-            r = requests.get(f"{hub_url}/status", timeout=10)
-            if r.status_code == 200:
-                conns = r.json().get("active_connections", [])
-                if len(conns) >= min_count:
-                    logger.info(f"Spokes online: {conns}")
-                    return conns
-        except Exception:
-            pass
+        conns = None
+        # 1. Try the authenticated agent request first.
+        if client:
+            result = client.request_sync("GET_SPOKE_STATUS", {}, timeout=10)
+            if isinstance(result, dict):
+                conns = result.get("active_connections") or []
+        # 2. Fall back to the public HTTP /status endpoint.
+        if conns is None and hub_url:
+            try:
+                r = requests.get(f"{hub_url}/status", timeout=10)
+                if r.status_code == 200:
+                    conns = r.json().get("active_connections", [])
+            except Exception:
+                conns = None
+        if isinstance(conns, list) and len(conns) >= min_count:
+            logger.info(f"Spokes online: {conns}")
+            return conns
         time.sleep(5)
     logger.warning(f"Timed out after {timeout}s waiting for spokes to come back online")
     return []
@@ -3864,6 +3936,15 @@ def scan_self_logs(gh_current, config):
             "systemctl restart",
             "Update pending signal",
             "Triggering restart",
+            # Hub agent lifecycle — expected during onboarding/approval/rotation,
+            # not a BugFixer bug.
+            "Hub agent",
+            "APPROVAL_REQUIRED",
+            "pending admin approval",
+            "Hub rejected secret",
+            "zero-touch",
+            "reconnect",
+            "Hub connection",
         )
 
         formatted_logs = []
@@ -4615,15 +4696,17 @@ async def get_hub_logs_page(request: Request):
     fetch_status = None
     logs = None
     try:
-        if hub_url and "your-netbox" not in hub_url:
-            probe = requests.get(hub_url.rstrip("/") + "/setup/logs/all", timeout=15)
-            fetch_status = probe.status_code
-            if probe.status_code == 200:
+        client = _get_hub_agent_client()
+        if not client:
+            fetch_error = "Hub agent not configured (set HUB_WS_URL and approve bugfixer in the Hub WebUI)"
+        else:
+            result = client.request_sync("GET_LOGS", {}, timeout=20)
+            if isinstance(result, dict):
+                fetch_status = 200
                 logs = get_hub_logs()
             else:
-                fetch_error = f"Hub returned HTTP {probe.status_code}"
-        else:
-            fetch_error = "HUB_QUERY_URL not configured"
+                fetch_status = None
+                fetch_error = "Hub agent not approved/connected — approve bugfixer in the Hub WebUI"
     except Exception as ex:
         fetch_error = str(ex)
     fetch_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -4637,21 +4720,20 @@ async def get_hub_logs_page(request: Request):
 
 @app.get("/api/hub-logs/raw")
 async def hub_logs_raw():
-    """Return the raw JSON from the Hub /setup/logs/all endpoint for debugging."""
-    config = load_config()
-    url = (config.get("HUB_QUERY_URL") or "").strip()
-    if not url or "your-netbox" in url:
-        return JSONResponse({"error": "HUB_QUERY_URL not configured"}, status_code=400)
-    try:
-        resp = requests.get(url.rstrip("/") + "/setup/logs/all", timeout=15)
-        return JSONResponse({
-            "status_code": resp.status_code,
-            "content_type": resp.headers.get("Content-Type", ""),
-            "body_preview": resp.text[:5000],
-            "body_length": len(resp.text),
-        })
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    """Return the raw Hub logs (via the authenticated agent) for debugging."""
+    client = _get_hub_agent_client()
+    if not client:
+        return JSONResponse({"error": "Hub agent not configured"}, status_code=400)
+    result = client.request_sync("GET_LOGS", {}, timeout=20)
+    if not isinstance(result, dict):
+        return JSONResponse({"error": "Hub agent not approved/connected"}, status_code=503)
+    return JSONResponse({
+        "status_code": 200,
+        "content_type": "application/json",
+        "body_preview": json.dumps(result)[:5000],
+        "body_length": len(json.dumps(result)),
+        "logs": result.get("logs", []),
+    })
 
 DEFAULT_ENV = {
     "GITHUB_TOKEN": "",
@@ -4677,7 +4759,8 @@ DEFAULT_ENV = {
     "POLL_INTERVAL_SECONDS": "300",
     "UPDATE_API_URL": "",
     "HUB_QUERY_URL": "",
-    "LM_ADMIN_TOKEN": "",
+    "HUB_WS_URL": "",
+    "HUB_AGENT_ID": "bugfixer",
     "POST_UPDATE_COOLDOWN_MINUTES": "10",
     "LOG_FILE_PATH": "/var/log/bugfixer.log",
     "DEV_BRANCH": "dev",
@@ -4722,7 +4805,6 @@ async def settings_page(request: Request):
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
     settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
-    settings["LM_ADMIN_TOKEN"] = config.get("LM_ADMIN_TOKEN") or settings.get("LM_ADMIN_TOKEN", "")
     settings["LLM_TIMEOUT"] = config.get("LLM_TIMEOUT") or settings.get("LLM_TIMEOUT", "900")
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
@@ -4849,7 +4931,8 @@ async def save_settings(request: Request):
         "QA_REPO": lambda v: v.strip() if v else "",
         "QA_TEST_COMMAND": lambda v: v.strip() if v else "pytest",
         "HUB_QUERY_URL": lambda v: v.strip() if v else "",
-        "LM_ADMIN_TOKEN": lambda v: v.strip() if v else "",
+        "HUB_WS_URL": lambda v: v.strip() if v else "",
+        "HUB_AGENT_ID": lambda v: v.strip() if v else "bugfixer",
         "POST_UPDATE_COOLDOWN_MINUTES": lambda v: max(0, int(v)) if str(v).isdigit() else 10,
     }
 
@@ -6381,6 +6464,13 @@ threading.Thread(target=connectivity_worker, daemon=True).start()
 threading.Thread(target=heartbeat_worker, daemon=True).start()
 threading.Thread(target=poller_worker, daemon=True).start()
 threading.Thread(target=updater_worker, daemon=True).start()
+
+# Start the Hub WebSocket agent (zero-touch onboarding → admin approval →
+# signed requests for logs + update triggers). No-op if HUB_WS_URL is unset.
+try:
+    _start_hub_agent()
+except Exception as _e:
+    logger.warning(f"Hub agent startup failed (non-fatal): {_e}")
 
 if __name__ == "__main__":
     import uvicorn

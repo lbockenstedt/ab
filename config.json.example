@@ -9,6 +9,8 @@
   "repo_tests": {},
   "GITHUB_TOKEN": "",
   "monitored_labels": ["automated-fix"],
+  "HUB_WS_URL": "",
+  "HUB_AGENT_ID": "bugfixer",
   "refresh_status_seconds": 30,
   "refresh_logs_seconds": 10
 }

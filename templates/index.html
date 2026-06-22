@@ -748,13 +748,41 @@
                                 <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Hub Query URL (Verification)</label>
+                                <label class="text-sm font-medium text-slate-600">Hub WebUI URL (approvals + status fallback)</label>
                                 <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="http://your-hub:8000">
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Hub Admin Token</label>
-                                <input type="password" name="LM_ADMIN_TOKEN" value="{{ settings.LM_ADMIN_TOKEN }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="LM_ADMIN_TOKEN from hub /opt/lm/.env">
+                                <label class="text-sm font-medium text-slate-600">Hub WebSocket URL</label>
+                                <input type="text" name="HUB_WS_URL" value="{{ settings.HUB_WS_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="ws://your-hub:8765 (derived from Hub WebUI URL if blank)">
                             </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Hub Agent ID</label>
+                                <input type="text" name="HUB_AGENT_ID" value="{{ settings.HUB_AGENT_ID or 'bugfixer' }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="bugfixer">
+                            </div>
+                        </div>
+                        <!-- Hub Agent status / approval panel (BugFixer authenticates to the
+                             Hub as a WebSocket agent — zero-touch onboarding, admin approval,
+                             then signed requests for logs + update triggers). -->
+                        <div class="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-sm font-semibold text-slate-700">Hub Agent</span>
+                                <span id="hub-agent-badge" class="text-xs font-bold px-2 py-0.5 rounded-full"
+                                      data-status="{{ state.hub_agent_status }}">
+                                    {{ state.hub_agent_status }}
+                                </span>
+                            </div>
+                            <div id="hub-agent-message" class="text-xs text-slate-500 mb-2">{{ state.hub_agent_message }}</div>
+                            <div class="flex items-center gap-2">
+                                <button type="button" onclick="hubAgentReregister()"
+                                        class="px-3 py-1 text-xs bg-[#01A982] hover:bg-[#018f6e] text-white rounded font-bold transition-colors">Re-register</button>
+                                <button type="button" onclick="hubAgentRefresh()"
+                                        class="px-3 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold transition-colors border border-slate-300">Refresh</button>
+                            </div>
+                            <p class="text-[11px] text-slate-500 mt-2">
+                                Approve <code class="bg-slate-100 px-1 rounded">bugfixer</code> in the Hub WebUI → Setup → Spoke Approvals
+                                {% if settings.HUB_QUERY_URL %}at <a href="{{ settings.HUB_QUERY_URL }}" target="_blank" class="text-[#01A982] underline">{{ settings.HUB_QUERY_URL }}</a>{% endif %}.
+                                The session key is exchanged automatically after approval — zero-touch.
+                            </p>
                         </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
                                 <input type="checkbox" name="direct_push_enabled" id="direct_push_enabled" {{ 'checked' if settings.direct_push_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
@@ -1868,6 +1896,49 @@
             });
         }
         // ── End LLM Vault UI ──────────────────────────────────────────────────
+
+        // ── Hub Agent status panel ──────────────────────────────────────────
+        function _renderHubAgentBadge(status, message) {
+            const badge = document.getElementById('hub-agent-badge');
+            const msg = document.getElementById('hub-agent-message');
+            if (badge) {
+                badge.textContent = status;
+                badge.dataset.status = status;
+                const colors = {
+                    'approved': 'bg-green-100 text-green-700',
+                    'pending': 'bg-yellow-100 text-yellow-700',
+                    'error': 'bg-red-100 text-red-700',
+                    'not_registered': 'bg-slate-200 text-slate-600',
+                };
+                badge.className = 'text-xs font-bold px-2 py-0.5 rounded-full ' + (colors[status] || 'bg-slate-200 text-slate-600');
+            }
+            if (msg) msg.textContent = message || '';
+        }
+
+        async function hubAgentRefresh() {
+            try {
+                const r = await fetch('/api/hub-agent/status');
+                if (!r.ok) return;
+                const d = await r.json();
+                _renderHubAgentBadge(d.status, d.message);
+            } catch (e) { console.warn('hub agent refresh failed', e); }
+        }
+
+        async function hubAgentReregister() {
+            if (!confirm('Re-register the Hub agent? This clears the stored session key and restarts zero-touch onboarding (you must re-approve bugfixer in the Hub WebUI).')) return;
+            try {
+                const r = await fetch('/api/hub-agent/reregister', {method: 'POST'});
+                const d = await r.json().catch(() => ({}));
+                _renderHubAgentBadge('pending', d.message || 're-registering…');
+            } catch (e) {
+                _renderHubAgentBadge('error', String(e));
+            }
+        }
+
+        // Poll the Hub agent status while the settings page is open.
+        (function(){ if (document.getElementById('hub-agent-badge')) hubAgentRefresh(); })();
+        setInterval(() => { if (document.getElementById('hub-agent-badge')) hubAgentRefresh(); }, 5000);
+        // ── End Hub Agent status panel ────────────────────────────────────────
 
         // ── One-click Local LLM (CPU-only) Setup ──────────────────────────────
         let localLLMPollInterval = null;
