@@ -5037,69 +5037,133 @@ def _llm_setup_log(line, replace_last=False):
             task["stream"] = s + line + "\n"
 
 
-def _ollama_list_names():
-    """Return the set of model names from `ollama list` (empty on failure)."""
-    import subprocess
+def _ollama_reachable(base_url=OLLAMA_BASE_URL, timeout=5):
+    """True if the Ollama HTTP API answers at {base_url}/api/tags."""
     try:
-        r = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=60)
-        names = set()
-        for line in (r.stdout or "").splitlines()[1:]:  # skip the header row
-            cols = line.split()
-            if cols:
-                names.add(cols[0])
-        return names
-    except Exception as e:
-        logger.debug(f"ollama list failed: {e}")
-        return set()
+        resp = requests.get(base_url.rstrip("/") + "/api/tags", timeout=timeout)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def _wait_for_ollama(base_url, timeout=60):
     """Poll {base_url}/api/tags until it answers 200 (or timeout). Returns True if reachable."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            resp = requests.get(base_url.rstrip("/") + "/api/tags", timeout=5)
-            if resp.status_code == 200:
-                return True
-        except Exception:
-            pass
+        if _ollama_reachable(base_url, timeout=5):
+            return True
         time.sleep(2)
     return False
 
 
-def _ollama_pull_streaming(model, log_fn):
-    """Run `ollama pull <model>`, streaming progress into the task log.
+def _ollama_tags(base_url=OLLAMA_BASE_URL):
+    """Return the set of model names via GET /api/tags (empty on failure).
 
-    ollama emits carriage-return-delimited progress bars; we read one char at a
-    time so each \\r segment replaces the last log line (bar updates in place),
-    while newline-terminated lines append normally.
+    Uses the HTTP API rather than the `ollama` CLI because the bugfixer service
+    runs under systemd with a minimal PATH that does not include /usr/local/bin
+    (where the Ollama installer places the binary).
     """
-    import subprocess
-    proc = subprocess.Popen(
-        ["ollama", "pull", model],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, newline="",
-    )
-    buf = ""
     try:
-        assert proc.stdout is not None
-        while True:
-            ch = proc.stdout.read(1)
-            if not ch:
+        resp = requests.get(base_url.rstrip("/") + "/api/tags", timeout=15)
+        resp.raise_for_status()
+        return {m.get("name", "") for m in resp.json().get("models", []) if m.get("name")}
+    except Exception as e:
+        logger.debug(f"ollama /api/tags failed: {e}")
+        return set()
+
+
+def _ollama_bin_path():
+    """Locate the ollama binary, checking common install paths (not just PATH).
+
+    Returns the path string if found, else None. Used only to decide whether
+    the installer needs to run; pull/create/list go through the HTTP API.
+    """
+    import shutil
+    p = shutil.which("ollama")
+    if p:
+        return p
+    for cand in ("/usr/local/bin/ollama", "/usr/bin/ollama",
+                 os.path.expanduser("~/.local/bin/ollama")):
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def _ollama_http_pull(model, log_fn, base_url=OLLAMA_BASE_URL):
+    """Pull a model via POST /api/pull, streaming JSON progress into the log.
+
+    Ollama emits newline-delimited JSON: {"status": ..., "total": ..., "completed": ...}
+    with a final {"status": "success"}. We render a compact progress line that
+    replaces the last log line so the bar updates in place.
+    """
+    try:
+        resp = requests.post(base_url.rstrip("/") + "/api/pull",
+                              json={"name": model}, stream=True, timeout=None)
+        resp.raise_for_status()
+        saw_success = False
+        for raw in resp.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                log_fn("  " + str(raw))
+                continue
+            status = obj.get("status", "")
+            if status == "success":
+                log_fn("  " + status)
+                saw_success = True
                 break
-            if ch in ("\r", "\n"):
-                line = buf
-                buf = ""
-                if line.strip():
-                    log_fn("  " + line.strip(), replace_last=(ch == "\r"))
+            total = obj.get("total")
+            completed = obj.get("completed")
+            if total and completed:
+                pct = 100.0 * completed / total
+                line = f"{status}: {pct:.1f}% ({_gb(completed)}/{_gb(total)})"
             else:
-                buf += ch
-        if buf.strip():
-            log_fn("  " + buf.strip())
-    finally:
-        proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"ollama pull exited {proc.returncode}")
+                line = status
+            log_fn("  " + line, replace_last=True)
+        if not saw_success:
+            # stream ended without an explicit success — verify via /api/tags
+            if model not in _ollama_tags(base_url):
+                raise RuntimeError("pull stream ended without success and model not present")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"ollama /api/pull failed: {e}")
+
+
+def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
+    """Create a model via POST /api/create (inline modelfile), streaming status."""
+    try:
+        resp = requests.post(base_url.rstrip("/") + "/api/create",
+                              json={"name": name, "modelfile": modelfile, "stream": True},
+                              stream=True, timeout=None)
+        resp.raise_for_status()
+        saw_success = False
+        for raw in resp.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                log_fn("  " + str(raw))
+                continue
+            status = obj.get("status", "")
+            log_fn("  " + status, replace_last=True)
+            if status == "success":
+                saw_success = True
+                break
+        if not saw_success and name not in _ollama_tags(base_url):
+            raise RuntimeError("create stream ended without success and model not present")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"ollama /api/create failed: {e}")
+
+
+def _gb(b):
+    """Format a byte count as gigabytes with one decimal."""
+    return f"{b / 1024 ** 3:.1f}GB"
 
 
 def run_local_llm_setup(model, num_ctx, cores):
@@ -5110,7 +5174,7 @@ def run_local_llm_setup(model, num_ctx, cores):
     verify. Each stage is idempotent. Progress is streamed via
     _llm_setup_log() into state['active_tasks']['LocalLLMSetup'].
     """
-    import subprocess, shutil
+    import subprocess
     task_id = "LocalLLMSetup"
     update_task_state(task_id, "Local LLM Setup", action="start")
     base_url = OLLAMA_BASE_URL
@@ -5118,20 +5182,22 @@ def run_local_llm_setup(model, num_ctx, cores):
     summary = {"state": "failed", "message": "not started"}
     try:
         # ---- Stage 1: detect / install Ollama ----
+        # Installed = the HTTP API answers OR the binary exists at a known path.
+        # We do NOT rely on `which("ollama")` alone because the bugfixer service
+        # runs under systemd with a minimal PATH that omits /usr/local/bin.
         _llm_setup_log("▶ Stage 1/7 — Checking for Ollama…")
-        if shutil.which("ollama"):
-            try:
-                ver = subprocess.run(["ollama", "--version"], capture_output=True, text=True, timeout=15)
-                vline = ((ver.stdout or ver.stderr or "installed").strip().splitlines() or ["installed"])[0]
-            except Exception:
-                vline = "installed"
-            _llm_setup_log(f"✓ Ollama already installed ({vline})")
+        already_up = _ollama_reachable(base_url, timeout=5)
+        bin_path = _ollama_bin_path()
+        if already_up or bin_path:
+            _llm_setup_log(f"✓ Ollama already installed (service {'up' if already_up else 'down'}, "
+                           f"binary at {bin_path or 'unknown path'})")
         else:
             _llm_setup_log("  Ollama not found — running official installer (requires root)…")
             inst = subprocess.run(["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
                                   capture_output=True, text=True, timeout=900)
             if inst.returncode != 0:
-                raise RuntimeError(f"installer exited {inst.returncode}: {(inst.stderr or '').strip()[-500:]}")
+                tail = ((inst.stdout or "") + (inst.stderr or "")).strip()[-800:]
+                raise RuntimeError(f"installer exited {inst.returncode}: {tail}")
             _llm_setup_log("✓ Ollama installed")
 
         # ---- Stage 2: ensure the ollama service is up ----
@@ -5145,11 +5211,11 @@ def run_local_llm_setup(model, num_ctx, cores):
 
         # ---- Stage 3: pull the model (skip if already present) ----
         _llm_setup_log(f"▶ Stage 3/7 — Pulling model {model} (skip if present)…")
-        present = _ollama_list_names()
+        present = _ollama_tags(base_url)
         if model in present:
             _llm_setup_log(f"✓ Model {model} already present")
         else:
-            _ollama_pull_streaming(model, _llm_setup_log)
+            _ollama_http_pull(model, _llm_setup_log, base_url)
             _llm_setup_log(f"✓ Model {model} pulled")
 
         # ---- Stage 4: create a context-tuned derived model ----
@@ -5158,19 +5224,7 @@ def run_local_llm_setup(model, num_ctx, cores):
             derived_tag = f"{model}-{ctx_k}k" if ctx_k else f"{model}-{int(num_ctx)}"
             _llm_setup_log(f"▶ Stage 4/7 — Creating context-tuned model {derived_tag} (num_ctx={int(num_ctx)}, num_thread={int(cores)})…")
             modelfile = f"FROM {model}\nPARAMETER num_ctx {int(num_ctx)}\nPARAMETER num_thread {int(cores)}\n"
-            with tempfile.NamedTemporaryFile("w", suffix=".Modelfile", delete=False) as mf:
-                mf.write(modelfile)
-                mfile = mf.name
-            try:
-                cr = subprocess.run(["ollama", "create", derived_tag, "-f", mfile],
-                                    capture_output=True, text=True, timeout=900)
-                if cr.returncode != 0:
-                    raise RuntimeError(f"ollama create failed: {(cr.stderr or '').strip()[-500:]}")
-            finally:
-                try:
-                    os.unlink(mfile)
-                except Exception:
-                    pass
+            _ollama_http_create(derived_tag, modelfile, _llm_setup_log, base_url)
             _llm_setup_log(f"✓ Derived model {derived_tag} created")
         else:
             _llm_setup_log("▶ Stage 4/7 — num_ctx unset; using base model as-is")
@@ -5231,7 +5285,7 @@ def run_local_llm_setup(model, num_ctx, cores):
 
         # ---- Stage 7: verify ----
         _llm_setup_log("▶ Stage 7/7 — Verifying Ollama responds with the model…")
-        names = _ollama_list_names()
+        names = _ollama_tags(base_url)
         if derived_tag in names:
             _llm_setup_log(f"✓ Verified — {len(names)} model(s) available, {derived_tag} present")
             _llm_setup_log(f"\n✅ Setup complete. Slot 4 = {derived_tag} @ {base_url}")
