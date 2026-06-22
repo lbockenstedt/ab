@@ -1465,6 +1465,8 @@ state = {
     "claude_auth_url": "",       # OAuth URL captured from that process
     "claude_auth_done": False,   # True once the process exits 0
     "restart_pending": False,    # True when an update was pulled; restart deferred until cycle end
+    "refresh_status_seconds": config_on_start.get("refresh_status_seconds", 30),
+    "refresh_logs_seconds": config_on_start.get("refresh_logs_seconds", 10),
 }
 
 try:

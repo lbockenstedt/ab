@@ -8,5 +8,7 @@
   "dev_branch": "dev",
   "repo_tests": {},
   "GITHUB_TOKEN": "",
-  "monitored_labels": ["automated-fix"]
+  "monitored_labels": ["automated-fix"],
+  "refresh_status_seconds": 30,
+  "refresh_logs_seconds": 10
 }

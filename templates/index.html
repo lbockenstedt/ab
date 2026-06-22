@@ -6,11 +6,16 @@
     <title>BugFixer Hub (Fixed)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    {% if view == 'status' %}
-    <meta http-equiv="refresh" content="30">
-    {% elif view == 'logs' %}
-    <meta http-equiv="refresh" content="10">
-    {% endif %}
+    <script>
+      // Auto-refresh is JS-driven (not <meta http-equiv="refresh">) so the
+      // footer "Pause Refresh" button can stop/resume it. Intervals come from
+      // config.json via the hub state dict.
+      window.BF_REFRESH = {
+        view: "{{ view }}",
+        statusSeconds: {{ state.refresh_status_seconds | default(30) }},
+        logsSeconds:   {{ state.refresh_logs_seconds   | default(10) }},
+      };
+    </script>
     <style>
         :root {
             --hpe-green: #01A982;
@@ -1059,11 +1064,57 @@
                 <button onclick="togglePause()" id="pause-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap {% if state.paused %}bg-green-600 hover:bg-green-700{% else %}bg-orange-600 hover:bg-orange-700{% endif %} text-white">
                     {% if state.paused %}<i class="fas fa-play mr-1"></i>Resume{% else %}<i class="fas fa-pause mr-1"></i>Stop{% endif %}
                 </button>
+                <button onclick="toggleRefreshPause()" id="refresh-pause-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap bg-slate-500 hover:bg-slate-600 text-white" title="Pause / resume page auto-refresh">
+                    <i class="fas fa-pause mr-1"></i>Pause Refresh
+                </button>
             </div
 >
         </div>
     </footer>
     <script>
+        // ---- Configurable page auto-refresh + Pause Refresh (footer) ----
+        // Replaces the old <meta http-equiv="refresh"> so the auto-reload can be
+        // paused/resumed. Pause state persists in localStorage across reloads.
+        (function () {
+            const AUTO_VIEWS = ['status', 'logs'];
+            const KEY = 'bf_refresh_paused';
+            let timer = null;
+
+            function secondsFor(view) {
+                if (view === 'status') return parseInt(window.BF_REFRESH && window.BF_REFRESH.statusSeconds, 10) || 30;
+                if (view === 'logs')   return parseInt(window.BF_REFRESH && window.BF_REFRESH.logsSeconds, 10)   || 10;
+                return 0;
+            }
+            function start() {
+                if (timer) return;
+                const s = secondsFor(window.BF_REFRESH && window.BF_REFRESH.view);
+                if (!s) return;
+                timer = setInterval(function () { window.location.reload(); }, s * 1000);
+            }
+            function stop() { if (timer) { clearInterval(timer); timer = null; } }
+            function isPaused() { return localStorage.getItem(KEY) === '1'; }
+
+            function syncBtn(btn) {
+                if (!btn) return;
+                if (isPaused()) {
+                    btn.innerHTML = '<i class="fas fa-play mr-1"></i>Resume Refresh';
+                    btn.className = 'py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap bg-green-600 hover:bg-green-700 text-white';
+                } else {
+                    btn.innerHTML = '<i class="fas fa-pause mr-1"></i>Pause Refresh';
+                    btn.className = 'py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap bg-slate-500 hover:bg-slate-600 text-white';
+                }
+            }
+            window.toggleRefreshPause = function () {
+                const btn = document.getElementById('refresh-pause-btn');
+                if (isPaused()) { localStorage.removeItem(KEY); start(); }
+                else            { localStorage.setItem(KEY, '1'); stop(); }
+                syncBtn(btn);
+            };
+
+            if (window.BF_REFRESH && AUTO_VIEWS.indexOf(window.BF_REFRESH.view) !== -1 && !isPaused()) start();
+            syncBtn(document.getElementById('refresh-pause-btn'));
+        })();
+
         let currentTaskId = null;
         let detailsPollingInterval = null;
 
