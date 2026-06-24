@@ -211,6 +211,7 @@ def get_version():
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com"
+LMSTUDIO_BASE_URL = "http://localhost:1234/v1"  # LM Studio local OpenAI-compatible server
 ANTHROPIC_API_VERSION = "2023-06-01"
 
 
@@ -435,7 +436,8 @@ def validate_llm_config_on_startup():
     ok = False
     for n in (1, 2):
         provider, api_key, model, _ = _get_provider_config(n, config)
-        if api_key and model:
+        # claude_cli and lmstudio don't need an API key (session auth / local server).
+        if model and (api_key or provider in ("claude_cli", "lmstudio")):
             logger.info(f"LLM Provider {n}: provider={provider!r} model={model!r} — configured.")
             ok = True
         else:
@@ -670,7 +672,7 @@ def _any_provider_available(config):
     any_free = False
     for n in (1, 2, 3, 4):
         provider, key, model, _ = _get_provider_config(n, config)
-        configured = model and (key or provider == "claude_cli")
+        configured = model and (key or provider in ("claude_cli", "lmstudio"))
         if not configured:
             continue  # not configured
         rem = _provider_credit_cb_remaining(n)
@@ -1175,6 +1177,10 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
         return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if p == "groq":
         effective_url = base_url or "https://api.groq.com/openai/v1"
+        return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
+    if p == "lmstudio":
+        # LM Studio exposes an OpenAI-compatible API; no auth key required.
+        effective_url = base_url or LMSTUDIO_BASE_URL
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
     if p == "claude_cli":
         return _request_claude_cli(model, messages, task_id, config)
@@ -2206,6 +2212,18 @@ def _check_provider_online(n, config):
             import subprocess
             r = subprocess.run(["claude", "--version"], capture_output=True, timeout=5)
             return r.returncode == 0
+        except Exception:
+            return False
+    if p == "lmstudio":
+        # LM Studio needs no API key — just confirm the local server is reachable.
+        if not model:
+            return False
+        try:
+            base = (base_url or LMSTUDIO_BASE_URL).rstrip("/")
+            resp = requests.get(f"{base}/models", timeout=10)
+            if resp.status_code == 401:
+                return False
+            return resp.status_code < 300
         except Exception:
             return False
     if not api_key or not model:
@@ -4248,6 +4266,18 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             {"name": "claude-opus-4-8",            "details": "Claude Opus 4.8"},
             {"name": "claude-haiku-4-5-20251001",  "details": "Claude Haiku 4.5"},
         ]
+    if p == "lmstudio":
+        # LM Studio exposes /v1/models (OpenAI-compatible); no auth key needed.
+        base = (base_url or LMSTUDIO_BASE_URL).rstrip("/")
+        out = []
+        try:
+            resp = requests.get(f"{base}/models", timeout=10)
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                out.append({"name": m.get("id", ""), "details": "LM Studio (local)"})
+        except Exception as e:
+            logger.warning(f"LM Studio model fetch failed: {e}")
+        return out
     if not api_key:
         return []
     models = []
@@ -5555,6 +5585,85 @@ async def delete_issue(request: Request):
     return {
         "status": "success",
         "message": f"{'Removed from history. ' if was_in_history else ''}{github_msg}",
+    }
+
+@app.post("/resolve_issue")
+async def resolve_issue(request: Request):
+    """Mark an issue as resolved: close it on GitHub and set its local status to fixed."""
+    global state
+    data = await request.json()
+    issue_id = data.get("issue_id", "").strip()
+    if not issue_id or ":" not in issue_id:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
+
+    repo_name, issue_num_str = issue_id.rsplit(":", 1)
+    try:
+        issue_num = int(issue_num_str)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue number"})
+
+    # Close the issue on GitHub first. We only update the local status to fixed
+    # if this succeeds (including the already-closed case); on failure we leave
+    # the local state untouched so the UI and history don't claim a fix that
+    # never landed on GitHub.
+    config = load_config()
+    token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return JSONResponse(status_code=500, content={
+            "status": "error",
+            "message": "GitHub close failed: No GitHub token configured. Local status left unchanged.",
+        })
+
+    try:
+        gh = Github(token)
+        repo = gh.get_repo(repo_name)
+        issue = repo.get_issue(issue_num)
+
+        try:
+            issue.create_comment(
+                "🤖 **BugFixer**: This issue has been marked as **resolved** and is now closed. "
+                "It will not be automatically reopened or processed again."
+            )
+        except Exception:
+            pass
+
+        if issue.state != "closed":
+            issue.edit(state="closed")
+            github_msg = f"Issue #{issue_num} closed on GitHub."
+        else:
+            github_msg = f"Issue #{issue_num} was already closed on GitHub."
+        logger.info(f"Resolved issue {issue_id}: status -> fixed, {github_msg}")
+    except Exception as e:
+        logger.warning(f"Could not close {issue_id} on GitHub: {e}")
+        return JSONResponse(status_code=502, content={
+            "status": "error",
+            "message": f"GitHub close failed: {e}. Local status left unchanged.",
+        })
+
+    # GitHub close succeeded — now update local processed history to fixed and
+    # keep the counters honest.
+    processed = load_processed()
+    local_msg = "No local history entry to update, but "
+    if issue_id in processed:
+        entry = processed[issue_id]
+        prev_status = entry.get("status")
+        success_statuses = ("fixed", "verified", "awaiting_prod_verification")
+        if prev_status not in success_statuses:
+            # Was counted as a failure/non-actionable; flip the counters.
+            if prev_status == "failed":
+                state["failure_count"] = max(0, state.get("failure_count", 0) - 1)
+            state["success_count"] = state.get("success_count", 0) + 1
+        entry["status"] = "fixed"
+        entry["timestamp"] = datetime.now().isoformat()
+        entry["decision_reason"] = "Manually marked as resolved and closed on GitHub."
+        processed[issue_id] = entry
+        state["processed"] = processed
+        save_processed(processed)
+        local_msg = "Marked as fixed. "
+
+    return {
+        "status": "success",
+        "message": f"{local_msg}{github_msg}",
     }
 
 @app.post("/update_now")

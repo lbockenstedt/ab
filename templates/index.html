@@ -308,6 +308,7 @@
                             <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-bold text-slate-700 transition-colors">Retry</button>
                             <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-1 bg-orange-100 hover:bg-orange-200 rounded font-bold text-orange-700 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
                             <button onclick="deleteIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded font-bold text-red-700 transition-colors">Delete</button>
+                            <button onclick="resolveIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors" title="Mark as resolved: close on GitHub and set status to fixed">Resolved</button>
                         </td>
                     </tr>
                     <tr class="bg-slate-50/50">
@@ -506,7 +507,7 @@
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
-                                {% for pname in ['google','anthropic','openai','groq','ollama','claude_cli'] %}
+                                {% for pname in ['google','anthropic','openai','groq','ollama','lmstudio','claude_cli'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
                                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                                     <div class="flex items-center justify-between mb-2">
@@ -572,6 +573,7 @@
                                         <option value="openai">OpenAI</option>
                                         <option value="groq">Groq</option>
                                         <option value="ollama">Ollama</option>
+                                        <option value="lmstudio">LM Studio (local)</option>
                                         <option value="claude_cli">Claude CLI (local)</option>
                                     </select>
                                     <select id="new-entry-model" onchange="updateDefaultRpm()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
@@ -608,6 +610,7 @@
                                                 <option value="openai" {{ 'selected' if entry.provider == 'openai' else '' }}>OpenAI</option>
                                                 <option value="groq" {{ 'selected' if entry.provider == 'groq' else '' }}>Groq</option>
                                                 <option value="ollama" {{ 'selected' if entry.provider == 'ollama' else '' }}>Ollama</option>
+                                                <option value="lmstudio" {{ 'selected' if entry.provider == 'lmstudio' else '' }}>LM Studio (local)</option>
                                                 <option value="claude_cli" {{ 'selected' if entry.provider == 'claude_cli' else '' }}>Claude CLI (local)</option>
                                             </select>
                                             <select id="edit-model-{{ entry.id }}" onchange="updateEditRpm('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
@@ -1712,7 +1715,7 @@
             ['gemma2-9b',              30],
             ['qwen-qwq',               30],
         ];
-        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, groq: 30, claude_cli: 10};
+        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, groq: 30, lmstudio: 0, claude_cli: 10};
 
         function getDefaultRpm(provider, model) {
             if (model) {
@@ -2040,6 +2043,20 @@
                 });
                 const data = await resp.json();
                 alert(data.message || (data.status === 'success' ? 'Deleted.' : 'Error deleting issue.'));
+                if (data.status === 'success') location.reload();
+            } catch (e) { alert('Request failed: ' + e); }
+        }
+
+        async function resolveIssue(issueId) {
+            if (!confirm(`Mark ${issueId} as resolved?\n\nThis closes the issue on GitHub and sets its status to fixed.`)) return;
+            try {
+                const resp = await fetch('/resolve_issue', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ issue_id: issueId })
+                });
+                const data = await resp.json();
+                alert(data.message || (data.status === 'success' ? 'Resolved.' : 'Error resolving issue.'));
                 if (data.status === 'success') location.reload();
             } catch (e) { alert('Request failed: ' + e); }
         }
