@@ -219,6 +219,31 @@ def get_version():
         with open(VERSION_FILE, "r") as f: return f.read().strip()
     except: return "Unknown"
 
+STARTUP_STAMP_FILE = os.path.join(CONFIG_DIR, "startup_stamp.json")
+
+def write_startup_stamp():
+    """Record which commit this process actually booted on, plus start time / pid /
+    main.py mtime. The watchdog reads this to detect stale-running code (disk updated
+    but the process never restarted) and force a restart to load the pending update.
+    Also drives the Diagnostics panel's running-vs-disk version comparison."""
+    try:
+        commit = "unknown"
+        try:
+            commit = git.Repo(os.getcwd()).head.commit.hexsha
+        except Exception as ge:
+            logger.warning(f"Startup stamp: could not read git commit: {ge}")
+        stamp = {
+            "commit": commit,
+            "started_at": datetime.now().isoformat(),
+            "pid": os.getpid(),
+            "main_mtime": os.path.getmtime(__file__),
+        }
+        with open(STARTUP_STAMP_FILE, "w") as f:
+            json.dump(stamp, f, indent=2)
+        logger.info(f"Startup stamp written: commit={commit[:7] if commit != 'unknown' else 'unknown'} pid={os.getpid()}")
+    except Exception as e:
+        logger.warning(f"Could not write startup stamp: {e}")
+
 # ============================================================================
 # Multi-Provider LLM Routing
 # ============================================================================
@@ -280,6 +305,30 @@ def _is_lmstudio(provider):
     prefix means adding further instances needs no code change here.
     """
     return (provider or "").lower().strip().startswith("lmstudio")
+
+
+def _provider_configured(provider, key, model):
+    """A provider is usable when it has a model, and either an API key or is a no-key
+    provider (claude_cli session auth, LM Studio local server). Centralizes the no-key
+    exception so every configured-check site agrees on what "configured" means."""
+    return bool(model and (key or provider == "claude_cli" or _is_lmstudio(provider)))
+
+
+def _record_provider_result(n, status, reason=""):
+    """Record the last failover outcome for provider slot n.
+
+    Surfaces silent skips (e.g. ``not_configured``) and per-provider failure reasons in
+    the Diagnostics panel so they are visible without reading CLI logs. Best-effort:
+    never raises into the failover path.
+    """
+    try:
+        state["provider_last_result"][n] = {
+            "status": status,
+            "reason": (str(reason)[:300]) if reason else "",
+            "at": datetime.now().isoformat(),
+        }
+    except Exception:
+        pass
 
 
 def _find_claude_cli_slot(config):
@@ -1377,14 +1426,18 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             row = all_providers[force_provider - 1]
             result, err = _try_provider(*row)
             if result is not None:
+                _record_provider_result(force_provider, "ok")
                 return result
+            _record_provider_result(force_provider, err if isinstance(err, str) else "failed", err)
             raise Exception(f"Provider {force_provider} unavailable: {err}")
 
         # force_cloud=False: Provider 1 only, no fallover.
         if force_cloud is False:
             result, err = _try_provider(1, p1_provider, p1_model, p1_key, p1_url)
             if result is not None:
+                _record_provider_result(1, "ok")
                 return result
+            _record_provider_result(1, err if isinstance(err, str) else "failed", err)
             raise Exception(f"Provider 1 (force-only) unavailable: {err}")
 
         # Determine starting provider.
@@ -1397,20 +1450,29 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             provider, model, key, url = pmap[n]
             result, err = _try_provider(n, provider, model, key, url)
             if result is not None and str(result).strip():
+                _record_provider_result(n, "ok")
                 return result
             if result is not None and not str(result).strip():
                 # Provider returned an empty body — treat as a transient failure so we
                 # fall through to the next provider instead of passing "" to the caller.
                 logger.warning(f"Provider {n} ({provider}) returned empty response. Trying next provider...")
+                _record_provider_result(n, "empty_response", "provider returned an empty body")
                 last_err = "empty_response"
                 continue
             if err == "not_configured":
+                # Previously a silent continue — log it so a skipped provider (e.g. a
+                # no-key LM Studio with no model, or a missing API key) is visible.
+                reason = "no model configured" if not model else "no API key configured"
+                logger.info(f"Provider {n} ({provider}) skipped — not configured ({reason}).")
+                _record_provider_result(n, "not_configured", reason)
                 continue
             if err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
+                _record_provider_result(n, err, "cooldown active")
                 last_err = err
                 continue
             # Real failure — log and keep trying remaining providers.
             logger.warning(f"Provider {n} ({provider}) failed: {err}. Trying next provider...")
+            _record_provider_result(n, "failed", err)
             last_err = err
 
         raise Exception(
@@ -1531,6 +1593,11 @@ state = {
     "status": "Idle", "active_llm": "Unknown",
     "provider_1_online": False, "provider_2_online": False, "provider_3_online": False, "provider_4_online": False,
     "provider_1_configured": False, "provider_2_configured": False, "provider_3_configured": False, "provider_4_configured": False,
+    # Per-slot last failover outcome (status sentinel + reason + iso8601), surfaced in the
+    # Diagnostics panel so silent skips (e.g. "not_configured") are visible without CLI logs.
+    "provider_last_result": {1: None, 2: None, 3: None, 4: None},
+    # Bounded recent log of self-update / restart events for the Diagnostics panel.
+    "restart_log": [],
     "local_online": False, "cloud_online": False,
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
@@ -1559,6 +1626,10 @@ state = {
     "hub_agent_message": "",
     "hub_agent_last_seen": "",
 }
+
+# Stamp which commit this process booted on, before any worker starts, so the watchdog
+# can detect stale-running code and the Diagnostics panel can show running vs disk versions.
+write_startup_stamp()
 
 try:
     validate_llm_config_on_startup()
@@ -2382,10 +2453,10 @@ def heartbeat_worker():
             p3_provider, p3_key, p3_model, _ = _get_provider_config(3, config)
             p4_provider, p4_key, p4_model, _ = _get_provider_config(4, config)
 
-            p1_configured = bool(p1_key and p1_model)
-            p2_configured = bool(p2_key and p2_model)
-            p3_configured = bool(p3_key and p3_model)
-            p4_configured = bool(p4_key and p4_model)
+            p1_configured = _provider_configured(p1_provider, p1_key, p1_model)
+            p2_configured = _provider_configured(p2_provider, p2_key, p2_model)
+            p3_configured = _provider_configured(p3_provider, p3_key, p3_model)
+            p4_configured = _provider_configured(p4_provider, p4_key, p4_model)
 
             state["provider_1_configured"] = p1_configured
             state["provider_2_configured"] = p2_configured
@@ -2516,7 +2587,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         if n == builder_n:
             continue
         provider, key, model, _ = _get_provider_config(n, config)
-        if not (key and model):
+        if not _provider_configured(provider, key, model):
             continue
         r_model = _get_reviewer_model(n, config) or model
         reviewers.append({"name": f"Reviewer {n} ({provider})", "model": r_model, "provider_n": n})
@@ -3061,6 +3132,24 @@ def check_for_updates():
         update_state["last_known_good_commit"] = old_commit
         save_update_state(update_state)
 
+        # PRE-PULL GATE: don't re-pull a commit we already know is bad (syntax failure
+        # or watchdog rollback). Derive the tracked branch instead of hardcoding main.
+        try:
+            tracked = None
+            try:
+                tracked = self_repo.active_branch.tracking_branch().name.split("/")[-1]
+            except Exception:
+                pass
+            tracked = tracked or "main"
+            self_repo.remotes.origin.fetch()
+            remote_head = self_repo.commit(f"origin/{tracked}").hexsha
+        except Exception as fe:
+            logger.warning(f"Pre-pull gate: could not read remote head: {fe}")
+            remote_head = None
+        if remote_head and remote_head in update_state.get("failed_commits", []):
+            logger.warning(f"Remote head {remote_head[:7]} is in failed_commits blocklist. Skipping pull.")
+            return False, f"Update skipped: remote head {remote_head[:7]} is a known-bad commit."
+
         self_repo.remotes.origin.pull()
         new_commit = self_repo.head.commit.hexsha
 
@@ -3097,11 +3186,11 @@ def check_for_updates():
             except Exception as e:
                 logger.warning(f"Could not create update_pending signal: {e}")
 
-            # Signal the main loop to restart once the current scan cycle completes
-            # rather than killing the process immediately.  Immediate SIGTERM kills
-            # in-flight git clone / fix operations and generates spurious self-diagnosis issues.
+            # Signal the dedicated restart_worker to apply the restart. This is decoupled
+            # from the scan cycle (and from state["paused"]) so the running process reliably
+            # reloads the new code; the watchdog enforces it as a durable backstop.
             state["restart_pending"] = True
-            logger.info("Restart deferred — will apply after current scan cycle completes.")
+            logger.info("Restart scheduled — restart_worker will apply it shortly.")
             return True, f"Update found: {cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
 
         return False, "No updates available."
@@ -3114,10 +3203,81 @@ def updater_worker():
     while True:
         try:
             logger.info("Checking for self-updates...")
-            check_for_updates()
+            updated, msg = check_for_updates()
+            _log_restart_event("auto_update", msg, ok=bool(updated))
         except Exception as e:
             logger.error(f"Updater worker error: {e}")
         time.sleep(3600)
+
+def _log_restart_event(kind, message, ok=True):
+    """Append a bounded entry to state["restart_log"] for the Diagnostics panel."""
+    try:
+        entry = {"at": datetime.now().isoformat(), "kind": kind,
+                 "result": "ok" if ok else "failed", "message": str(message)[:200]}
+        log = state.get("restart_log", [])
+        log.append(entry)
+        # keep only the most recent 20
+        del log[:-20]
+        state["restart_log"] = log
+    except Exception:
+        pass
+
+def _spawn_restart():
+    """Spawn a detached `systemctl restart bugfixer` that survives this process dying.
+    The unit runs as root, so sudo is only used as a fallback when not root. Detaching
+    into a new session + closing fds ensures systemd's restart proceeds even after the
+    parent receives SIGTERM."""
+    cmd = ["systemctl", "restart", "bugfixer"]
+    if os.geteuid() != 0:
+        cmd = ["sudo"] + cmd
+    import subprocess as _sp
+    _sp.Popen(cmd, start_new_session=True, stdout=_sp.DEVNULL,
+              stderr=_sp.DEVNULL, close_fds=True)
+
+def restart_worker():
+    """Applies a pending restart independent of scan-cycle completion and paused state.
+
+    Watches state["restart_pending"]; when set, consumes the flag, waits a short grace
+    window so in-flight git clone / LLM calls can reach a commit point or fail cleanly
+    (SIGTERM mid-op is already classified as a non-bug by the self-diagnosis filter),
+    then spawns a detached `systemctl restart bugfixer`. Best-effort verifies health
+    post-restart and retries the spawn once. The authoritative post-restart verification
+    is the watchdog's restart-then-verify flow; this worker is the fast path and the
+    on-disk update_pending file is the durable backstop."""
+    GRACE_SECONDS = 15
+    VERIFY_TIMEOUT = 60
+    VERIFY_INTERVAL = 3
+    HEALTH_URL = "http://127.0.0.1:8000/api/health"
+    while True:
+        try:
+            if state.get("restart_pending"):
+                state["restart_pending"] = False
+                logger.info(f"restart_worker: applying restart (grace window {GRACE_SECONDS}s).")
+                time.sleep(GRACE_SECONDS)
+                _spawn_restart()
+                _log_restart_event("restart", "restart spawned", ok=True)
+                # The current process will receive SIGTERM from systemd within ~1s. If by
+                # some reason we are still alive after VERIFY_TIMEOUT, retry the spawn once.
+                t0 = time.time()
+                healthy = False
+                while time.time() - t0 < VERIFY_TIMEOUT:
+                    try:
+                        r = requests.get(HEALTH_URL, timeout=2)
+                        if r.status_code == 200 and r.json().get("status") == "ok":
+                            healthy = True
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(VERIFY_INTERVAL)
+                if not healthy:
+                    logger.error("restart_worker: post-restart health not observed; retrying spawn.")
+                    _log_restart_event("restart", "post-restart health failed; retrying", ok=False)
+                    _spawn_restart()
+            else:
+                time.sleep(2)
+        except Exception as e:
+            logger.error(f"restart_worker error: {e}")
+            time.sleep(5)
 
 def find_existing_pull_request(repo_obj, target_branch, base_branch):
     """Checks whether an open pull request already exists for the given head/base pair."""
@@ -3685,6 +3845,47 @@ def scan_heartbeats(gh_current, config, hub_logs):
         if not (missing or stale):
             continue
 
+        # Hub-side recovery handoff. The Hub watchdog (run_spoke_recovery_loop)
+        # already restarts stranded spoke units with backoff and exposes per-
+        # spoke recovery state via GET_SPOKE_STATUS (included in the payload
+        # fetched above). Don't double-act:
+        #   - manual_pause : admin paused recovery from the WebUI -> suppress.
+        #   - in_progress  : hub is actively recovering (attempt n/3) -> suppress
+        #                    so bugfixer doesn't file a "missing heartbeat" while
+        #                    the hub is bringing the spoke back.
+        #   - gave_up      : hub tried and couldn't (a restart structurally can't
+        #                    fix it — e.g. venv/interpreter missing, broken
+        #                    installer) -> escalate ONCE per down-period with a
+        #                    "Recovery exhausted" issue naming the cause, which is
+        #                    far more actionable than a generic missing-heartbeat.
+        # The Hub itself (sid == "hub") is not recovered by the watchdog, so it
+        # falls through to the normal missing/stale triage below.
+        recovery = {}
+        if sid != "hub":
+            recovery = (spoke_status.get("recovery") or {}).get(sid, {}) or {}
+        rec_paused = bool(recovery.get("manual_pause"))
+        rec_in_progress = bool(recovery.get("in_progress")) and not bool(recovery.get("gave_up"))
+        rec_gave_up = bool(recovery.get("gave_up"))
+        if rec_paused:
+            logger.info(f"scan_heartbeats: {sid} recovery paused by admin; not triaging.")
+            continue
+        if rec_in_progress:
+            logger.info(f"scan_heartbeats: {sid} hub recovery in progress "
+                         f"(attempt {recovery.get('attempts', 0)}/3); suppressing triage to avoid double-action.")
+            continue
+        # Escalate a gave_up at most once per down-period: track the last gave_up
+        # state per sid so we file on the transition, not every poll cycle (which
+        # would otherwise reopen/comment the issue every ~5 min while the spoke is
+        # still down). Clear when the spoke recovers (no longer gave_up).
+        if not hasattr(scan_heartbeats, "_gave_up_filed"):
+            scan_heartbeats._gave_up_filed = {}
+        if rec_gave_up:
+            if scan_heartbeats._gave_up_filed.get(sid):
+                logger.debug(f"scan_heartbeats: {sid} already escalated (gave_up); skipping re-file.")
+                continue
+        else:
+            scan_heartbeats._gave_up_filed.pop(sid, None)
+
         # Map module -> repo: static type map, then explicit module_repo_map
         # (keyed by spoke_id or module_type), then auto-match, then self-diagnosis.
         repo_name = MODULE_TYPE_REPO.get((mtype or "").lower()) if sid != "hub" else MODULE_TYPE_REPO.get("hub")
@@ -3703,7 +3904,23 @@ def scan_heartbeats(gh_current, config, hub_logs):
             logger.warning(f"scan_heartbeats: no repo maps to {sid} (module_type={mtype!r}); skipping triage. Add a 'module_repo_map' entry if this module should be tracked.")
             continue
 
-        if missing:
+        if rec_gave_up:
+            last_err = recovery.get("last_error") or "unknown"
+            crash_sig = recovery.get("last_crash_sig") or "unknown"
+            title = f"Recovery exhausted — {sid}"
+            body = (f"**Automated Recovery Escalation**\n\nThe Hub watchdog attempted to recover module "
+                    f"**{sid}** (type={mtype or 'unknown'}) by restarting its systemd unit, but gave up. "
+                    f"A restart structurally cannot fix this — the cause is most likely a missing venv / "
+                    f"interpreter, a broken installer path, or a configuration error (the same class of "
+                    f"failure as the cs status=203/EXEC venv-wipe strand).\n\n"
+                    f"**Give-up reason:** {last_err}\n**Last crash signature:** {crash_sig}\n\n"
+                    f"Action needed: re-run the spoke's installer (`install_all.sh`, or the spoke's own "
+                    f"installer, e.g. `/opt/lm/cs/install_cs.sh`) to recreate the venv / repair the unit, "
+                    f"then restart the spoke. The Hub watchdog will clear its recovery state and resume "
+                    f"monitoring once the spoke reconnects.")
+            scan_heartbeats._gave_up_filed[sid] = True
+            logger.info(f"scan_heartbeats: {sid} hub recovery GAVE_UP ({last_err}); escalating once.")
+        elif missing:
             title = f"Missing heartbeat — {sid}"
             body = (f"**Automated Heartbeat Triage**\n\nNo `[heartbeat]` log line was found for module "
                     f"**{sid}** (type={mtype or 'unknown'}) in the latest Hub logs. The module may be "
@@ -4473,15 +4690,9 @@ def poller_worker():
             # all run regardless of scheduler state.  The schedule/blackout gates are applied
             # per-issue inside scan_repo_issues.
             run_scan_cycle()
-            # Apply any deferred restart NOW — the cycle just finished so no tasks are
-            # in flight.  This avoids SIGTERM killing git clone / LLM calls mid-operation.
-            if state.get("restart_pending"):
-                logger.info("Deferred restart: scan cycle complete, no tasks in flight — restarting now.")
-                state["restart_pending"] = False
-                import subprocess as _sp
-                _sp.Popen(["sudo", "systemctl", "restart", "bugfixer"])
-                time.sleep(5)  # give systemd time to send SIGTERM cleanly
-                return
+            # Restart handling moved to the dedicated restart_worker (decoupled from the
+            # scan cycle and from state["paused"]), so updates reliably reload the running
+            # process even while busy or paused.
             sched = _schedule_check(cfg)
             if sched.get("is_work_hours") and cfg.get("SCHEDULER_WORK_POLL_INTERVAL"):
                 interval = int(cfg.get("SCHEDULER_WORK_POLL_INTERVAL") or 600)
@@ -4709,6 +4920,97 @@ async def fetch_models_live(request: Request):
 async def scheduler_status():
     config = load_config()
     return _schedule_check(config)
+
+
+def _diag_origin_head():
+    """Best-effort origin HEAD from locally-cached remote refs (no network fetch)."""
+    try:
+        repo = git.Repo(os.getcwd())
+        branch = "main"
+        try:
+            branch = repo.active_branch.tracking_branch().name.split("/")[-1]
+        except Exception:
+            pass
+        try:
+            return repo.commit(f"origin/{branch}").hexsha
+        except Exception:
+            try:
+                return repo.remotes.origin.refs[f"{branch}"].commit.hexsha
+            except Exception:
+                return None
+    except Exception:
+        return None
+
+
+@app.get("/api/diagnostics")
+async def diagnostics():
+    """Surfaces running-vs-disk-vs-origin versions, stale-code state, per-provider
+    status (including the previously-silent skip reasons), and update/restart state,
+    so the user can see what is wrong from the UI instead of reading CLI logs."""
+    config = load_config()
+
+    # Startup stamp — which commit this process booted on.
+    running_commit, started_at, pid, main_mtime = None, None, None, None
+    try:
+        with open(STARTUP_STAMP_FILE, "r") as f:
+            stamp = json.load(f)
+        running_commit = stamp.get("commit")
+        if running_commit == "unknown":
+            running_commit = None
+        started_at = stamp.get("started_at")
+        pid = stamp.get("pid")
+        main_mtime = stamp.get("main_mtime")
+    except Exception:
+        pass
+
+    # On-disk HEAD.
+    disk_commit = None
+    try:
+        disk_commit = git.Repo(os.getcwd()).head.commit.hexsha
+    except Exception:
+        pass
+
+    origin_commit = _diag_origin_head()
+
+    update_state = load_update_state()
+    update_pending_exists = os.path.exists(os.path.join(CONFIG_DIR, "update_pending"))
+
+    providers = []
+    for n in (1, 2, 3, 4):
+        provider, key, model, _ = _get_provider_config(n, config)
+        cb = (state.get("provider_credit_cb") or {}).get(n) or {}
+        providers.append({
+            "n": n,
+            "provider": provider,
+            "model": model,
+            "configured": _provider_configured(provider, key, model),
+            "online": state.get(f"provider_{n}_online", False),
+            "cooldown_active": bool(cb.get("active")),
+            "cooldown_remaining_min": cb.get("cooldown_remaining_min"),
+            "cooldown_cause": cb.get("cause"),
+            "last_result": (state.get("provider_last_result") or {}).get(n),
+            "rpm": _get_provider_rpm(n, config),
+        })
+
+    return {
+        "versions": {
+            "running": running_commit,
+            "disk": disk_commit,
+            "origin": origin_commit,
+            "label": get_version(),
+            "stale": bool(disk_commit and running_commit and disk_commit != running_commit),
+        },
+        "process": {"pid": pid, "started_at": started_at, "main_mtime": main_mtime},
+        "update": {
+            "pending": update_pending_exists,
+            "restart_pending": bool(state.get("restart_pending")),
+            "last_known_good_commit": update_state.get("last_known_good_commit"),
+            "failed_commits": update_state.get("failed_commits", []),
+            "restart_log": state.get("restart_log", []),
+        },
+        "providers": providers,
+        "watchdog_signal": update_pending_exists,
+    }
 
 
 @app.get("/api/claude-cli/status")
@@ -5175,6 +5477,15 @@ async def settings_page(request: Request):
         "view": "settings",
         "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]},
         "available_labels": state.get("available_labels", []),
+        "state": state,
+    })
+
+@app.get("/diagnostics")
+async def diagnostics_page(request: Request):
+    """Diagnostics view — versions, stale-code state, per-provider status, and
+    update/restart state. Data is fetched live via /api/diagnostics by refreshDiagnostics()."""
+    return templates.TemplateResponse(request=request, name="index.html", context={
+        "view": "diagnostics",
         "state": state,
     })
 
@@ -6113,14 +6424,13 @@ async def retry_all_failed(request: Request):
 
 @app.post("/restart")
 async def restart_service():
-    logger.info("Restart request received. Triggering systemctl restart...")
-    try:
-        import subprocess
-        subprocess.Popen(["sudo", "systemctl", "restart", "bugfixer"])
-        return {"status": "success", "message": "Restart signal sent successfully."}
-    except Exception as e:
-        logger.error(f"Restart failed: {e}")
-        return {"status": "error", "message": str(e)}
+    """Manual restart: flag the dedicated restart_worker instead of fire-and-forget
+    sudo, so the restart goes through the same verified, detached, grace-windowed path
+    as automatic self-updates."""
+    logger.info("Manual restart requested — flagging restart_worker.")
+    state["restart_pending"] = True
+    _log_restart_event("manual_restart", "manual restart requested", ok=True)
+    return {"status": "success", "message": "Restart scheduled (grace window applies)."}
 
 @app.post("/trigger_hub_update")
 async def trigger_hub_update():
@@ -6911,6 +7221,7 @@ threading.Thread(target=connectivity_worker, daemon=True).start()
 threading.Thread(target=heartbeat_worker, daemon=True).start()
 threading.Thread(target=poller_worker, daemon=True).start()
 threading.Thread(target=updater_worker, daemon=True).start()
+threading.Thread(target=restart_worker, daemon=True).start()
 
 # Start the Hub WebSocket agent (zero-touch onboarding → admin approval →
 # signed requests for logs + update triggers). No-op if HUB_WS_URL is unset.

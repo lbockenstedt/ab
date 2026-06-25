@@ -139,6 +139,9 @@
                 <a href="/settings" class="nav-link py-5 px-1 {{ 'active' if view == 'settings' else '' }}">
                     <i class="fas fa-cog mr-2"></i>Settings
                 </a>
+                <a href="/diagnostics" class="nav-link py-5 px-1 {{ 'active' if view == 'diagnostics' else '' }}">
+                    <i class="fas fa-stethoscope mr-2"></i>Diagnostics
+                </a>
                 <a href="/chat" class="nav-link py-5 px-1 {{ 'active' if view == 'chat' else '' }}">
                     <i class="fas fa-comments mr-2"></i>Chat
                 </a>
@@ -1107,6 +1110,69 @@
             <input type="hidden" id="active-chat-id" value="{{ active_chat_id }}">
         </div>
         {% endif %}
+
+        {% if view == 'diagnostics' %}
+        <div id="diag-root" class="space-y-6">
+            <!-- Code Version / Stale Code card -->
+            <div class="hpe-card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold text-slate-800">Code Version</h3>
+                    <i class="fas fa-code-branch text-[#01A982]"></i>
+                </div>
+                <div id="diag-stale-banner" class="hidden mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium flex items-center justify-between gap-3">
+                    <span><i class="fas fa-exclamation-triangle mr-2"></i><span id="diag-stale-msg">Running code is stale — restart needed</span></span>
+                    <div class="flex gap-2">
+                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded font-bold text-xs text-white">Restart now</button>
+                        <button onclick="diagAction('/update_now', 'Checking…')" class="py-1.5 px-3 rounded font-bold text-xs bg-slate-600 hover:bg-slate-700 text-white">Check for updates</button>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div><div class="text-slate-500">Running</div><div id="diag-v-running" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">On disk</div><div id="diag-v-disk" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Origin</div><div id="diag-v-origin" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Version</div><div id="diag-v-label" class="font-mono text-slate-800">{{ state.version }}</div></div>
+                </div>
+                <div class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 grid grid-cols-2 md:grid-cols-3 gap-2">
+                    <div>Started: <span id="diag-started" class="text-slate-700 font-mono">—</span></div>
+                    <div>PID: <span id="diag-pid" class="text-slate-700 font-mono">—</span></div>
+                    <div>Update pending: <span id="diag-pending" class="text-slate-700 font-mono">no</span></div>
+                </div>
+            </div>
+
+            <!-- Providers table -->
+            <div class="hpe-card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold text-slate-800">LLM Providers</h3>
+                    <button onclick="refreshDiagnostics()" class="text-xs text-slate-500 hover:text-slate-700"><i class="fas fa-sync-alt"></i> refresh</button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead class="text-left text-xs text-slate-500 uppercase tracking-wider">
+                            <tr><th class="py-2 pr-3">Slot</th><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3">Configured</th><th class="py-2 pr-3">Online</th><th class="py-2 pr-3">Cooldown</th><th class="py-2 pr-3">Last result</th><th class="py-2 pr-3">RPM</th></tr>
+                        </thead>
+                        <tbody id="diag-providers-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Update / Restart card -->
+            <div class="hpe-card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold text-slate-800">Update &amp; Restart</h3>
+                    <div class="flex gap-2">
+                        <button onclick="diagAction('/update_now', 'Checking…')" class="py-1.5 px-3 rounded font-bold text-xs bg-slate-600 hover:bg-slate-700 text-white"><i class="fas fa-cloud-download-alt mr-1"></i>Check for updates</button>
+                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary py-1.5 px-3 rounded font-bold text-xs text-white">Restart now</button>
+                    </div>
+                </div>
+                <div class="text-xs text-slate-500 grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+                    <div>Last known good: <span id="diag-lkg" class="text-slate-700 font-mono">—</span></div>
+                    <div>Restart pending: <span id="diag-restart-pending" class="text-slate-700 font-mono">no</span></div>
+                </div>
+                <div class="text-xs text-slate-500 mb-1">Recent events</div>
+                <div id="diag-restart-log" class="text-xs font-mono text-slate-700 space-y-1 max-h-48 overflow-y-auto"></div>
+            </div>
+        </div>
+        {% endif %}
     </main>
 
     <footer class="bg-[#263040] border-t border-slate-700 p-4 flex-none">
@@ -1558,6 +1624,84 @@
 
         // Load scheduler status on page load if on settings view.
         if (document.getElementById('sched-status-box')) refreshSchedStatus();
+
+        function _diagShort(c) { return c ? String(c).slice(0, 7) : '—'; }
+        function _diagPill(ok, label) {
+            return ok
+                ? '<span class="status-pill pill-online">' + label + '</span>'
+                : '<span class="status-pill pill-offline">' + label + '</span>';
+        }
+        async function refreshDiagnostics() {
+            const root = document.getElementById('diag-root');
+            if (!root) return;
+            try {
+                const d = await fetch('/api/diagnostics').then(r => r.json());
+                const v = d.versions || {};
+                document.getElementById('diag-v-running').textContent = _diagShort(v.running);
+                document.getElementById('diag-v-disk').textContent = _diagShort(v.disk);
+                document.getElementById('diag-v-origin').textContent = _diagShort(v.origin);
+                document.getElementById('diag-v-label').textContent = v.label || '—';
+                const proc = d.process || {};
+                document.getElementById('diag-started').textContent = proc.started_at || '—';
+                document.getElementById('diag-pid').textContent = (proc.pid != null) ? proc.pid : '—';
+
+                const up = d.update || {};
+                document.getElementById('diag-pending').textContent = (d.watchdog_signal || up.pending) ? 'yes' : 'no';
+                document.getElementById('diag-restart-pending').textContent = up.restart_pending ? 'yes' : 'no';
+                document.getElementById('diag-lkg').textContent = _diagShort(up.last_known_good_commit);
+
+                const banner = document.getElementById('diag-stale-banner');
+                const msg = document.getElementById('diag-stale-msg');
+                if (v.stale) {
+                    msg.textContent = '⚠ Running code is stale — on-disk code is newer than the running process. Restart needed.';
+                    banner.classList.remove('hidden');
+                } else if (d.watchdog_signal) {
+                    msg.textContent = '⚠ Update pending — a restart is scheduled to load the new code.';
+                    banner.classList.remove('hidden');
+                } else {
+                    banner.classList.add('hidden');
+                }
+
+                // Providers table
+                const body = document.getElementById('diag-providers-body');
+                const rows = (d.providers || []).map(p => {
+                    const lr = p.last_result || {};
+                    const lastTxt = lr.status ? lr.status + (lr.reason ? ' — ' + lr.reason : '') : '—';
+                    const cd = p.cooldown_active
+                        ? (p.cooldown_cause === 'rate_limit' ? 'RL ' : '⏱ ') + Math.round(p.cooldown_remaining_min || 0) + 'm'
+                        : '—';
+                    return '<tr class="border-t border-slate-100">'
+                        + '<td class="py-2 pr-3 font-bold text-slate-700">P' + p.n + '</td>'
+                        + '<td class="py-2 pr-3 text-slate-700">' + (p.provider || '—') + '</td>'
+                        + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + (p.model || '—') + '</td>'
+                        + '<td class="py-2 pr-3">' + _diagPill(p.configured, p.configured ? 'on' : 'off') + '</td>'
+                        + '<td class="py-2 pr-3">' + _diagPill(p.online, p.online ? 'up' : 'down') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + cd + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + lastTxt + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.rpm || 0) + '</td>'
+                        + '</tr>';
+                }).join('');
+                body.innerHTML = rows;
+
+                // Restart log
+                const logEl = document.getElementById('diag-restart-log');
+                const log = (up.restart_log || []).slice().reverse();
+                logEl.innerHTML = log.length
+                    ? log.map(e => '<div>' + (e.at || '') + ' &nbsp; <span class="text-slate-500">' + e.kind + '</span> &nbsp; ' + (e.message || '') + '</div>').join('')
+                    : '<div class="text-slate-400">No recent events.</div>';
+            } catch (e) {
+                const logEl = document.getElementById('diag-restart-log');
+                if (logEl) logEl.innerHTML = '<div class="text-red-500">Error loading diagnostics: ' + e + '</div>';
+            }
+        }
+        async function diagAction(endpoint, _msg) {
+            try {
+                await fetch(endpoint, { method: 'POST' });
+            } catch (e) { /* ignore — refresh will reflect state */ }
+            setTimeout(refreshDiagnostics, 1500);
+        }
+        // Load diagnostics on page load if on the diagnostics view, and refresh every 10s.
+        if (document.getElementById('diag-root')) { refreshDiagnostics(); setInterval(refreshDiagnostics, 10000); }
 
         let _claudeAuthPollTimer = null;
 
