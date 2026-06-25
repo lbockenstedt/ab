@@ -1851,7 +1851,7 @@ def parse_module_repo_map(value):
 
 def discover_labels(gh_current, monitored_repos):
     """Fetches all unique labels from all monitored repositories, including built-in defaults."""
-    all_labels = {"automated-fix", "bug", "critical", "high-priority"}
+    all_labels = {"automated-fix", "bug", "Bug", "critical", "high-priority"}
     for repo_name in monitored_repos:
         try:
             repo = gh_current.get_repo(repo_name)
@@ -1861,6 +1861,39 @@ def discover_labels(gh_current, monitored_repos):
         except Exception as e:
             logger.error(f"Error discovering labels for {repo_name}: {e}")
     return sorted(list(all_labels))
+
+# Default colors for labels bugfixer creates when missing. PyGithub's
+# create_issue(labels=...) raises UnknownObjectException if a label doesn't
+# exist on the target repo, so _ensure_label creates it first. The "Bug"
+# label is applied to user-filed "File a Bug" reports (see scan_bugs).
+_LABEL_COLORS = {
+    "automated-fix": "0e8a16",  # green
+    "Bug": "b60205",            # red (classic GitHub bug color)
+    "bug": "b60205",
+    "log-detected": "fbca04",   # yellow
+    "critical": "b60205",
+    "high-priority": "d93f0b",
+}
+
+def _ensure_label(gh_repo, name):
+    """Create a label on the repo if it doesn't already exist.
+
+    GitHub issue creation raises if a label name is absent, so this is called
+    before create_issue for every label we intend to apply. No-op if it exists.
+    """
+    try:
+        gh_repo.get_label(name)
+        return True
+    except Exception:
+        # 404 / UnknownObjectException -> create it.
+        try:
+            color = _LABEL_COLORS.get(name, "ededed")
+            gh_repo.create_label(name=name, color=color)
+            logger.info(f"Created missing label '{name}' on {gh_repo.full_name}")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not create label '{name}' on {gh_repo.full_name}: {e}")
+            return False
 
 def bump_repo_version(repo_path):
     """Increments the patch component of the N.N.N version in the target repo's
@@ -2044,7 +2077,7 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
 
     return None, None, False
 
-def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
+def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, labels=None, raw=False):
     """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos.
 
     The 'body' field is required to create a meaningful issue. If it is missing or
@@ -2161,10 +2194,23 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data):
             f"### Log Evidence:\n```\n{body_text}\n```\n\n"
             f"This issue has been automatically created for fixing."
         )
+        # raw=True (used by scan_bugs for user-filed "File a Bug" reports): use
+        # the caller-provided title/body verbatim — no "Log Alert" prefix and no
+        # Log Evidence wrapping — so the public issue body stays clean (just the
+        # user's explanation + context + a hidden bug-report-id reference).
+        if raw:
+            full_title = title_text
+            full_body = body_text
+        applied_labels = labels if labels is not None else ["automated-fix", "log-detected"]
+        # Ensure each label exists on the target repo first — create_issue
+        # raises UnknownObjectException if a label is absent (e.g. the "Bug"
+        # label on a freshly-monitored repo like lbockenstedt/lm).
+        for lbl in applied_labels:
+            _ensure_label(gh_repo, lbl)
         issue = gh_repo.create_issue(
             title=full_title,
             body=full_body,
-            labels=["automated-fix", "log-detected"]
+            labels=applied_labels
         )
         logger.info(f"Created automated issue #{issue.number} for {current_repo_name}")
         return issue
@@ -3399,6 +3445,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             final_confidence = 0.0
             base_branch = config.get("default_branch", "main")
 
+            # File-a-Bug enrichment: if this issue was filed from the WebUI "File
+            # a Bug" button, its body carries a hidden <!-- bug-report-id: <id>
+            # --> marker. Pull the full console/HTML/screenshot from the hub and
+            # append them to the body fed to the AI fix/review — the public
+            # issue stays clean, but the AI gets the rich artifacts as context.
+            fix_body = (issue.body or "") + _bug_report_fix_context(issue.body or "")
+
             for attempt in range(1, max_attempts + 1):
                 try:
                     update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
@@ -3415,7 +3468,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             processed[issue_id]["status"] = "processing"
                             save_processed(processed)
                     elif not pending_fix:
-                        fix_code = apply_ai_fix(path, issue.body or "", error_context, force_cloud=force_cloud, task_id=issue_id, force_provider=force_provider)
+                        fix_code = apply_ai_fix(path, fix_body, error_context, force_cloud=force_cloud, task_id=issue_id, force_provider=force_provider)
                         success_applied, fixes, confidence = parse_and_apply(fix_code, path)
 
                     if not success_applied:
@@ -3428,7 +3481,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             review_verdict = "Approve"
                         else:
                             update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
-                            review = review_fix(path, issue.body or "", fixes, force_cloud=force_cloud, task_id=issue_id, builder_n=force_provider)
+                            review = review_fix(path, fix_body, fixes, force_cloud=force_cloud, task_id=issue_id, builder_n=force_provider)
 
                             # --- Handle Queue for Retry ---
                             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
@@ -3968,6 +4021,222 @@ def scan_heartbeats(gh_current, config, hub_logs):
     else:
         logger.debug("scan_heartbeats: all expected modules have fresh heartbeats.")
 
+
+def scan_bugs(gh_current, config, hub_logs):
+    """File GitHub issues for user-submitted "File a Bug" reports.
+
+    The WebUI footer button POSTs an explanation + console + HTML + screenshot
+    to the hub's /api/bug-report; the hub stores the full artifacts under
+    data_dir/bugs/<id>/ and logs a short ``[bug-report] id=<id> ...`` marker
+    line. This scans the RAW hub_logs (before filter_error_logs drops it) for
+    those markers, pulls each report's metadata from the hub (GET_BUG_REPORTS),
+    and for any not-yet-filed report:
+      - fetches the full artifacts (GET_BUG_REPORT) — used ONLY to build a
+        concise context block; the raw console/HTML/screenshot are kept out of
+        the public issue body (they live on the hub and are pulled back by
+        process_single_issue as AI-fix context via the bug-report-id marker).
+      - files a clean-body GitHub issue (raw=True, labels automated-fix+bug)
+        carrying the user's explanation + context + a hidden
+        ``<!-- bug-report-id: <id> -->`` reference.
+      - marks the report filed on the hub (MARK_BUG_FILED) so it isn't re-filed.
+
+    The issue carries 'automated-fix', so scan_repo_issues -> process_single_issue
+    will then attempt a fix (once lbockenstedt/lm is in monitored_repos).
+    """
+    if not config.get("bug_report_enabled", True):
+        return
+    if not hub_logs:
+        return
+
+    # Parse [bug-report] id=... markers out of the raw hub logs (newest-first).
+    # The marker line format (hub api.py): "[bug-report] id=<rid> severity=...
+    # view=... summary=...". Only the id is needed here; the full report is
+    # fetched from the hub.
+    id_pat = re.compile(r'\[bug-report\][^\n]*?\bid=([0-9a-fA-F]+)')
+    seen_ids = []
+    seen_set = set()
+    for entry in hub_logs or []:
+        if not isinstance(entry, dict):
+            continue
+        log = entry.get("log") or ""
+        if "[bug-report]" not in log:
+            continue
+        m = id_pat.search(log)
+        if not m:
+            continue
+        rid = m.group(1)
+        if rid in seen_set:
+            continue
+        seen_set.add(rid)
+        seen_ids.append(rid)
+    if not seen_ids:
+        return
+
+    client = _get_hub_agent_client()
+    if not client:
+        logger.warning("scan_bugs: no hub agent client; skipping bug-report filing.")
+        return
+
+    # Reconcile against the hub's filed flag so a bugfixer restart (which
+    # clears the in-memory _filed set) does not re-file reports already filed
+    # in a prior process lifetime. _filed is the per-process dedup fast-path.
+    if not hasattr(scan_bugs, "_filed"):
+        scan_bugs._filed = set()
+    filed_on_hub = set()
+    try:
+        reports = client.request_sync("GET_BUG_REPORTS", {}, timeout=10)
+        for r in (reports.get("reports") if isinstance(reports, dict) else []) or []:
+            if isinstance(r, dict) and r.get("filed"):
+                filed_on_hub.add(r.get("id"))
+    except Exception as e:
+        logger.warning(f"scan_bugs: GET_BUG_REPORTS failed: {e}")
+    scan_bugs._filed |= filed_on_hub
+
+    monitored_repos = get_monitored_repos(config)
+    repo_name = (config.get("bug_report_repo") or "").strip()
+    if not repo_name:
+        repo_name = MODULE_TYPE_REPO.get("hub") or resolve_self_diagnosis_repo(config)
+    if not repo_name:
+        logger.warning("scan_bugs: no bug_report_repo/hub repo resolved; skipping.")
+        return
+
+    filed_this_cycle = 0
+    for rid in seen_ids:
+        if rid in scan_bugs._filed:
+            continue
+        # Pull the full report from the hub. The body we file is clean; the
+        # raw console/HTML/screenshot stay on the hub for fix context.
+        try:
+            report = client.request_sync("GET_BUG_REPORT", {"id": rid}, timeout=15)
+        except Exception as e:
+            logger.warning(f"scan_bugs: GET_BUG_REPORT {rid} failed: {e}")
+            continue
+        if not isinstance(report, dict) or not report.get("id"):
+            logger.warning(f"scan_bugs: report {rid} not found on hub (may have been evicted); skipping.")
+            continue
+        if report.get("filed"):
+            scan_bugs._filed.add(rid)
+            continue
+
+        explanation = (report.get("report_json") and _safe_json_field(report.get("report_json"), "explanation")) \
+            or report.get("summary") or ""
+        severity = (report.get("report_json") and _safe_json_field(report.get("report_json"), "severity")) \
+            or report.get("severity") or "medium"
+        ctx = report.get("context") or {}
+        # Build a clean, public-safe issue body.
+        ctx_lines = []
+        if isinstance(ctx, dict):
+            for k in ("currentView", "currentSubView", "currentTenant", "url",
+                      "hubVersion", "webuiVersion", "username", "userAgent"):
+                v = ctx.get(k)
+                if v:
+                    ctx_lines.append(f"- **{k}**: {v}")
+        title = f"🤖 Bug Report: {str(explanation)[:80].strip()}"
+        body = (
+            f'**Filed via the LM WebUI "File a Bug" button**\n\n'
+            f"### What's wrong\n{explanation}\n\n"
+            f"### Context\n" + ("\n".join(ctx_lines) if ctx_lines else "_no context captured_") + "\n\n"
+            f"**Severity:** {severity}\n\n"
+            f"---\n"
+            f"<!-- bug-report-id: {rid} -->\n"
+            f"_Full console log, raw DOM, and screenshot are stored on the hub "
+            f"(report id `{rid}`) and are NOT included in this public issue. "
+            f"BugFixer pulls them from the hub as fix context._\n"
+        )
+        error_data = {"module": "hub", "title": title, "body": body, "repo": repo_name}
+        try:
+            gh_repo = gh_current.get_repo(repo_name)
+            issue = create_automated_issue(gh_current, monitored_repos, gh_repo, error_data,
+                                           labels=["automated-fix", "Bug"], raw=True)
+            if issue is None:
+                logger.info(f"scan_bugs: {rid} not filed this cycle (cooldown/dedup/no-op).")
+                continue
+            issue_url = getattr(issue, "html_url", "") or ""
+            try:
+                client.request_sync("MARK_BUG_FILED", {"id": rid, "issue_url": issue_url}, timeout=10)
+            except Exception as me:
+                logger.warning(f"scan_bugs: MARK_BUG_FILED {rid} failed: {me}")
+            scan_bugs._filed.add(rid)
+            filed_this_cycle += 1
+            logger.info(f"scan_bugs: filed bug report {rid} -> {repo_name}#{getattr(issue, 'number', '?')} ({issue_url})")
+        except Exception as e:
+            logger.error(f"scan_bugs: failed to file bug report {rid} in {repo_name}: {e}")
+    if filed_this_cycle:
+        logger.info(f"scan_bugs: filed {filed_this_cycle} new bug report(s).")
+    else:
+        logger.debug("scan_bugs: no new unfilled bug reports this cycle.")
+
+
+def _safe_json_field(json_str, field):
+    """Parse a JSON string and return one field, or '' on any failure.
+
+    Used by scan_bugs to pull explanation/severity out of the report.json blob
+    the hub returns via GET_BUG_REPORT without crashing on a malformed string.
+    """
+    try:
+        obj = json.loads(json_str) if isinstance(json_str, str) else None
+        if isinstance(obj, dict):
+            v = obj.get(field)
+            return v if v is not None else ""
+    except Exception:
+        pass
+    return ""
+
+
+def _bug_report_fix_context(issue_body):
+    """Pull a "File a Bug" report's full artifacts from the hub as fix context.
+
+    The public GitHub issue body for a user-filed bug carries only the user's
+    explanation + a hidden ``<!-- bug-report-id: <id> -->`` reference; the raw
+    console/HTML/screenshot live on the hub. This detects that marker in the
+    issue body, fetches GET_BUG_REPORT from the hub, and returns a context
+    section (console errors + DOM excerpt + screenshot note) to append to the
+    issue body fed to apply_ai_fix / review_fix — so the AI gets the rich
+    artifacts WITHOUT them ever landing in the public issue. Returns "" if no
+    marker is present or anything fails (never blocks the fix).
+    """
+    if not isinstance(issue_body, str) or not issue_body:
+        return ""
+    m = re.search(r'<!--\s*bug-report-id:\s*([0-9a-fA-F]+)\s*-->', issue_body)
+    if not m:
+        return ""
+    rid = m.group(1)
+    client = _get_hub_agent_client()
+    if not client:
+        return ""
+    try:
+        report = client.request_sync("GET_BUG_REPORT", {"id": rid}, timeout=15)
+    except Exception as e:
+        logger.warning(f"fix-context: GET_BUG_REPORT {rid} failed: {e}")
+        return ""
+    if not isinstance(report, dict) or not report.get("id"):
+        return ""
+
+    console = str(report.get("console") or "")
+    # Surface only the error/exception lines from the console — the most useful
+    # signal for a UI bug — capped to keep the prompt bounded.
+    err_lines = [ln for ln in console.splitlines()
+                 if re.search(r'\b(error|exception|failed|uncaught|traceback)\b', ln, re.IGNORECASE)]
+    console_excerpt = "\n".join(err_lines[-40:]) if err_lines else "(no error-level console lines)"
+
+    dom = str(report.get("dom") or "")
+    dom_excerpt = dom[:4096] if dom else "(not captured)"
+    if len(dom) > 4096:
+        dom_excerpt += "\n…[DOM truncated]"
+
+    has_shot = "present (stored on hub, not inlined)" if report.get("screenshot_b64") else "not captured"
+
+    return (
+        f"\n\n--- Additional fix context from File-a-Bug report `{rid}` ---\n"
+        f"The user filed this bug from the LM WebUI. The captured browser state "
+        f"(kept on the hub, not in this public issue) is below — use it to localize "
+        f"the fault in the WebUI / hub code.\n\n"
+        f"### Browser console (error/exception lines)\n```\n{console_excerpt}\n```\n\n"
+        f"### DOM excerpt (first 4 KB)\n```html\n{dom_excerpt}\n```\n\n"
+        f"### Screenshot: {has_shot}\n"
+    )
+
+
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
@@ -3984,6 +4253,17 @@ def scan_hub_logs(gh_current, config):
                 scan_heartbeats(gh_current, config, hub_logs)
             except Exception as hb_err:
                 logger.error(f"Heartbeat scan failed: {hb_err}")
+            # File-a-Bug triage: the WebUI footer button logs a short
+            # [bug-report] marker line; scan_bugs filters the RAW hub_logs for
+            # those markers (before filter_error_logs drops them), pulls the
+            # full artifacts from the hub, files a clean-body GitHub issue, and
+            # marks it filed so it isn't re-filed. The issue carries
+            # 'automated-fix' so scan_repo_issues -> process_single_issue then
+            # attempts a fix, pulling the same artifacts back as fix context.
+            try:
+                scan_bugs(gh_current, config, hub_logs)
+            except Exception as bug_err:
+                logger.error(f"Bug-report scan failed: {bug_err}")
             # Scrub to error-relevant entries only before paying for an LLM
             # call: keeps the prompt small (avoids context-overflow 500s) and
             # focuses the model on actionable errors instead of INFO noise.
@@ -5602,6 +5882,9 @@ async def save_settings(request: Request):
         "MAX_ISSUES_PER_CYCLE": lambda v: v,
         "POLL_INTERVAL_SECONDS": lambda v: v,
         "self_diagnosis_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
+        # File-a-Bug: which repo bugfixer files user-submitted WebUI bug reports
+        # into (and where the fix pipeline then runs). Defaults to lbockenstedt/lm.
+        "bug_report_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
         "module_repo_map": lambda v: parse_module_repo_map(v),
         # Chat-agent numeric settings (stored as strings by the form; coerce to int).
         "CHAT_TOOL_MAX_ITERATIONS": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_TOOL_MAX_ITERATIONS"],
@@ -5644,6 +5927,8 @@ async def save_settings(request: Request):
                 config_data[key] = transform(val)
 
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
+    # File-a-Bug toggle (defaults on so the footer button works out of the box).
+    config_data["bug_report_enabled"] = data.get("bug_report_enabled") != "off"
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
     config_data["skip_review"] = data.get("skip_review") == "on"
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
