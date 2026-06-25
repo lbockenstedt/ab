@@ -6351,9 +6351,12 @@ async def resolve_issue(request: Request):
         entry["decision_reason"] = "Manually marked as resolved and closed on GitHub."
         processed[issue_id] = entry
         state["processed"] = processed
-        state["closed_count"] = state.get("closed_count", 0) + 1
+        # Only bump Closed if it wasn't already closed locally — re-resolving an
+        # already-closed issue must not double-count.
+        if prev_status != "closed":
+            state["closed_count"] = state.get("closed_count", 0) + 1
         save_processed(processed)
-        local_msg = "Marked as closed. "
+        local_msg = "Already marked closed locally. " if prev_status == "closed" else "Marked as closed. "
 
     return {
         "status": "success",

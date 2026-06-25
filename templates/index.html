@@ -315,7 +315,7 @@
                             <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-bold text-slate-700 transition-colors">Retry</button>
                             <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-1 bg-orange-100 hover:bg-orange-200 rounded font-bold text-orange-700 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
                             <button onclick="deleteIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded font-bold text-red-700 transition-colors">Delete</button>
-                            <button onclick="resolveIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors" title="Mark as resolved: close on GitHub and set status to fixed">Resolved</button>
+                            <button onclick="resolveIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-green-100 hover:bg-green-200 rounded font-bold text-green-700 transition-colors" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                         </td>
                     </tr>
                     <tr class="bg-slate-50/50">
@@ -2257,7 +2257,7 @@
         }
 
         async function resolveIssue(issueId) {
-            if (!confirm(`Mark ${issueId} as resolved?\n\nThis closes the issue on GitHub and sets its status to fixed.`)) return;
+            if (!confirm(`Mark ${issueId} as resolved?\n\nThis closes the issue on GitHub (if not already closed) and moves it to Closed in BugFixer.`)) return;
             try {
                 const resp = await fetch('/resolve_issue', {
                     method: 'POST',
@@ -2266,7 +2266,13 @@
                 });
                 const data = await resp.json();
                 alert(data.message || (data.status === 'success' ? 'Resolved.' : 'Error resolving issue.'));
-                if (data.status === 'success') location.reload();
+                if (data.status === 'success') {
+                    // Switch the Activity Feed to the Closed filter so the user sees
+                    // the issue land in Closed instead of vanishing from the default
+                    // (Active) view, then reload.
+                    try { localStorage.setItem('bf_activity_filter', 'closed'); } catch (e) {}
+                    location.reload();
+                }
             } catch (e) { alert('Request failed: ' + e); }
         }
 
