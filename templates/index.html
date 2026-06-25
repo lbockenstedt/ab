@@ -114,6 +114,22 @@
         .chat-side-del { flex: none; color: #94a3b8; opacity: 0; transition: opacity 0.15s ease; background: none; border: none; padding: 2px 4px; cursor: pointer; }
         .chat-side-item:hover .chat-side-del { opacity: 1; }
         .chat-side-del:hover { color: #dc2626; }
+        /* Toast notifications — replace alert() completion/error popups so
+           actions don't throw a blocking dialog. Stack top-right, auto-dismiss. */
+        #bf-toast-stack { position: fixed; top: 16px; right: 16px; z-index: 9999;
+            display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+        .bf-toast { pointer-events: auto; min-width: 240px; max-width: 380px;
+            padding: 10px 14px; border-radius: 8px; color: #fff; font-size: 13px;
+            font-weight: 600; box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+            display: flex; align-items: flex-start; gap: 8px; opacity: 0;
+            transform: translateX(12px); transition: opacity .18s ease, transform .18s ease; }
+        .bf-toast.show { opacity: 1; transform: translateX(0); }
+        .bf-toast.success { background: #01A982; }
+        .bf-toast.error   { background: #dc2626; }
+        .bf-toast.info    { background: #263040; }
+        .bf-toast.warn    { background: #d97706; }
+        .bf-toast .bf-toast-x { margin-left: auto; cursor: pointer; opacity: .85;
+            background: none; border: none; color: inherit; font-size: 15px; line-height: 1; padding: 0; }
     </style>
 </head>
 <body class="h-screen flex flex-col overflow-hidden">
@@ -1221,6 +1237,39 @@
         </div>
     </footer>
     <script>
+        // Lightweight toast notifier — replaces alert() for completion/error
+        // messages so an action doesn't pop a blocking modal. Types: success |
+        // error | info | warn. Auto-dismisses after 4s (errors 6s).
+        function showToast(message, type = 'info') {
+            let stack = document.getElementById('bf-toast-stack');
+            if (!stack) {
+                stack = document.createElement('div');
+                stack.id = 'bf-toast-stack';
+                document.body.appendChild(stack);
+            }
+            const t = document.createElement('div');
+            t.className = `bf-toast ${type}`;
+            const msg = document.createElement('span');
+            msg.style.flex = '1';
+            msg.textContent = String(message);
+            t.appendChild(msg);
+            const x = document.createElement('button');
+            x.className = 'bf-toast-x';
+            x.textContent = '×';
+            x.setAttribute('aria-label', 'Dismiss');
+            t.appendChild(x);
+            stack.appendChild(t);
+            requestAnimationFrame(() => t.classList.add('show'));
+            const ms = type === 'error' ? 6000 : 4000;
+            let timer = setTimeout(dismiss, ms);
+            x.onclick = dismiss;
+            function dismiss() {
+                clearTimeout(timer);
+                t.classList.remove('show');
+                setTimeout(() => t.remove(), 220);
+            }
+        }
+
         // ---- Configurable page auto-refresh + Pause Refresh (footer) ----
         // Replaces the old <meta http-equiv="refresh"> so the auto-reload can be
         // paused/resumed. Pause state persists in localStorage across reloads.
@@ -1385,9 +1434,10 @@
                     body: JSON.stringify(payload)
                 });
                 const result = await resp.json();
-                alert(result.message || (result.status === 'triggered' ? 'Triggered successfully!' : 'Error triggering fix.'));
+                showToast(result.message || (result.status === 'triggered' ? 'Fix triggered successfully!' : 'Error triggering fix.'),
+                          result.status === 'triggered' ? 'success' : 'error');
             } catch (e) {
-                alert('Request failed: ' + e);
+                showToast('Request failed: ' + e, 'error');
             }
         }
 
@@ -1396,29 +1446,30 @@
             try {
                 const resp = await fetch(endpoint, { method: 'POST' });
                 const result = await resp.json();
-                alert(result.message || (result.status === 'success' ? 'Action completed successfully!' : 'Error occurred.'));
+                showToast(result.message || (result.status === 'success' ? 'Action completed successfully!' : 'Error occurred.'),
+                          result.status === 'success' ? 'success' : 'error');
             } catch (e) {
-                alert('Request failed: ' + e);
+                showToast('Request failed: ' + e, 'error');
             }
         }
 
         function copyLogs() {
             const logElement = document.getElementById('system-logs-text');
             if (!logElement) {
-                alert('Log element not found!');
+                showToast('Log element not found!', 'error');
                 return;
             }
             const logText = logElement.innerText || logElement.textContent;
 
             if (!logText) {
-                alert('No logs to copy!');
+                showToast('No logs to copy!', 'info');
                 return;
             }
 
             // Try the modern Clipboard API first
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(logText).then(() => {
-                    alert('Logs copied to clipboard!');
+                    showToast('Logs copied to clipboard!', 'success');
                 }).catch(err => {
                     console.error('Modern clipboard API failed, trying fallback...', err);
                     fallbackCopyTextToClipboard(logText);
@@ -1444,13 +1495,13 @@
             try {
                 const successful = document.execCommand('copy');
                 if (successful) {
-                    alert('Logs copied to clipboard!');
+                    showToast('Logs copied to clipboard!', 'success');
                 } else {
-                    alert('Unable to copy logs.');
+                    showToast('Unable to copy logs.', 'error');
                 }
             } catch (err) {
                 console.error('Fallback copy failed:', err);
-                alert('Failed to copy logs.');
+                showToast('Failed to copy logs.', 'error');
             }
 
             document.body.removeChild(textArea);
@@ -1469,7 +1520,7 @@
                     btn.className = 'py-2 px-4 rounded-lg font-bold bg-orange-600 hover:bg-orange-700 text-white transition-all duration-200 text-sm';
                 }
             } catch (e) {
-                alert('Failed to toggle pause state');
+                showToast('Failed to toggle pause state', 'error');
             }
         }
 
@@ -1486,7 +1537,7 @@
                     btn.className = 'py-2 px-4 rounded-lg font-bold bg-slate-600 hover:bg-slate-700 text-white transition-all duration-200 text-sm';
                 }
             } catch (e) {
-                alert('Failed to toggle blackout');
+                showToast('Failed to toggle blackout', 'error');
             }
         }
 
@@ -1498,9 +1549,10 @@
                     body: JSON.stringify({ llm_preference: preference })
                 });
                 const data = await resp.json();
-                alert(data.message || (data.status === 'triggered' ? 'Bulk retry started!' : 'Error retrying all failures.'));
+                showToast(data.message || (data.status === 'triggered' ? 'Bulk retry started!' : 'Error retrying all failures.'),
+                          data.status === 'triggered' ? 'success' : 'error');
             } catch (e) {
-                alert('Request failed: ' + e);
+                showToast('Request failed: ' + e, 'error');
             }
         }
 
@@ -1509,10 +1561,14 @@
             try {
                 const resp = await fetch('/clear_history', { method: 'POST' });
                 const data = await resp.json();
-                alert(data.message || (data.status === 'success' ? 'History cleared successfully!' : 'Error clearing history.'));
-                location.reload();
+                if (data.status === 'success') {
+                    showToast(data.message || 'History cleared successfully!', 'success');
+                    setTimeout(() => location.reload(), 900);
+                } else {
+                    showToast(data.message || 'Error clearing history.', 'error');
+                }
             } catch (e) {
-                alert('Request failed: ' + e);
+                showToast('Request failed: ' + e, 'error');
             }
         }
 
@@ -1813,7 +1869,7 @@
         async function submitClaudeCode() {
             const input = document.getElementById('claude-cli-code');
             const code = (input?.value || '').trim();
-            if (!code) { alert('Paste the authorization code first.'); return; }
+            if (!code) { showToast('Paste the authorization code first.', 'warn'); return; }
             _showClaudeCliResult('Submitting code…', 'text-violet-600', '', [], false);
             clearInterval(_claudeAuthPollTimer);
             try {
@@ -1844,7 +1900,7 @@
                 body: JSON.stringify({provider, api_key: key, base_url: url})
             });
             if ((await resp.json()).status === 'ok') location.reload();
-            else alert('Failed to save credential.');
+            else showToast('Failed to save credential.', 'error');
         }
 
         function showAddEntry() {
@@ -2001,14 +2057,14 @@
             const model = document.getElementById('new-entry-model')?.value;
             const rpm = parseInt(document.getElementById('new-entry-rpm')?.value || '0');
             const reviewer_model = document.getElementById('new-entry-reviewer')?.value.trim() || '';
-            if (!model) { alert('Please select a model.'); return; }
+            if (!model) { showToast('Please select a model.', 'warn'); return; }
             const resp = await fetch('/api/llm/entries', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model})
             });
             if ((await resp.json()).status === 'ok') location.reload();
-            else alert('Failed to add entry.');
+            else showToast('Failed to add entry.', 'error');
         }
 
         function editEntry(id) {
@@ -2078,21 +2134,21 @@
             const model = document.getElementById(`edit-model-${id}`)?.value;
             const rpm = parseInt(document.getElementById(`edit-rpm-${id}`)?.value || '0');
             const reviewer_model = document.getElementById(`edit-reviewer-${id}`)?.value.trim() || '';
-            if (!model) { alert('Please select a model.'); return; }
+            if (!model) { showToast('Please select a model.', 'warn'); return; }
             const resp = await fetch(`/api/llm/entries/${id}`, {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model})
             });
             if ((await resp.json()).status === 'ok') location.reload();
-            else alert('Failed to save entry.');
+            else showToast('Failed to save entry.', 'error');
         }
 
         async function deleteEntry(entryId) {
             if (!confirm('Remove this entry?')) return;
             const resp = await fetch(`/api/llm/entries/${entryId}`, {method: 'DELETE'});
             if ((await resp.json()).status === 'ok') location.reload();
-            else alert('Failed to delete entry.');
+            else showToast('Failed to delete entry.', 'error');
         }
 
         async function saveSlots() {
@@ -2251,9 +2307,13 @@
                     body: JSON.stringify({ issue_id: issueId })
                 });
                 const data = await resp.json();
-                alert(data.message || (data.status === 'success' ? 'Deleted.' : 'Error deleting issue.'));
-                if (data.status === 'success') location.reload();
-            } catch (e) { alert('Request failed: ' + e); }
+                if (data.status === 'success') {
+                    showToast(data.message || 'Issue deleted.', 'success');
+                    setTimeout(() => location.reload(), 900);
+                } else {
+                    showToast(data.message || 'Error deleting issue.', 'error');
+                }
+            } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }
 
         async function resolveIssue(issueId) {
@@ -2265,26 +2325,28 @@
                     body: JSON.stringify({ issue_id: issueId })
                 });
                 const data = await resp.json();
-                alert(data.message || (data.status === 'success' ? 'Resolved.' : 'Error resolving issue.'));
                 if (data.status === 'success') {
+                    showToast(data.message || 'Issue resolved.', 'success');
                     // Keep the current filter unchanged — just reload. The resolved
                     // issue moves to Closed and drops out of the Active view on its
                     // own; the user can switch to the Closed filter manually if they
                     // want to watch it land there. We must NOT force the filter to
                     // 'closed' here: doing so also persisted it, so the default view
                     // kept showing closed on every later load.
-                    location.reload();
+                    setTimeout(() => location.reload(), 900);
+                } else {
+                    showToast(data.message || 'Error resolving issue.', 'error');
                 }
-            } catch (e) { alert('Request failed: ' + e); }
+            } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }
 
         async function clearCreditCooldown(n) {
             try {
                 const resp = await fetch(`/api/clear-credit-cooldown/${n}`, { method: 'POST' });
                 const data = await resp.json();
-                if (data.status === 'cleared') location.reload();
-                else alert('Failed to clear cooldown: ' + JSON.stringify(data));
-            } catch (e) { alert('Request failed: ' + e); }
+                if (data.status === 'cleared') { showToast('Credit cooldown cleared.', 'success'); setTimeout(() => location.reload(), 900); }
+                else showToast('Failed to clear cooldown: ' + JSON.stringify(data), 'error');
+            } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }
 
         async function fetchModels() { /* kept for compat — delegates to loadProviderModels */ }
@@ -2446,7 +2508,7 @@
                 currentChatTaskId = data.chat_id;
                 pollChatStream(data.chat_id);
             } catch (e) {
-                alert('Chat send failed: ' + e);
+                showToast('Chat send failed: ' + e, 'error');
                 if (sendBtn) sendBtn.disabled = false;
             }
         }
@@ -2562,12 +2624,12 @@
                 } else {
                     btn.disabled = false;
                     btn.textContent = original;
-                    alert('Could not start fix: ' + (data.message || 'unknown error'));
+                    showToast('Could not start fix: ' + (data.message || 'unknown error'), 'error');
                 }
             } catch (e) {
                 btn.disabled = false;
                 btn.textContent = original;
-                alert('Confirm fix failed: ' + e);
+                showToast('Confirm fix failed: ' + e, 'error');
             }
         }
 
@@ -2584,7 +2646,7 @@
                 const data = await resp.json();
                 if (data.chat_id) location.href = '/chat?chat_id=' + encodeURIComponent(data.chat_id);
             } catch (e) {
-                alert('New chat failed: ' + e);
+                showToast('New chat failed: ' + e, 'error');
             }
         }
 
@@ -2601,7 +2663,7 @@
                 });
                 location.reload();
             } catch (e) {
-                alert('Rename failed: ' + e);
+                showToast('Rename failed: ' + e, 'error');
             }
         }
 
@@ -2616,7 +2678,7 @@
                 const data = await resp.json();
                 location.href = '/chat?chat_id=' + encodeURIComponent(data.active_chat_id || '');
             } catch (e) {
-                alert('Delete failed: ' + e);
+                showToast('Delete failed: ' + e, 'error');
             }
         }
 
@@ -2626,7 +2688,7 @@
                 await fetch('/api/chat/clear', { method: 'POST' });
                 location.reload();
             } catch (e) {
-                alert('Clear failed: ' + e);
+                showToast('Clear failed: ' + e, 'error');
             }
         }
 
