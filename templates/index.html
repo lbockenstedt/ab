@@ -2267,10 +2267,12 @@
                 const data = await resp.json();
                 alert(data.message || (data.status === 'success' ? 'Resolved.' : 'Error resolving issue.'));
                 if (data.status === 'success') {
-                    // Switch the Activity Feed to the Closed filter so the user sees
-                    // the issue land in Closed instead of vanishing from the default
-                    // (Active) view, then reload.
-                    try { localStorage.setItem('bf_activity_filter', 'closed'); } catch (e) {}
+                    // Keep the current filter unchanged — just reload. The resolved
+                    // issue moves to Closed and drops out of the Active view on its
+                    // own; the user can switch to the Closed filter manually if they
+                    // want to watch it land there. We must NOT force the filter to
+                    // 'closed' here: doing so also persisted it, so the default view
+                    // kept showing closed on every later load.
                     location.reload();
                 }
             } catch (e) { alert('Request failed: ' + e); }
