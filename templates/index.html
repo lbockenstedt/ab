@@ -1745,11 +1745,15 @@
             if (models.length === 0) {
                 const o = document.createElement('option');
                 o.value = '';
-                // lmstudio needs no API key — an empty model list means the
-                // host/URL is wrong or the server isn't running, not that a
-                // credential still needs saving.
+                // lmstudio needs no API key. Reaching here means the backend
+                // returned an EMPTY list with NO error — i.e. LM Studio
+                // responded 200 but has no model loaded (load one in the LM
+                // Studio app, then re-query). A wrong host/port or a server
+                // that isn't running surfaces as a ⚠ error below instead, not
+                // this branch. (If the deployed service predates the no-key
+                // fix, update it — it returned empty here for a missing key.)
                 o.textContent = (provider === 'lmstudio')
-                    ? '— no models found (check LM Studio host/port) —'
+                    ? '— no models found — load a model in LM Studio, then re-query —'
                     : '— save credential first —';
                 sel.appendChild(o);
                 return;
