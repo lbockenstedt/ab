@@ -1777,9 +1777,17 @@ def discover_labels(gh_current, monitored_repos):
     return sorted(list(all_labels))
 
 def bump_repo_version(repo_path):
-    """Increments the version in the VERSION file of the target repository."""
+    """Increments the patch component of the N.N.N version in the target repo's
+    VERSION file, mirroring the version-bump.yml CI (X.Y.Z -> X.Y.Z+1) and writing
+    a trailing newline so the file matches every repo's shared scheme.
+
+    Previously this wrote a "V.NN" string, which did not match the N.N.N scheme
+    every target repo uses — it corrupted the target's VERSION and made the
+    target's CI bump (IFS='.' read) produce garbage like "V.01.1". Bumping the
+    patch in place keeps the target's scheme intact. int(..., 10) avoids any
+    octal interpretation of leading-zero patches (e.g. "01")."""
     version_file = os.path.join(repo_path, "VERSION")
-    current_version = "V.00"
+    current_version = ""
     if os.path.exists(version_file):
         try:
             with open(version_file, "r") as f:
@@ -1787,18 +1795,18 @@ def bump_repo_version(repo_path):
         except Exception as e:
             logger.error(f"Error reading version file: {e}")
 
-    if current_version.startswith("V."):
+    new_version = "0.0.1"
+    parts = current_version.split(".")
+    if len(parts) == 3:
         try:
-            ver_num = int(current_version[2:])
-            new_version = f"V.{ver_num + 1:02d}"
+            parts[2] = str(int(parts[2], 10) + 1)
+            new_version = ".".join(parts)
         except ValueError:
-            new_version = "V.01"
-    else:
-        new_version = "V.01"
+            new_version = "0.0.1"
 
     try:
         with open(version_file, "w") as f:
-            f.write(new_version)
+            f.write(new_version + "\n")
         return new_version
     except Exception as e:
         logger.error(f"Error writing version file: {e}")
