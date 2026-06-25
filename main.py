@@ -76,6 +76,21 @@ CHAT_CONFIG_DEFAULTS = {
     "CHAT_INDEX_ISSUE_LIMIT": 8,       # Max open issues listed per repo in the system-prompt index.
     "CHAT_INDEX_CACHE_TTL": 60,        # Seconds to cache the GitHub issue index across turns.
     "CHAT_FIX_PROPOSAL_TTL": 600,      # Seconds a fix-proposal confirmation token stays valid.
+    # AI fix-generation context bounds. apply_ai_fix used to concatenate every
+    # relevant file in full, which blew past provider limits (groq 413 Payload
+    # Too Large, ollama "Response ended prematurely", then truncated JSON →
+    # "unmatched '}'"). These bound the prompt so the returned fix JSON stays
+    # complete and parseable.
+    "FIX_MAX_FILES": 5,                # Max relevant files included in one fix prompt.
+    "FIX_MAX_FILE_CHARS": 12000,       # Max chars per file in the prompt (truncated past this).
+    "FIX_MAX_CONTEXT_CHARS": 60000,   # Max total chars across all files in one prompt.
+    "FIX_MAX_OUTPUT_TOKENS": 8192,     # max_tokens sent on OpenAI-compatible fix requests (output headroom).
+    # Per-module heartbeat triage. scan_heartbeats reads the raw Hub logs and
+    # files/reopens an issue when an expected module's [heartbeat] line is
+    # missing or older than HEARTBEAT_STALE_S. heartbeat_exclude is a list of
+    # spoke_ids and/or module_types to never triage (e.g. an undeployed spoke).
+    "HEARTBEAT_STALE_S": 300,          # Max age (seconds) of a heartbeat line before triage.
+    "heartbeat_exclude": [],           # spoke_ids / module_types to skip (list).
 }
 
 class QueueLocalException(Exception):
@@ -932,6 +947,16 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     msgs = _to_openai_messages(messages)
     use_stream = False if tools else effective_stream
     payload = {"model": model, "messages": msgs, "stream": use_stream}
+    # Explicit max_tokens gives the model room to return a complete JSON object
+    # (matches the anthropic path's 8192). Without it, some OpenAI-compatible
+    # backends (ollama) truncate mid-object → "Response ended prematurely" and
+    # the fix JSON then fails to parse ("unmatched '}'").
+    try:
+        out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"])
+    except Exception:
+        out_tok = CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"]
+    if out_tok > 0:
+        payload["max_tokens"] = out_tok
     if tools:
         payload["tools"] = _tools_to_openai(tools)
 
@@ -2556,16 +2581,31 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques}
 
 def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None):
+    config = load_config()
+    max_files = int(config.get("FIX_MAX_FILES", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"])
+    max_file_chars = int(config.get("FIX_MAX_FILE_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"])
+    max_ctx_chars = int(config.get("FIX_MAX_CONTEXT_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"])
     relevant_files = identify_files_to_fix(repo_path, issue_body)
     if not relevant_files:
         logger.warning(f"No specific files identified for issue. Attempting general fix.")
+    # Bound the prompt: cap file count, per-file chars, and total chars so the
+    # request stays under provider limits (groq 413, ollama truncation) and the
+    # returned fix JSON parses cleanly instead of hitting "unmatched '}'".
+    relevant_files = relevant_files[:max_files]
     context_code = ""
     for f_path in relevant_files:
         full_p = os.path.join(repo_path, f_path)
         if os.path.exists(full_p):
             try:
                 with open(full_p, 'r') as f:
-                    context_code += f"\n--- FILE: {f_path} ---\n{f.read()}\n"
+                    content = f.read()
+                if len(content) > max_file_chars:
+                    content = _trunc(content, max_file_chars)
+                context_code += f"\n--- FILE: {f_path} ---\n{content}\n"
+                if len(context_code) >= max_ctx_chars:
+                    context_code = context_code[:max_ctx_chars] + "\n…[context truncated to stay under provider limit]\n"
+                    logger.info(f"apply_ai_fix context capped at {max_ctx_chars} chars across {len(relevant_files)} files")
+                    break
             except Exception as e:
                 logger.error(f"Could not read file {f_path}: {e}")
     if error_context:
@@ -3514,6 +3554,163 @@ def verify_production_fixes(gh_current, processed):
             except Exception as e:
                 logger.error(f"Error verifying {issue_id}: {e}")
 
+# Static module_type -> repo map for heartbeat triage. Each spoke advertises a
+# logical module_type (e.g. "firewall", "hypervisor") at Hub auth time; this maps
+# that type to the repo whose issues a missing/stale heartbeat should land in.
+# "hub" covers the Hub itself. Falls back to module_repo_map / resolve_module_repo
+# / resolve_self_diagnosis_repo at runtime so every module gets triaged somewhere.
+MODULE_TYPE_REPO = {
+    "firewall": "lbockenstedt/opnsense",
+    "hypervisor": "lbockenstedt/pxmx",
+    "nac": "lbockenstedt/cppm",
+    "ipam": "lbockenstedt/netbox",
+    "directory": "lbockenstedt/ldap",
+    "simulation": "lbockenstedt/cs",
+    "dhcp": "lbockenstedt/dhcp",
+    "dns": "lbockenstedt/dns",
+    "hub": "lbockenstedt/lm",
+}
+HEARTBEAT_STALE_S_DEFAULT = 300
+
+def scan_heartbeats(gh_current, config, hub_logs):
+    """Triage modules whose per-module heartbeat log line is missing or stale.
+
+    Every spoke (via BaseControlPlane._health_heartbeat_task) and the Hub (via
+    run_hub_heartbeat_loop) emit a greppable ``[heartbeat] ok module=...`` line
+    through the telemetry pipeline every ~60s, which the Hub stamps with a
+    receive timestamp and stores in agent_logs[spoke_id] / self.logs. This reads
+    the RAW hub_logs (before filter_error_logs drops heartbeat lines) and, for
+    every approved spoke (minus agent monitors and heartbeat_exclude) plus the
+    Hub, checks that a fresh heartbeat line exists. Missing/stale -> file or
+    reopen a GitHub issue via create_automated_issue, which automatically applies
+    the post-update cooldown guard (so a spoke restarting after a fix push does
+    not immediately trip) and the global dedup/reopen logic (a recurring missing
+    heartbeat reopens the closed prior issue instead of spamming duplicates).
+    """
+    try:
+        stale_s = int(config.get("HEARTBEAT_STALE_S", HEARTBEAT_STALE_S_DEFAULT) or HEARTBEAT_STALE_S_DEFAULT)
+    except Exception:
+        stale_s = HEARTBEAT_STALE_S_DEFAULT
+    exclude_raw = config.get("heartbeat_exclude") or []
+    if isinstance(exclude_raw, str):
+        exclude_raw = [s.strip() for s in exclude_raw.replace(",", "\n").splitlines() if s.strip()]
+    exclude = {str(x).strip().lower() for x in (exclude_raw or []) if str(x).strip()}
+
+    # Approved spokes + their module_types. Agents (module_type "agent") are the
+    # monitors, not monitored modules — they do not emit the BaseControlPlane
+    # heartbeat, and self-triage is a chicken-and-egg — so they are excluded by
+    # default. heartbeat_exclude adds intentional opt-outs (e.g. an undeployed
+    # spoke whose approval lingers).
+    client = _get_hub_agent_client()
+    spoke_status = None
+    if client:
+        try:
+            spoke_status = client.request_sync("GET_SPOKE_STATUS", {}, timeout=10)
+        except Exception as e:
+            logger.warning(f"scan_heartbeats: GET_SPOKE_STATUS failed: {e}")
+    if not isinstance(spoke_status, dict):
+        spoke_status = {}
+    approved = spoke_status.get("approved") or {}
+    module_types = spoke_status.get("module_types") or {}
+
+    expected = {}  # spoke_id -> module_type
+    for sid, is_approved in approved.items():
+        if not is_approved:
+            continue
+        mtype = (module_types.get(sid) or "").strip().lower()
+        if mtype == "agent":
+            continue
+        if sid.lower() in exclude or mtype in exclude:
+            continue
+        expected[sid] = module_types.get(sid) or ""
+    if "hub" not in exclude:
+        expected["hub"] = "hub"
+
+    if not expected:
+        logger.info("scan_heartbeats: no expected modules to check this cycle.")
+        return
+
+    # Group raw hub_logs by module; capture the latest [heartbeat] line's
+    # Hub-stamped timestamp per module. hub_logs are newest-first, so the first
+    # heartbeat line encountered per module is the latest.
+    latest_hb = {}  # module -> timestamp_str
+    ts_pat = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
+    for entry in hub_logs or []:
+        if not isinstance(entry, dict):
+            continue
+        mod = entry.get("module") or ""
+        log = entry.get("log") or ""
+        if "[heartbeat]" not in log:
+            continue
+        if mod in latest_hb:
+            continue
+        m = ts_pat.match(log.strip())
+        latest_hb[mod] = m.group(1) if m else ""
+
+    monitored_repos = get_monitored_repos(config)
+    now = time.time()
+    triaged = 0
+    for sid, mtype in expected.items():
+        hb = latest_hb.get(sid)
+        age_s = None
+        if hb:
+            try:
+                dt = datetime.strptime(hb, "%Y-%m-%d %H:%M:%S")
+                age_s = now - dt.timestamp()
+            except Exception:
+                age_s = None
+        missing = not hb
+        stale = (age_s is not None and age_s > stale_s)
+        if not (missing or stale):
+            continue
+
+        # Map module -> repo: static type map, then explicit module_repo_map
+        # (keyed by spoke_id or module_type), then auto-match, then self-diagnosis.
+        repo_name = MODULE_TYPE_REPO.get((mtype or "").lower()) if sid != "hub" else MODULE_TYPE_REPO.get("hub")
+        if not repo_name:
+            module_map = config.get("module_repo_map") or {}
+            if isinstance(module_map, dict):
+                for k, v in module_map.items():
+                    if str(k).strip().lower() in (sid.lower(), (mtype or "").lower()) and v and str(v).strip():
+                        repo_name = clean_repo_name(str(v).strip())
+                        break
+        if not repo_name:
+            repo_name = resolve_module_repo(sid, monitored_repos, config)
+        if not repo_name:
+            repo_name = resolve_self_diagnosis_repo(config)
+        if not repo_name:
+            logger.warning(f"scan_heartbeats: no repo maps to {sid} (module_type={mtype!r}); skipping triage. Add a 'module_repo_map' entry if this module should be tracked.")
+            continue
+
+        if missing:
+            title = f"Missing heartbeat — {sid}"
+            body = (f"**Automated Heartbeat Triage**\n\nNo `[heartbeat]` log line was found for module "
+                    f"**{sid}** (type={mtype or 'unknown'}) in the latest Hub logs. The module may be "
+                    f"stopped or its telemetry relay to the Hub is broken.\n\nThis issue was automatically created for triage.")
+        else:
+            title = f"Stale heartbeat — {sid}"
+            body = (f"**Automated Heartbeat Triage**\n\nThe latest `[heartbeat]` log line for module "
+                    f"**{sid}** (type={mtype or 'unknown'}) is {int(age_s)}s old (stale threshold {stale_s}s). "
+                    f"Last heartbeat timestamp: {hb}.\n\nThe module may be hung or its telemetry relay is delayed. "
+                    f"This issue was automatically created for triage.")
+        error_data = {"module": sid, "title": title, "body": body, "repo": repo_name}
+        try:
+            repo_obj = gh_current.get_repo(repo_name)
+            create_automated_issue(gh_current, monitored_repos, repo_obj, error_data)
+            triaged += 1
+            logger.info(f"scan_heartbeats: triaged {sid} (missing={missing}, age_s={age_s}) -> {repo_name}")
+        except GithubException as ge:
+            if ge.status == 404:
+                logger.error(f"scan_heartbeats: repo {repo_name} not found (404) for {sid}; skipping.")
+            else:
+                logger.error(f"scan_heartbeats: failed to create issue for {sid} in {repo_name}: {ge}")
+        except Exception as e:
+            logger.error(f"scan_heartbeats: failed to triage {sid}: {e}")
+    if triaged:
+        logger.info(f"scan_heartbeats: triaged {triaged} module(s) with missing/stale heartbeats.")
+    else:
+        logger.debug("scan_heartbeats: all expected modules have fresh heartbeats.")
+
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
@@ -3522,6 +3719,14 @@ def scan_hub_logs(gh_current, config):
     try:
         hub_logs = get_hub_logs()
         if hub_logs:
+            # Heartbeat triage runs on the RAW hub_logs (before filter_error_logs
+            # drops heartbeat lines): if an expected module's [heartbeat] line is
+            # missing or stale, file/reopen an issue so a dead or hung module is
+            # caught even when it is emitting no errors.
+            try:
+                scan_heartbeats(gh_current, config, hub_logs)
+            except Exception as hb_err:
+                logger.error(f"Heartbeat scan failed: {hb_err}")
             # Scrub to error-relevant entries only before paying for an LLM
             # call: keeps the prompt small (avoids context-overflow 500s) and
             # focuses the model on actionable errors instead of INFO noise.
@@ -3583,6 +3788,33 @@ def scan_hub_logs(gh_current, config):
                         logger.error(f"Failed to create auto-issue for {repo_name}: {ge}")
                 except Exception as e:
                     logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
+        else:
+            # Hub unreachable: get_hub_logs() returned None. If BugFixer has a
+            # Hub agent client configured (so this is an outage, not a missing
+            # config), triage a hub-down heartbeat miss against the self-diagnosis
+            # repo so a silent Hub outage does not pass unreported. Dedup keeps
+            # this to one issue across cycles; a 'bugfixer-dismissed' label
+            # suppresses it permanently.
+            if _get_hub_agent_client():
+                try:
+                    repo_name = resolve_self_diagnosis_repo(config)
+                    if repo_name:
+                        error_data = {
+                            "module": "hub",
+                            "title": "Missing heartbeat — hub",
+                            "body": ("**Automated Heartbeat Triage**\n\nBugFixer could not fetch Hub logs this "
+                                     "cycle (GET_LOGS returned no data). The Hub may be down or the BugFixer agent "
+                                     "link is not approved/connected.\n\nThis issue was automatically created for triage."),
+                            "repo": repo_name,
+                        }
+                        monitored_repos = get_monitored_repos(config)
+                        repo_obj = gh_current.get_repo(repo_name)
+                        create_automated_issue(gh_current, monitored_repos, repo_obj, error_data)
+                        logger.warning("scan_heartbeats: Hub unreachable — triaged hub-down to self-diagnosis repo.")
+                except Exception as e:
+                    logger.error(f"scan_heartbeats: failed to triage hub-down: {e}")
+            else:
+                logger.info("Hub log scan skipped — no Hub agent client configured (set HUB_WS_URL).")
     except Exception as e:
         logger.error(f"Hub log scan failed: {e}")
     finally:
@@ -5026,6 +5258,12 @@ async def save_settings(request: Request):
         "CHAT_INDEX_ISSUE_LIMIT": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_INDEX_ISSUE_LIMIT"],
         "CHAT_INDEX_CACHE_TTL": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_INDEX_CACHE_TTL"],
         "CHAT_FIX_PROPOSAL_TTL": lambda v: int(v) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["CHAT_FIX_PROPOSAL_TTL"],
+        "FIX_MAX_FILES": lambda v: max(1, int(v)) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"],
+        "FIX_MAX_FILE_CHARS": lambda v: max(1, int(v)) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"],
+        "FIX_MAX_CONTEXT_CHARS": lambda v: max(1, int(v)) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"],
+        "FIX_MAX_OUTPUT_TOKENS": lambda v: max(1, int(v)) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"],
+        "HEARTBEAT_STALE_S": lambda v: max(30, int(v)) if str(v).strip().isdigit() else CHAT_CONFIG_DEFAULTS["HEARTBEAT_STALE_S"],
+        "heartbeat_exclude": lambda v: [str(x).strip() for x in v if str(x).strip()] if isinstance(v, list) else ([s.strip() for s in str(v).replace(",", "\n").splitlines() if s.strip()] if v else []),
         "CHAT_SYSTEM_PROMPT": lambda v: v.strip() if v else "",
         "CHAT_HISTORY_WINDOW": lambda v: int(v) if str(v).strip().isdigit() else 20,
         "LLM_LOG_MAX_ENTRIES": lambda v: int(v) if str(v).strip().isdigit() else 200,

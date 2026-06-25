@@ -214,7 +214,12 @@ class HubAgentClient:
             await asyncio.sleep(_RECONNECT_DELAY)
 
     async def _connect_and_serve(self):
-        async with websockets.connect(self.hub_ws_url) as websocket:
+        # max_size: the hub's GET_LOGS response aggregates every spoke's logs
+        # and can exceed the default 1 MiB frame ceiling, which closed us with
+        # code 1009 "message too big". Match the hub's 16 MiB ceiling so the
+        # large GET_LOGS response arrives intact (the hub also self-caps its
+        # payload under 12 MiB in collect_all_logs).
+        async with websockets.connect(self.hub_ws_url, max_size=16 * 1024 * 1024) as websocket:
             self._ws = websocket
 
             # 1. Spoke authentication handshake.
