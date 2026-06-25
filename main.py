@@ -4294,33 +4294,62 @@ async def get_task_details(task_id: str = None):
         "count": len(state["active_tasks"])
     }
 
+def _model_fetch_reason(e):
+    """Reduce a requests/HTTP exception to a short, UI-displayable reason."""
+    # HTTPError from raise_for_status() carries the response object.
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None):
+        return f"HTTP {resp.status_code}"
+    name = type(e).__name__
+    s = str(e).lower()
+    if "refused" in s:
+        return "connection refused (wrong host/port, or server not running)"
+    if "getaddrinfo" in s or "name or service not known" in s or "nodename nor servname" in s or "name resolution" in s:
+        return "host not found (DNS/name resolution failed)"
+    if "timed out" in s or "timeout" in name.lower():
+        return "timed out"
+    if "missing schema" in s or "missing schema" in name.lower():
+        return "bad URL (missing http://)"
+    return f"{name}: {str(e)[:100]}"
+
+
 def _fetch_models_for_provider(provider, api_key, base_url):
     """Fetch available model names from a provider's API using live credentials.
-    Returns list of {"name": str, "details": str}.
+
+    Returns ``{"models": [{"name": str, "details": str}], "error": str}``.
+    ``error`` is empty on success; on failure it holds a short, UI-displayable
+    reason (including the attempted URL) so the dropdown can show *why* no
+    models came back instead of a silent empty list. Every failure is logged
+    at WARNING with the attempted URL and exception type.
     """
     p = (provider or "openai").lower().strip()
     # claude_cli needs no API key — return the current Claude model roster.
     if p == "claude_cli":
-        return [
+        return {"models": [
             {"name": "claude-sonnet-4-6",         "details": "Claude Sonnet 4.6"},
             {"name": "claude-opus-4-8",            "details": "Claude Opus 4.8"},
             {"name": "claude-haiku-4-5-20251001",  "details": "Claude Haiku 4.5"},
-        ]
+        ], "error": ""}
     if p == "lmstudio":
         # LM Studio exposes /v1/models (OpenAI-compatible); no auth key needed.
         base = _normalize_lmstudio_url(base_url).rstrip("/")
+        attempted = f"{base}/models"
         out = []
+        error = ""
         try:
-            resp = requests.get(f"{base}/models", timeout=10)
+            resp = requests.get(attempted, timeout=10)
             resp.raise_for_status()
             for m in resp.json().get("data", []):
                 out.append({"name": m.get("id", ""), "details": "LM Studio (local)"})
         except Exception as e:
-            logger.warning(f"LM Studio model fetch failed: {e}")
-        return out
+            error = f"{attempted} — {_model_fetch_reason(e)}"
+            logger.warning(f"LM Studio model fetch failed: {error} [{type(e).__name__}]")
+        return {"models": out, "error": error}
     if not api_key:
-        return []
+        return {"models": [], "error": ""}
     models = []
+    error = ""
+    attempted = ""
     try:
         if p == "ollama":
             base = (base_url or "https://ollama.com").rstrip("/")
@@ -4328,7 +4357,8 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             if api_key:
                 clean = api_key.strip().replace("Bearer ", "").strip()
                 headers["Authorization"] = f"Bearer {clean}"
-            resp = requests.get(f"{base}/api/tags", headers=headers, timeout=10)
+            attempted = f"{base}/api/tags"
+            resp = requests.get(attempted, headers=headers, timeout=10)
             resp.raise_for_status()
             for m in resp.json().get("models", []):
                 name = m.get("name", "")
@@ -4341,13 +4371,15 @@ def _fetch_models_for_provider(provider, api_key, base_url):
         elif p == "anthropic":
             base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
             headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_API_VERSION}
-            resp = requests.get(f"{base}/models", headers=headers, timeout=10)
+            attempted = f"{base}/models"
+            resp = requests.get(attempted, headers=headers, timeout=10)
             resp.raise_for_status()
             for m in resp.json().get("data", []):
                 models.append({"name": m.get("id", ""), "details": m.get("display_name", "")})
         elif p == "google":
             base = (base_url or GOOGLE_BASE_URL).rstrip("/")
-            resp = requests.get(f"{base}/v1beta/models", headers={"x-goog-api-key": api_key}, timeout=10)
+            attempted = f"{base}/v1beta/models"
+            resp = requests.get(attempted, headers={"x-goog-api-key": api_key}, timeout=10)
             resp.raise_for_status()
             for m in resp.json().get("models", []):
                 name = m.get("name", "").replace("models/", "")
@@ -4356,22 +4388,25 @@ def _fetch_models_for_provider(provider, api_key, base_url):
         elif p == "groq":
             base = (base_url or "https://api.groq.com/openai/v1").rstrip("/")
             headers = {"Authorization": f"Bearer {api_key}"}
-            resp = requests.get(f"{base}/models", headers=headers, timeout=10)
+            attempted = f"{base}/models"
+            resp = requests.get(attempted, headers=headers, timeout=10)
             resp.raise_for_status()
             for m in resp.json().get("data", []):
                 models.append({"name": m.get("id", ""), "details": m.get("owned_by", "")})
         else:  # openai (and openai-compatible)
             base = (base_url or OPENAI_BASE_URL).rstrip("/")
             headers = {"Authorization": f"Bearer {api_key}"}
-            resp = requests.get(f"{base}/models", headers=headers, timeout=10)
+            attempted = f"{base}/models"
+            resp = requests.get(attempted, headers=headers, timeout=10)
             resp.raise_for_status()
             for m in resp.json().get("data", []):
                 mid = m.get("id", "")
                 if any(k in mid for k in ("gpt", "o1", "o3", "o4")):
                     models.append({"name": mid, "details": m.get("owned_by", "")})
     except Exception as e:
-        logger.debug(f"Model fetch for provider {p!r}: {e}")
-    return models
+        error = f"{attempted} — {_model_fetch_reason(e)}" if attempted else _model_fetch_reason(e)
+        logger.warning(f"Model fetch failed for provider {p!r}: {error} [{type(e).__name__}]")
+    return {"models": models, "error": error}
 
 
 @app.get("/api/models")
@@ -4380,9 +4415,13 @@ async def get_models():
     config = load_config()
     p1_provider, p1_key, _, p1_url = _get_provider_config(1, config)
     p2_provider, p2_key, _, p2_url = _get_provider_config(2, config)
+    p1 = _fetch_models_for_provider(p1_provider, p1_key, p1_url)
+    p2 = _fetch_models_for_provider(p2_provider, p2_key, p2_url)
     return {
-        "local_models": _fetch_models_for_provider(p1_provider, p1_key, p1_url),
-        "cloud_models": _fetch_models_for_provider(p2_provider, p2_key, p2_url),
+        "local_models": p1["models"],
+        "cloud_models": p2["models"],
+        "local_error": p1["error"],
+        "cloud_error": p2["error"],
         "enabled_models": config.get("enabled_models", []),
     }
 
@@ -4407,8 +4446,8 @@ async def fetch_models_live(request: Request):
             api_key = (cred.get("api_key") or "").strip()
             base_url = base_url or (cred.get("base_url") or "").strip()
 
-        models = _fetch_models_for_provider(provider, api_key, base_url)
-        return {"models": models}
+        result = _fetch_models_for_provider(provider, api_key, base_url)
+        return {"models": result["models"], "error": result["error"]}
     except Exception as e:
         logger.error(f"fetch-models error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e), "models": []})

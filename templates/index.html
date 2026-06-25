@@ -1799,7 +1799,16 @@
                 });
                 const data = await resp.json();
                 sel.disabled = false;
-                _fillModelSelect(sel, data.models || [], '', provider);
+                const models = data.models || [];
+                if (models.length === 0 && data.error) {
+                    sel.innerHTML = '';
+                    const o = document.createElement('option');
+                    o.value = ''; o.textContent = '⚠ ' + data.error;
+                    o.style.color = '#b91c1c';
+                    sel.appendChild(o);
+                } else {
+                    _fillModelSelect(sel, models, '', provider);
+                }
             } catch(e) {
                 sel.disabled = false;
                 sel.innerHTML = '';
@@ -1860,7 +1869,16 @@
                 });
                 const data = await resp.json();
                 sel.disabled = false;
-                _fillModelSelect(sel, data.models || [], currentModel, provider);
+                const models = data.models || [];
+                if (models.length === 0 && data.error) {
+                    sel.innerHTML = '';
+                    const o = document.createElement('option');
+                    o.value = currentModel; o.textContent = '⚠ ' + data.error;
+                    o.style.color = '#b91c1c';
+                    sel.appendChild(o);
+                } else {
+                    _fillModelSelect(sel, models, currentModel, provider);
+                }
             } catch(e) {
                 sel.disabled = false;
                 sel.innerHTML = '';
@@ -2130,9 +2148,10 @@
                 if (models.length === 0) {
                     const opt = document.createElement('option');
                     opt.value = '';
-                    opt.textContent = '— no models returned (check API key) —';
+                    opt.textContent = data.error ? ('⚠ ' + data.error) : '— no models returned (check API key) —';
+                    if (data.error) opt.style.color = '#b91c1c';
                     select.appendChild(opt);
-                    if (statusEl) statusEl.textContent = '(check API key)';
+                    if (statusEl) statusEl.textContent = data.error ? '(fetch failed)' : '(check API key)';
                 } else {
                     let found = false;
                     models.forEach(m => {
