@@ -270,6 +270,18 @@ def _normalize_lmstudio_url(base_url):
     return urlunsplit((parts.scheme or "http", netloc, path, "", ""))
 
 
+def _is_lmstudio(provider):
+    """True for any LM Studio provider (``lmstudio``, ``lmstudio2``, ...).
+
+    All LM Studio instances expose an OpenAI-compatible ``/v1`` API on a local
+    server and need no API key. The vault keys credentials by provider name, so
+    each ``lmstudio<N>`` carries its own base_url — letting multiple LM Studio
+    servers coexist (e.g. a workstation instance and a second box). Matching by
+    prefix means adding further instances needs no code change here.
+    """
+    return (provider or "").lower().strip().startswith("lmstudio")
+
+
 def _find_claude_cli_slot(config):
     """Return the provider slot number (1-4) configured as claude_cli, or None."""
     for n in (1, 2, 3, 4):
@@ -492,7 +504,7 @@ def validate_llm_config_on_startup():
     for n in (1, 2):
         provider, api_key, model, _ = _get_provider_config(n, config)
         # claude_cli and lmstudio don't need an API key (session auth / local server).
-        if model and (api_key or provider in ("claude_cli", "lmstudio")):
+        if model and (api_key or provider == "claude_cli" or _is_lmstudio(provider)):
             logger.info(f"LLM Provider {n}: provider={provider!r} model={model!r} — configured.")
             ok = True
         else:
@@ -727,7 +739,7 @@ def _any_provider_available(config):
     any_free = False
     for n in (1, 2, 3, 4):
         provider, key, model, _ = _get_provider_config(n, config)
-        configured = model and (key or provider in ("claude_cli", "lmstudio"))
+        configured = model and (key or provider == "claude_cli" or _is_lmstudio(provider))
         if not configured:
             continue  # not configured
         rem = _provider_credit_cb_remaining(n)
@@ -1243,7 +1255,7 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     if p == "groq":
         effective_url = base_url or "https://api.groq.com/openai/v1"
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
-    if p == "lmstudio":
+    if _is_lmstudio(p):
         # LM Studio exposes an OpenAI-compatible API; no auth key required.
         effective_url = _normalize_lmstudio_url(base_url)
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
@@ -1293,8 +1305,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     ]
 
     def _try_provider(n, provider, model, key, url):
-        # claude_cli authenticates via the Claude Code session, not an API key.
-        if provider == "claude_cli":
+        # claude_cli (Claude Code session) and LM Studio (local server) need no
+        # API key — only a model must be configured for them to be usable.
+        if provider == "claude_cli" or _is_lmstudio(provider):
             if not model:
                 return None, "not_configured"
         elif not (key and model):
@@ -2287,7 +2300,7 @@ def _check_provider_online(n, config):
             return r.returncode == 0
         except Exception:
             return False
-    if p == "lmstudio":
+    if _is_lmstudio(p):
         # LM Studio needs no API key — just confirm the local server is reachable.
         if not model:
             return False
@@ -4570,7 +4583,7 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             {"name": "claude-opus-4-8",            "details": "Claude Opus 4.8"},
             {"name": "claude-haiku-4-5-20251001",  "details": "Claude Haiku 4.5"},
         ], "error": ""}
-    if p == "lmstudio":
+    if _is_lmstudio(p):
         # LM Studio exposes /v1/models (OpenAI-compatible); no auth key needed.
         base = _normalize_lmstudio_url(base_url).rstrip("/")
         attempted = f"{base}/models"

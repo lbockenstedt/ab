@@ -507,7 +507,7 @@
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
-                                {% for pname in ['google','anthropic','openai','groq','ollama','lmstudio','claude_cli'] %}
+                                {% for pname in ['google','anthropic','openai','groq','ollama','lmstudio','lmstudio2','claude_cli'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
                                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                                     <div class="flex items-center justify-between mb-2">
@@ -574,6 +574,7 @@
                                         <option value="groq">Groq</option>
                                         <option value="ollama">Ollama</option>
                                         <option value="lmstudio">LM Studio (local)</option>
+                                        <option value="lmstudio2">LM Studio 2 (local)</option>
                                         <option value="claude_cli">Claude CLI (local)</option>
                                     </select>
                                     <select id="new-entry-model" onchange="updateDefaultRpm()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
@@ -611,6 +612,7 @@
                                                 <option value="groq" {{ 'selected' if entry.provider == 'groq' else '' }}>Groq</option>
                                                 <option value="ollama" {{ 'selected' if entry.provider == 'ollama' else '' }}>Ollama</option>
                                                 <option value="lmstudio" {{ 'selected' if entry.provider == 'lmstudio' else '' }}>LM Studio (local)</option>
+                                                <option value="lmstudio2" {{ 'selected' if entry.provider == 'lmstudio2' else '' }}>LM Studio 2 (local)</option>
                                                 <option value="claude_cli" {{ 'selected' if entry.provider == 'claude_cli' else '' }}>Claude CLI (local)</option>
                                             </select>
                                             <select id="edit-model-{{ entry.id }}" onchange="updateEditRpm('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
@@ -1715,7 +1717,7 @@
             ['gemma2-9b',              30],
             ['qwen-qwq',               30],
         ];
-        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, groq: 30, lmstudio: 0, claude_cli: 10};
+        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, groq: 30, lmstudio: 0, lmstudio2: 0, claude_cli: 10};
 
         function getDefaultRpm(provider, model) {
             if (model) {
@@ -1752,7 +1754,7 @@
                 // that isn't running surfaces as a ⚠ error below instead, not
                 // this branch. (If the deployed service predates the no-key
                 // fix, update it — it returned empty here for a missing key.)
-                o.textContent = (provider === 'lmstudio')
+                o.textContent = (provider.startsWith('lmstudio'))
                     ? '— no models found — load a model in LM Studio, then re-query —'
                     : '— save credential first —';
                 sel.appendChild(o);
