@@ -1588,6 +1588,8 @@ config_on_start = load_config()
 processed_init = load_processed()
 success_count = sum(1 for info in processed_init.values() if info.get("status") in ["fixed", "verified", "awaiting_prod_verification"])
 failure_count = sum(1 for info in processed_init.values() if info.get("status") == "failed")
+# Issues closed on GitHub and recorded locally as `closed` (terminal resolved state).
+closed_count = sum(1 for info in processed_init.values() if info.get("status") == "closed")
 
 state = {
     "status": "Idle", "active_llm": "Unknown",
@@ -1603,7 +1605,7 @@ state = {
     "processed": processed_init,
     "version": get_version(), "llm_stream": "",
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
-    "success_count": success_count, "failure_count": failure_count,
+    "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "provider_credit_cb": _provider_credit_cb_snapshot(),
     "paused": False,
@@ -3640,12 +3642,23 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 logger.warning(f"Could not post success comment to {issue_id}: {ce}")
 
             is_log_detected = "log-detected" in [lbl.name for lbl in issue.get_labels()]
+            issue_id = f"{repo_name}:{issue_num}"
             if not is_log_detected:
+                # Resolved + closed immediately: apply the closed label, record the terminal
+                # `closed` status, and move this issue out of Resolved into Closed. The
+                # success_count += 1 above (QA pass) is undone here — the issue is Closed, not
+                # Resolved. Log-detected issues stay open for the production verification period.
                 issue.edit(state='closed')
+                _apply_closed_label(repo_obj, issue, issue_id)
+                state["success_count"] = max(0, state["success_count"] - 1)
+                state["closed_count"] = state.get("closed_count", 0) + 1
+                new_status = "closed"
+            else:
+                new_status = "awaiting_prod_verification"
 
             processed = load_processed()
-            processed[f"{repo_name}:{issue_num}"] = {
-                "status": "fixed" if not is_log_detected else "awaiting_prod_verification",
+            processed[issue_id] = {
+                "status": new_status,
                 "timestamp": datetime.now().isoformat(),
                 "commit": commit_hash,
                 "commit_msg": commit_msg,
@@ -3719,8 +3732,14 @@ def verify_production_fixes(gh_current, processed):
                                     except Exception as ce:
                                         logger.warning(f"Could not post verification comment to {issue_id}: {ce}")
                                     issue.edit(state='closed')
-                                    processed[issue_id]["status"] = "verified"
-                                    state["success_count"] += 1
+                                    _apply_closed_label(repo_obj, issue, issue_id)
+                                    processed[issue_id]["status"] = "closed"
+                                    # Leaves Resolved (was counted via the QA-pass increment when
+                                    # first fixed) and enters Closed. This also avoids the old
+                                    # double-count where awaiting_prod_verification issues got a
+                                    # second success_count += 1 on verification.
+                                    state["success_count"] = max(0, state["success_count"] - 1)
+                                    state["closed_count"] = state.get("closed_count", 0) + 1
                                     save_processed(processed)
                                 else:
                                     logger.info(f"Issue {issue_id} is clean, but only for {days_clean}/{days_required} days. Waiting...")
@@ -6159,6 +6178,30 @@ async def clear_history():
     return {"status": "success", "message": "All history and tasks have been cleared."}
 
 
+def _ensure_bugfixer_closed_label(repo):
+    """Ensure the `bugfixer-closed` label exists in repo (create if missing). Best-effort.
+    Mirrors the bugfixer-dismissed ensure-pattern used in delete_issue."""
+    try:
+        repo.get_label("bugfixer-closed")
+    except Exception:
+        try:
+            repo.create_label("bugfixer-closed", "6b7280",
+                               "Issue resolved and closed by BugFixer")
+        except Exception as e:
+            logger.warning(f"Could not create bugfixer-closed label: {e}")
+
+
+def _apply_closed_label(repo, issue, issue_id):
+    """Best-effort add the `bugfixer-closed` label to an issue being closed (existing
+    labels are kept). Failure to label is non-fatal — the close + local transition still
+    proceed."""
+    try:
+        _ensure_bugfixer_closed_label(repo)
+        issue.add_to_labels("bugfixer-closed")
+    except Exception as e:
+        logger.warning(f"Could not apply bugfixer-closed label to {issue_id}: {e}")
+
+
 @app.post("/delete_issue")
 async def delete_issue(request: Request):
     """Remove an issue from local history and close it on GitHub."""
@@ -6281,7 +6324,9 @@ async def resolve_issue(request: Request):
             github_msg = f"Issue #{issue_num} closed on GitHub."
         else:
             github_msg = f"Issue #{issue_num} was already closed on GitHub."
-        logger.info(f"Resolved issue {issue_id}: status -> fixed, {github_msg}")
+        # Apply the closed label (best-effort; existing labels kept).
+        _apply_closed_label(repo, issue, issue_id)
+        logger.info(f"Resolved issue {issue_id}: status -> closed, {github_msg}")
     except Exception as e:
         logger.warning(f"Could not close {issue_id} on GitHub: {e}")
         return JSONResponse(status_code=502, content={
@@ -6289,26 +6334,26 @@ async def resolve_issue(request: Request):
             "message": f"GitHub close failed: {e}. Local status left unchanged.",
         })
 
-    # GitHub close succeeded — now update local processed history to fixed and
-    # keep the counters honest.
+    # GitHub close succeeded — now update local processed history to `closed` and
+    # move the issue out of its prior System-Health bucket into Closed.
     processed = load_processed()
     local_msg = "No local history entry to update, but "
     if issue_id in processed:
         entry = processed[issue_id]
         prev_status = entry.get("status")
-        success_statuses = ("fixed", "verified", "awaiting_prod_verification")
-        if prev_status not in success_statuses:
-            # Was counted as a failure/non-actionable; flip the counters.
-            if prev_status == "failed":
-                state["failure_count"] = max(0, state.get("failure_count", 0) - 1)
-            state["success_count"] = state.get("success_count", 0) + 1
-        entry["status"] = "fixed"
+        # Remove the issue from whichever bucket it was counted in, then place it in Closed.
+        if prev_status == "failed":
+            state["failure_count"] = max(0, state.get("failure_count", 0) - 1)
+        elif prev_status in ("fixed", "verified", "awaiting_prod_verification"):
+            state["success_count"] = max(0, state.get("success_count", 0) - 1)
+        entry["status"] = "closed"
         entry["timestamp"] = datetime.now().isoformat()
         entry["decision_reason"] = "Manually marked as resolved and closed on GitHub."
         processed[issue_id] = entry
         state["processed"] = processed
+        state["closed_count"] = state.get("closed_count", 0) + 1
         save_processed(processed)
-        local_msg = "Marked as fixed. "
+        local_msg = "Marked as closed. "
 
     return {
         "status": "success",

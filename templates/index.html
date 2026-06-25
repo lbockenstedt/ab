@@ -200,6 +200,10 @@
                             <span class="text-slate-500 text-sm">Issues Failed</span>
                             <span class="font-bold text-red-600">{{ state.failure_count }}</span>
                         </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-slate-500 text-sm">Issues Closed</span>
+                            <span class="font-bold text-slate-600">{{ state.closed_count }}</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -273,15 +277,14 @@
                         </button>
                     </div>
                     <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
-                    <button onclick="filterActivity('all')" class="filter-btn active px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">All</button>
-                    <button onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Fixed</button>
-                    <button onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Failed</button>
-                    <button onclick="filterActivity('non-actionable')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Non-Actionable</button>
+                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn active px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all" title="Active issues (closed hidden)">Active</button>
+                    <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Fixed</button>
+                    <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Failed</button>
+                    <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Non-Actionable</button>
+                    <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Closed</button>
                     <i class="fas fa-history text-slate-400 ml-4"></i>
                 </div>
-            </div
-
->
+            </div>
             <table class="w-full text-left text-sm">
                 <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
                     <tr class="border-b border-slate-200">
@@ -293,11 +296,12 @@
                 </thead>
                 <tbody class="divide-y divide-slate-200">
                     {% for issue_id, info in state.processed.items() %}
-                    <tr class="hover:bg-slate-50 transition-colors">
+                    <tr class="hover:bg-slate-50 transition-colors" data-status="{{ info.status }}">
                         <td class="px-6 py-4 font-mono text-[#01A982]">{{ issue_id }}</td>
                         <td class="px-6 py-4 text-slate-600">
                             {% if info.status == 'fixed' %}AI fix pushed / PR opened
                             {% elif info.status == 'verified' %}Verified clean in production
+                            {% elif info.status == 'closed' %}Closed on GitHub (resolved)
                             {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
                             {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
                             {% elif info.status == 'non-actionable' %}Non-actionable: {{ (info.reason or '')[:80] }}
@@ -305,7 +309,7 @@
                             {% else %}{{ info.status }}{% endif %}
                         </td>
                         <td class="px-6 py-4 text-right">
-                            <span class="text-green-700 bg-green-100 px-2 py-1 rounded text-xs font-bold">{{ info.status.upper() }}</span>
+                            <span class="px-2 py-1 rounded text-xs font-bold {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
                         <td class="px-6 py-4 text-center space-x-2">
                             <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-200 hover:bg-slate-300 rounded font-bold text-slate-700 transition-colors">Retry</button>
@@ -318,7 +322,7 @@
                         <td colspan="4" class="px-6 py-2 text-slate-500 text-[10px] italic border-b border-slate-100">
                             <div class="flex flex-col gap-2">
                                 <div class="flex items-center flex-wrap gap-x-2">
-                                    {% if info.status == 'fixed' or info.status == 'verified' %}
+                                    {% if info.status == 'fixed' or info.status == 'verified' or info.status == 'closed' %}
                                         <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
                                         <span class="mx-2 text-slate-300">|</span>
                                         <span class="font-semibold">Method:</span> {{ info.commit_type if info.commit_type else 'N/A' }}
@@ -1512,32 +1516,55 @@
             }
         }
 
-        function filterActivity(status) {
-            const rows = document.querySelectorAll('tbody tr');
-            const buttons = document.querySelectorAll('.filter-btn');
+        // Activity Feed filter state. Persisted in localStorage so a manual selection
+        // survives the status view's 30s auto-reload; defaults to 'all' (= active,
+        // closed issues hidden).
+        let _activityFilter = 'all';
+        try {
+            const saved = localStorage.getItem('bf_activity_filter');
+            if (saved) _activityFilter = saved;
+        } catch (e) {}
 
+        function filterActivity(status) {
+            _activityFilter = status;
+            try { localStorage.setItem('bf_activity_filter', status); } catch (e) {}
+
+            const buttons = document.querySelectorAll('.filter-btn');
             buttons.forEach(btn => {
-                btn.classList.remove('bg-slate-800', 'text-white');
-                btn.classList.add('bg-slate-200', 'text-slate-700');
-                if (btn.innerText.toLowerCase() === status || (status === 'all' && btn.innerText === 'All')) {
-                    btn.classList.add('bg-slate-800', 'text-white');
-                    btn.classList.remove('bg-slate-200', 'text-slate-700');
-                }
+                const active = btn.dataset.filter === status;
+                btn.classList.toggle('bg-slate-800', active);
+                btn.classList.toggle('text-white', active);
+                btn.classList.toggle('bg-slate-200', !active);
+                btn.classList.toggle('text-slate-700', !active);
             });
 
-            rows.forEach(row => {
-                if (status === 'all') {
-                    row.style.display = '';
-                } else {
-                    const statusCell = row.querySelector('td:nth-child(3)');
-                    if (statusCell && statusCell.innerText.toLowerCase().includes(status)) {
-                        row.style.display = '';
-                    } else {
-                        row.style.display = 'none';
-                    }
-                }
+            // Only the Activity Feed table has data-status rows. Each main row is
+            // followed by its expandable detail row (no data-status) — toggle both
+            // together so a filtered-out issue hides its detail too.
+            document.querySelectorAll('tbody tr[data-status]').forEach(row => {
+                const s = (row.dataset.status || '').toLowerCase();
+                let show;
+                if (status === 'all')         show = s !== 'closed';      // active: closed hidden
+                else if (status === 'closed') show = s === 'closed';
+                else                          show = s === status;
+                row.style.display = show ? '' : 'none';
+                const detail = row.nextElementSibling;
+                if (detail) detail.style.display = show ? '' : 'none';
             });
         }
+
+        // Apply the default/persisted filter once the Activity Feed is present.
+        // (Runs on every status-view load so closed rows start hidden.)
+        (function () {
+            const apply = () => {
+                if (document.querySelector('tbody tr[data-status]')) filterActivity(_activityFilter);
+            };
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', apply);
+            } else {
+                apply();
+            }
+        })();
 
         // ── LLM Vault UI ──────────────────────────────────────────────────────
         function _showClaudeCliResult(statusText, statusColor, output, urls, showCodeInput) {
