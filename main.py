@@ -212,7 +212,47 @@ OPENAI_BASE_URL = "https://api.openai.com/v1"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com"
 LMSTUDIO_BASE_URL = "http://localhost:1234/v1"  # LM Studio local OpenAI-compatible server
+LMSTUDIO_DEFAULT_PORT = 1234
 ANTHROPIC_API_VERSION = "2023-06-01"
+
+
+def _normalize_lmstudio_url(base_url):
+    """Normalize an LM Studio base URL to a full ``http://<host>:<port>/v1`` form.
+
+    Why: the Settings vault stores whatever the user typed into the Base URL
+    field. For LM Studio that is frequently a bare LAN IP ('192.168.1.50') or
+    host:port ('192.168.1.50:1234') with no scheme and no ``/v1`` path. Passing
+    that straight to requests.get('192.168.1.50/models') raises MissingSchema and
+    silently yields zero models — which the UI then misreports as
+    '— save credential first —'. LM Studio needs no API key, so the real fix is
+    to build the URL the user meant: prepend http://, default port 1234, and
+    force the OpenAI-compatible ``/v1`` mount point.
+
+    Accepts a bare host/IP, host:port, or full URL and always returns a URL
+    ending in ``/v1`` (without trailing slash).
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    base = (base_url or "").strip()
+    if not base:
+        return LMSTUDIO_BASE_URL
+    if "://" not in base:
+        base = "http://" + base
+    parts = urlsplit(base)
+    host = parts.hostname or ""
+    port = parts.port
+    if not port:
+        port = LMSTUDIO_DEFAULT_PORT
+    # LM Studio serves its OpenAI-compatible API under /v1. If the user
+    # already included /v1 keep it; otherwise force it (any other path is
+    # not a valid LM Studio endpoint).
+    path = parts.path or ""
+    if not path.rstrip("/").endswith("/v1"):
+        path = "/v1"
+    else:
+        path = path.rstrip("/")
+    netloc = f"{host}:{port}" if host else f":{port}"
+    return urlunsplit((parts.scheme or "http", netloc, path, "", ""))
 
 
 def _find_claude_cli_slot(config):
@@ -1180,7 +1220,7 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
     if p == "lmstudio":
         # LM Studio exposes an OpenAI-compatible API; no auth key required.
-        effective_url = base_url or LMSTUDIO_BASE_URL
+        effective_url = _normalize_lmstudio_url(base_url)
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
     if p == "claude_cli":
         return _request_claude_cli(model, messages, task_id, config)
@@ -2219,7 +2259,7 @@ def _check_provider_online(n, config):
         if not model:
             return False
         try:
-            base = (base_url or LMSTUDIO_BASE_URL).rstrip("/")
+            base = _normalize_lmstudio_url(base_url).rstrip("/")
             resp = requests.get(f"{base}/models", timeout=10)
             if resp.status_code == 401:
                 return False
@@ -4268,7 +4308,7 @@ def _fetch_models_for_provider(provider, api_key, base_url):
         ]
     if p == "lmstudio":
         # LM Studio exposes /v1/models (OpenAI-compatible); no auth key needed.
-        base = (base_url or LMSTUDIO_BASE_URL).rstrip("/")
+        base = _normalize_lmstudio_url(base_url).rstrip("/")
         out = []
         try:
             resp = requests.get(f"{base}/models", timeout=10)

@@ -1740,11 +1740,17 @@
             {name: 'claude-haiku-4-5-20251001', details: 'Claude Haiku 4.5'},
         ];
 
-        function _fillModelSelect(sel, models, currentModel) {
+        function _fillModelSelect(sel, models, currentModel, provider) {
             sel.innerHTML = '';
             if (models.length === 0) {
                 const o = document.createElement('option');
-                o.value = ''; o.textContent = '— save credential first —';
+                o.value = '';
+                // lmstudio needs no API key — an empty model list means the
+                // host/URL is wrong or the server isn't running, not that a
+                // credential still needs saving.
+                o.textContent = (provider === 'lmstudio')
+                    ? '— no models found (check LM Studio host/port) —'
+                    : '— save credential first —';
                 sel.appendChild(o);
                 return;
             }
@@ -1776,19 +1782,24 @@
             // claude_cli has a fixed model roster — no server call needed.
             if (provider === 'claude_cli') {
                 sel.disabled = false;
-                _fillModelSelect(sel, _CLAUDE_CLI_MODELS, '');
+                _fillModelSelect(sel, _CLAUDE_CLI_MODELS, '', provider);
                 updateDefaultRpm();
                 return;
             }
+            // Include the base_url the user has typed in the credential panel so
+            // models can be fetched before credentials are explicitly saved.
+            const vaultBaseUrl = (document.getElementById('vault-url-' + provider)?.value || '').trim();
             try {
+                const body = {provider};
+                if (vaultBaseUrl) body.base_url = vaultBaseUrl;
                 const resp = await fetch('/api/fetch-models', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({provider})
+                    body: JSON.stringify(body)
                 });
                 const data = await resp.json();
                 sel.disabled = false;
-                _fillModelSelect(sel, data.models || [], '');
+                _fillModelSelect(sel, data.models || [], '', provider);
             } catch(e) {
                 sel.disabled = false;
                 sel.innerHTML = '';
@@ -1835,18 +1846,21 @@
             // claude_cli has a fixed model roster — no server call needed.
             if (provider === 'claude_cli') {
                 sel.disabled = false;
-                _fillModelSelect(sel, _CLAUDE_CLI_MODELS, currentModel);
+                _fillModelSelect(sel, _CLAUDE_CLI_MODELS, currentModel, provider);
                 return;
             }
+            const vaultBaseUrl = (document.getElementById('vault-url-' + provider)?.value || '').trim();
             try {
+                const body = {provider};
+                if (vaultBaseUrl) body.base_url = vaultBaseUrl;
                 const resp = await fetch('/api/fetch-models', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({provider})
+                    body: JSON.stringify(body)
                 });
                 const data = await resp.json();
                 sel.disabled = false;
-                _fillModelSelect(sel, data.models || [], currentModel);
+                _fillModelSelect(sel, data.models || [], currentModel, provider);
             } catch(e) {
                 sel.disabled = false;
                 sel.innerHTML = '';
