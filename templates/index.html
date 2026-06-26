@@ -1270,6 +1270,33 @@
             }
         }
 
+        // Stage a success toast to appear AFTER the next reload, then reload.
+        // Use this instead of showToast()+setTimeout(reload) — that pattern cut
+        // the toast off ~0.9s in, so the confirmation vanished the instant the
+        // page refreshed. Stashing it in sessionStorage and replaying on load
+        // lets the toast live for its full 4s on the freshly rendered page.
+        function reloadWithToast(message, type) {
+            try {
+                sessionStorage.setItem('bf_pending_toast', JSON.stringify({ message, type }));
+            } catch (e) { /* sessionStorage unavailable — plain reload below */ }
+            location.reload();
+        }
+
+        // Replay a toast staged just before the reload that brought us here
+        // (resolve/close/delete/clear-credit/clear-history). Runs on every load;
+        // sessionStorage is per-tab and cleared after replay so it doesn't
+        // reappear on later navigations. The 4s toast auto-dismisses well before
+        // the 30s/10s status/logs auto-refresh, so it won't be cut off again.
+        (function replayPendingToast() {
+            try {
+                const raw = sessionStorage.getItem('bf_pending_toast');
+                if (!raw) return;
+                sessionStorage.removeItem('bf_pending_toast');
+                const { message, type } = JSON.parse(raw);
+                if (message) showToast(message, type || 'info');
+            } catch (e) { /* corrupt entry — ignore */ }
+        })();
+
         // ---- Configurable page auto-refresh + Pause Refresh (footer) ----
         // Replaces the old <meta http-equiv="refresh"> so the auto-reload can be
         // paused/resumed. Pause state persists in localStorage across reloads.
@@ -1562,8 +1589,7 @@
                 const resp = await fetch('/clear_history', { method: 'POST' });
                 const data = await resp.json();
                 if (data.status === 'success') {
-                    showToast(data.message || 'History cleared successfully!', 'success');
-                    setTimeout(() => location.reload(), 900);
+                    reloadWithToast(data.message || 'History cleared successfully!', 'success');
                 } else {
                     showToast(data.message || 'Error clearing history.', 'error');
                 }
@@ -2308,8 +2334,7 @@
                 });
                 const data = await resp.json();
                 if (data.status === 'success') {
-                    showToast(data.message || 'Issue deleted.', 'success');
-                    setTimeout(() => location.reload(), 900);
+                    reloadWithToast(data.message || 'Issue deleted.', 'success');
                 } else {
                     showToast(data.message || 'Error deleting issue.', 'error');
                 }
@@ -2326,14 +2351,13 @@
                 });
                 const data = await resp.json();
                 if (data.status === 'success') {
-                    showToast(data.message || 'Issue resolved.', 'success');
                     // Keep the current filter unchanged — just reload. The resolved
                     // issue moves to Closed and drops out of the Active view on its
                     // own; the user can switch to the Closed filter manually if they
                     // want to watch it land there. We must NOT force the filter to
                     // 'closed' here: doing so also persisted it, so the default view
                     // kept showing closed on every later load.
-                    setTimeout(() => location.reload(), 900);
+                    reloadWithToast(data.message || 'Issue resolved.', 'success');
                 } else {
                     showToast(data.message || 'Error resolving issue.', 'error');
                 }
@@ -2344,7 +2368,7 @@
             try {
                 const resp = await fetch(`/api/clear-credit-cooldown/${n}`, { method: 'POST' });
                 const data = await resp.json();
-                if (data.status === 'cleared') { showToast('Credit cooldown cleared.', 'success'); setTimeout(() => location.reload(), 900); }
+                if (data.status === 'cleared') { reloadWithToast('Credit cooldown cleared.', 'success'); }
                 else showToast('Failed to clear cooldown: ' + JSON.stringify(data), 'error');
             } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }
