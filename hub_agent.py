@@ -281,7 +281,7 @@ class HubAgentClient:
                         msg = json.loads(message)
                     except json.JSONDecodeError:
                         continue
-                    self._handle_message(msg)
+                    await self._handle_message(msg)
             finally:
                 hb_task.cancel()
                 await asyncio.gather(hb_task, return_exceptions=True)
@@ -296,7 +296,17 @@ class HubAgentClient:
             return True
         return self.signer.verify(msg)
 
-    def _handle_message(self, msg: dict) -> None:
+    def _read_version(self) -> str:
+        """Read this agent's VERSION file (beside this module) for get_version
+        replies. Falls back to ``"unknown"`` if unreadable."""
+        try:
+            p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+            with open(p) as f:
+                return f.read().strip() or "unknown"
+        except Exception:
+            return "unknown"
+
+    async def _handle_message(self, msg: dict) -> None:
         if not self._verify(msg):
             logger.warning("Invalid signature on inbound message; dropping.")
             return
@@ -354,6 +364,36 @@ class HubAgentClient:
         if cmd_type == "DENIED":
             self._approved = False
             self.on_status("error", "approval revoked by admin")
+            return
+
+        if cmd_type in ("get_version", "GET_VERSION"):
+            # Hub queries our version after approval (and now after a
+            # post-connect admin approval). Reply with a signed COMMAND_RESULT
+            # carrying data.version — the Hub stores it (main.py: COMMAND_RESULT
+            # with a "version" key) so the Diagnostics page shows our .NN
+            # instead of "unknown". The top-level correlation_id echoes the
+            # inbound message_id (the Hub's ack path keys on it).
+            if self._ws is None:
+                return
+            reply = {
+                "correlation_id": msg.get("header", {}).get("message_id"),
+                "header": {
+                    "message_id": str(uuid.uuid4()),
+                    "timestamp": round(time.time(), 6),
+                    "sender_id": self.spoke_id,
+                    "destination_id": "hub",
+                },
+                "payload": {
+                    "type": "COMMAND_RESULT",
+                    "data": {"status": "SUCCESS", "version": self._read_version()},
+                },
+            }
+            if self.signer:
+                reply["signature"] = self.signer.sign(reply)
+            try:
+                await self._ws.send(json.dumps(reply, separators=(",", ":")))
+            except Exception as e:
+                logger.warning("Failed to send get_version reply: %s", e)
             return
 
         logger.debug("Unhandled Hub message type: %s", cmd_type)
