@@ -24,9 +24,25 @@ from github import Github, GithubException
 import git
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# Setup Logging
-DEFAULT_LOG_FILE = "/var/log/bugfixer.log"
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+# Setup Logging — uses the shared logging_setup helper when lm/core is on
+# PYTHONPATH, else an inline equivalent (bugfixer is self-contained and does
+# NOT import lm/core, so the inline fallback is the normal path here). Either
+# way LOG_LEVEL env is honored at boot and the standard format (with %(name)s)
+# is applied so the BugFixer logger name carries identity without a literal tag.
+try:
+    from logging_setup import configure_logging
+except ImportError:
+    try:
+        from core.src.logging_setup import configure_logging
+    except ImportError:
+        import logging as _logging
+        _FMT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        _DFMT = '%Y-%m-%d %H:%M:%S'
+        def configure_logging(default_level=_logging.INFO, *, log_file=None, **_):
+            handlers = ([_logging.FileHandler(log_file, mode='a'), _logging.StreamHandler()]
+                        if log_file else None)
+            _logging.basicConfig(level=default_level, force=True,
+                                 format=_FMT, datefmt=_DFMT, handlers=handlers)
 
 def get_log_path():
     path = os.getenv("LOG_FILE_PATH", "/var/log/bugfixer.log")
@@ -45,16 +61,9 @@ if not os.path.exists(log_dir):
     except Exception as e:
         print(f"Error creating log directory {log_dir}: {e}")
 
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, mode='a'),
-        logging.StreamHandler()
-    ]
-)
+_resolved_level = configure_logging(log_file=log_file)
 logger = logging.getLogger("BugFixer")
-logger.info(f"BugFixer started. Logging level: {LOG_LEVEL}. Logging to: {log_file}")
+logger.info(f"BugFixer started. Logging level: {logging.getLevelName(_resolved_level)}. Logging to: {log_file}")
 
 # Persistent Configuration Paths
 CONFIG_DIR = "/etc/bugfixer"

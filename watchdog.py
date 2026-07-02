@@ -10,11 +10,23 @@ HEALTH_URL = "http://localhost:8000/api/health"
 CHECK_INTERVAL = 5 # seconds
 HEALTH_TIMEOUT = 60 # seconds
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [WATCHDOG] %(levelname)s %(message)s',
-    handlers=[logging.FileHandler("/var/log/bugfixer_watchdog.log"), logging.StreamHandler()]
-)
+try:
+    from logging_setup import configure_logging
+except ImportError:
+    try:
+        from core.src.logging_setup import configure_logging
+    except ImportError:
+        import logging as _logging
+        _FMT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        _DFMT = '%Y-%m-%d %H:%M:%S'
+        def configure_logging(default_level=_logging.INFO, *, log_file=None, **_):
+            handlers = ([_logging.FileHandler(log_file), _logging.StreamHandler()]
+                        if log_file else None)
+            _logging.basicConfig(level=default_level, force=True,
+                                 format=_FMT, datefmt=_DFMT, handlers=handlers)
+# The BugFixerWatchdog logger name carries identity via %(name)s, replacing
+# the literal [WATCHDOG] format tag (now standard across all LM components).
+configure_logging(log_file="/var/log/bugfixer_watchdog.log")
 logger = logging.getLogger("BugFixerWatchdog")
 
 def load_update_state():

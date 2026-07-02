@@ -26,6 +26,23 @@ from typing import Any, Callable, Dict, Optional
 import websockets
 from websockets.exceptions import ConnectionClosedError
 
+# Self-contained runtime DEBUG/INFO flip used by the WebUI "Enable Debug"
+# button (the Hub broadcasts SET_LOG_LEVEL to every connected agent; bugfixer
+# connects as module_type "agent"). Inline fallback because bugfixer does NOT
+# import lm/core (see module docstring) — the fallback is the standard block.
+try:
+    from logging_setup import set_log_level
+except ImportError:
+    try:
+        from core.src.logging_setup import set_log_level
+    except ImportError:
+        def set_log_level(enabled):
+            level = logging.DEBUG if enabled else logging.INFO
+            logging.getLogger().setLevel(level)
+            for _n in list(logging.root.manager.loggerDict):
+                logging.getLogger(_n).setLevel(level)
+            return level
+
 logger = logging.getLogger("HubAgent")
 
 # Reconnect backoff (seconds) after a lost/failed connection.
@@ -394,6 +411,16 @@ class HubAgentClient:
                 await self._ws.send(json.dumps(reply, separators=(",", ":")))
             except Exception as e:
                 logger.warning("Failed to send get_version reply: %s", e)
+            return
+
+        if cmd_type in ("SET_LOG_LEVEL", "SPOKE_SET_LOG_LEVEL"):
+            # WebUI "Enable Debug" broadcast. bugfixer connects as
+            # module_type "agent" so it's in active_connections and receives
+            # this; without a handler here it silently dropped to "Unhandled"
+            # and the BugFixer/HubAgent loggers never flipped to DEBUG.
+            enabled = bool(data.get("enabled", False))
+            level = set_log_level(enabled)
+            logger.info("Log level set to %s", logging.getLevelName(level))
             return
 
         logger.debug("Unhandled Hub message type: %s", cmd_type)
