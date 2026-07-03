@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, re, uuid, collections
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -1491,6 +1492,18 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     except Exception as e:
         logger.error(f"LLM request failed after all providers: {e}")
         raise
+
+@contextlib.contextmanager
+def _authenticated_remote(remote, plain_url, token):
+    """Re-embeds the GitHub token on a remote only for the duration of a push/pull,
+    then strips it back out. Keeps the token out of .git/config the rest of the
+    time, since that directory is mounted read/write into the Docker sandbox where
+    untrusted repository code (deps, tests) runs with default network access."""
+    remote.set_url(plain_url.replace("https://", f"https://{token}@"))
+    try:
+        yield remote
+    finally:
+        remote.set_url(plain_url)
 
 def run_sandboxed_command(command, cwd):
     """Executes a command in a Docker sandbox. Fails closed (returns an error result)
@@ -3139,7 +3152,11 @@ def verify_fix(repo_path, repo_name, config):
             qa_path = os.path.join(os.path.dirname(repo_path), "qa_suite")
             if not os.path.exists(qa_path):
                 url = f"https://{token}@github.com/{qa_repo}.git"
-                git.Repo.clone_from(url, qa_path)
+                qa_git = git.Repo.clone_from(url, qa_path)
+                # Strip the token back out immediately — this repo is only ever read
+                # from inside the sandbox (never pushed), so it has no reason to keep
+                # a live credential sitting in .git/config.
+                qa_git.remotes.origin.set_url(f"https://github.com/{qa_repo}.git")
                 logger.info(f"Cloned QA repository to {qa_path}")
             logger.info(f"Executing QA command: {test_cmd}")
             full_cmd = f"{test_cmd} {repo_path}" if " " not in test_cmd else test_cmd
@@ -3446,6 +3463,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             url = repo_obj.clone_url.replace("https://", f"https://{token}@")
             logger.info(f"Cloning {repo_name} for manual fix...")
             repo_git = git.Repo.clone_from(url, path)
+            # Strip the token back out of .git/config right after cloning. The AI
+            # fix, review, and test/verify steps below run untrusted repository code
+            # inside run_sandboxed_command()'s Docker container, which mounts this
+            # same directory with default network access — a hostile dependency or
+            # test could otherwise read the live token straight out of the remote
+            # URL and exfiltrate it. The token is re-applied only transiently, right
+            # before each push/pull, via _authenticated_remote().
+            repo_git.remotes.origin.set_url(repo_obj.clone_url)
 
             max_attempts = 3
             success = False
@@ -3607,14 +3632,16 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     logger.info(f"Bumped target repository {repo_name} version to {new_v}")
 
                 try:
-                    repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                    with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
+                        repo_git.remotes.origin.push(f"HEAD:{base_branch}")
                     can_actually_direct_push = True
                     decision_reason = "Trusted repo & approved"
                 except Exception as pe:
                     logger.warning(f"Direct push failed for {repo_name} ({pe}). Attempting rebase...")
                     try:
-                        repo_git.remotes.origin.pull(base_branch, rebase=True)
-                        repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                        with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
+                            repo_git.remotes.origin.pull(base_branch, rebase=True)
+                            repo_git.remotes.origin.push(f"HEAD:{base_branch}")
                         can_actually_direct_push = True
                         decision_reason = "Trusted repo & approved (after rebase)"
                         logger.info(f"Push successful after rebase for {repo_name}")
@@ -3645,7 +3672,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     repo_git.git.checkout(target_branch)
                 except:
                     repo_git.create_head(target_branch).checkout()
-                repo_git.remotes.origin.push(target_branch, force=True)
+                with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
+                    repo_git.remotes.origin.push(target_branch, force=True)
                 base_branch = config.get("default_branch", "main")
 
                 existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
