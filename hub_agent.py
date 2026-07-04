@@ -84,6 +84,47 @@ class MessageSigner:
         return hmac.compare_digest(self.sign(msg), sig)
 
 
+def _normalize_hub_ws_url(url: Optional[str]) -> Optional[str]:
+    """Fill in a pinned HUB_WS_URL's scheme/port/path with sane defaults.
+
+    Mirrors ``BaseControlPlane._normalize_hub_url`` (core/src/messaging/
+    control_plane.py) — this module is intentionally self-contained and
+    doesn't import the lm package, so the logic is ported rather than shared.
+    ``websockets.connect()`` dials the URL verbatim; a bare host or a URL
+    missing the ``/ws/spoke`` path connects to the wrong thing. Defaults:
+    scheme -> ``wss``, port -> ``443``, path -> ``/ws/spoke`` (only when the
+    port is 443 — a pin to some other, explicitly-given port is assumed to be
+    a legacy raw-socket listener with no path routing, so it's left alone).
+    Empty/``None`` pass through unchanged.
+    """
+    if not url:
+        return url
+    raw = url.strip()
+    if "://" not in raw:
+        raw = "wss://" + raw
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return url
+    scheme = parts.scheme or "wss"
+    netloc = parts.netloc
+    host_part = netloc.rsplit("]", 1)[-1] if netloc else netloc
+    if netloc and ":" not in host_part:
+        netloc = f"{netloc}:443"
+        port = 443
+    else:
+        port = parts.port
+    if scheme == "ws" and port == 443:
+        scheme = "wss"
+    path = parts.path
+    if port == 443 and path in ("", "/"):
+        path = "/ws/spoke"
+    elif path not in ("", "/"):
+        path = path.rstrip("/")
+    return urlunsplit((scheme, netloc, path, "", ""))
+
+
 class HubAgentClient:
     """Persistent Hub WebSocket agent for BugFixer.
 
@@ -101,7 +142,7 @@ class HubAgentClient:
         on_secret: Optional[Callable[[str], None]] = None,
         on_hub_secret: Optional[Callable[[str], None]] = None,
     ):
-        self.hub_ws_url = hub_ws_url
+        self.hub_ws_url = _normalize_hub_ws_url(hub_ws_url)
         self.spoke_id = spoke_id
         self.secret = secret or ""
         self.hub_secrets = [hub_secret] if hub_secret else []
