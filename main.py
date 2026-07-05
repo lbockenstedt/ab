@@ -2912,10 +2912,12 @@ def _upd_summary(d):
 # ---------------------------------------------------------------------------
 
 def _derive_ws_url(http_url):
-    """Derive a Hub WebSocket URL (ws://host:8765) from an HTTP Hub URL.
+    """Derive a Hub WebSocket URL from an HTTP Hub URL.
 
-    The Hub's HTTP API and its WebSocket server run on different ports (8000 vs
-    8765), so we can't just swap the scheme — we take the host and rebuild.
+    The unified hub shares ONE port (:443) for HTTP + WebSocket, with the spoke
+    socket on the ``/ws/spoke`` path — the old bare ``:8765`` raw-socket listener
+    is gone. So derive ``wss://<host>:443/ws/spoke`` (hub_agent._normalize_hub_ws_url
+    would fill the same defaults). TLS is unverified by default (self-signed hub).
     """
     try:
         from urllib.parse import urlparse
@@ -2923,8 +2925,7 @@ def _derive_ws_url(http_url):
         host = parsed.hostname
         if not host:
             return ""
-        scheme = "wss" if parsed.scheme == "https" else "ws"
-        return f"{scheme}://{host}:8765"
+        return f"wss://{host}:443/ws/spoke"
     except Exception:
         return ""
 

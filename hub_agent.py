@@ -19,6 +19,7 @@ import hmac
 import json
 import logging
 import os
+import ssl
 import sys
 import threading
 import time
@@ -172,6 +173,12 @@ class HubAgentClient:
         self.on_status = on_status or (lambda _s, _m: None)
         self.on_secret = on_secret or (lambda _s: None)
         self.on_hub_secret = on_hub_secret or (lambda _s: None)
+
+        # wss:// TLS to the unified :443 hub. Default: encrypt WITHOUT authenticating
+        # the self-signed hub cert (matches BaseControlPlane._client_ssl_ctx); set
+        # LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify against a shipped CA.
+        self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0") == "1"
+        self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "") or "").strip()
 
         self.signer = MessageSigner(self.secret) if self.secret else None
         # Pending request Futures keyed by the request header.message_id.
@@ -362,13 +369,30 @@ class HubAgentClient:
                 break
             await asyncio.sleep(_RECONNECT_DELAY)
 
+    def _client_ssl_ctx(self):
+        """SSL context for a ``wss://`` connect to the hub. Default: unverified
+        (encrypt without authenticating the self-signed hub cert) — the exact
+        private API used hub-wide (see memory ssl-create-unverified-context).
+        Without this, ``websockets.connect`` builds a verifying context for a
+        wss:// URI and the self-signed hub cert fails CERTIFICATE_VERIFY_FAILED."""
+        try:
+            if self._tls_verify and self._tls_ca_cert:
+                return ssl.create_default_context(cafile=self._tls_ca_cert)
+            return ssl._create_unverified_context()
+        except Exception as e:  # noqa: BLE001
+            logger.error("Could not build wss SSL context: %s", e)
+            return None
+
     async def _connect_and_serve(self):
         # max_size: the hub's GET_LOGS response aggregates every spoke's logs
         # and can exceed the default 1 MiB frame ceiling, which closed us with
         # code 1009 "message too big". Match the hub's 16 MiB ceiling so the
         # large GET_LOGS response arrives intact (the hub also self-caps its
         # payload under 12 MiB in collect_all_logs).
-        async with websockets.connect(self.hub_ws_url, max_size=16 * 1024 * 1024) as websocket:
+        # For wss:// pass an explicit SSL context (unverified by default) so the
+        # self-signed hub cert doesn't fail the handshake; ws:// passes ssl=None.
+        _ssl = self._client_ssl_ctx() if str(self.hub_ws_url or "").startswith("wss://") else None
+        async with websockets.connect(self.hub_ws_url, max_size=16 * 1024 * 1024, ssl=_ssl) as websocket:
             self._ws = websocket
 
             # 1. Spoke authentication handshake.
