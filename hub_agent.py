@@ -13,11 +13,13 @@ package, so BugFixer can run on hosts that don't have the lm source tree.
 """
 
 import asyncio
+import collections
 import hashlib
 import hmac
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -44,6 +46,27 @@ except ImportError:
             return level
 
 logger = logging.getLogger("HubAgent")
+
+
+class _HubLogRelayHandler(logging.Handler):
+    """Captures INFO+ records into a bounded ring buffer for relay to the hub as
+    SPOKE_LOG. Per logging-observability-contract.md: the BugFixer's own logs
+    and crashes must reach the hub (Error Log + the BugFixer's own GET_LOGS) —
+    the tool that triages every module can't be the one blind spot. Buffered
+    while disconnected; drained by the relay task once connected."""
+
+    def __init__(self, buf: "collections.deque"):
+        super().__init__(level=logging.INFO)
+        self._buf = buf
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._buf.append(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{record.levelname}] "
+                f"{record.name}: {self.format(record)}")
+        except Exception:
+            pass
+
 
 # Reconnect backoff (seconds) after a lost/failed connection.
 _RECONNECT_DELAY = 5
@@ -159,6 +182,68 @@ class HubAgentClient:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
+        # Log relay to the hub (contract reqs 1-4). Handler installed ONCE on the
+        # root logger; records buffer here while disconnected and are drained as
+        # SPOKE_LOG by _log_relay_task once connected. Bounded ring (drop-oldest)
+        # so a long hub outage keeps the most recent lines.
+        self._log_relay_buf: "collections.deque" = collections.deque(maxlen=1000)
+        _relay_handler = _HubLogRelayHandler(self._log_relay_buf)
+        _relay_handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger().addHandler(_relay_handler)
+        self._install_uncaught_exception_relay()
+
+    # -------------------------------------------------------------- log relay
+
+    def _install_uncaught_exception_relay(self) -> None:
+        """Route uncaught SYNC exceptions through the HubAgent logger (→ relay →
+        hub) before the interpreter's default handler. asyncio counterpart set
+        in _run(). Contract req 4."""
+        _prev = sys.excepthook
+
+        def _hook(exc_type, exc, tb):
+            try:
+                if not issubclass(exc_type, KeyboardInterrupt):
+                    logger.error("Uncaught exception", exc_info=(exc_type, exc, tb))
+            finally:
+                _prev(exc_type, exc, tb)
+
+        sys.excepthook = _hook
+
+    def _asyncio_exception_relay(self, loop, context) -> None:
+        """asyncio loop exception handler — relays unhandled task exceptions
+        through the HubAgent logger then defers to the default handler."""
+        exc = context.get("exception")
+        msg = context.get("message") or "unhandled asyncio exception"
+        if exc is not None:
+            logger.error("Uncaught asyncio exception: %s", msg, exc_info=exc)
+        else:
+            logger.error("asyncio error: %s", msg)
+        loop.default_exception_handler(context)
+
+    async def _log_relay_task(self, websocket) -> None:
+        """Drain the buffered log records to the hub as signed SPOKE_LOG frames
+        every 5s. The hub registers this agent in active_connections (it auths
+        as a spoke), so SPOKE_LOG lands in agent_logs[spoke_id] → Error Log +
+        GET_LOGS."""
+        while True:
+            await asyncio.sleep(5)
+            entries = []
+            while self._log_relay_buf and len(entries) < 300:
+                entries.append(self._log_relay_buf.popleft())
+            if not entries:
+                continue
+            try:
+                msg = {
+                    "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
+                               "sender_id": self.spoke_id, "destination_id": "hub"},
+                    "payload": {"type": "SPOKE_LOG", "data": {"entries": entries}},
+                }
+                if self.signer:
+                    msg["signature"] = self.signer.sign(msg)
+                await websocket.send(json.dumps(msg, separators=(",", ":")))
+            except Exception as e:  # noqa: BLE001
+                logger.debug("BugFixer log relay send failed: %s", e)
+
     # ------------------------------------------------------------------ public
 
     def start(self) -> None:
@@ -233,6 +318,12 @@ class HubAgentClient:
     # ------------------------------------------------------------------ loop
 
     async def _run(self):
+        # Relay unhandled asyncio-task exceptions through the logger → hub
+        # (sync excepthook installed in __init__). Contract req 4.
+        try:
+            asyncio.get_running_loop().set_exception_handler(self._asyncio_exception_relay)
+        except Exception:  # noqa: BLE001
+            pass
         logger.info("Hub agent starting: %s -> %s", self.spoke_id, self.hub_ws_url)
         if self.secret:
             self.on_status("pending", "reconnecting with stored secret")
@@ -333,6 +424,10 @@ class HubAgentClient:
                     await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
             hb_task = asyncio.create_task(heartbeat())
+            # Drain buffered logs (startup + reconnect gap) to the hub and keep
+            # streaming while connected. Started per-connection; the capturing
+            # handler (added in __init__) persists so nothing is lost between.
+            lr_task = asyncio.create_task(self._log_relay_task(websocket))
             try:
                 async for message in websocket:
                     try:
@@ -342,7 +437,8 @@ class HubAgentClient:
                     await self._handle_message(msg)
             finally:
                 hb_task.cancel()
-                await asyncio.gather(hb_task, return_exceptions=True)
+                lr_task.cancel()
+                await asyncio.gather(hb_task, lr_task, return_exceptions=True)
                 self._ws = None
 
     # ------------------------------------------------------------------ dispatch
