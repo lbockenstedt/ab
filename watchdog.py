@@ -6,7 +6,14 @@ CONFIG_DIR = "/etc/bugfixer"
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 UPDATE_PENDING_FILE = os.path.join(CONFIG_DIR, "update_pending")
 STARTUP_STAMP_FILE = os.path.join(CONFIG_DIR, "startup_stamp.json")
-HEALTH_URL = "http://localhost:8000/api/health"
+# Derive the health probe from the same env the server binds on (unified-443:
+# HTTPS on :443 by default). Kept in lockstep with main.py's SERVER_PORT / SSL
+# settings so the watchdog never probes the wrong scheme/port.
+_HEALTH_PORT = os.environ.get("BUGFIXER_PORT", "443")
+_HEALTH_SCHEME = "https" if os.path.exists(
+    os.environ.get("BUGFIXER_SSL_CERT", "/etc/bugfixer/cert.pem")) else "http"
+HEALTH_URL = os.environ.get(
+    "BUGFIXER_HEALTH_URL", f"{_HEALTH_SCHEME}://127.0.0.1:{_HEALTH_PORT}/api/health")
 CHECK_INTERVAL = 5 # seconds
 HEALTH_TIMEOUT = 60 # seconds
 
@@ -134,7 +141,7 @@ def main():
             while time.time() - start_time < HEALTH_TIMEOUT:
                 if is_service_active():
                     try:
-                        resp = requests.get(HEALTH_URL, timeout=2)
+                        resp = requests.get(HEALTH_URL, timeout=2, verify=False)
                         if resp.status_code == 200 and resp.json().get("status") == "ok":
                             logger.info("WATCHDOG: Health check passed. Update verified.")
                             success = True

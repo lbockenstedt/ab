@@ -571,7 +571,7 @@ def validate_llm_config_on_startup():
             "!!  LLM CONFIGURATION WARNING  !!\n"
             "Neither LLM provider is fully configured.\n"
             "HOW TO FIX:\n"
-            "  1. Open the BugFixer dashboard: http://localhost:8000/settings\n"
+            "  1. Open the BugFixer dashboard: https://<this-host>/settings\n"
             "  2. Set LLM_PROVIDER_1, LLM_API_KEY_1, and LLM_MODEL_1\n"
             "  3. Optionally set LLM_PROVIDER_2, LLM_API_KEY_2, LLM_MODEL_2 for failover.\n"
             + "=" * 78
@@ -580,6 +580,24 @@ def validate_llm_config_on_startup():
 
 load_dotenv(ENV_FILE)
 app = FastAPI()
+
+# ── Web-server bind (unified-443: HTTPS on :443 by default) ──────────────────
+# Overridable via env (set in the systemd unit or for local dev). install.sh
+# generates a self-signed cert at SSL_CERT/SSL_KEY; when both exist the server
+# serves HTTPS, otherwise it falls back to plain HTTP on the SAME port so the
+# UI still comes up. The internal restart/health check and watchdog.py derive
+# their probe URL from the same settings so they never drift from the bind.
+SERVER_HOST = os.environ.get("BUGFIXER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("BUGFIXER_PORT", "443") or "443")
+SSL_CERT = (os.environ.get("BUGFIXER_SSL_CERT", "/etc/bugfixer/cert.pem") or "").strip()
+SSL_KEY  = (os.environ.get("BUGFIXER_SSL_KEY", "/etc/bugfixer/key.pem") or "").strip()
+
+def _tls_enabled() -> bool:
+    return bool(SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY))
+
+def _local_health_url() -> str:
+    scheme = "https" if _tls_enabled() else "http"
+    return f"{scheme}://127.0.0.1:{SERVER_PORT}/api/health"
 
 template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
@@ -2078,7 +2096,7 @@ def restart_worker():
     GRACE_SECONDS = 15
     VERIFY_TIMEOUT = 60
     VERIFY_INTERVAL = 3
-    HEALTH_URL = "http://127.0.0.1:8000/api/health"
+    HEALTH_URL = _local_health_url()
     while True:
         try:
             if state.get("restart_pending"):
@@ -2093,7 +2111,7 @@ def restart_worker():
                 healthy = False
                 while time.time() - t0 < VERIFY_TIMEOUT:
                     try:
-                        r = requests.get(HEALTH_URL, timeout=2)
+                        r = requests.get(HEALTH_URL, timeout=2, verify=False)
                         if r.status_code == 200 and r.json().get("status") == "ok":
                             healthy = True
                             break
@@ -2323,7 +2341,7 @@ def scan_self_logs(gh_current, config):
     if not self_repo_name:
         logger.warning(
             "Self-diagnosis repository is not configured. Set 'self_diagnosis_repo' in the "
-            "BugFixer settings (http://localhost:8000/settings) to a valid, accessible "
+            "BugFixer settings (https://<this-host>/settings) to a valid, accessible "
             "'owner/repo' GitHub repository where self-diagnosis issues should be filed. "
             "Skipping self-log scan until configured."
         )
@@ -2342,7 +2360,7 @@ def scan_self_logs(gh_current, config):
                 f"Self-diagnosis target repository '{self_repo_name}' was not found or is "
                 f"inaccessible (404 Not Found). The configured GITHUB_TOKEN may lack access, "
                 f"or the repository does not exist. Update 'self_diagnosis_repo' in the "
-                f"BugFixer settings (http://localhost:8000/settings) to point at a valid, "
+                f"BugFixer settings (https://<this-host>/settings) to point at a valid, "
                 f"accessible repository. Skipping self-log scan."
             )
         else:
@@ -3293,4 +3311,12 @@ except Exception as _e:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    if _tls_enabled():
+        logger.info("Serving BugFixer UI on https://%s:%s (TLS)", SERVER_HOST, SERVER_PORT)
+        uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT,
+                    ssl_certfile=SSL_CERT, ssl_keyfile=SSL_KEY)
+    else:
+        logger.warning("No TLS cert at %s / %s — serving PLAIN HTTP on :%s "
+                       "(re-run install.sh to generate a self-signed cert).",
+                       SSL_CERT, SSL_KEY, SERVER_PORT)
+        uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)

@@ -24,7 +24,7 @@ echo "=== BugFixer Installer ==="
 # 1. System dependencies
 echo ">> Installing system dependencies..."
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git build-essential python3-pip python3-venv psmisc
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git build-essential python3-pip python3-venv psmisc openssl
 
 # Node.js (needed for Claude Code CLI)
 if ! command -v node &>/dev/null; then
@@ -88,6 +88,26 @@ fi
 ./venv/bin/pip install -r requirements.txt -q
 echo "   Python dependencies installed."
 
+# 5b. Self-signed TLS cert (unified-443: the UI serves HTTPS on :443)
+CERT_FILE="$CONFIG_DIR/cert.pem"
+KEY_FILE="$CONFIG_DIR/key.pem"
+if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+    echo ">> Generating self-signed TLS certificate in $CONFIG_DIR..."
+    IP_FOR_CERT=$(hostname -I 2>/dev/null | awk '{print $1}')
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$KEY_FILE" -out "$CERT_FILE" \
+        -subj "/CN=${IP_FOR_CERT:-bugfixer}" \
+        -addext "subjectAltName=IP:${IP_FOR_CERT:-127.0.0.1},IP:127.0.0.1,DNS:localhost" \
+        >/dev/null 2>&1 \
+      && echo "   Certificate created (self-signed, 10y)." \
+      || warn_cert=1
+    chmod 600 "$KEY_FILE" 2>/dev/null || true
+    chmod 644 "$CERT_FILE" 2>/dev/null || true
+    [ "${warn_cert:-0}" = 1 ] && echo "   ⚠️  cert generation failed — UI will fall back to plain HTTP on :443"
+else
+    echo ">> Reusing existing TLS certificate in $CONFIG_DIR"
+fi
+
 # 6. Systemd service for BugFixer
 echo ">> Installing systemd services..."
 cat > /etc/systemd/system/bugfixer.service << SERVICE
@@ -100,6 +120,10 @@ StartLimitBurst=5
 [Service]
 User=root
 WorkingDirectory=${INSTALL_DIR}
+Environment=BUGFIXER_HOST=0.0.0.0
+Environment=BUGFIXER_PORT=443
+Environment=BUGFIXER_SSL_CERT=${CERT_FILE}
+Environment=BUGFIXER_SSL_KEY=${KEY_FILE}
 ExecStart=${INSTALL_DIR}/venv/bin/python3 main.py
 Restart=always
 RestartSec=10
@@ -119,6 +143,9 @@ After=bugfixer.service
 [Service]
 User=root
 WorkingDirectory=${INSTALL_DIR}
+Environment=BUGFIXER_PORT=443
+Environment=BUGFIXER_SSL_CERT=${CERT_FILE}
+Environment=BUGFIXER_SSL_KEY=${KEY_FILE}
 ExecStart=${INSTALL_DIR}/venv/bin/python3 watchdog.py
 Restart=always
 RestartSec=15
@@ -140,7 +167,7 @@ echo ""
 echo "======================================="
 echo " BugFixer installed successfully"
 echo "======================================="
-echo "  Dashboard : http://${IP:-<server-ip>}:8000"
+echo "  Dashboard : https://${IP:-<server-ip>}/   (self-signed cert — accept the browser warning)"
 echo "  Config    : $CONFIG_DIR/config.json"
 echo "  Logs      : journalctl -u bugfixer -f"
 echo "              tail -f $LOG_FILE"
