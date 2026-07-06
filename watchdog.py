@@ -68,10 +68,13 @@ def read_startup_stamp():
 
 def spawn_restart():
     """Detached `systemctl restart bugfixer` that survives this process dying. The
-    service runs as root, so sudo is only a fallback when not root."""
-    cmd = ["systemctl", "restart", "bugfixer"]
+    service runs as svc_bg, so non-root invokes the race-free root helper via
+    sudoers (mirrors main.py _spawn_restart); root still calls systemctl directly
+    for dev/standalone."""
     if os.geteuid() != 0:
-        cmd = ["sudo"] + cmd
+        cmd = ["sudo", "-n", "/usr/local/bin/bugfixer-self-restart"]
+    else:
+        cmd = ["systemctl", "restart", "bugfixer"]
     subprocess.Popen(cmd, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
     logger.info("WATCHDOG: spawned detached restart.")

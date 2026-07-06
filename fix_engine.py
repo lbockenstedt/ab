@@ -83,16 +83,26 @@ def run_sandboxed_command(command, cwd):
 
     logger.info(f"Running sandboxed command in Docker image {image}...")
 
-    docker_cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{cwd}:/app",
-        "-w", "/app",
-        image,
-        "sh", "-c", command
-    ]
-
     try:
-        result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=300)
+        if os.geteuid() != 0:
+            # Non-root (svc_bg): docker socket needs root, so delegate to the
+            # root helper. The helper validates cwd is under /opt/bugfixer and
+            # runs `docker run` as root; it exits with the docker rc and passes
+            # stdout/stderr through. Image selection stays here (svc_bg picks
+            # the image from repo files) and is passed as a single argv.
+            result = subprocess.run(
+                ["sudo", "-n", "/usr/local/bin/bugfixer-sandbox", image, cwd, command],
+                capture_output=True, text=True, timeout=300,
+            )
+        else:
+            docker_cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{cwd}:/app",
+                "-w", "/app",
+                image,
+                "sh", "-c", command
+            ]
+            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=300)
         return MockResult(result.stdout, result.stderr, result.returncode)
     except Exception as e:
         logger.error(f"Docker execution error: {e}")

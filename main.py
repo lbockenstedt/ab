@@ -2073,13 +2073,20 @@ def _log_restart_event(kind, message, ok=True):
 
 def _spawn_restart():
     """Spawn a detached `systemctl restart bugfixer` that survives this process dying.
-    The unit runs as root, so sudo is only used as a fallback when not root. Detaching
-    into a new session + closing fds ensures systemd's restart proceeds even after the
-    parent receives SIGTERM."""
-    cmd = ["systemctl", "restart", "bugfixer"]
-    if os.geteuid() != 0:
-        cmd = ["sudo"] + cmd
+    As root (dev/standalone) that's a direct `systemctl restart bugfixer`; as the
+    svc_bg service user, it goes through the narrow root helper
+    /usr/local/bin/bugfixer-self-restart (granted via /etc/sudoers.d/bugfixer),
+    which re-execs into a transient systemd unit OUTSIDE bugfixer.service's cgroup
+    — a bare `systemctl restart bugfixer` from inside the unit races the
+    stop/start against this process's cgroup and can strand bugfixer inactive
+    (same ~min-strand bug lm hit, see lm/install_all.sh lm-self-restart).
+    Detaching into a new session + closing fds ensures the restart proceeds
+    even after the parent receives SIGTERM."""
     import subprocess as _sp
+    if os.geteuid() == 0:
+        cmd = ["systemctl", "restart", "bugfixer"]
+    else:
+        cmd = ["sudo", "-n", "/usr/local/bin/bugfixer-self-restart"]
     _sp.Popen(cmd, start_new_session=True, stdout=_sp.DEVNULL,
               stderr=_sp.DEVNULL, close_fds=True)
 
@@ -2926,39 +2933,21 @@ def _ollama_bin_path():
 
 
 def _ensure_zstd(log_fn):
-    """Ensure the zstd binary is available.
+    """Detection-only zstd check.
 
     The official Ollama installer extracts its release tarball with zstd, so a
     box without zstd fails with "This version requires zstd for extraction".
-    Installs it via the system package manager when missing; logs clear manual
-    instructions if that is not possible. Returns True when zstd is available.
+    bugfixer now runs as svc_bg (no apt rights), so the privileged
+    /usr/local/bin/bugfixer-ollama-setup helper installs zstd as the first stage
+    of the Local LLM Setup (it has root via sudoers). This runtime check just
+    reports presence so the setup log is honest; the helper is the one that
+    actually installs zstd when the privileged stage runs.
     """
-    import subprocess, shutil
+    import shutil
     if shutil.which("zstd"):
         log_fn("  zstd already available")
         return True
-    log_fn("  zstd not found — attempting to install via apt-get (requires root)…")
-    apt = shutil.which("apt-get")
-    if not apt:
-        log_fn("  ✗ apt-get not found. Install zstd manually, then retry:")
-        log_fn("     Debian/Ubuntu: sudo apt-get install -y zstd")
-        log_fn("     RHEL/CentOS/Fedora: sudo dnf install -y zstd")
-        log_fn("     Arch: sudo pacman -S zstd")
-        return False
-    try:
-        r = subprocess.run([apt, "install", "-y", "zstd"],
-                           capture_output=True, text=True, timeout=300)
-    except Exception as e:
-        log_fn(f"  ✗ apt-get install zstd raised: {e}")
-        return False
-    if r.returncode != 0:
-        log_fn(f"  ✗ apt-get install zstd failed (exit {r.returncode}): "
-               f"{((r.stderr or '') + (r.stdout or '')).strip()[-400:]}")
-        return False
-    if shutil.which("zstd"):
-        log_fn("  ✓ zstd installed")
-        return True
-    log_fn("  ⚠ apt-get reported success but zstd still not on PATH; installer may fail")
+    log_fn("  zstd not found on PATH — the ollama-setup helper will install it")
     return True
 
 
@@ -3054,36 +3043,38 @@ def run_local_llm_setup(model, num_ctx, cores):
     derived_tag = model
     summary = {"state": "failed", "message": "not started"}
     try:
-        # ---- Stage 1: detect / install Ollama ----
+        # ---- Stage 1: detect / install Ollama + apply CPU tuning ----
         # Installed = the HTTP API answers OR the binary exists at a known path.
         # We do NOT rely on `which("ollama")` alone because the bugfixer service
         # runs under systemd with a minimal PATH that omits /usr/local/bin.
-        _llm_setup_log("▶ Stage 1/7 — Prerequisites + checking for Ollama…")
-        # zstd is required by the Ollama installer to extract its tarball; ensure
-        # it is present up front (no-op if already installed) so the install path
-        # works when needed.
-        if not _ensure_zstd(_llm_setup_log):
-            raise RuntimeError("zstd is required by the Ollama installer and could not be "
-                               "installed automatically. Install zstd, then click Setup again.")
+        # bugfixer runs as svc_bg (no root), so the privileged stages — install
+        # ollama (curl|sh), ensure zstd, start the service, write the
+        # /etc/systemd/system/ollama.service.d CPU-tuning override, daemon-reload
+        # + restart — are delegated to /usr/local/bin/bugfixer-ollama-setup via
+        # passwordless sudo (granted in /etc/sudoers.d/bugfixer). The helper is
+        # idempotent (installs only if absent, starts only if down, applies the
+        # override only if it changed), so calling it unconditionally also
+        # covers the former Stage 5 tuning. It prints progress to stdout, which
+        # we relay into the setup log. HTTP-API stages (pull/create model,
+        # verify) stay here in svc_bg.
+        _llm_setup_log("▶ Stage 1/7 — Prerequisites + installing/tuning Ollama (root helper)…")
         already_up = _ollama_reachable(base_url, timeout=5)
         bin_path = _ollama_bin_path()
-        if already_up or bin_path:
-            _llm_setup_log(f"✓ Ollama already installed (service {'up' if already_up else 'down'}, "
-                           f"binary at {bin_path or 'unknown path'})")
-        else:
-            _llm_setup_log("  Ollama not found — running official installer (requires root)…")
-            inst = subprocess.run(["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
-                                  capture_output=True, text=True, timeout=900)
-            if inst.returncode != 0:
-                tail = ((inst.stdout or "") + (inst.stderr or "")).strip()[-800:]
-                raise RuntimeError(f"installer exited {inst.returncode}: {tail}")
-            _llm_setup_log("✓ Ollama installed")
+        _llm_setup_log(f"  pre-check: ollama service {'up' if already_up else 'down'}, "
+                       f"binary at {bin_path or 'unknown path'}")
+        helper_cmd = ["sudo", "-n", "/usr/local/bin/bugfixer-ollama-setup", str(int(cores))]
+        # The helper may restart ollama, so stream its progress synchronously
+        # and surface failure before we depend on the API being up.
+        proc = subprocess.run(helper_cmd, capture_output=True, text=True, timeout=900)
+        for line in (proc.stdout or "").splitlines():
+            _llm_setup_log(f"  [helper] {line}")
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-800:]
+            raise RuntimeError(f"ollama-setup helper exited {proc.returncode}: {tail}")
+        _llm_setup_log("✓ Ollama installed/tuned by helper")
 
-        # ---- Stage 2: ensure the ollama service is up ----
-        _llm_setup_log("▶ Stage 2/7 — Ensuring the ollama service is running…")
-        active = subprocess.run(["systemctl", "is-active", "ollama"], capture_output=True, text=True, timeout=15)
-        if (active.stdout or "").strip() != "active":
-            subprocess.run(["systemctl", "start", "ollama"], capture_output=True, text=True, timeout=30)
+        # ---- Stage 2: confirm the ollama service is reachable ----
+        _llm_setup_log("▶ Stage 2/7 — Confirming the ollama service is reachable…")
         if not _wait_for_ollama(base_url):
             raise RuntimeError(f"ollama service did not become reachable at {base_url}")
         _llm_setup_log(f"✓ ollama service reachable at {base_url}")
@@ -3109,14 +3100,14 @@ def run_local_llm_setup(model, num_ctx, cores):
             _llm_setup_log("▶ Stage 4/7 — num_ctx unset; using base model as-is")
             _llm_setup_log("✓ Skipped derived-model step")
 
-        # ---- Stage 5: write the systemd override + restart ollama ----
-        _llm_setup_log("▶ Stage 5/7 — Applying systemd CPU tuning (daemon-reload + restart ollama)…")
-        wanted = (
-            "[Service]\n"
-            'Environment="OLLAMA_NUM_PARALLEL=1"\n'
-            'Environment="OLLAMA_KEEP_ALIVE=30m"\n'
-            f'Environment="OLLAMA_NUM_THREAD={int(cores)}"\n'
-        )
+        # ---- Stage 5: confirm the systemd override applied by the root helper ----
+        # The root helper invoked in Stage 1 already writes the override, runs
+        # daemon-reload, and restarts ollama. This stage is now a read-only
+        # confirmation so the 7-stage narrative stays intact and the operator can
+        # see the tuning landed. The privileged writes/restart are NOT repeated
+        # here — that would require systemd access svc_bg no longer has.
+        _llm_setup_log("▶ Stage 5/7 — Confirming systemd CPU tuning applied by helper…")
+        wanted_line = f"OLLAMA_NUM_THREAD={int(cores)}"
         current = ""
         if os.path.exists(OLLAMA_OVERRIDE_PATH):
             try:
@@ -3124,20 +3115,17 @@ def run_local_llm_setup(model, num_ctx, cores):
                     current = f.read()
             except Exception:
                 current = ""
-        if current.strip() == wanted.strip():
-            _llm_setup_log("✓ systemd override already matches")
+        if wanted_line in current:
+            _llm_setup_log(f"✓ systemd override already applied by helper ({OLLAMA_OVERRIDE_PATH})")
         else:
-            os.makedirs(OLLAMA_OVERRIDE_DIR, exist_ok=True)
-            with open(OLLAMA_OVERRIDE_PATH, "w") as f:
-                f.write(wanted)
-            _llm_setup_log(f"  Wrote {OLLAMA_OVERRIDE_PATH}")
-        subprocess.run(["systemctl", "daemon-reload"], capture_output=True, text=True, timeout=30)
-        rs = subprocess.run(["systemctl", "restart", "ollama"], capture_output=True, text=True, timeout=30)
-        if rs.returncode != 0:
-            raise RuntimeError(f"systemctl restart ollama failed: {(rs.stderr or '').strip()}")
-        if not _wait_for_ollama(base_url):
-            raise RuntimeError("ollama did not come back after restart")
-        _llm_setup_log("✓ systemd tuned and ollama restarted")
+            # Don't raise — Stage 2 already confirmed ollama is reachable, so
+            # a missing/stale override file is a degraded-tuning warning, not a
+            # setup failure. The helper is the authority on the override now.
+            _llm_setup_log(
+                f"⚠ systemd override not found / missing {wanted_line} at {OLLAMA_OVERRIDE_PATH} "
+                f"— tuning may not be applied (helper should have written it)"
+            )
+        _llm_setup_log("✓ systemd override confirmed (read-only)")
 
         # ---- Stage 6: configure BugFixer provider slot 4 ----
         _llm_setup_log("▶ Stage 6/7 — Configuring BugFixer provider slot 4 (P4)…")

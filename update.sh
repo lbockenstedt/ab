@@ -26,6 +26,13 @@ fi
 
 # 3. Restart service
 echo "♻️ Restarting bugfixer service..."
-systemctl restart bugfixer
+if [ "$(id -u)" != "0" ]; then
+    # Non-root (svc_bg via sudoers): use the race-free root helper that
+    # re-execs into a transient systemd unit so the restart survives this
+    # shell exiting. Mirrors main.py _spawn_restart / watchdog.spawn_restart.
+    exec sudo -n /usr/local/bin/bugfixer-self-restart
+else
+    systemctl restart bugfixer
+fi
 
 echo "✅ BugFixer updated successfully and service restarted!"
