@@ -1,17 +1,18 @@
 #!/bin/bash
 # BugFixer Installer
 #
-# Download and run (avoids stdin-pipe hang):
-#   curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh -o /tmp/install-bugfixer.sh && sudo bash /tmp/install-bugfixer.sh
-#
-# Or pipe directly (also works — stdin is forced to /dev/null internally):
-#   curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | sudo bash
+# Pipe directly (root shell):
+#   curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | bash
+# Or download then run:
+#   curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh -o /tmp/install-bugfixer.sh && bash /tmp/install-bugfixer.sh
 set -e
 
-# When piped through curl | bash, stdin is the curl pipe and interactive
-# tools (npm, apt prompts) can hang waiting for input. Reopen stdin from
-# the terminal or /dev/null so nothing blocks.
-exec </dev/null
+# NOTE: do NOT `exec </dev/null` here. When this script is run via
+# `curl … | bash`, bash reads the SCRIPT ITSELF from stdin — repointing fd 0
+# to /dev/null makes bash hit EOF on the next line and exit immediately
+# (symptom: "install ends right away, nothing logged"). Interactive hangs are
+# instead prevented per-command: apt runs DEBIAN_FRONTEND=noninteractive with
+# -y, and the npm / NodeSource calls get their own `</dev/null` redirect below.
 
 REPO_URL="https://github.com/lbockenstedt/bugfixer.git"
 INSTALL_DIR="/opt/bugfixer"
@@ -28,14 +29,14 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git build-essential p
 # Node.js (needed for Claude Code CLI)
 if ! command -v node &>/dev/null; then
     echo ">> Installing Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 </dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs </dev/null
 fi
 
 # Claude Code CLI (optional — enables the claude_cli LLM provider)
 if ! command -v claude &>/dev/null; then
     echo ">> Installing Claude Code CLI..."
-    npm install -g @anthropic-ai/claude-code --silent --no-progress 2>&1 | tail -3
+    npm install -g @anthropic-ai/claude-code --silent --no-progress </dev/null 2>&1 | tail -3
     echo "   claude CLI installed. Run 'claude auth login' on this server to authenticate."
 else
     echo ">> Claude Code CLI already installed ($(claude --version 2>/dev/null | head -1))"
