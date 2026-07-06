@@ -544,6 +544,52 @@ class HubAgentClient:
             self.on_status("error", "approval revoked by admin")
             return
 
+        if cmd_type in ("HELP_ASK", "help_ask"):
+            # LLM-turn executor for the hub's Help "Ask" assistant. The HUB owns
+            # the doc corpus, the tools, and the agentic loop; BugFixer just runs
+            # ONE model turn (reusing its multi-provider call_llm) and returns the
+            # normalized {content, tool_calls}. call_llm is sync → run off-thread
+            # so we don't block the agent's WS receive loop. Reply mirrors the
+            # get_version COMMAND_RESULT pattern (correlation_id echoes the inbound
+            # message_id; the hub's request_response keys on it).
+            if self._ws is None:
+                return
+            corr = msg.get("header", {}).get("message_id")
+            try:
+                from main import call_llm  # lazy: main imports this module
+                msgs = data.get("messages") or []
+                tools = data.get("tools") or None
+                system = data.get("system") or "You are the Lab Manager help assistant."
+                result, err = await asyncio.to_thread(
+                    call_llm, "", system_prompt=system, messages=msgs, tools=tools)
+                if err or not isinstance(result, dict):
+                    rdata = {"status": "ERROR", "message": str(err or "no result from LLM")}
+                else:
+                    rdata = {"status": "SUCCESS", "assistant": {
+                        "content": result.get("text") or "",
+                        "tool_calls": result.get("tool_calls") or [],
+                    }}
+            except Exception as e:  # noqa: BLE001
+                logger.warning("HELP_ASK failed: %s", e)
+                rdata = {"status": "ERROR", "message": str(e)}
+            reply = {
+                "correlation_id": corr,
+                "header": {
+                    "message_id": str(uuid.uuid4()),
+                    "timestamp": round(time.time(), 6),
+                    "sender_id": self.spoke_id,
+                    "destination_id": "hub",
+                },
+                "payload": {"type": "COMMAND_RESULT", "data": rdata},
+            }
+            if self.signer:
+                reply["signature"] = self.signer.sign(reply)
+            try:
+                await self._ws.send(json.dumps(reply, separators=(",", ":")))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to send HELP_ASK reply: %s", e)
+            return
+
         if cmd_type in ("get_version", "GET_VERSION"):
             # Hub queries our version after approval (and now after a
             # post-connect admin approval). Reply with a signed COMMAND_RESULT
