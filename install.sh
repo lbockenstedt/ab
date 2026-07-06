@@ -100,6 +100,22 @@ chmod 644 "$LOG_FILE" "$WATCHDOG_LOG"
 chown "$SVC_USER:$SVC_USER" "$LOG_FILE" "$WATCHDOG_LOG"
 mkdir -p /var/log/lm
 
+# Circular logging: cap /var/log/lm/*.log so it can't fill the disk (copytruncate
+# keeps the inode → the running spoke's O_APPEND FileHandler + systemd stderr
+# keep appending). Belt-and-suspenders alongside logging_setup's RotatingFileHandler.
+cat > /etc/logrotate.d/lm <<'LOGROTATE'
+/var/log/lm/*.log /var/log/client-sim-*.log {
+    su root root
+    size 50M
+    rotate 5
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+LOGROTATE
+
 # 5. Python venv + dependencies
 echo ">> Installing Python dependencies (this may take a minute)..."
 cd "$INSTALL_DIR"
