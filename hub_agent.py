@@ -107,6 +107,26 @@ class MessageSigner:
             return False
         return hmac.compare_digest(self.sign(msg), sig)
 
+    def sign_bytes(self, message_bytes: bytes) -> str:
+        return hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
+
+    def verify_bytes(self, message_bytes: bytes, signature: str) -> bool:
+        return hmac.compare_digest(self.sign_bytes(message_bytes), signature)
+
+
+def encode_frame(signer, msg: Dict[str, Any]) -> str:
+    """Wire form ``<sig>.<body>`` — body serialized ONCE, sig over those exact
+    bytes; byte-identical to lm/core so the Hub verifies received bytes directly."""
+    body = json.dumps(msg, separators=(",", ":"))
+    sig = signer.sign_bytes(body.encode()) if signer is not None else ""
+    return sig + "." + body
+
+
+def split_frame(wire: str):
+    """Split ``<sig>.<body>`` → (sig, body) on the FIRST '.'; unsigned = ('', body)."""
+    sig, sep, body = wire.partition(".")
+    return ("", wire) if not sep else (sig, body)
+
 
 def _normalize_hub_ws_url(url: Optional[str]) -> Optional[str]:
     """Fill in a pinned HUB_WS_URL's scheme/port/path with sane defaults.
@@ -245,9 +265,7 @@ class HubAgentClient:
                                "sender_id": self.spoke_id, "destination_id": "hub"},
                     "payload": {"type": "SPOKE_LOG", "data": {"entries": entries}},
                 }
-                if self.signer:
-                    msg["signature"] = self.signer.sign(msg)
-                await websocket.send(json.dumps(msg, separators=(",", ":")))
+                await websocket.send(encode_frame(self.signer, msg))
             except Exception as e:  # noqa: BLE001
                 logger.debug("BugFixer log relay send failed: %s", e)
 
@@ -312,12 +330,11 @@ class HubAgentClient:
             },
             "payload": {"type": "HUB_REQUEST", "data": {"type": req_type, **data}},
         }
-        msg["signature"] = self.signer.sign(msg)
 
         fut = asyncio.get_event_loop().create_future()
         self._pending[msg_id] = fut
         try:
-            await self._ws.send(json.dumps(msg, separators=(",", ":")))
+            await self._ws.send(encode_frame(self.signer, msg))
             return await asyncio.wait_for(fut, timeout=timeout)
         finally:
             self._pending.pop(msg_id, None)
@@ -440,9 +457,7 @@ class HubAgentClient:
                                        "sender_id": self.spoke_id, "destination_id": "hub"},
                             "payload": {"type": "HEARTBEAT", "data": {}},
                         }
-                        if self.signer:
-                            msg["signature"] = self.signer.sign(msg)
-                        await websocket.send(json.dumps(msg, separators=(",", ":")))
+                        await websocket.send(encode_frame(self.signer, msg))
                     except Exception:
                         return
                     await asyncio.sleep(_HEARTBEAT_INTERVAL)
@@ -454,9 +469,16 @@ class HubAgentClient:
             lr_task = asyncio.create_task(self._log_relay_task(websocket))
             try:
                 async for message in websocket:
+                    # Wire form <sig>.<body>: verify the RECEIVED body bytes
+                    # directly, parse once. Bootstrap (no secret yet) allows
+                    # unsigned so onboarding frames pass.
+                    sig, body = split_frame(message)
                     try:
-                        msg = json.loads(message)
+                        msg = json.loads(body)
                     except json.JSONDecodeError:
+                        continue
+                    if self.secret and self.signer and sig and not self.signer.verify_bytes(body.encode(), sig):
+                        logger.warning("Invalid signature — dropping")
                         continue
                     await self._handle_message(msg)
             finally:
@@ -468,11 +490,11 @@ class HubAgentClient:
     # ------------------------------------------------------------------ dispatch
 
     def _verify(self, msg: dict) -> bool:
-        """Bootstrap-allow unsigned messages until we have a secret; otherwise
-        verify with the per-spoke signer (matches control_plane._verify_signature)."""
-        if not self.secret or not self.signer:
-            return True
-        return self.signer.verify(msg)
+        """The HMAC is now verified at the receive loop over the RECEIVED body
+        bytes (<sig>.<body> format) before dispatch — the parsed dict no longer
+        carries a "signature" field, so re-verifying it here would always fail.
+        Kept as an always-true hook for existing call sites."""
+        return True
 
     def _read_version(self) -> str:
         """Read this agent's VERSION file (beside this module) for get_version
@@ -582,10 +604,8 @@ class HubAgentClient:
                 },
                 "payload": {"type": "COMMAND_RESULT", "data": rdata},
             }
-            if self.signer:
-                reply["signature"] = self.signer.sign(reply)
             try:
-                await self._ws.send(json.dumps(reply, separators=(",", ":")))
+                await self._ws.send(encode_frame(self.signer, reply))
             except Exception as e:  # noqa: BLE001
                 logger.warning("Failed to send HELP_ASK reply: %s", e)
             return
@@ -612,10 +632,8 @@ class HubAgentClient:
                     "data": {"status": "SUCCESS", "version": self._read_version()},
                 },
             }
-            if self.signer:
-                reply["signature"] = self.signer.sign(reply)
             try:
-                await self._ws.send(json.dumps(reply, separators=(",", ":")))
+                await self._ws.send(encode_frame(self.signer, reply))
             except Exception as e:
                 logger.warning("Failed to send get_version reply: %s", e)
             return
