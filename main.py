@@ -17,13 +17,12 @@ from dedup import (
     strip_boilerplate,
 )
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from fastapi.exceptions import RequestValidationError
 from github import Github, GithubException
 import git
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry
 
 # Setup Logging — uses the shared logging_setup helper when lm/core is on
 # PYTHONPATH, else an inline equivalent (bugfixer is self-contained and does
@@ -2930,25 +2929,6 @@ def _ollama_bin_path():
         if os.path.exists(cand):
             return cand
     return None
-
-
-def _ensure_zstd(log_fn):
-    """Detection-only zstd check.
-
-    The official Ollama installer extracts its release tarball with zstd, so a
-    box without zstd fails with "This version requires zstd for extraction".
-    bugfixer now runs as svc_bg (no apt rights), so the privileged
-    /usr/local/bin/bugfixer-ollama-setup helper installs zstd as the first stage
-    of the Local LLM Setup (it has root via sudoers). This runtime check just
-    reports presence so the setup log is honest; the helper is the one that
-    actually installs zstd when the privileged stage runs.
-    """
-    import shutil
-    if shutil.which("zstd"):
-        log_fn("  zstd already available")
-        return True
-    log_fn("  zstd not found on PATH — the ollama-setup helper will install it")
-    return True
 
 
 def _ollama_http_pull(model, log_fn, base_url=OLLAMA_BASE_URL):
