@@ -1540,76 +1540,12 @@ async def catch_exceptions_mid(request: Request, call_next):
             content={"message": "Internal Server Error. Check bugfixer.log for details.", "error": str(e)}
         )
 
-_task_state_lock = threading.Lock()
-_chat_lock = threading.RLock()
-
-def update_task_state(task_id, task_name="Unknown Task", action="start"):
-    """Manages active tasks and their start times. action can be 'start' or 'end'."""
-    global state
-    if not task_id:
-        logger.debug("update_task_state called with no task_id; ignoring.")
-        return
-    try:
-        if action == "start":
-            with _task_state_lock:
-                state["active_tasks"][task_id] = {
-                    "name": task_name,
-                    "start_time": datetime.now(),
-                    "stream": ""
-                }
-            logger.info(f"Task started: {task_id} - {task_name}")
-        elif action == "end":
-            with _task_state_lock:
-                if task_id in state["active_tasks"]:
-                    del state["active_tasks"][task_id]
-            logger.info(f"Task completed: {task_id}")
-    except Exception as e:
-        logger.error(f"update_task_state failed for task_id={task_id!r} action={action!r}: {e}")
-
-config_on_start = load_config()
-processed_init = load_processed()
-success_count = sum(1 for info in processed_init.values() if info.get("status") in ["fixed", "verified", "awaiting_prod_verification"])
-failure_count = sum(1 for info in processed_init.values() if info.get("status") == "failed")
-# Issues closed on GitHub and recorded locally as `closed` (terminal resolved state).
-closed_count = sum(1 for info in processed_init.values() if info.get("status") == "closed")
-
-state = {
-    "status": "Idle", "active_llm": "Unknown",
-    "provider_1_online": False, "provider_2_online": False, "provider_3_online": False, "provider_4_online": False,
-    "provider_1_configured": False, "provider_2_configured": False, "provider_3_configured": False, "provider_4_configured": False,
-    # Per-slot last failover outcome (status sentinel + reason + iso8601), surfaced in the
-    # Diagnostics panel so silent skips (e.g. "not_configured") are visible without CLI logs.
-    "provider_last_result": {1: None, 2: None, 3: None, 4: None},
-    # Bounded recent log of self-update / restart events for the Diagnostics panel.
-    "restart_log": [],
-    "local_online": False, "cloud_online": False,
-    "last_run": "Never", "api_status": "Not Triggered",
-    "processed": processed_init,
-    "version": get_version(), "llm_stream": "",
-    "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
-    "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
-    "llm_circuit_breaker": _llm_cb_snapshot(),
-    "provider_credit_cb": _provider_credit_cb_snapshot(),
-    "paused": False,
-    "blackout": False,
-    "chat_streams": {}, "chat_fix_proposals": {},
-    "daily_fixes_count": 0,
-    "daily_budget_date": "",
-    "scheduler_mode": "full",
-    "claude_auth_proc": None,    # background subprocess running `claude auth login`
-    "claude_auth_url": "",       # OAuth URL captured from that process
-    "claude_auth_done": False,   # True once the process exits 0
-    "restart_pending": False,    # True when an update was pulled; restart deferred until cycle end
-    "refresh_status_seconds": config_on_start.get("refresh_status_seconds", 30),
-    "refresh_logs_seconds": config_on_start.get("refresh_logs_seconds", 10),
-    "cpu_count": os.cpu_count() or 4,  # detected core count, surfaced in the Local LLM setup UI
-    "local_llm_setup": {},             # last-run summary for the one-click Local LLM setup
-    # Hub agent (WebSocket) status — BugFixer authenticates to the LM Hub as an
-    # agent like any other system, instead of the removed static admin token.
-    "hub_agent_status": "not_registered",  # not_registered | pending | approved | error
-    "hub_agent_message": "",
-    "hub_agent_last_seen": "",
-}
+# Shared mutable application state + task-state locks + update_task_state live in
+# app_state.py. Imported here (after config_store + llm_client names are already
+# re-exported into main's namespace, which app_state builds `state` from) and
+# re-exported so the `from main import state / update_task_state / _chat_lock`
+# surface used by routes.py and the sibling modules resolves unchanged.
+from app_state import *  # noqa: E402,F401,F403
 
 # Stamp which commit this process booted on, before any worker starts, so the watchdog
 # can detect stale-running code and the Diagnostics panel can show running vs disk versions.
