@@ -24,7 +24,11 @@ echo "=== BugFixer Installer ==="
 # 1. System dependencies
 echo ">> Installing system dependencies..."
 DEBIAN_FRONTEND=noninteractive apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git build-essential python3-pip python3-venv psmisc openssl zstd
+# NOTE: `sudo` is REQUIRED — a minimal Debian LXC (Proxmox template) ships
+# without it, so /etc/sudoers.d/ wouldn't exist and the sudoers drop-in below
+# would fail with "no such file or directory". svc_bg also invokes its root
+# helpers via passwordless sudo, so the package is genuinely needed at runtime.
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git build-essential python3-pip python3-venv psmisc openssl zstd sudo
 
 # Dedicated service user (mirrors lm/install_all.sh svc_lm). bugfixer + its
 # watchdog run as svc_bg; the two genuinely root-only capabilities (the Docker
@@ -311,6 +315,7 @@ chmod 0755 /usr/local/bin/bugfixer-self-restart /usr/local/bin/bugfixer-sandbox 
 
 # Sudoers: svc_bg may invoke ONLY these three exact paths, passwordless.
 # No direct systemctl, no docker, no apt — least privilege.
+mkdir -p /etc/sudoers.d   # belt-and-suspenders: exists once `sudo` is installed
 cat > /etc/sudoers.d/bugfixer <<SUDOERS
 # Grants the bugfixer service user (svc_bg) passwordless access to its three
 # narrow root helpers ONLY. Mirrors lm/install_all.sh's /etc/sudoers.d/lm.
