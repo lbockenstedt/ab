@@ -30,9 +30,9 @@ import websockets
 from websockets.exceptions import ConnectionClosedError
 
 # Self-contained runtime DEBUG/INFO flip used by the WebUI "Enable Debug"
-# button (the Hub broadcasts SET_LOG_LEVEL to every connected agent; bugfixer
-# connects as module_type "agent"). Inline fallback because bugfixer does NOT
-# import lm/core (see module docstring) — the fallback is the standard block.
+# button (the Hub broadcasts SET_LOG_LEVEL to every connected spoke). Inline
+# fallback because bugfixer does NOT import lm/core (see module docstring) — the
+# fallback is the standard block.
 try:
     from logging_setup import set_log_level
 except ImportError:
@@ -413,7 +413,16 @@ class HubAgentClient:
             self._ws = websocket
 
             # 1. Spoke authentication handshake.
-            auth_payload = {"spoke_id": self.spoke_id, "module_type": "agent"}
+            # module_type "bugfixer" (NOT "agent"): bugfixer is a STANDALONE
+            # module, not a generic multi-role node. Connecting as "agent" made
+            # the hub treat it as a role-hosting agent — it hid from the plain
+            # approval list, tried to LOAD_ROLE a (non-existent) bugfixer role
+            # (UI stuck on "activating"), and diverted the session-key push so it
+            # never armed. The hub reaches bugfixer by spoke_id ("bugfixer",
+            # HUB_AGENT_ID) and broadcasts SET_LOG_LEVEL to ALL spokes, so a
+            # distinct type keeps every integration working while it registers as
+            # an ordinary approvable module.
+            auth_payload = {"spoke_id": self.spoke_id, "module_type": "bugfixer"}
             if self.secret:
                 auth_payload["secret"] = self.secret
             await websocket.send(json.dumps(auth_payload, separators=(",", ":")))
@@ -639,9 +648,10 @@ class HubAgentClient:
             return
 
         if cmd_type in ("SET_LOG_LEVEL", "SPOKE_SET_LOG_LEVEL"):
-            # WebUI "Enable Debug" broadcast. bugfixer connects as
-            # module_type "agent" so it's in active_connections and receives
-            # this; without a handler here it silently dropped to "Unhandled"
+            # WebUI "Enable Debug" broadcast. It's broadcast to every connected
+            # spoke (any module_type), so bugfixer receives it while in
+            # active_connections; without a handler here it silently dropped to
+            # "Unhandled"
             # and the BugFixer/HubAgent loggers never flipped to DEBUG.
             enabled = bool(data.get("enabled", False))
             level = set_log_level(enabled)
