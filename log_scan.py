@@ -886,39 +886,25 @@ def scan_hub_logs(gh_current, config):
                 except Exception as e:
                     logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
         else:
-            # Hub unreachable: get_hub_logs() returned None. Only triage a
-            # hub-down issue when the agent IS approved/connected — a not-yet-
-            # approved agent (right after a reinstall) returns None for every
-            # request, which is a bootup state, NOT a Hub outage. Filing here
-            # during bootup = a false "Missing heartbeat — hub" flood. Dedup
-            # keeps a real outage to one issue across cycles; a
-            # 'bugfixer-dismissed' label suppresses it permanently.
-            client = _get_hub_agent_client()
+            # Hub unreachable: get_hub_logs() returned None — BugFixer cannot
+            # read Hub logs this cycle. That IS "not connected to the Hub",
+            # regardless of the last-known agent status. The WS layer
+            # (hub_agent.py) only logs+reconnects on a dropped link without
+            # flipping hub_agent_status, so that state can be stale ("approved")
+            # while the connection is actually down — and filing a "Missing
+            # heartbeat — hub" issue here every cycle produced a false flood of
+            # connectivity bugs in GitHub. Per the standing directive: do NOT
+            # generate connectivity/heartbeat errors while the Hub is
+            # unreachable. Record the reason for the Diagnostics UI and skip;
+            # a real outage surfaces there (hub status dot + suppression card),
+            # not as a GitHub issue for the LLM to "fix".
             agent_status = state.get("hub_agent_status")
-            if client and agent_status == "approved":
-                try:
-                    repo_name = resolve_self_diagnosis_repo(config)
-                    if repo_name:
-                        error_data = {
-                            "module": "hub",
-                            "title": "Missing heartbeat — hub",
-                            "body": ("**Automated Heartbeat Triage**\n\nBugFixer could not fetch Hub logs this "
-                                     "cycle (GET_LOGS returned no data) while its agent link was approved. The Hub "
-                                     "may be down or the agent link dropped mid-cycle.\n\nThis issue was automatically created for triage."),
-                            "repo": repo_name,
-                        }
-                        monitored_repos = get_monitored_repos(config)
-                        repo_obj = gh_current.get_repo(repo_name)
-                        create_automated_issue(gh_current, monitored_repos, repo_obj, error_data)
-                        logger.warning("scan_heartbeats: Hub unreachable — triaged hub-down to self-diagnosis repo.")
-                except Exception as e:
-                    logger.error(f"scan_heartbeats: failed to triage hub-down: {e}")
-            else:
-                _record_hb_suppression(
-                    f"not fully connected to hub (agent status={agent_status}); "
-                    f"hub-down triage suppressed")
-                logger.info(f"Hub log scan skipped — agent not approved/connected yet "
-                            f"(status={agent_status}); suppressing hub-down triage to avoid a false flood.")
+            _record_hb_suppression(
+                f"cannot read hub logs (GET_LOGS returned no data; "
+                f"agent status={agent_status}); connectivity triage suppressed")
+            logger.info(f"Hub log scan skipped — cannot read hub logs this cycle "
+                        f"(agent status={agent_status}); suppressing connectivity "
+                        f"triage to avoid a false flood.")
     except Exception as e:
         logger.error(f"Hub log scan failed: {e}")
     finally:
