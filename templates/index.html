@@ -2159,13 +2159,37 @@
                         const chainNote = (cl != null)
                             ? '<div>chain: ' + cl + ' cert' + (cl === 1 ? ' <span class="text-red-600 font-bold">(leaf only — intermediate missing)</span>' : 's (leaf + intermediate)') + '</div>'
                             : '';
+                        // Full chain: leaf → intermediate(s) → root. The ROOT
+                        // (self-signed, last entry) answers the crux question — is
+                        // the issuing CA a PUBLIC one the hub's system store trusts,
+                        // or a PRIVATE/internal CA it never will?
+                        let chainBlock = '';
+                        if (Array.isArray(c.chain) && c.chain.length) {
+                            const pubRe = /ISRG Root|Let's Encrypt|DST Root|Amazon Root|Google Trust|USERTrust|DigiCert|Baltimore|GlobalSign|Sectigo|Certum|Go Daddy/i;
+                            const rows = c.chain.map((lk, i) => {
+                                const role = lk.self_signed
+                                    ? '<span class="text-purple-700 font-bold">ROOT</span>'
+                                    : (i === 0 ? 'leaf' : 'intermediate');
+                                const pub = lk.self_signed
+                                    ? (pubRe.test(lk.subject)
+                                        ? ' <span class="text-[#01A982] font-bold">(public root — system store trusts it)</span>'
+                                        : ' <span class="text-red-600 font-bold">(PRIVATE root — hub can NOT trust via system store)</span>')
+                                    : '';
+                                return '<div class="pl-2 border-l-2 border-slate-200 mt-1">'
+                                     + '<div>' + role + pub + '</div>'
+                                     + '<div>subj: ' + (lk.subject || '—') + '</div>'
+                                     + '<div>iss: ' + (lk.issuer || '—') + '</div></div>';
+                            }).join('');
+                            chainBlock = '<div class="mt-1 text-slate-500 font-semibold">chain (leaf → root):</div>' + rows;
+                        }
                         el.innerHTML =
                             '<div>' + ss + '</div>' +
                             '<div>subject: ' + (c.subject || '—') + '</div>' +
                             '<div>issuer: ' + (c.issuer || '—') + '</div>' +
                             chainNote +
                             (c.sans && c.sans.length ? '<div>SANs: ' + c.sans.join(', ') + '</div>' : '') +
-                            (c.not_after ? '<div>expires: ' + c.not_after + '</div>' : '');
+                            (c.not_after ? '<div>expires: ' + c.not_after + '</div>' : '') +
+                            chainBlock;
                     };
                     renderCert('diag-hc-client-cert', hc.client_cert, false);
                     renderCert('diag-hc-webui-cert', hc.webui_cert, true);

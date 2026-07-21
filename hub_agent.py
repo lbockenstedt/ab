@@ -427,6 +427,31 @@ class HubAgentClient:
                     info["sans"] = [n.value for n in san]
                 except Exception:  # noqa: BLE001 - no SAN ext
                     info["sans"] = []
+                # Full chain breakdown: subject/issuer of EVERY cert in the file
+                # (leaf -> intermediate(s) -> root), so the Diagnostics page shows
+                # what the ROOT is — the whole question of whether the issuing CA is
+                # a public one the hub's system store trusts, or a private/internal
+                # CA it can never trust via the system store. Parse each PEM block
+                # (load_pem_x509_certificates isn't in older cryptography).
+                try:
+                    with open(path, "rb") as f:
+                        raw = f.read()
+                    end = b"-----END CERTIFICATE-----"
+                    chain = []
+                    for seg in raw.split(end):
+                        if b"-----BEGIN CERTIFICATE-----" not in seg:
+                            continue
+                        try:
+                            c = x509.load_pem_x509_certificate(seg + end)
+                            s = c.subject.rfc4514_string()
+                            i = c.issuer.rfc4514_string()
+                            chain.append({"subject": s, "issuer": i,
+                                          "self_signed": s == i})
+                        except Exception:  # noqa: BLE001
+                            continue
+                    info["chain"] = chain
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception as e:  # noqa: BLE001 - cryptography missing / parse error
                 info["parse_error"] = str(e)
             return info
