@@ -297,6 +297,14 @@ async def diagnostics():
         },
         "providers": providers,
         "watchdog_signal": update_pending_exists,
+        "heartbeat": {
+            "agent_status": state.get("hub_agent_status", "not_registered"),
+            "approved": state.get("hub_agent_status") == "approved",
+            "approved_at": state.get("hub_agent_approved_at", ""),
+            "suppressed": bool(state.get("heartbeat_suppression")),
+            "suppression_reason": (state.get("heartbeat_suppression") or {}).get("reason"),
+            "suppression_at": (state.get("heartbeat_suppression") or {}).get("at"),
+        },
     }
 
 

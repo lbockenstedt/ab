@@ -296,6 +296,43 @@ MODULE_TYPE_REPO = {
 
 
 HEARTBEAT_STALE_S_DEFAULT = 300
+# After a reinstall (Hub or BugFixer), the agent reconnects and the Hub's
+# telemetry pipeline takes a minute or two to come back up: spokes reconnect
+# and the Hub's own [heartbeat] loop resumes. Triage fired in that window
+# files a false "missing heartbeat" issue for EVERY expected module — a flood
+# of bugs for the LLM to "fix" that are really just bootup transient. The
+# warm-up gate below suppresses per-spoke triage until the Hub's own heartbeat
+# is observed (the pipeline is flowing) or this many seconds elapse since
+# (re)approval, whichever comes first.
+HEARTBEAT_WARMUP_S = 300
+
+
+def _approved_at_epoch():
+    """Epoch seconds of the agent's last (re)approval, or None if never
+    approved/unknown. Drives the heartbeat warm-up backstop."""
+    s = state.get("hub_agent_approved_at")
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").timestamp()
+    except Exception:
+        return None
+
+
+def _record_hb_suppression(reason):
+    """Stash the current heartbeat-triage suppression reason in state so the
+    Diagnostics UI can show WHY no issues are being filed (vs. silently
+    dropping them). Pass None to clear it when triage is active again."""
+    try:
+        if reason is None:
+            state.pop("heartbeat_suppression", None)
+        else:
+            state["heartbeat_suppression"] = {
+                "reason": reason,
+                "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+    except Exception:
+        pass
 
 
 def scan_heartbeats(gh_current, config, hub_logs):
@@ -334,8 +371,21 @@ def scan_heartbeats(gh_current, config, hub_logs):
             spoke_status = client.request_sync("GET_SPOKE_STATUS", {}, timeout=10)
         except Exception as e:
             logger.warning(f"scan_heartbeats: GET_SPOKE_STATUS failed: {e}")
+    # GATE 1 — fully connected? After a reinstall the agent may be configured
+    # but not yet approved/connected, or the Hub may still be booting. In that
+    # state GET_SPOKE_STATUS returns None (request_sync short-circuits when not
+    # approved), which used to be coerced to {} and treated as "0 approved
+    # spokes" — followed by a "missing heartbeat — hub" issue every cycle. More
+    # broadly, triaging before the link is genuinely up files false issues for
+    # every expected module. Suppress until a signed request actually round-
+    # trips to the Hub.
     if not isinstance(spoke_status, dict):
-        spoke_status = {}
+        reason = ("agent not approved/connected" if not client
+                  else "GET_SPOKE_STATUS failed (hub not reachable)")
+        _record_hb_suppression(f"not fully connected to hub ({reason})")
+        logger.info(f"scan_heartbeats: not fully connected to hub yet ({reason}); "
+                    f"suppressing heartbeat triage to avoid a false-positive flood.")
+        return
     approved = spoke_status.get("approved") or {}
     module_types = spoke_status.get("module_types") or {}
 
@@ -372,6 +422,43 @@ def scan_heartbeats(gh_current, config, hub_logs):
             continue
         m = ts_pat.match(log.strip())
         latest_hb[mod] = m.group(1) if m else ""
+
+    # GATE 2 — telemetry pipeline warm-up. The Hub emits its own
+    # `[heartbeat] ok module=hub` line every ~60s. Until we have observed it
+    # at least once since this process started, the pipeline is still warming
+    # up (Hub just restarted after a reinstall, spokes reconnecting, no
+    # heartbeats collected yet) and EVERY spoke would show "missing" → flood.
+    # Once the Hub's own heartbeat appears the pipeline is confirmed flowing
+    # and spoke misses are real. A WARMUP_S backstop (since (re)approval)
+    # ensures a genuinely-broken Hub heartbeat loop is eventually triaged
+    # instead of suppressed forever — but only the Hub itself, never the
+    # spokes, so a dead pipeline still can't flood.
+    if not hasattr(scan_heartbeats, "_hub_hb_observed"):
+        scan_heartbeats._hub_hb_observed = False
+    if latest_hb.get("hub"):
+        scan_heartbeats._hub_hb_observed = True
+    if not scan_heartbeats._hub_hb_observed:
+        approved_at = _approved_at_epoch()
+        elapsed = (time.time() - approved_at) if approved_at else None
+        elapsed_s = int(elapsed) if elapsed is not None else 0
+        if elapsed is None or elapsed < HEARTBEAT_WARMUP_S:
+            _record_hb_suppression(
+                f"warm-up: waiting for hub's own heartbeat "
+                f"({elapsed_s}s/{HEARTBEAT_WARMUP_S}s since approval)")
+            logger.info(f"scan_heartbeats: hub heartbeat not yet observed "
+                        f"(warm-up {elapsed_s}s/{HEARTBEAT_WARMUP_S}s); "
+                        f"suppressing spoke triage to avoid a false-positive flood.")
+            return
+        # Warm-up elapsed with no Hub heartbeat ever observed — the Hub's own
+        # heartbeat loop may be broken. Triaging ONLY the Hub (single dedup'd
+        # issue) and never the spokes, so a dead pipeline still can't flood.
+        logger.warning("scan_heartbeats: warm-up elapsed but no hub heartbeat ever "
+                       "observed; triaging hub-only as potentially down.")
+        expected = {"hub": "hub"}
+
+    # Pipeline is flowing (or warm-up backstop tripped for hub-only) — clear
+    # any prior suppression note so the UI shows triage is active again.
+    _record_hb_suppression(None)
 
     monitored_repos = get_monitored_repos(config)
     now = time.time()
@@ -799,13 +886,16 @@ def scan_hub_logs(gh_current, config):
                 except Exception as e:
                     logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
         else:
-            # Hub unreachable: get_hub_logs() returned None. If BugFixer has a
-            # Hub agent client configured (so this is an outage, not a missing
-            # config), triage a hub-down heartbeat miss against the self-diagnosis
-            # repo so a silent Hub outage does not pass unreported. Dedup keeps
-            # this to one issue across cycles; a 'bugfixer-dismissed' label
-            # suppresses it permanently.
-            if _get_hub_agent_client():
+            # Hub unreachable: get_hub_logs() returned None. Only triage a
+            # hub-down issue when the agent IS approved/connected — a not-yet-
+            # approved agent (right after a reinstall) returns None for every
+            # request, which is a bootup state, NOT a Hub outage. Filing here
+            # during bootup = a false "Missing heartbeat — hub" flood. Dedup
+            # keeps a real outage to one issue across cycles; a
+            # 'bugfixer-dismissed' label suppresses it permanently.
+            client = _get_hub_agent_client()
+            agent_status = state.get("hub_agent_status")
+            if client and agent_status == "approved":
                 try:
                     repo_name = resolve_self_diagnosis_repo(config)
                     if repo_name:
@@ -813,8 +903,8 @@ def scan_hub_logs(gh_current, config):
                             "module": "hub",
                             "title": "Missing heartbeat — hub",
                             "body": ("**Automated Heartbeat Triage**\n\nBugFixer could not fetch Hub logs this "
-                                     "cycle (GET_LOGS returned no data). The Hub may be down or the BugFixer agent "
-                                     "link is not approved/connected.\n\nThis issue was automatically created for triage."),
+                                     "cycle (GET_LOGS returned no data) while its agent link was approved. The Hub "
+                                     "may be down or the agent link dropped mid-cycle.\n\nThis issue was automatically created for triage."),
                             "repo": repo_name,
                         }
                         monitored_repos = get_monitored_repos(config)
@@ -824,7 +914,11 @@ def scan_hub_logs(gh_current, config):
                 except Exception as e:
                     logger.error(f"scan_heartbeats: failed to triage hub-down: {e}")
             else:
-                logger.info("Hub log scan skipped — no Hub agent client configured (set HUB_WS_URL).")
+                _record_hb_suppression(
+                    f"not fully connected to hub (agent status={agent_status}); "
+                    f"hub-down triage suppressed")
+                logger.info(f"Hub log scan skipped — agent not approved/connected yet "
+                            f"(status={agent_status}); suppressing hub-down triage to avoid a false flood.")
     except Exception as e:
         logger.error(f"Hub log scan failed: {e}")
     finally:

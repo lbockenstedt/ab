@@ -253,6 +253,12 @@ def _hub_agent_on_status(status, message):
     state["hub_agent_status"] = status
     state["hub_agent_message"] = message or ""
     state["hub_agent_last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Record when the agent (re)became approved so the heartbeat triage warm-up
+    # gate (log_scan.scan_heartbeats) can avoid filing a false flood of
+    # "missing heartbeat" issues while the Hub/telemetry pipeline is still
+    # coming up after a reinstall. Reset on every (re)approval.
+    if status == "approved":
+        state["hub_agent_approved_at"] = state["hub_agent_last_seen"]
 
 
 def _persist_config_key(key, value):

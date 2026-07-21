@@ -1306,6 +1306,28 @@
                 </div>
             </div>
 
+            <!-- Hub & Heartbeat Triage card -->
+            <div class="hpe-card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold text-slate-800">Hub &amp; Heartbeat Triage</h3>
+                    <i class="fas fa-heartbeat text-[#01A982]"></i>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+                    <div><div class="text-slate-500">Hub agent</div><div id="diag-hb-agent" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Approved since</div><div id="diag-hb-approved-at" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Heartbeat triage</div><div id="diag-hb-state" class="font-bold text-slate-800">—</div></div>
+                </div>
+                <div id="diag-hb-suppression" class="hidden mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                    <i class="fas fa-pause-circle mr-1"></i><span id="diag-hb-reason">suppressed</span>
+                    <div class="text-slate-500 mt-1">at <span id="diag-hb-at">—</span></div>
+                </div>
+                <p class="text-[11px] text-slate-500 mt-2">
+                    Triage is suppressed until BugFixer is fully connected to the Hub AND the Hub's own heartbeat is
+                    observed — this prevents a flood of false "missing heartbeat" bugs while the telemetry pipeline
+                    warms up after a reinstall.
+                </p>
+            </div>
+
             <!-- Providers table -->
             <div class="hpe-card p-6">
                 <div class="flex items-center justify-between mb-4">
@@ -2008,6 +2030,22 @@
                         + '</tr>';
                 }).join('');
                 body.innerHTML = rows;
+
+                // Hub & Heartbeat Triage
+                const hb = d.heartbeat || {};
+                document.getElementById('diag-hb-agent').textContent = hb.agent_status || '—';
+                document.getElementById('diag-hb-approved-at').textContent = hb.approved_at || '—';
+                const stEl = document.getElementById('diag-hb-state');
+                stEl.textContent = hb.suppressed ? 'suppressed' : (hb.approved ? 'active' : 'pending');
+                stEl.className = 'font-bold ' + (hb.suppressed ? 'text-amber-600' : (hb.approved ? 'text-[#01A982]' : 'text-slate-500'));
+                const supEl = document.getElementById('diag-hb-suppression');
+                if (hb.suppressed) {
+                    supEl.classList.remove('hidden');
+                    document.getElementById('diag-hb-reason').textContent = hb.suppression_reason || 'suppressed';
+                    document.getElementById('diag-hb-at').textContent = hb.suppression_at || '—';
+                } else {
+                    supEl.classList.add('hidden');
+                }
 
                 // Restart log
                 const logEl = document.getElementById('diag-restart-log');
