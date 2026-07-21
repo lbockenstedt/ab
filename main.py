@@ -65,6 +65,18 @@ _resolved_level = configure_logging(log_file=log_file)
 logger = logging.getLogger("BugFixer")
 logger.info(f"BugFixer started. Logging level: {logging.getLevelName(_resolved_level)}. Logging to: {log_file}")
 
+# main.py is launched directly (systemd `ExecStart=python3 main.py`), so it loads
+# as the module __main__. The sibling modules below do `from main import ...`
+# (logger, load_config, CONFIG_DIR, …). Without this alias Python RE-IMPORTS
+# main.py a second time under the name `main`, and that copy races the circular
+# `from config_store import *` on the next line — it sees a half-loaded
+# config_store (load_config not yet defined) and dies with
+# "ImportError: cannot import name 'load_config' from 'main'". Aliasing `main` to
+# THIS already-running module makes every `from main import X` resolve to it, so
+# there is only ever one main module. No-op when imported normally (name==main).
+import sys as _sys
+_sys.modules.setdefault("main", _sys.modules[__name__])
+
 # Persistent config paths, chat-config defaults, and the config / processed /
 # update-state / version / startup-stamp helpers live in config_store.py.
 # Imported right after `logger` (which config_store depends on) so main's own
