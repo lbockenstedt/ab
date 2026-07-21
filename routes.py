@@ -214,6 +214,20 @@ async def scheduler_status():
     return _schedule_check(config)
 
 
+def _hub_connection_diag():
+    """Hub-connection + mTLS cert state from the running HubAgentClient (module
+    global), so the Diagnostics page can show whether log/update access works and
+    whether the WebUI is still self-signed — the cert data we otherwise SSH for."""
+    try:
+        import hub_agent
+        client = hub_agent.hub_agent_client
+        if client is None:
+            return {"available": False, "reason": "hub agent not started"}
+        return client.cert_diagnostics()
+    except Exception as e:  # noqa: BLE001 - diagnostics must never 500
+        return {"available": False, "error": str(e)}
+
+
 @router.get("/api/diagnostics")
 async def diagnostics():
     """Surfaces running-vs-disk-vs-origin versions, stale-code state, per-provider
@@ -297,6 +311,7 @@ async def diagnostics():
         },
         "providers": providers,
         "watchdog_signal": update_pending_exists,
+        "hub_connection": _hub_connection_diag(),
         "heartbeat": {
             "agent_status": state.get("hub_agent_status", "not_registered"),
             "approved": state.get("hub_agent_status") == "approved",

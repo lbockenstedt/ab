@@ -220,6 +220,9 @@ class HubAgentClient:
         self._present_cert = True
         self._presented_cert = False   # was a cert presented on the current attempt?
         self._cert_ever_worked = False  # did a handshake ever SUCCEED while presenting the cert?
+        self._last_conn_error = ""      # last hub-connection error (surfaced on Diagnostics)
+        self._cert_rejected = False     # did the hub reject our client cert (handshake died)?
+        self._cert_rejected_at = None   # unix ts of the last cert rejection
 
         self.signer = MessageSigner(self.secret) if self.secret else None
         # Pending request Futures keyed by the request header.message_id.
@@ -360,6 +363,66 @@ class HubAgentClient:
         finally:
             self._pending.pop(msg_id, None)
 
+    def cert_diagnostics(self):
+        """Runtime hub-connection + mTLS cert state for the Diagnostics page, so
+        an operator sees WHY hub-log/update access is or isn't working (and whether
+        the WebUI is still on the self-signed cert) without SSHing to the box.
+
+        log_access is the honest signal: the current connection is presenting a
+        cert the hub accepted. HUB_REQUEST also requires the hub to have SAN-pinned
+        this cert as the BugFixer identity — that half lives on the hub and can't
+        be observed from here, so we report 'mTLS active', not 'authorized'."""
+        def _cert_info(path):
+            info = {"path": path, "exists": bool(path and os.path.exists(path))}
+            if not info["exists"]:
+                return info
+            try:
+                info["mtime"] = os.path.getmtime(path)
+            except OSError:
+                pass
+            try:
+                from cryptography import x509
+                with open(path, "rb") as f:
+                    cert = x509.load_pem_x509_certificate(f.read())
+                subj = cert.subject.rfc4514_string()
+                iss = cert.issuer.rfc4514_string()
+                info["subject"] = subj
+                info["issuer"] = iss
+                info["self_signed"] = (subj == iss)
+                try:
+                    info["not_after"] = cert.not_valid_after_utc.isoformat()
+                except Exception:  # noqa: BLE001 - older cryptography
+                    info["not_after"] = cert.not_valid_after.isoformat()
+                try:
+                    san = cert.extensions.get_extension_for_class(
+                        x509.SubjectAlternativeName).value
+                    info["sans"] = [n.value for n in san]
+                except Exception:  # noqa: BLE001 - no SAN ext
+                    info["sans"] = []
+            except Exception as e:  # noqa: BLE001 - cryptography missing / parse error
+                info["parse_error"] = str(e)
+            return info
+
+        webui_cert = os.environ.get("BUGFIXER_SSL_CERT", "/etc/bugfixer/cert.pem")
+        connected = self._ws is not None
+        return {
+            "available": True,
+            "hub_ws_url": self.hub_ws_url,
+            "connected": connected,
+            "mtls_enabled": self._hub_mtls,
+            "present_cert": self._present_cert,
+            "presented_this_attempt": self._presented_cert,
+            "cert_ever_worked": self._cert_ever_worked,
+            "cert_rejected": self._cert_rejected,
+            "cert_rejected_at": self._cert_rejected_at,
+            "last_error": self._last_conn_error,
+            # mTLS is active on the live connection only if we presented the cert
+            # this attempt AND we're still connected (a rejected cert is disengaged).
+            "mtls_active": bool(connected and self._presented_cert),
+            "client_cert": _cert_info(self._client_cert_file),
+            "webui_cert": _cert_info(webui_cert),
+        }
+
     # ------------------------------------------------------------------ loop
 
     async def _run(self):
@@ -402,6 +465,7 @@ class HubAgentClient:
                     logger.warning("Hub connection closed (%s); reconnecting", e)
             except (OSError, Exception) as e:
                 logger.warning("Hub connection error (%s); reconnecting in %ds", e, _RECONNECT_DELAY)
+                self._last_conn_error = str(e)
                 # If we presented the client cert this attempt and the handshake
                 # died before we ever connected WITH the cert, it is being REJECTED
                 # (untrusted CA / not chained to the hub's mTLS CA). Drop it for the
@@ -414,6 +478,8 @@ class HubAgentClient:
                 # trust the BugFixer cert's CA).
                 if self._presented_cert and not self._cert_ever_worked:
                     self._present_cert = False
+                    self._cert_rejected = True
+                    self._cert_rejected_at = time.time()
                     logger.warning(
                         "wss: hub rejected our client cert (handshake failed) — "
                         "retrying WITHOUT it so the basic connection recovers. The hub "
@@ -569,6 +635,8 @@ class HubAgentClient:
             # get mistaken for a cert rejection and disengage a working cert.
             if self._presented_cert:
                 self._cert_ever_worked = True
+                self._cert_rejected = False
+            self._last_conn_error = ""   # handshake succeeded — clear the last error
 
             # 1. Spoke authentication handshake.
             # module_type "bugfixer" (NOT "agent"): bugfixer is a STANDALONE

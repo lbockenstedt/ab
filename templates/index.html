@@ -1324,6 +1324,43 @@
                 </p>
             </div>
 
+            <!-- Hub Connection & mTLS card — shows whether log/update access works
+                 (mTLS cert accepted + presented) and whether the WebUI is still on
+                 the self-signed cert. Populated by refreshDiagnostics(). -->
+            <div class="hpe-card p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-bold text-[#263040]">Hub Connection &amp; mTLS</h3>
+                    <i class="fas fa-lock text-[#01A982]"></i>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div><div class="text-slate-500">WS connected</div><div id="diag-hc-connected" class="font-bold text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Log/update access (mTLS)</div><div id="diag-hc-mtls" class="font-bold text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Client cert presented</div><div id="diag-hc-presented" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Cert ever accepted</div><div id="diag-hc-everok" class="font-mono text-slate-800">—</div></div>
+                </div>
+                <div id="diag-hc-rejected" class="hidden mt-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
+                    <i class="fas fa-exclamation-triangle mr-1"></i>The hub rejected the BugFixer client cert — mTLS log/update access is OFF.
+                    The hub must trust the cert's CA (it is verified against the private mTLS CA + the system store). Re-deploy the cert from the LE module or restart bugfixer to retry.
+                    <div class="text-slate-500 mt-1">last rejected at <span id="diag-hc-rejected-at">—</span></div>
+                </div>
+                <div id="diag-hc-error" class="hidden mt-2 text-xs text-amber-700"><span class="font-semibold">Last connection error:</span> <span id="diag-hc-error-msg" class="font-mono">—</span></div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                    <div class="text-xs">
+                        <div class="text-slate-500 font-semibold mb-1">mTLS client cert <span class="font-normal text-slate-400">(presented to the hub)</span></div>
+                        <div id="diag-hc-client-cert" class="font-mono text-slate-700 space-y-0.5">—</div>
+                    </div>
+                    <div class="text-xs">
+                        <div class="text-slate-500 font-semibold mb-1">WebUI server cert <span class="font-normal text-slate-400">(what browsers + GitHub webhooks see)</span></div>
+                        <div id="diag-hc-webui-cert" class="font-mono text-slate-700 space-y-0.5">—</div>
+                    </div>
+                </div>
+                <p class="text-[11px] text-slate-500 mt-3">
+                    "Log/update access" requires the current connection to present a cert the hub accepts. The hub must
+                    also have this cert SAN-pinned as the BugFixer identity (LE module → Tag BugFixer) — that half is
+                    enforced on the hub and isn't visible here.
+                </p>
+            </div>
+
             <!-- Providers table -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
@@ -2063,6 +2100,57 @@
                     document.getElementById('diag-hb-at').textContent = hb.suppression_at || '—';
                 } else {
                     supEl.classList.add('hidden');
+                }
+
+                // Hub Connection & mTLS
+                const hc = d.hub_connection || {};
+                const yn = (v) => v ? 'yes' : 'no';
+                const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+                const setCls = (id, cls) => { const el = document.getElementById(id); if (el) el.className = cls; };
+                if (hc.available === false) {
+                    setTxt('diag-hc-connected', 'agent not started');
+                    setCls('diag-hc-connected', 'font-bold text-slate-500');
+                    setTxt('diag-hc-mtls', '—'); setTxt('diag-hc-presented', '—'); setTxt('diag-hc-everok', '—');
+                } else {
+                    setTxt('diag-hc-connected', hc.connected ? 'connected' : 'disconnected');
+                    setCls('diag-hc-connected', 'font-bold ' + (hc.connected ? 'text-[#01A982]' : 'text-red-600'));
+                    setTxt('diag-hc-mtls', hc.mtls_active ? 'ON' : 'OFF');
+                    setCls('diag-hc-mtls', 'font-bold ' + (hc.mtls_active ? 'text-[#01A982]' : 'text-red-600'));
+                    setTxt('diag-hc-presented', yn(hc.presented_this_attempt));
+                    setTxt('diag-hc-everok', yn(hc.cert_ever_worked));
+                    // Rejection banner
+                    const rej = document.getElementById('diag-hc-rejected');
+                    if (rej) {
+                        if (hc.cert_rejected) {
+                            rej.classList.remove('hidden');
+                            const ts = hc.cert_rejected_at ? new Date(hc.cert_rejected_at * 1000).toLocaleString() : '—';
+                            setTxt('diag-hc-rejected-at', ts);
+                        } else { rej.classList.add('hidden'); }
+                    }
+                    // Last error
+                    const errWrap = document.getElementById('diag-hc-error');
+                    if (errWrap) {
+                        if (hc.last_error) { errWrap.classList.remove('hidden'); setTxt('diag-hc-error-msg', hc.last_error); }
+                        else { errWrap.classList.add('hidden'); }
+                    }
+                    // Cert detail renderer
+                    const renderCert = (elId, c, selfSignedIsBad) => {
+                        const el = document.getElementById(elId);
+                        if (!el) return;
+                        if (!c || !c.exists) { el.innerHTML = '<span class="text-red-600">not present (' + ((c && c.path) || '—') + ')</span>'; return; }
+                        if (c.parse_error) { el.innerHTML = 'present at ' + c.path + ' <span class="text-slate-400">(unparsed: ' + c.parse_error + ')</span>'; return; }
+                        const ss = c.self_signed
+                            ? '<span class="' + (selfSignedIsBad ? 'text-red-600' : 'text-amber-600') + ' font-bold">self-signed</span>'
+                            : '<span class="text-[#01A982] font-bold">CA-issued</span>';
+                        el.innerHTML =
+                            '<div>' + ss + '</div>' +
+                            '<div>subject: ' + (c.subject || '—') + '</div>' +
+                            '<div>issuer: ' + (c.issuer || '—') + '</div>' +
+                            (c.sans && c.sans.length ? '<div>SANs: ' + c.sans.join(', ') + '</div>' : '') +
+                            (c.not_after ? '<div>expires: ' + c.not_after + '</div>' : '');
+                    };
+                    renderCert('diag-hc-client-cert', hc.client_cert, false);
+                    renderCert('diag-hc-webui-cert', hc.webui_cert, true);
                 }
 
                 // Restart log
