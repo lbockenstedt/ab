@@ -1288,6 +1288,16 @@
 
         {% if view == 'diagnostics' %}
         <div id="diag-root" class="space-y-6">
+            <!-- Header with a Copy-raw button so the full /api/diagnostics JSON can
+                 be copied and pasted for support without SSHing to the box. -->
+            <div class="flex items-center justify-between">
+                <h2 class="text-xl font-bold text-[#263040]">Diagnostics</h2>
+                <button id="diag-copy-btn" onclick="copyDiagnostics()"
+                        class="btn-sec px-3 py-1.5 rounded font-bold text-xs flex items-center gap-2"
+                        title="Copy the full raw diagnostics JSON to the clipboard">
+                    <i class="fas fa-copy"></i> <span id="diag-copy-label">Copy raw data</span>
+                </button>
+            </div>
             <!-- Code Version / Stale Code card -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
@@ -2143,10 +2153,17 @@
                         const ss = c.self_signed
                             ? '<span class="' + (selfSignedIsBad ? 'text-red-600' : 'text-amber-600') + ' font-bold">self-signed</span>'
                             : '<span class="text-[#01A982] font-bold">CA-issued</span>';
+                        // A leaf-only chain (len 1) can't be verified by a peer that
+                        // only holds roots (the LE intermediate is missing) — flag it.
+                        const cl = c.chain_len;
+                        const chainNote = (cl != null)
+                            ? '<div>chain: ' + cl + ' cert' + (cl === 1 ? ' <span class="text-red-600 font-bold">(leaf only — intermediate missing)</span>' : 's (leaf + intermediate)') + '</div>'
+                            : '';
                         el.innerHTML =
                             '<div>' + ss + '</div>' +
                             '<div>subject: ' + (c.subject || '—') + '</div>' +
                             '<div>issuer: ' + (c.issuer || '—') + '</div>' +
+                            chainNote +
                             (c.sans && c.sans.length ? '<div>SANs: ' + c.sans.join(', ') + '</div>' : '') +
                             (c.not_after ? '<div>expires: ' + c.not_after + '</div>' : '');
                     };
@@ -2163,6 +2180,36 @@
             } catch (e) {
                 const logEl = document.getElementById('diag-restart-log');
                 if (logEl) logEl.innerHTML = '<div class="text-red-500">Error loading diagnostics: ' + e + '</div>';
+            }
+        }
+        // Copy the full raw /api/diagnostics JSON to the clipboard so it can be
+        // pasted for support without SSHing to the box. Falls back to a temporary
+        // textarea + execCommand when the async Clipboard API is unavailable
+        // (non-secure context / older browser).
+        async function copyDiagnostics() {
+            const label = document.getElementById('diag-copy-label');
+            const orig = label ? label.textContent : '';
+            try {
+                const d = await fetch('/api/diagnostics').then(r => r.json());
+                const text = JSON.stringify(d, null, 2);
+                let ok = false;
+                try {
+                    if (navigator.clipboard && window.isSecureContext) {
+                        await navigator.clipboard.writeText(text);
+                        ok = true;
+                    }
+                } catch (e) { /* fall through to legacy path */ }
+                if (!ok) {
+                    const ta = document.createElement('textarea');
+                    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                    document.body.appendChild(ta); ta.focus(); ta.select();
+                    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+                    document.body.removeChild(ta);
+                }
+                if (label) { label.textContent = ok ? 'Copied!' : 'Copy failed — select manually'; setTimeout(() => { label.textContent = orig; }, 2000); }
+                if (!ok && typeof showToast === 'function') showToast('Copy failed — clipboard blocked; here is the data:\n' + text.slice(0, 200) + '…', 'warn');
+            } catch (e) {
+                if (label) { label.textContent = 'Error'; setTimeout(() => { label.textContent = orig; }, 2000); }
             }
         }
         async function diagAction(endpoint, _msg) {

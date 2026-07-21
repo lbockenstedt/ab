@@ -381,6 +381,11 @@ class HubAgentClient:
             except OSError:
                 pass
             try:
+                with open(path, "r") as f:
+                    info["chain_len"] = f.read().count("-----BEGIN CERTIFICATE-----")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
                 from cryptography import x509
                 with open(path, "rb") as f:
                     cert = x509.load_pem_x509_certificate(f.read())
@@ -544,6 +549,16 @@ class HubAgentClient:
             else:
                 fc = fullchain if fullchain.endswith("\n") else fullchain + "\n"
                 pk = privkey if privkey.endswith("\n") else privkey + "\n"
+                # Ensure the intermediate is bundled. The system trust store holds
+                # only ROOTS (ISRG), not LE intermediates, so a verifier can only
+                # build leaf -> intermediate -> root if WE present the intermediate.
+                # If the hub/LE sent the chain separately and fullchain didn't
+                # already include it, append it — otherwise a leaf-only fullchain is
+                # rejected at the hub handshake (and browsers show an incomplete
+                # chain for the WebUI cert).
+                chain = data.get("chain") or ""
+                if chain.strip() and chain.strip() not in fc:
+                    fc = fc + (chain if chain.endswith("\n") else chain + "\n")
                 # 1. mTLS client identity for the hub connection.
                 os.makedirs(os.path.dirname(self._client_cert_file) or ".", exist_ok=True)
                 with open(self._client_cert_file, "w") as f:
