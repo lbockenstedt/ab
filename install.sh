@@ -45,23 +45,35 @@ if ! id -u "$SVC_USER" >/dev/null 2>&1; then
     useradd -r -d /opt/bugfixer -s /usr/sbin/nologin "$SVC_USER"
 fi
 
-# Node.js (needed for Claude Code CLI)
-if ! command -v node &>/dev/null; then
-    echo ">> Installing Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 </dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs </dev/null
+# Node.js + npm (needed only for the OPTIONAL Claude Code CLI). Trigger the
+# install when EITHER is missing — a box with a node from elsewhere (Debian's
+# split nodejs package) can have node but no npm, which used to skip this block
+# and then fail at `npm install` with "npm: command not found".
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo ">> Installing Node.js + npm..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 </dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs </dev/null || true
 fi
 
-# Claude Code CLI (optional — enables the claude_cli LLM provider)
-if ! command -v claude &>/dev/null; then
+# Claude Code CLI (OPTIONAL — enables the claude_cli LLM provider). NEVER fatal:
+# a missing/failed npm must not abort the whole install — the bot runs fine with
+# a cloud LLM configured in the WebUI instead.
+if command -v claude >/dev/null 2>&1; then
+    echo ">> Claude Code CLI already installed ($(claude --version 2>/dev/null | head -1))"
+elif command -v npm >/dev/null 2>&1; then
     echo ">> Installing Claude Code CLI..."
-    npm install -g @anthropic-ai/claude-code --silent --no-progress </dev/null 2>&1 | tail -3
+    npm install -g @anthropic-ai/claude-code --silent --no-progress </dev/null 2>&1 | tail -3 || true
     echo "   claude CLI installed. Run 'claude auth login' on this server to authenticate."
 else
-    echo ">> Claude Code CLI already installed ($(claude --version 2>/dev/null | head -1))"
+    echo "   ⚠️  npm unavailable — skipping the optional Claude Code CLI (configure a cloud LLM in the WebUI instead)."
 fi
 
 # 2. Clone or update repo
+# Git's dubious-ownership guard fires when a user runs git on a repo owned by
+# ANOTHER user — here root re-running the installer over an already svc_bg-owned
+# tree (the fetch/reset below), or svc_bg's update.sh over a root-owned file.
+# Whitelist the tree SYSTEM-WIDE (/etc/gitconfig) so every user can operate on it.
+git config --system --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
 if [ ! -d "$INSTALL_DIR/.git" ]; then
     echo ">> Cloning BugFixer to $INSTALL_DIR..."
     git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
