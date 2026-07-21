@@ -245,7 +245,7 @@
             </div>
         </header>
 
-    <main class="flex-1 overflow-y-auto p-6">
+    <main class="flex-1 min-h-0 overflow-y-auto p-6">
         {% if view == 'status' %}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <!-- System Status Card -->
@@ -552,7 +552,7 @@
         {% endif %}
 
         {% if view == 'settings' %}
-        <div class="max-w-6xl mx-auto">
+        <div>
             <div class="hpe-card p-8">
                 <div class="flex items-center gap-3 mb-6">
                     <i class="fas fa-sliders-h text-[#01A982] text-2xl"></i>
