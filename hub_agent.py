@@ -199,6 +199,14 @@ class HubAgentClient:
         # LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify against a shipped CA.
         self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0") == "1"
         self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "") or "").strip()
+        # mTLS CLIENT identity for the wss connection, installed by the hub's
+        # cert-distribution (INSTALL_CERT, LE-issued). When both files exist the
+        # SSL context presents them so the hub can mutually-authenticate bugfixer
+        # — required by hubs that gate data reads on a client cert.
+        self._client_cert_file = (os.environ.get("BUGFIXER_HUB_CLIENT_CERT")
+                                  or "/etc/bugfixer/hub-client-cert.pem")
+        self._client_key_file = (os.environ.get("BUGFIXER_HUB_CLIENT_KEY")
+                                 or "/etc/bugfixer/hub-client-key.pem")
 
         self.signer = MessageSigner(self.secret) if self.secret else None
         # Pending request Futures keyed by the request header.message_id.
@@ -394,11 +402,69 @@ class HubAgentClient:
         wss:// URI and the self-signed hub cert fails CERTIFICATE_VERIFY_FAILED."""
         try:
             if self._tls_verify and self._tls_ca_cert:
-                return ssl.create_default_context(cafile=self._tls_ca_cert)
-            return ssl._create_unverified_context()
+                ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
+            else:
+                ctx = ssl._create_unverified_context()
+            # Present the hub-installed mTLS client cert when available so the
+            # hub can mutually-authenticate us (INSTALL_CERT writes these files).
+            if (ctx is not None and os.path.exists(self._client_cert_file)
+                    and os.path.exists(self._client_key_file)):
+                try:
+                    ctx.load_cert_chain(self._client_cert_file, self._client_key_file)
+                    logger.info("wss: presenting hub mTLS client cert %s", self._client_cert_file)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("wss: could not load client cert (mTLS off): %s", e)
+            return ctx
         except Exception as e:  # noqa: BLE001
             logger.error("Could not build wss SSL context: %s", e)
             return None
+
+    async def _handle_install_cert(self, msg, data):
+        """Install a hub-distributed (LE) cert as our mTLS CLIENT identity for the
+        hub connection: write fullchain + privkey, reply the COMMAND_RESULT the
+        hub's request_response awaits, then reconnect so the wss handshake
+        presents the new cert. Mirrors the INSTALL_CERT contract other cert-capable
+        spokes implement (cert_distribution.py)."""
+        status, message = "SUCCESS", "cert installed"
+        try:
+            fullchain = data.get("fullchain") or ""
+            privkey = data.get("privkey") or ""
+            if not fullchain or not privkey:
+                status, message = "ERROR", "missing fullchain/privkey"
+            else:
+                os.makedirs(os.path.dirname(self._client_cert_file) or ".", exist_ok=True)
+                with open(self._client_cert_file, "w") as f:
+                    f.write(fullchain if fullchain.endswith("\n") else fullchain + "\n")
+                with open(self._client_key_file, "w") as f:
+                    f.write(privkey if privkey.endswith("\n") else privkey + "\n")
+                try:
+                    os.chmod(self._client_key_file, 0o600)
+                except OSError:
+                    pass
+                message = f"cert installed for {data.get('domain') or '?'} — reconnecting to present it"
+                logger.info("INSTALL_CERT: %s", message)
+        except Exception as e:  # noqa: BLE001
+            status, message = "ERROR", str(e)
+            logger.warning("INSTALL_CERT failed: %s", e)
+        # Reply the COMMAND_RESULT the hub awaits (correlation_id echoes the
+        # inbound message_id; signed with our session secret).
+        if self._ws is not None and self.signer is not None:
+            reply = {
+                "correlation_id": msg.get("header", {}).get("message_id"),
+                "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
+                           "sender_id": self.spoke_id, "destination_id": "hub"},
+                "payload": {"type": "COMMAND_RESULT", "data": {"status": status, "message": message}},
+            }
+            try:
+                await self._ws.send(encode_frame(self.signer, reply))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("INSTALL_CERT: failed to send result: %s", e)
+        # Reconnect to present the freshly-installed client cert (success only).
+        if status == "SUCCESS" and self._ws is not None:
+            try:
+                await self._ws.close(code=1012, reason="reconnect to present new cert")
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _connect_and_serve(self):
         # max_size: the hub's GET_LOGS response aggregates every spoke's logs
@@ -549,6 +615,10 @@ class HubAgentClient:
                 self.on_secret(new_secret)
                 self.on_status("approved", "session key received — zero-touch ready")
                 logger.info("Session key received from Hub for %s", self.spoke_id)
+            return
+
+        if cmd_type == "INSTALL_CERT":
+            await self._handle_install_cert(msg, data)
             return
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
