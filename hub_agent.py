@@ -219,6 +219,7 @@ class HubAgentClient:
         self._hub_mtls = os.environ.get("BUGFIXER_HUB_MTLS", "1") != "0"
         self._present_cert = True
         self._presented_cert = False   # was a cert presented on the current attempt?
+        self._cert_ever_worked = False  # did a handshake ever SUCCEED while presenting the cert?
 
         self.signer = MessageSigner(self.secret) if self.secret else None
         # Pending request Futures keyed by the request header.message_id.
@@ -402,17 +403,23 @@ class HubAgentClient:
             except (OSError, Exception) as e:
                 logger.warning("Hub connection error (%s); reconnecting in %ds", e, _RECONNECT_DELAY)
                 # If we presented the client cert this attempt and the handshake
-                # died before we even connected (no session key = never armed),
-                # the cert is being REJECTED (untrusted CA / not the hub's mTLS
-                # cert). Drop it for the next attempt so the session-key
-                # connection recovers and a corrected cert can be re-deployed;
-                # INSTALL_CERT flips _present_cert back on for a fresh cert.
-                if self._presented_cert and not self.secret:
+                # died before we ever connected WITH the cert, it is being REJECTED
+                # (untrusted CA / not chained to the hub's mTLS CA). Drop it for the
+                # next attempt so the session-key connection recovers instead of
+                # hard-looping offline. Gate on _cert_ever_worked (NOT the secret) —
+                # bugfixer keeps a persisted session secret across the transport-
+                # layer cert, so the old `not self.secret` guard never fired and the
+                # rejected cert stranded it. A restart or a fresh INSTALL_CERT
+                # re-arms _present_cert to try again (e.g. after the hub is taught to
+                # trust the BugFixer cert's CA).
+                if self._presented_cert and not self._cert_ever_worked:
                     self._present_cert = False
                     logger.warning(
                         "wss: hub rejected our client cert (handshake failed) — "
-                        "retrying WITHOUT it. Re-deploy a valid BugFixer cert from "
-                        "the LE module (tag it as BugFixer) to enable log/update access.")
+                        "retrying WITHOUT it so the basic connection recovers. The hub "
+                        "must trust the BugFixer cert's CA before mTLS log/update "
+                        "access can work; re-deploy it from the LE module (tagged "
+                        "BugFixer) or restart bugfixer to retry.")
 
             if self._stop.is_set():
                 break
@@ -448,10 +455,19 @@ class HubAgentClient:
             return None
 
     async def _handle_install_cert(self, msg, data):
-        """Install a hub-distributed (LE) cert as our mTLS CLIENT identity for the
-        hub connection: write fullchain + privkey, reply the COMMAND_RESULT the
-        hub's request_response awaits, then reconnect so the wss handshake
-        presents the new cert. Mirrors the INSTALL_CERT contract other cert-capable
+        """Install a hub-distributed (LE) cert. It serves TWO roles for bugfixer,
+        both from the one deployment:
+          1. the WebUI SERVER cert (BUGFIXER_SSL_CERT/KEY, default
+             /etc/bugfixer/cert.pem+key.pem) — so browsers AND GitHub webhooks
+             reach the bugfixer WebUI over a PUBLICLY-TRUSTED cert instead of the
+             install-time self-signed one (GitHub rejects self-signed webhook URLs);
+          2. our mTLS CLIENT identity for the hub connection (hub-client-cert.pem)
+             — the cert the hub's HUB_REQUEST channel authorizes on (log reads +
+             fleet update commands), gated by BugFixer SAN pinning.
+        Write both, reply the COMMAND_RESULT the hub's request_response awaits, then
+        trigger a graceful full-service restart so uvicorn reloads the new WebUI
+        cert (a running listener can't hot-swap its cert) and the reconnect presents
+        the new mTLS cert. Mirrors the INSTALL_CERT contract other cert-capable
         spokes implement (cert_distribution.py)."""
         status, message = "SUCCESS", "cert installed"
         try:
@@ -460,20 +476,44 @@ class HubAgentClient:
             if not fullchain or not privkey:
                 status, message = "ERROR", "missing fullchain/privkey"
             else:
+                fc = fullchain if fullchain.endswith("\n") else fullchain + "\n"
+                pk = privkey if privkey.endswith("\n") else privkey + "\n"
+                # 1. mTLS client identity for the hub connection.
                 os.makedirs(os.path.dirname(self._client_cert_file) or ".", exist_ok=True)
                 with open(self._client_cert_file, "w") as f:
-                    f.write(fullchain if fullchain.endswith("\n") else fullchain + "\n")
+                    f.write(fc)
                 with open(self._client_key_file, "w") as f:
-                    f.write(privkey if privkey.endswith("\n") else privkey + "\n")
+                    f.write(pk)
                 try:
                     os.chmod(self._client_key_file, 0o600)
                 except OSError:
                     pass
+                # 2. WebUI server cert (so GitHub webhooks + browsers trust it).
+                webui_cert = os.environ.get("BUGFIXER_SSL_CERT", "/etc/bugfixer/cert.pem")
+                webui_key = os.environ.get("BUGFIXER_SSL_KEY", "/etc/bugfixer/key.pem")
+                webui_written = False
+                try:
+                    os.makedirs(os.path.dirname(webui_cert) or ".", exist_ok=True)
+                    with open(webui_cert, "w") as f:
+                        f.write(fc)
+                    with open(webui_key, "w") as f:
+                        f.write(pk)
+                    try:
+                        os.chmod(webui_key, 0o600)
+                    except OSError:
+                        pass
+                    webui_written = True
+                except Exception as we:  # noqa: BLE001 — WebUI cert is best-effort
+                    logger.warning("INSTALL_CERT: WebUI cert write failed (%s) — "
+                                   "mTLS client cert still installed", we)
                 # A freshly-deployed cert is worth trying even if a prior one was
-                # rejected — re-arm the present-cert path so the reconnect below
+                # rejected — re-arm the present-cert path so the restart's reconnect
                 # presents THIS cert over mTLS.
                 self._present_cert = True
-                message = f"cert installed for {data.get('domain') or '?'} — reconnecting to present it"
+                self._cert_ever_worked = False
+                message = (f"cert installed for {data.get('domain') or '?'}"
+                           f"{' (WebUI + mTLS)' if webui_written else ' (mTLS only)'}"
+                           " — restarting to load it")
                 logger.info("INSTALL_CERT: %s", message)
         except Exception as e:  # noqa: BLE001
             status, message = "ERROR", str(e)
@@ -491,12 +531,27 @@ class HubAgentClient:
                 await self._ws.send(encode_frame(self.signer, reply))
             except Exception as e:  # noqa: BLE001
                 logger.warning("INSTALL_CERT: failed to send result: %s", e)
-        # Reconnect to present the freshly-installed client cert (success only).
-        if status == "SUCCESS" and self._ws is not None:
+        # Success: trigger a graceful full-service restart so uvicorn reloads the
+        # new WebUI server cert (a live listener can't hot-swap its cert) AND the
+        # reconnect presents the new mTLS client cert. Prefer the restart_worker's
+        # deferred-restart flag (grace window + watchdog backstop, decoupled from
+        # this task); if app_state isn't importable, fall back to just closing the
+        # ws so at least the mTLS cert is re-presented on reconnect.
+        if status == "SUCCESS":
+            restarted = False
             try:
-                await self._ws.close(code=1012, reason="reconnect to present new cert")
-            except Exception:  # noqa: BLE001
-                pass
+                import app_state
+                app_state.state["restart_pending"] = True
+                restarted = True
+                logger.info("INSTALL_CERT: restart scheduled to load the new cert(s)")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("INSTALL_CERT: could not schedule restart (%s) — "
+                               "closing ws to at least re-present the mTLS cert", e)
+            if not restarted and self._ws is not None:
+                try:
+                    await self._ws.close(code=1012, reason="reconnect to present new cert")
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _connect_and_serve(self):
         # max_size: the hub's GET_LOGS response aggregates every spoke's logs
@@ -509,6 +564,11 @@ class HubAgentClient:
         _ssl = self._client_ssl_ctx() if str(self.hub_ws_url or "").startswith("wss://") else None
         async with websockets.connect(self.hub_ws_url, max_size=16 * 1024 * 1024, ssl=_ssl) as websocket:
             self._ws = websocket
+            # The wss handshake completed. If we presented the client cert, the hub
+            # ACCEPTED it — remember that, so a later transient network drop doesn't
+            # get mistaken for a cert rejection and disengage a working cert.
+            if self._presented_cert:
+                self._cert_ever_worked = True
 
             # 1. Spoke authentication handshake.
             # module_type "bugfixer" (NOT "agent"): bugfixer is a STANDALONE
