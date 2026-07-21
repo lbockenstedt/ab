@@ -207,6 +207,13 @@ class HubAgentClient:
                                   or "/etc/bugfixer/hub-client-cert.pem")
         self._client_key_file = (os.environ.get("BUGFIXER_HUB_CLIENT_KEY")
                                  or "/etc/bugfixer/hub-client-key.pem")
+        # Present the client cert ONLY when explicitly opted in. A hub that does
+        # NOT request a client cert on /ws/spoke rejects an unexpected one — the
+        # wss handshake fails ("did not receive a valid HTTP response") and the
+        # spoke can never even auth. Default OFF so the standard session-key
+        # connection always works; flip BUGFIXER_HUB_MTLS=1 only when the hub is
+        # actually configured to require mTLS from spokes.
+        self._hub_mtls = os.environ.get("BUGFIXER_HUB_MTLS", "0") == "1"
 
         self.signer = MessageSigner(self.secret) if self.secret else None
         # Pending request Futures keyed by the request header.message_id.
@@ -405,9 +412,11 @@ class HubAgentClient:
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
             else:
                 ctx = ssl._create_unverified_context()
-            # Present the hub-installed mTLS client cert when available so the
-            # hub can mutually-authenticate us (INSTALL_CERT writes these files).
-            if (ctx is not None and os.path.exists(self._client_cert_file)
+            # Present the hub-installed mTLS client cert ONLY when opted in
+            # (BUGFIXER_HUB_MTLS=1) — presenting an unrequested client cert to a
+            # non-mTLS hub aborts the handshake and blocks all connectivity.
+            if (self._hub_mtls and ctx is not None
+                    and os.path.exists(self._client_cert_file)
                     and os.path.exists(self._client_key_file)):
                 try:
                     ctx.load_cert_chain(self._client_cert_file, self._client_key_file)
