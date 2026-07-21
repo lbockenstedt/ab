@@ -73,6 +73,11 @@ class _HubLogRelayHandler(logging.Handler):
 _RECONNECT_DELAY = 5
 _HEARTBEAT_INTERVAL = 30
 _HANDSHAKE_TIMEOUT = 5.0
+# After the hub rejects our client cert we disengage it (connect on the session
+# key). Retry the cert on a natural reconnect once this long has passed since the
+# rejection, so bugfixer auto-recovers mTLS once the hub is taught to trust the
+# cert — no manual restart needed.
+_CERT_RETRY_INTERVAL = 300
 
 
 class MessageSigner:
@@ -363,6 +368,24 @@ class HubAgentClient:
         finally:
             self._pending.pop(msg_id, None)
 
+    async def _ack(self, msg, status="SUCCESS", message=""):
+        """Send a COMMAND_RESULT the hub's mailbox treats as an acknowledgement
+        (correlation_id = the inbound message_id), so a DURABLE push is cleared and
+        not retried to exhaustion. Signed with our session secret; a no-op if we
+        have no signer/connection yet."""
+        if self._ws is None or self.signer is None:
+            return
+        reply = {
+            "correlation_id": msg.get("header", {}).get("message_id"),
+            "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
+                       "sender_id": self.spoke_id, "destination_id": "hub"},
+            "payload": {"type": "COMMAND_RESULT", "data": {"status": status, "message": message}},
+        }
+        try:
+            await self._ws.send(encode_frame(self.signer, reply))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ack send failed: %s", e)
+
     def cert_diagnostics(self):
         """Runtime hub-connection + mTLS cert state for the Diagnostics page, so
         an operator sees WHY hub-log/update access is or isn't working (and whether
@@ -444,6 +467,14 @@ class HubAgentClient:
             self.on_status("not_registered", "awaiting admin approval")
 
         while not self._stop.is_set():
+            # Auto-retry a previously-rejected client cert on this reconnect once
+            # enough time has passed — so mTLS log/update access self-heals after
+            # the hub is taught to trust the cert, without a manual bugfixer restart.
+            if (not self._present_cert and self._cert_rejected and self._cert_rejected_at
+                    and (time.time() - self._cert_rejected_at) > _CERT_RETRY_INTERVAL):
+                self._present_cert = True
+                logger.info("wss: re-arming the mTLS client cert to retry "
+                            "(>%ds since the last rejection)", _CERT_RETRY_INTERVAL)
             try:
                 await self._connect_and_serve()
             except ConnectionClosedError as e:
@@ -808,6 +839,19 @@ class HubAgentClient:
 
         if cmd_type == "INSTALL_CERT":
             await self._handle_install_cert(msg, data)
+            return
+
+        if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
+            # The hub's wildcard mTLS-materials fan-out. bugfixer keeps its OWN
+            # dedicated cert (bugfixer.<domain>) as its mTLS client identity — it
+            # must NOT adopt the fanned-out wildcard client cert, which would
+            # replace its SAN-pinned identity and break HUB_REQUEST authorization.
+            # So ignore the payload and just ACK, so the hub's durable mailbox
+            # clears it instead of retrying to exhaustion ("failed after max
+            # retries"). The hub also skips us once our cert is a claimed target.
+            await self._ack(msg, "SUCCESS",
+                            "ignored — bugfixer uses its own dedicated cert, not the wildcard")
+            logger.info("SPOKE_SET_MTLS_MATERIALS ignored (bugfixer keeps its own cert) — acked")
             return
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
