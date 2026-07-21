@@ -207,13 +207,18 @@ class HubAgentClient:
                                   or "/etc/bugfixer/hub-client-cert.pem")
         self._client_key_file = (os.environ.get("BUGFIXER_HUB_CLIENT_KEY")
                                  or "/etc/bugfixer/hub-client-key.pem")
-        # Present the client cert ONLY when explicitly opted in. A hub that does
-        # NOT request a client cert on /ws/spoke rejects an unexpected one — the
-        # wss handshake fails ("did not receive a valid HTTP response") and the
-        # spoke can never even auth. Default OFF so the standard session-key
-        # connection always works; flip BUGFIXER_HUB_MTLS=1 only when the hub is
-        # actually configured to require mTLS from spokes.
-        self._hub_mtls = os.environ.get("BUGFIXER_HUB_MTLS", "0") == "1"
+        # Present the client cert whenever it exists — the hub's reverse
+        # HUB_REQUEST channel (log reads + fleet update triggers) is authorized
+        # ONLY for the connection that presents the pinned BugFixer cert over mTLS
+        # (_hub_request_authorized), so bugfixer MUST present it to read hub data.
+        # BUGFIXER_HUB_MTLS=0 force-disables (debug). But an UNTRUSTED cert breaks
+        # the wss handshake entirely, so _present_cert is a runtime fallback: a
+        # handshake failure while presenting flips it off for the next attempt
+        # (recover the session-key connection so a corrected cert can be
+        # re-deployed), and INSTALL_CERT flips it back on to try the fresh cert.
+        self._hub_mtls = os.environ.get("BUGFIXER_HUB_MTLS", "1") != "0"
+        self._present_cert = True
+        self._presented_cert = False   # was a cert presented on the current attempt?
 
         self.signer = MessageSigner(self.secret) if self.secret else None
         # Pending request Futures keyed by the request header.message_id.
@@ -396,6 +401,18 @@ class HubAgentClient:
                     logger.warning("Hub connection closed (%s); reconnecting", e)
             except (OSError, Exception) as e:
                 logger.warning("Hub connection error (%s); reconnecting in %ds", e, _RECONNECT_DELAY)
+                # If we presented the client cert this attempt and the handshake
+                # died before we even connected (no session key = never armed),
+                # the cert is being REJECTED (untrusted CA / not the hub's mTLS
+                # cert). Drop it for the next attempt so the session-key
+                # connection recovers and a corrected cert can be re-deployed;
+                # INSTALL_CERT flips _present_cert back on for a fresh cert.
+                if self._presented_cert and not self.secret:
+                    self._present_cert = False
+                    logger.warning(
+                        "wss: hub rejected our client cert (handshake failed) — "
+                        "retrying WITHOUT it. Re-deploy a valid BugFixer cert from "
+                        "the LE module (tag it as BugFixer) to enable log/update access.")
 
             if self._stop.is_set():
                 break
@@ -412,14 +429,16 @@ class HubAgentClient:
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
             else:
                 ctx = ssl._create_unverified_context()
-            # Present the hub-installed mTLS client cert ONLY when opted in
-            # (BUGFIXER_HUB_MTLS=1) — presenting an unrequested client cert to a
-            # non-mTLS hub aborts the handshake and blocks all connectivity.
-            if (self._hub_mtls and ctx is not None
+            # Present the installed mTLS client cert (needed for HUB_REQUEST) —
+            # unless a prior handshake failure flipped _present_cert off, so a
+            # wrong/untrusted cert can't permanently brick connectivity.
+            self._presented_cert = False
+            if (self._hub_mtls and self._present_cert and ctx is not None
                     and os.path.exists(self._client_cert_file)
                     and os.path.exists(self._client_key_file)):
                 try:
                     ctx.load_cert_chain(self._client_cert_file, self._client_key_file)
+                    self._presented_cert = True
                     logger.info("wss: presenting hub mTLS client cert %s", self._client_cert_file)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("wss: could not load client cert (mTLS off): %s", e)
@@ -450,6 +469,10 @@ class HubAgentClient:
                     os.chmod(self._client_key_file, 0o600)
                 except OSError:
                     pass
+                # A freshly-deployed cert is worth trying even if a prior one was
+                # rejected — re-arm the present-cert path so the reconnect below
+                # presents THIS cert over mTLS.
+                self._present_cert = True
                 message = f"cert installed for {data.get('domain') or '?'} — reconnecting to present it"
                 logger.info("INSTALL_CERT: %s", message)
         except Exception as e:  # noqa: BLE001
