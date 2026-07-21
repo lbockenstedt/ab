@@ -206,7 +206,7 @@
 <body class="flex flex-col h-screen w-screen overflow-hidden">
     <!-- Topbar — spans full page width (LM-HUB shell) -->
     <header class="hpe-topbar h-14 flex-none flex items-center justify-between px-6">
-        <h1 class="text-white">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}System Logs{% elif view == 'hub-logs' %}Hub Module Logs{% elif view == 'settings' %}Configuration{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</h1>
+        <h1 class="text-white text-xl font-bold tracking-tight">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}System Logs{% elif view == 'hub-logs' %}Hub Module Logs{% elif view == 'settings' %}Configuration{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</h1>
         <div class="flex items-center gap-4 text-xs text-slate-300 font-mono">
             <span>LLM <span class="text-white">{{ state.active_llm }}</span></span>
             <span>Last Run <span class="text-white">{% if state.last_run and state.last_run != 'Never' and state.last_run|length >= 16 %}{{ state.last_run[5:16] }}{% else %}{{ state.last_run }}{% endif %}</span></span>
@@ -224,22 +224,22 @@
             <span class="font-bold tracking-tight text-[#263040]">BugFixer</span>
         </div>
         <nav class="flex-1 overflow-y-auto py-2 px-2 space-y-1">
-            <a href="/" class="nav-item {{ 'active' if view == 'status' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+            <a href="/" class="nav-item {{ 'active' if view == 'status' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-chart-line w-4 text-center"></i>Dashboard
             </a>
-            <a href="/logs" class="nav-item {{ 'active' if view == 'logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+            <a href="/logs" class="nav-item {{ 'active' if view == 'logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-list-ul w-4 text-center"></i>Logs
             </a>
-            <a href="/hub-logs" class="nav-item {{ 'active' if view == 'hub-logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+            <a href="/hub-logs" class="nav-item {{ 'active' if view == 'hub-logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-network-wired w-4 text-center"></i>Hub Logs
             </a>
-            <a href="/settings" class="nav-item {{ 'active' if view == 'settings' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+            <a href="/settings" class="nav-item {{ 'active' if view == 'settings' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-cog w-4 text-center"></i>Settings
             </a>
-            <a href="/diagnostics" class="nav-item {{ 'active' if view == 'diagnostics' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+            <a href="/diagnostics" class="nav-item {{ 'active' if view == 'diagnostics' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-stethoscope w-4 text-center"></i>Diagnostics
             </a>
-            <a href="/chat" class="nav-item {{ 'active' if view == 'chat' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+            <a href="/chat" class="nav-item {{ 'active' if view == 'chat' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-comments w-4 text-center"></i>Chat
             </a>
         </nav>
@@ -250,9 +250,9 @@
         {% if view == 'status' %}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <!-- System Status Card -->
-            <div class="hpe-card p-6 col-span-1">
+            <div class="hpe-card p-5 col-span-1">
                 <div class="flex items-center justify-between mb-6">
-                    <h3 class="text-lg font-semibold text-slate-800">System Health</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">System Health</h3>
                     <i class="fas fa-heartbeat text-[#01A982]"></i>
                 </div>
                 <div class="space-y-4">
@@ -306,9 +306,9 @@
             </div>
 
             <!-- Active Tasks Card -->
-            <div class="hpe-card p-6 col-span-1">
+            <div class="hpe-card p-5 col-span-1">
                 <div class="flex items-center justify-between mb-6">
-                    <h3 class="text-lg font-semibold text-slate-800">Active Tasks</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">Active Tasks</h3>
                     <i class="fas fa-tasks text-[#01A982]"></i>
                 </div>
                 <div class="flex flex-col h-full justify-between">
@@ -329,9 +329,9 @@
             </div>
 
             <!-- Task Details Card -->
-            <div class="hpe-card p-6 col-span-1">
+            <div class="hpe-card p-5 col-span-1">
                 <div class="flex items-center justify-between mb-6">
-                    <h3 class="text-lg font-semibold text-slate-800">Task Details</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">Task Details</h3>
                     <i class="fas fa-info-circle text-[#01A982]"></i>
                 </div>
                 <div id="task-details-content" class="space-y-4 text-sm">
@@ -363,7 +363,7 @@
         <!-- Processed Table -->
         <div class="mt-8 hpe-card rounded-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
-                <h3 class="text-lg font-semibold text-slate-800">Activity Feed</h3>
+                <h3 class="text-lg font-bold text-[#263040]">Activity Feed</h3>
                 <div class="flex gap-2 items-center">
                     <div class="flex gap-2 items-center mr-4 border-r border-slate-200 pr-4">
                         <button onclick="retryAll(null)" class="px-3 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700 hover:bg-green-200 transition-all border border-green-200">
@@ -469,7 +469,7 @@
         {% if view == 'logs' %}
         <div class="hpe-card rounded-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
-                <h3 class="text-lg font-semibold text-slate-800">System Logs</h3>
+                <h3 class="text-lg font-bold text-[#263040]">System Logs</h3>
                 <span class="text-xs text-slate-500 font-mono">Last 100 lines</span>
             </div>
             <div class="p-4 bg-slate-50 border-b border-slate-200 flex justify-center">
@@ -487,7 +487,7 @@
         <div class="hpe-card rounded-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-2">
                 <div>
-                    <h3 class="text-lg font-semibold text-slate-800">Hub Module Logs</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">Hub Module Logs</h3>
                     <p class="text-xs text-slate-400 mt-0.5">Newest entries first · Fetched {{ hub_fetch_time or 'now' }}
                         {% if hub_logs %} · {{ hub_logs|length }} entries{% endif %}
                         {% if hub_fetch_status %} · HTTP {{ hub_fetch_status }}{% endif %}
@@ -554,7 +554,7 @@
 
         {% if view == 'settings' %}
         <div>
-            <div class="hpe-card p-8">
+            <div class="hpe-card p-5">
                 <div class="flex items-center gap-3 mb-6">
                     <i class="fas fa-sliders-h text-[#01A982] text-2xl"></i>
                     <h3 class="text-lg font-bold text-[#263040]">Configuration</h3>
@@ -1244,7 +1244,7 @@
             <!-- Main: active conversation -->
             <section class="flex-1 flex flex-col p-6 min-w-0">
                 <div class="flex items-center justify-between mb-4 flex-none">
-                    <h3 class="text-lg font-semibold text-slate-800 flex items-center gap-2 truncate">
+                    <h3 class="text-lg font-bold text-[#263040] flex items-center gap-2 truncate">
                         <i class="fas fa-comments text-[#01A982]"></i>
                         <span id="chat-title" class="truncate">{{ active_chat_title }}</span>
                         <span class="text-xs text-slate-400 font-normal">(auto LLM, persists across reboots)</span>
@@ -1278,9 +1278,9 @@
         {% if view == 'diagnostics' %}
         <div id="diag-root" class="space-y-6">
             <!-- Code Version / Stale Code card -->
-            <div class="hpe-card p-6">
+            <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-semibold text-slate-800">Code Version</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">Code Version</h3>
                     <i class="fas fa-code-branch text-[#01A982]"></i>
                 </div>
                 <div id="diag-stale-banner" class="hidden mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium flex items-center justify-between gap-3">
@@ -1307,9 +1307,9 @@
             </div>
 
             <!-- Hub & Heartbeat Triage card -->
-            <div class="hpe-card p-6">
+            <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-semibold text-slate-800">Hub &amp; Heartbeat Triage</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">Hub &amp; Heartbeat Triage</h3>
                     <i class="fas fa-heartbeat text-[#01A982]"></i>
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
@@ -1329,9 +1329,9 @@
             </div>
 
             <!-- Providers table -->
-            <div class="hpe-card p-6">
+            <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-semibold text-slate-800">LLM Providers</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">LLM Providers</h3>
                     <button onclick="refreshDiagnostics()" class="text-xs text-slate-500 hover:text-slate-700"><i class="fas fa-sync-alt"></i> refresh</button>
                 </div>
                 <div class="overflow-x-auto">
@@ -1345,9 +1345,9 @@
             </div>
 
             <!-- Update / Restart card -->
-            <div class="hpe-card p-6">
+            <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-semibold text-slate-800">Update &amp; Restart</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">Update &amp; Restart</h3>
                     <div class="flex gap-2">
                         <button onclick="diagAction('/update_now', 'Checking…')" class="py-1.5 px-3 rounded font-bold text-xs bg-slate-600 hover:bg-slate-700 text-white"><i class="fas fa-cloud-download-alt mr-1"></i>Check for updates</button>
                         <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary py-1.5 px-3 rounded font-bold text-xs">Restart now</button>
