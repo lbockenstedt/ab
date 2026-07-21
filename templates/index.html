@@ -560,22 +560,24 @@
                     <h3 class="text-lg font-bold text-[#263040]">Configuration</h3>
                 </div>
 
-                <!-- LM-style horizontal sub-nav strip: jump-to-section tabs.
-                     Mirrors #top-nav / .sub-nav-item in lm/WebUI/index.html. -->
+                <!-- LM-style horizontal sub-nav strip: one section per tab (mirrors
+                     #top-nav / .sub-nav-item / setSubView in lm/WebUI/index.html).
+                     Clicking a tab hides every settings section and shows the one it
+                     points at — exactly one tab's content is visible at a time. -->
                 <div class="hpe-subnav h-11 flex items-center gap-5 px-1 text-sm font-medium -mx-2 mb-6 overflow-x-auto">
-                    <a href="#sec-github"    class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-github')">GitHub</a>
-                    <a href="#sec-llm"       class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-llm')">LLM</a>
-                    <a href="#sec-local-llm" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-local-llm')">Local LLM</a>
-                    <a href="#sec-qa"        class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-qa')">QA</a>
-                    <a href="#sec-automation" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-automation')">Automation</a>
-                    <a href="#sec-system"    class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-system')">System</a>
-                    <a href="#sec-chat"      class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-chat')">Chat</a>
-                    <a href="#sec-scheduler" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-scheduler')">Scheduler</a>
+                    <button type="button" class="sub-nav-item active px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub</button>
+                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM</button>
+                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
+                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
+                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
+                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-system" onclick="settingsTab('sec-system')">System</button>
+                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
+                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
                 </div>
 
-                <form action="/save_settings" method="post" class="space-y-10">
+                <form id="settings-form" action="/save_settings" method="post" class="space-y-8">
                     <!-- 1. GitHub & Repository Core -->
-                    <section id="sec-github">
+                    <section id="sec-github" data-settings-section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-github text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub & Repository Core</h4>
@@ -639,10 +641,13 @@
                                 <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
                             </div>
                         </div>
+                                            <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
                     <!-- 2. LLM Configuration -->
-                    <section id="sec-llm">
+                    <section id="sec-llm" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-brain text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">LLM Configuration</h4>
@@ -810,10 +815,13 @@
                                 <input type="number" name="LLM_TIMEOUT" value="{{ settings.LLM_TIMEOUT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                         </div>
+                                            <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
                     <!-- Local LLM (CPU-only) Setup -->
-                    <section id="sec-local-llm">
+                    <section id="sec-local-llm" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-microchip text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Local LLM (CPU-only) Setup</h4>
@@ -856,10 +864,13 @@
                             <div id="local-llm-setup-status-line" class="font-medium text-slate-200 mb-2"></div>
                             <pre id="local-llm-setup-log" class="whitespace-pre-wrap break-all text-[11px] text-green-400 max-h-80 overflow-y-auto font-mono"></pre>
                         </div>
+                                            <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
                     <!-- 3. QA & Verification -->
-                    <section id="sec-qa">
+                    <section id="sec-qa" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-vial text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">QA & Verification</h4>
@@ -884,10 +895,13 @@
                                 <span class="text-xs text-slate-500">Override the global test command for specific repositories. Format: <code class="bg-slate-100 px-1 rounded">owner/repo:command</code></span>
                             </div>
                         </div>
+                                            <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
                     <!-- 4. Automation & Deployment -->
-                    <section id="sec-automation">
+                    <section id="sec-automation" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-robot text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Automation & Deployment</h4>
@@ -1003,10 +1017,13 @@
                                 </div>
                             </div>
                         </div>
+                                            <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
                     <!-- System Settings -->
-                    <section id="sec-system">
+                    <section id="sec-system" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-server text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">System Settings</h4>
@@ -1017,10 +1034,13 @@
                                 <input type="text" name="LOG_FILE_PATH" value="{{ settings.LOG_FILE_PATH }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="/var/log/bugfixer/bugfixer.log">
                             </div>
                         </div>
+                                            <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
                     <!-- Chat Agent -->
-                    <section id="sec-chat">
+                    <section id="sec-chat" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-comment-dots text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Chat Agent</h4>
@@ -1077,10 +1097,13 @@
                                 <input type="number" name="LLM_LOG_MAX_CHARS" value="{{ settings.LLM_LOG_MAX_CHARS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                         </div>
+                                            <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
                     <!-- Scheduler -->
-                    <section id="sec-scheduler">
+                    <section id="sec-scheduler" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-clock text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Scheduler</h4>
@@ -1175,13 +1198,11 @@
                                 <p class="text-[10px] text-slate-400">Default 600s (10 min). After hours uses the main Poll Interval setting.</p>
                             </div>
                         </div>
+                                            <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
-                    <div class="flex justify-end pt-6">
-                        <button type="submit" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">
-                            Save Configuration
-                        </button>
-                    </div>
                 </form>
             </div>
         </div>
@@ -1431,36 +1452,56 @@
             } catch (e) { /* corrupt entry — ignore */ }
         })();
 
-        // ---- Settings sub-nav: jump to a section + mark the active tab ----
-        // Mirrors LM's setSubView(): scroll the anchored section into view and
-        // toggle the .active underline onto the clicked sub-nav-item.
-        window.settingsJump = function (el, secId) {
-            const sec = document.getElementById(secId);
-            if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            document.querySelectorAll('[data-subnav]').forEach(n => n.classList.remove('active'));
-            if (el) el.classList.add('active');
-        };
-        // Highlight the tab for whichever section is currently in view.
-        (function () {
-            const tabs = Array.from(document.querySelectorAll('[data-subnav]'));
-            if (!tabs.length) return;
+        // ---- Settings sub-nav: one section per tab (mirrors LM setSubView) ----
+        // Clicking a tab hides every [data-settings-section] and shows the one it
+        // names, then toggles the .active underline onto the clicked tab. Exactly
+        // one tab's content is visible at a time; hidden sections' inputs stay in
+        // the form so a Save from any tab persists the whole config (idempotent).
+        window.settingsTab = function (secId) {
+            document.querySelectorAll('[data-tab]').forEach(t => {
+                t.classList.toggle('active', t.getAttribute('data-tab') === secId);
+            });
+            document.querySelectorAll('[data-settings-section]').forEach(s => {
+                s.classList.toggle('hidden', s.id !== secId);
+            });
             const main = document.querySelector('main');
-            const sections = tabs.map(t => {
-                const m = t.getAttribute('onclick').match(/'([^']+)'\s*\)$/);
-                return { tab: t, sec: m ? document.getElementById(m[1]) : null };
-            }).filter(s => s.sec);
-            const pick = () => {
-                const top = main ? main.getBoundingClientRect().top : 0;
-                let active = sections[0];
-                for (const s of sections) {
-                    if (s.sec.getBoundingClientRect().top - top - 120 <= 0) active = s;
-                }
-                tabs.forEach(t => t.classList.remove('active'));
-                if (active) active.tab.classList.add('active');
-            };
-            if (main) main.addEventListener('scroll', pick, { passive: true });
-            pick();
+            if (main) main.scrollTop = 0;
+        };
+        // On first paint, show only the first tab's section (the template renders
+        // every section without `hidden` so the form is whole; this collapses the
+        // rest). Mirrors LM's initial setSubView call.
+        (function () {
+            const first = document.querySelector('[data-tab]');
+            if (first) settingsTab(first.getAttribute('data-tab'));
         })();
+
+        // ---- Settings Save: AJAX POST, toast on success/error, no full reload ----
+        // The single <form> wraps every section; a Save from any tab submits the
+        // whole form (all fields) so hidden-tab fields persist too. routes.py
+        // returns JSON when the request sends Accept: application/json.
+        window.saveSettingsAjax = function (btn) {
+            const form = document.getElementById('settings-form');
+            if (!form) return;
+            const fd = new FormData(form);
+            const orig = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+            fetch('/save_settings', {
+                method: 'POST',
+                body: fd,
+                headers: { 'Accept': 'application/json' },
+                redirect: 'manual'
+            }).then(r => r.json()).then(data => {
+                if (data && data.status === 'ok') {
+                    showToast(data.message || 'Settings saved', 'success');
+                } else {
+                    showToast((data && data.message) || 'Save failed', 'error');
+                }
+            }).catch(err => {
+                showToast('Save failed: ' + err, 'error');
+            }).finally(() => {
+                if (btn) { btn.disabled = false; btn.textContent = orig; }
+            });
+        };
 
         // ---- Configurable page auto-refresh + Pause Refresh (footer) ----
         // Replaces the old <meta http-equiv="refresh"> so the auto-reload can be

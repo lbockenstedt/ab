@@ -1057,6 +1057,10 @@ async def save_settings(request: Request):
     except Exception as ve:
         logger.warning(f"Post-save LLM validation failed (non-fatal): {ve}")
 
+    # AJAX saves (Settings tabs) request JSON + a toast instead of a full
+    # redirect/reload. Honor that when the client signals Accept: application/json.
+    if "application/json" in (request.headers.get("accept") or ""):
+        return {"status": "ok", "message": "Settings saved"}
     return RedirectResponse(url="/settings", status_code=303)
 
 
