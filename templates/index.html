@@ -207,10 +207,6 @@
     <!-- Topbar — spans full page width (LM-HUB shell) -->
     <header class="hpe-topbar h-14 flex-none flex items-center justify-between px-6">
         <h1 class="text-white text-xl font-bold tracking-tight">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}System Logs{% elif view == 'hub-logs' %}Hub Module Logs{% elif view == 'settings' %}Configuration{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</h1>
-        <div class="flex items-center gap-4 text-xs text-slate-300 font-mono">
-            <span>LLM <span class="text-white">{{ state.active_llm }}</span></span>
-            <span>Last Run <span class="text-white">{% if state.last_run and state.last_run != 'Never' and state.last_run|length >= 16 %}{{ state.last_run[5:16] }}{% else %}{{ state.last_run }}{% endif %}</span></span>
-        </div>
     </header>
 
     <!-- MIDDLE AREA: sidebar + viewport (header/footer span full width above/below) -->
