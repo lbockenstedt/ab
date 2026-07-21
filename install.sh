@@ -3,8 +3,11 @@
 #
 # Pipe directly (root shell):
 #   curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | bash
+# Connect to an LM hub at install time (first arg via `bash -s --`, or env):
+#   curl -sSL .../install.sh | bash -s -- wss://lm-hub.example.com
+#   curl -sSL .../install.sh | HUB_WS_URL=wss://lm-hub.example.com bash
 # Or download then run:
-#   curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh -o /tmp/install-bugfixer.sh && bash /tmp/install-bugfixer.sh
+#   curl -sSL .../install.sh -o /tmp/install-bugfixer.sh && bash /tmp/install-bugfixer.sh wss://lm-hub.example.com
 set -e
 
 # NOTE: do NOT `exec </dev/null` here. When this script is run via
@@ -18,6 +21,13 @@ REPO_URL="https://github.com/lbockenstedt/bugfixer.git"
 INSTALL_DIR="/opt/bugfixer"
 CONFIG_DIR="/etc/bugfixer"
 LOG_FILE="/var/log/bugfixer.log"
+
+# Optional LM-hub connection, baked into config.json below. First positional arg
+# (via `bash -s -- <url>`) OR the HUB_WS_URL env var. A bare host is fine — the
+# agent normalizes it to wss://<host>:443/ws/spoke. HUB_QUERY_URL (hub WebUI URL,
+# for approvals + log fallback) is derived as https://<host> unless set.
+HUB_WS_URL="${1:-${HUB_WS_URL:-}}"
+HUB_QUERY_URL="${HUB_QUERY_URL:-}"
 
 echo "=== BugFixer Installer ==="
 
@@ -98,6 +108,38 @@ if [ ! -f "$CONFIG_DIR/config.json" ]; then
         cp "$INSTALL_DIR/config.json.example" "$CONFIG_DIR/config.json"
         echo "   Seeded config from template — finish setup via the WebUI"
     fi
+fi
+
+# Bake the hub connection into config.json when a URL was supplied (arg/env).
+# Updates the two keys in place — everything else in config.json is preserved,
+# so it's safe on a re-run. HUB_QUERY_URL is derived from the ws host when unset.
+if [ -n "$HUB_WS_URL" ]; then
+    echo ">> Configuring LM hub connection → $HUB_WS_URL"
+    HUB_WS_URL="$HUB_WS_URL" HUB_QUERY_URL="$HUB_QUERY_URL" \
+    CONFIG_FILE="$CONFIG_DIR/config.json" python3 - <<'PY'
+import json, os
+from urllib.parse import urlsplit
+cf = os.environ["CONFIG_FILE"]
+ws = os.environ["HUB_WS_URL"].strip()
+query = os.environ.get("HUB_QUERY_URL", "").strip()
+try:
+    cfg = json.load(open(cf))
+except Exception:
+    cfg = {}
+cfg["HUB_WS_URL"] = ws
+if not query:
+    u = ws if "://" in ws else "wss://" + ws
+    parts = urlsplit(u)
+    host, port = parts.hostname or "", parts.port
+    if host:
+        query = "https://" + host + ("" if port in (None, 443) else f":{port}")
+if query:
+    cfg["HUB_QUERY_URL"] = query
+with open(cf, "w") as fh:
+    json.dump(cfg, fh, indent=2)
+print(f"   HUB_WS_URL={cfg.get('HUB_WS_URL')}")
+print(f"   HUB_QUERY_URL={cfg.get('HUB_QUERY_URL', '(none)')}")
+PY
 fi
 
 # Migrate legacy local state files if present
@@ -355,6 +397,9 @@ echo " BugFixer installed successfully"
 echo "======================================="
 echo "  Dashboard : https://${IP:-<server-ip>}/   (self-signed cert — accept the browser warning)"
 echo "  Config    : $CONFIG_DIR/config.json"
+if [ -n "$HUB_WS_URL" ]; then
+echo "  Hub       : $HUB_WS_URL  → APPROVE 'bugfixer' in the LM Hub WebUI (Setup → Spokes & Agents)"
+fi
 echo "  Logs      : journalctl -u bugfixer -f"
 echo "              tail -f $LOG_FILE"
 echo "  Status    : systemctl status bugfixer"
@@ -362,3 +407,6 @@ echo "======================================="
 echo ""
 echo "Next: open the dashboard and go to Settings to add your"
 echo "GitHub token and LLM provider API keys."
+if [ -n "$HUB_WS_URL" ]; then
+echo "Then approve the pending 'bugfixer' agent in the LM Hub WebUI so it can connect."
+fi
