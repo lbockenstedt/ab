@@ -801,6 +801,13 @@ async def settings_page(request: Request):
     monitored_set = set(monitored)
     extra_monitored = [r for r in monitored if r not in set(github_repos)]
     repo_options = list(github_repos) + extra_monitored  # union, monitored last
+    # Trusted repos use the same checkbox treatment: fetched GitHub list UNION
+    # any already-trusted repos not in that list, so an external trusted repo
+    # still shows as a toggleable pre-checked box.
+    trusted = list(config.get("trusted_repos") or [])
+    trusted_set = set(trusted)
+    extra_trusted = [r for r in trusted if r not in set(github_repos)]
+    trusted_options = list(github_repos) + extra_trusted
 
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
@@ -808,6 +815,8 @@ async def settings_page(request: Request):
         "available_labels": state.get("available_labels", []),
         "repo_options": repo_options,
         "monitored_set": monitored_set,
+        "trusted_options": trusted_options,
+        "trusted_set": trusted_set,
         "state": state,
     })
 
@@ -892,8 +901,20 @@ async def save_settings(request: Request):
             monitored_repos.append(r)
     config_data["monitored_repos"] = list(dict.fromkeys(monitored_repos))
 
+    # Trusted repos: same checkbox + free-text treatment as monitored.
+    if hasattr(form_data, "getlist"):
+        checked_trusted = form_data.getlist("trusted_repos")
+    else:
+        checked_trusted = [data["trusted_repos"]] if data.get("trusted_repos") else []
+    extra_trusted_raw = data.get("trusted_repos_extra", "") or ""
+    extra_trusted = [clean_repo_name(x.strip()) for x in extra_trusted_raw.replace("\\n", ",").split(",") if x.strip()]
+    trusted_repos = [clean_repo_name(x) for x in checked_trusted if x and str(x).strip()]
+    for r in extra_trusted:
+        if r and r not in trusted_repos:
+            trusted_repos.append(r)
+    config_data["trusted_repos"] = list(dict.fromkeys(trusted_repos))
+
     updates = {
-        "trusted_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
         "default_branch": lambda v: v,
         "dev_branch": lambda v: v,
         "GITHUB_TOKEN": lambda v: v,

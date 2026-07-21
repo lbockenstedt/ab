@@ -62,12 +62,52 @@
             border: 1px solid var(--hpe-border) !important;
         }
         .btn-primary {
-            background-color: var(--hpe-green);
-            color: white;
+            background-color: rgba(1, 169, 130, 0.1);
+            color: var(--hpe-green);
+            border: 1px solid var(--hpe-green);
             transition: all 0.2s ease;
         }
         .btn-primary:hover {
-            filter: brightness(90%);
+            background-color: rgba(1, 169, 130, 0.2);
+        }
+        /* LM-HUB shell — left sidebar + navy topbar (green bottom border) so
+           BugFixer matches the Lab Manager WebUI chrome. Mirrors the base CSS
+           in lm/WebUI/index.html (hpe-sidebar / hpe-topbar / nav-item). */
+        .hpe-sidebar {
+            background-color: var(--hpe-white);
+            border-right: 1px solid var(--hpe-border);
+        }
+        .hpe-topbar {
+            background-color: var(--hpe-navy);
+            border-bottom: 3px solid var(--hpe-green);
+        }
+        .hpe-topbar h1 {
+            font-size: 1.05rem;
+            font-weight: 400;
+            letter-spacing: 0.01em;
+        }
+        .nav-item {
+            transition: all 0.2s ease;
+            cursor: pointer;
+            color: var(--hpe-text-main);
+        }
+        .nav-item:hover {
+            background: rgba(1, 169, 130, 0.1);
+            color: var(--hpe-green);
+        }
+        .nav-item.active {
+            background: rgba(1, 169, 130, 0.15);
+            color: var(--hpe-green);
+            font-weight: 600;
+            border-left: 4px solid var(--hpe-green);
+        }
+        /* Card titles → brand navy + bold (LM token: text-lg font-bold
+           text-[#263040]). Compound selector beats the single-class Tailwind
+           text-slate-800/700 utilities without !important. h4 section labels
+           are styled per-instance to LM's grey-uppercase section-label token. */
+        .hpe-card h3 {
+            color: var(--hpe-navy);
+            font-weight: 700;
         }
         .cursor-blink {
             display: inline-block;
@@ -132,40 +172,49 @@
             background: none; border: none; color: inherit; font-size: 15px; line-height: 1; padding: 0; }
     </style>
 </head>
-<body class="h-screen flex flex-col overflow-hidden">
-    <!-- Header / Nav -->
-    <nav class="border-b border-slate-200 bg-[#263040] flex-none">
-        <div class="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-                <div class="bg-[#01A982] p-2 rounded-lg">
-                    <i class="fas fa-robot text-white text-xl"></i>
-                </div>
-                <span class="text-xl font-bold tracking-tight text-white">BugFixer <span class="text-[#01A982]">Hub</span></span>
+<body class="flex h-screen w-screen overflow-hidden">
+    <!-- Sidebar (LM-HUB shell: white left nav) -->
+    <aside class="hpe-sidebar w-56 flex-none flex flex-col">
+        <div class="h-16 flex items-center gap-2 px-4 border-b border-slate-200 flex-none">
+            <div class="bg-[#01A982] p-2 rounded-lg">
+                <i class="fas fa-robot text-white"></i>
             </div>
-            <div class="flex gap-6">
-                <a href="/" class="nav-link py-5 px-1 {{ 'active' if view == 'status' else '' }}">
-                    <i class="fas fa-chart-line mr-2"></i>Dashboard
-                </a>
-                <a href="/logs" class="nav-link py-5 px-1 {{ 'active' if view == 'logs' else '' }}">
-                    <i class="fas fa-list-ul mr-2"></i>Logs
-                </a>
-                <a href="/hub-logs" class="nav-link py-5 px-1 {{ 'active' if view == 'hub-logs' else '' }}">
-                    <i class="fas fa-network-wired mr-2"></i>Hub Logs
-                </a>
-                <a href="/settings" class="nav-link py-5 px-1 {{ 'active' if view == 'settings' else '' }}">
-                    <i class="fas fa-cog mr-2"></i>Settings
-                </a>
-                <a href="/diagnostics" class="nav-link py-5 px-1 {{ 'active' if view == 'diagnostics' else '' }}">
-                    <i class="fas fa-stethoscope mr-2"></i>Diagnostics
-                </a>
-                <a href="/chat" class="nav-link py-5 px-1 {{ 'active' if view == 'chat' else '' }}">
-                    <i class="fas fa-comments mr-2"></i>Chat
-                </a>
-            </div>
+            <span class="font-bold tracking-tight text-[#263040]">BugFixer</span>
         </div>
-    </nav>
+        <nav class="flex-1 overflow-y-auto py-2 px-2 space-y-1">
+            <a href="/" class="nav-item {{ 'active' if view == 'status' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+                <i class="fas fa-chart-line w-4 text-center"></i>Dashboard
+            </a>
+            <a href="/logs" class="nav-item {{ 'active' if view == 'logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+                <i class="fas fa-list-ul w-4 text-center"></i>Logs
+            </a>
+            <a href="/hub-logs" class="nav-item {{ 'active' if view == 'hub-logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+                <i class="fas fa-network-wired w-4 text-center"></i>Hub Logs
+            </a>
+            <a href="/settings" class="nav-item {{ 'active' if view == 'settings' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+                <i class="fas fa-cog w-4 text-center"></i>Settings
+            </a>
+            <a href="/diagnostics" class="nav-item {{ 'active' if view == 'diagnostics' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+                <i class="fas fa-stethoscope w-4 text-center"></i>Diagnostics
+            </a>
+            <a href="/chat" class="nav-item {{ 'active' if view == 'chat' else '' }} flex items-center gap-2 px-3 py-2 rounded text-sm">
+                <i class="fas fa-comments w-4 text-center"></i>Chat
+            </a>
+        </nav>
+        <div class="px-4 py-3 border-t border-slate-200 text-[10px] text-slate-400 font-mono flex-none">{{ state.version }}</div>
+    </aside>
 
-    <main class="max-w-6xl mx-auto px-4 py-8 flex-grow overflow-y-auto">
+    <!-- Right column: topbar + viewport + action footer -->
+    <div class="flex flex-col flex-1 min-w-0">
+        <header class="hpe-topbar h-14 flex-none flex items-center justify-between px-6">
+            <h1 class="text-white">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}System Logs{% elif view == 'hub-logs' %}Hub Module Logs{% elif view == 'settings' %}Configuration{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</h1>
+            <div class="flex items-center gap-4 text-xs text-slate-300 font-mono">
+                <span>LLM <span class="text-white">{{ state.active_llm }}</span></span>
+                <span>Last Run <span class="text-white">{% if state.last_run and state.last_run != 'Never' and state.last_run|length >= 16 %}{{ state.last_run[5:16] }}{% else %}{{ state.last_run }}{% endif %}</span></span>
+            </div>
+        </header>
+
+    <main class="flex-1 overflow-y-auto p-6">
         {% if view == 'status' %}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <!-- System Status Card -->
@@ -484,7 +533,7 @@
                     <section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-github text-slate-400"></i>
-                            <h4 class="font-semibold text-slate-700">GitHub & Repository Core</h4>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub & Repository Core</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
@@ -519,7 +568,21 @@
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Trusted Repositories (Allow Direct Push)</label>
-                                <textarea name="trusted_repos" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">{{ settings.trusted_repos | join(', ') }}</textarea>
+                                {% if trusted_options %}
+                                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
+                                    {% for repo in trusted_options %}
+                                    <label class="flex items-center gap-2 text-sm text-slate-700 min-w-0" title="{{ repo }}">
+                                        <input type="checkbox" name="trusted_repos" value="{{ repo }}" {% if repo in trusted_set %}checked{% endif %} class="rounded border-slate-300 focus:ring-[#01A982] flex-shrink-0">
+                                        <span class="truncate">{{ repo }}</span>
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                                <span class="text-xs text-slate-500">Tick the repos BugFixer may push fixes to directly (without a PR). Same GitHub list as monitored.</span>
+                                {% else %}
+                                <span class="text-xs text-slate-400 block">Couldn't load your GitHub repo list — enter repos manually below.</span>
+                                {% endif %}
+                                <label class="text-xs text-slate-500">Additional trusted repos (comma-separated, e.g. <code class="bg-slate-100 px-1 rounded">org/repo</code>)</label>
+                                <input type="text" name="trusted_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="owner/repo, org/another">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Self-Diagnosis Repository (Where BugFixer files its own bugs)</label>
@@ -537,7 +600,7 @@
                     <section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-brain text-slate-400"></i>
-                            <h4 class="font-semibold text-slate-700">LLM Configuration</h4>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">LLM Configuration</h4>
                         </div>
 
                         <!-- Step A: Credentials Vault -->
@@ -708,7 +771,7 @@
                     <section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-microchip text-slate-400"></i>
-                            <h4 class="font-semibold text-slate-700">Local LLM (CPU-only) Setup</h4>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Local LLM (CPU-only) Setup</h4>
                         </div>
                         <p class="text-xs text-slate-500 mb-4">
                             One click installs <strong>Ollama</strong> (if missing), pulls a local CPU model,
@@ -754,7 +817,7 @@
                     <section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-vial text-slate-400"></i>
-                            <h4 class="font-semibold text-slate-700">QA & Verification</h4>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">QA & Verification</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2 col-span-1 md:col-span-2">
@@ -782,7 +845,7 @@
                     <section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-robot text-slate-400"></i>
-                            <h4 class="font-semibold text-slate-700">Automation & Deployment</h4>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Automation & Deployment</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
@@ -900,7 +963,7 @@
                     <section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-server text-slate-400"></i>
-                            <h4 class="font-semibold text-slate-700">System Settings</h4>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">System Settings</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
@@ -914,7 +977,7 @@
                     <section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-comment-dots text-slate-400"></i>
-                            <h4 class="font-semibold text-slate-700">Chat Agent</h4>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Chat Agent</h4>
                         </div>
                         <p class="text-xs text-slate-500 mb-4">
                             When enabled, the chat assistant is given a compact index of your repos, open
@@ -1068,9 +1131,9 @@
                         </div>
                     </section>
 
-                    <div class="pt-6">
-                        <button type="submit" class="w-full py-3 px-6 btn-primary font-bold rounded-xl shadow-lg shadow-green-900/20">
-                            SAVE CONFIGURATION
+                    <div class="flex justify-end pt-6">
+                        <button type="submit" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">
+                            Save Configuration
                         </button>
                     </div>
                 </form>
@@ -1079,7 +1142,7 @@
         {% endif %}
 
         {% if view == 'chat' %}
-        <div class="hpe-card flex overflow-hidden" style="height: calc(100vh - 200px);">
+        <div class="hpe-card flex overflow-hidden" style="height: calc(100vh - 160px);">
             <!-- Sidebar: conversation list -->
             <aside class="w-56 flex-none border-r border-slate-200 flex flex-col bg-slate-50">
                 <div class="p-3 flex-none">
@@ -1156,7 +1219,7 @@
                 <div id="diag-stale-banner" class="hidden mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium flex items-center justify-between gap-3">
                     <span><i class="fas fa-exclamation-triangle mr-2"></i><span id="diag-stale-msg">Running code is stale — restart needed</span></span>
                     <div class="flex gap-2">
-                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded font-bold text-xs text-white">Restart now</button>
+                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded font-bold text-xs">Restart now</button>
                         <button onclick="diagAction('/update_now', 'Checking…')" class="py-1.5 px-3 rounded font-bold text-xs bg-slate-600 hover:bg-slate-700 text-white">Check for updates</button>
                     </div>
                 </div>
@@ -1195,7 +1258,7 @@
                     <h3 class="text-lg font-semibold text-slate-800">Update &amp; Restart</h3>
                     <div class="flex gap-2">
                         <button onclick="diagAction('/update_now', 'Checking…')" class="py-1.5 px-3 rounded font-bold text-xs bg-slate-600 hover:bg-slate-700 text-white"><i class="fas fa-cloud-download-alt mr-1"></i>Check for updates</button>
-                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary py-1.5 px-3 rounded font-bold text-xs text-white">Restart now</button>
+                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary py-1.5 px-3 rounded font-bold text-xs">Restart now</button>
                     </div>
                 </div>
                 <div class="text-xs text-slate-500 grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
@@ -1209,47 +1272,40 @@
         {% endif %}
     </main>
 
-    <footer class="bg-[#263040] border-t border-slate-700 p-4 flex-none">
-        <div class="max-w-6xl mx-auto flex items-center gap-4">
-            <div class="flex flex-col items-end gap-1 text-xs text-slate-400 font-mono ml-auto flex-shrink-0 order-2 text-right">
-                <span>{{ state.version }}</span>
-                <span>LLM <span class="text-slate-200">{{ state.active_llm }}</span></span>
-                <span>Last Run: <span class="text-slate-200">{% if state.last_run and state.last_run != 'Never' and state.last_run|length >= 16 %}{{ state.last_run[5:16] }}{% else %}{{ state.last_run }}{% endif %}</span></span>
-            </div>
-            <div class="flex flex-nowrap items-center gap-2 order-1">
-                <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')">
-                    <button type="submit" class="py-1 px-2.5 rounded font-bold bg-slate-600 hover:bg-slate-700 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Check for Updates">
-                        <i class="fas fa-cloud-download-alt mr-1"></i>Updates
-                    </button>
-                </form>
-                <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')">
-                    <button type="submit" class="py-1 px-2.5 rounded font-bold bg-[#01A982] hover:bg-[#018f6d] text-white transition-all duration-200 text-xs whitespace-nowrap" title="Check for Issues Now">
-                        <i class="fas fa-search mr-1"></i>Scan Now
-                    </button>
-                </form>
-                <form action="/restart" method="post" onsubmit="handleFormSubmit(event, '/restart')">
-                    <button type="submit" class="py-1 px-2.5 rounded font-bold bg-slate-700 hover:bg-slate-800 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Restart BugFixer">
-                        <i class="fas fa-sync-alt mr-1"></i>Restart
-                    </button>
-                </form>
-                <form action="/trigger_hub_update" method="post" onsubmit="handleFormSubmit(event, '/trigger_hub_update')">
-                    <button type="submit" class="py-1 px-2.5 rounded font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Trigger Hub Update">
-                        <i class="fas fa-network-wired mr-1"></i>Hub Update
-                    </button>
-                </form>
-                <button onclick="toggleBlackout()" id="blackout-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap {% if state.blackout %}bg-violet-600 hover:bg-violet-700{% else %}bg-slate-600 hover:bg-slate-700{% endif %} text-white" title="Triage only — no fix commits pushed">
-                    <i class="fas fa-ban mr-1"></i>{% if state.blackout %}Blackout ON{% else %}Blackout{% endif %}
+    <footer class="bg-[#263040] border-t border-slate-700 p-3 flex-none">
+        <div class="flex flex-wrap items-center gap-2">
+            <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')">
+                <button type="submit" class="py-1 px-2.5 rounded font-bold bg-slate-600 hover:bg-slate-700 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Check for Updates">
+                    <i class="fas fa-cloud-download-alt mr-1"></i>Updates
                 </button>
-                <button onclick="togglePause()" id="pause-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap {% if state.paused %}bg-green-600 hover:bg-green-700{% else %}bg-orange-600 hover:bg-orange-700{% endif %} text-white">
-                    {% if state.paused %}<i class="fas fa-play mr-1"></i>Resume{% else %}<i class="fas fa-pause mr-1"></i>Stop{% endif %}
+            </form>
+            <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')">
+                <button type="submit" class="py-1 px-2.5 rounded font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all duration-200 text-xs whitespace-nowrap" title="Check for Issues Now">
+                    <i class="fas fa-search mr-1"></i>Scan Now
                 </button>
-                <button onclick="toggleRefreshPause()" id="refresh-pause-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap bg-slate-500 hover:bg-slate-600 text-white" title="Pause / resume page auto-refresh">
-                    <i class="fas fa-pause mr-1"></i>Pause Refresh
+            </form>
+            <form action="/restart" method="post" onsubmit="handleFormSubmit(event, '/restart')">
+                <button type="submit" class="py-1 px-2.5 rounded font-bold bg-slate-700 hover:bg-slate-800 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Restart BugFixer">
+                    <i class="fas fa-sync-alt mr-1"></i>Restart
                 </button>
-            </div
->
+            </form>
+            <form action="/trigger_hub_update" method="post" onsubmit="handleFormSubmit(event, '/trigger_hub_update')">
+                <button type="submit" class="py-1 px-2.5 rounded font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-all duration-200 text-xs whitespace-nowrap" title="Trigger Hub Update">
+                    <i class="fas fa-network-wired mr-1"></i>Hub Update
+                </button>
+            </form>
+            <button onclick="toggleBlackout()" id="blackout-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap {% if state.blackout %}bg-violet-600 hover:bg-violet-700{% else %}bg-slate-600 hover:bg-slate-700{% endif %} text-white" title="Triage only — no fix commits pushed">
+                <i class="fas fa-ban mr-1"></i>{% if state.blackout %}Blackout ON{% else %}Blackout{% endif %}
+            </button>
+            <button onclick="togglePause()" id="pause-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap {% if state.paused %}bg-green-600 hover:bg-green-700{% else %}bg-orange-600 hover:bg-orange-700{% endif %} text-white">
+                {% if state.paused %}<i class="fas fa-play mr-1"></i>Resume{% else %}<i class="fas fa-pause mr-1"></i>Stop{% endif %}
+            </button>
+            <button onclick="toggleRefreshPause()" id="refresh-pause-btn" class="py-1 px-2.5 rounded font-bold transition-all duration-200 text-xs whitespace-nowrap bg-slate-500 hover:bg-slate-600 text-white" title="Pause / resume page auto-refresh">
+                <i class="fas fa-pause mr-1"></i>Pause Refresh
+            </button>
         </div>
     </footer>
+    </div><!-- /right column -->
     <script>
         // Lightweight toast notifier — replaces alert() for completion/error
         // messages so an action doesn't pop a blocking modal. Types: success |
