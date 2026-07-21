@@ -581,6 +581,7 @@ class HubAgentClient:
             # distinct type keeps every integration working while it registers as
             # an ordinary approvable module.
             auth_payload = {"spoke_id": self.spoke_id, "module_type": "bugfixer"}
+            sent_secret = bool(self.secret)
             if self.secret:
                 auth_payload["secret"] = self.secret
             await websocket.send(json.dumps(auth_payload, separators=(",", ":")))
@@ -613,6 +614,19 @@ class HubAgentClient:
             else:
                 logger.warning("No hub secret configured — skipping Hub identity verification (insecure).")
             await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(",", ":")))
+
+            # We presented a stored secret and the hub sent HUB_VERIFIED without
+            # closing 1008 "Authentication" — so it ACCEPTED our secret: we are an
+            # already-approved spoke re-establishing its session. The hub only
+            # (re)sends SPOKE_UPDATE_SESSION_KEY / APPROVED on a ZERO-TOUCH connect,
+            # NOT when a valid secret is presented, so without this flip the status
+            # set to "pending" at reconnect (line ~374) would stick forever and
+            # bugfixer would keep suppressing its hub-log scans as if unapproved. A
+            # stale secret self-corrects: the hub closes 1008 → the reconnect
+            # handler clears the secret and re-onboards zero-touch.
+            if sent_secret and self.secret:
+                self._approved = True
+                self.on_status("approved", "reconnected — session re-established")
 
             # 3. Heartbeat task (unsigned while pending so the Hub accepts it).
             async def heartbeat():
