@@ -207,6 +207,21 @@
     <!-- Topbar — spans full page width (LM-HUB shell) -->
     <header class="hpe-topbar h-14 flex-none flex items-center justify-between px-6">
         <h1 class="text-white text-xl font-bold tracking-tight">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}System Logs{% elif view == 'hub-logs' %}Hub Module Logs{% elif view == 'settings' %}Configuration{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</h1>
+        <!-- Hub agent connection status — mirrors LM's header status pattern
+             (w-2 h-2 rounded-full, green/amber/red/slate by agent state) with a
+             hover tooltip that drops DOWN from the header. Clickable → Diagnostics
+             (Hub & Heartbeat Triage card). Polled by refreshHubStatusDot(). -->
+        {% set _hs = (state.hub_agent_status or 'not_registered') %}
+        <div id="hub-status-group" class="flex items-center gap-2 group relative cursor-pointer" onclick="location.href='/diagnostics'" title="Hub agent connection status">
+            <div id="hub-status-dot" class="w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] {{ {'approved':'bg-green-500','pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') }}"></div>
+            <span class="text-[10px] uppercase tracking-widest opacity-60">Hub</span>
+            <div id="hub-status-tooltip" class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[200px] text-left normal-case tracking-normal">
+                <div class="opacity-60 uppercase mb-1">Hub Agent</div>
+                <div id="hub-status-tip-status" class="font-bold">{{ state.hub_agent_status }}</div>
+                <div id="hub-status-tip-msg" class="opacity-80 mt-0.5">{{ state.hub_agent_message }}</div>
+                <div class="opacity-50 mt-1">last seen: <span id="hub-status-tip-seen">{{ state.hub_agent_last_seen }}</span></div>
+            </div>
+        </div>
     </header>
 
     <!-- MIDDLE AREA: sidebar + viewport (header/footer span full width above/below) -->
@@ -1443,20 +1458,6 @@
                     <i class="fas fa-pause mr-1"></i>Pause Refresh
                 </button>
                 <span class="text-[10px] uppercase tracking-widest opacity-60 ml-2">v{{ state.version }}</span>
-                <!-- Hub agent connection status — mirrors LM's footer hub-status-dot
-                     (w-2 h-2 rounded-full, green/amber/red/slate by agent state) with a
-                     hover tooltip. Clickable → Diagnostics (Hub & Heartbeat Triage card). -->
-                {% set _hs = (state.hub_agent_status or 'not_registered') %}
-                <div id="hub-status-group" class="flex items-center gap-2 group relative cursor-pointer ml-2" onclick="location.href='/diagnostics'" title="Hub agent connection status">
-                    <div id="hub-status-dot" class="w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] {{ {'approved':'bg-green-500','pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') }}"></div>
-                    <span class="text-[10px] uppercase tracking-widest opacity-60">Hub</span>
-                    <div id="hub-status-tooltip" class="absolute bottom-full right-0 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[200px] text-left normal-case tracking-normal">
-                        <div class="opacity-60 uppercase mb-1">Hub Agent</div>
-                        <div id="hub-status-tip-status" class="font-bold">{{ state.hub_agent_status }}</div>
-                        <div id="hub-status-tip-msg" class="opacity-80 mt-0.5">{{ state.hub_agent_message }}</div>
-                        <div class="opacity-50 mt-1">last seen: <span id="hub-status-tip-seen">{{ state.hub_agent_last_seen }}</span></div>
-                    </div>
-                </div>
             </div>
         </div>
     </footer>
@@ -2173,8 +2174,8 @@
         // Load diagnostics on page load if on the diagnostics view, and refresh every 10s.
         if (document.getElementById('diag-root')) { refreshDiagnostics(); setInterval(refreshDiagnostics, 10000); }
 
-        // ---- Footer Hub status dot (mirrors LM hub-status-dot) ----
-        // Polls /api/hub_agent_status and recolors the footer dot + tooltip so
+        // ---- Header Hub status dot (mirrors LM hub-status-dot) ----
+        // Polls /api/hub_agent_status and recolors the header dot + tooltip so
         // the connection state is visible from every view, not just Diagnostics.
         // green=approved, amber=pending, red=error, slate=not_registered.
         function refreshHubStatusDot() {
