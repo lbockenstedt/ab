@@ -733,6 +733,43 @@ DEFAULT_ENV = {
 }
 
 
+# Live GitHub repo list for the settings "Monitored Repositories" multi-select.
+# Cached in `state` with a TTL so we don't hit GitHub on every /settings load;
+# a failed/missing-token fetch returns [] and the template falls back to the
+# free-text "additional repos" input alone.
+_GITHUB_REPOS_TTL = 300
+
+
+def _fetch_github_repos_sync(token: str) -> list:
+    """Best-effort list of the configured token's accessible GitHub repos
+    (``owner/repo``). Filters to non-archived repos the user can push to (where
+    BugFixer could actually file/fix issues), sorted by name, capped at 200 so
+    the settings page stays snappy. Returns ``[]`` on any failure."""
+    if not token:
+        return []
+    try:
+        gh = Github(token)
+        repos = []
+        for r in gh.get_user().get_repos(affiliation="owner,organization_member"):
+            try:
+                if getattr(r, "archived", False):
+                    continue
+                perms = getattr(r, "permissions", None)
+                # Keep repos we can push to; skip read-only collaborator repos.
+                if perms is not None and not getattr(perms, "push", False):
+                    continue
+                repos.append(r.full_name)
+            except Exception:
+                continue
+            if len(repos) >= 200:
+                break
+        repos.sort(key=lambda s: s.lower())
+        return repos
+    except Exception as e:
+        logger.warning("settings: GitHub repo list fetch failed: %s", e)
+        return []
+
+
 @router.get("/settings")
 async def settings_page(request: Request):
     load_dotenv(override=True)
@@ -748,10 +785,29 @@ async def settings_page(request: Request):
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
 
+    # Live multi-select options: cached GitHub repo list (TTL-bounded) UNION the
+    # currently-monitored repos so any repo already monitored but not in the
+    # fetched list (e.g. a fork the token can't enumerate) still shows as a
+    # pre-checked checkbox the user can toggle off.
+    cache = state.get("github_repos_cache") or {}
+    now = time.time()
+    if cache and (now - cache.get("ts", 0)) < _GITHUB_REPOS_TTL:
+        github_repos = cache.get("repos", []) or []
+    else:
+        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+        github_repos = await asyncio.to_thread(_fetch_github_repos_sync, token) if token else []
+        state["github_repos_cache"] = {"ts": now, "repos": github_repos}
+    monitored = list(config.get("monitored_repos") or [])
+    monitored_set = set(monitored)
+    extra_monitored = [r for r in monitored if r not in set(github_repos)]
+    repo_options = list(github_repos) + extra_monitored  # union, monitored last
+
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
         "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]},
         "available_labels": state.get("available_labels", []),
+        "repo_options": repo_options,
+        "monitored_set": monitored_set,
         "state": state,
     })
 
@@ -819,8 +875,24 @@ async def save_settings(request: Request):
     if "label_mode" in data or "monitored_labels" in form_data or "custom_labels" in data:
         config_data["monitored_labels"] = labels
 
+    # Monitored repos now arrive as repeated checkbox values (getlist) plus an
+    # optional free-text "additional repos" field for repos not in the fetched
+    # GitHub list. Merge + dedup (preserve order). Handled here, NOT in the
+    # `updates` dict below — dict(form_data) collapses multi-values to the last
+    # checkbox, which would silently drop the rest.
+    if hasattr(form_data, "getlist"):
+        checked_repos = form_data.getlist("monitored_repos")
+    else:
+        checked_repos = [data["monitored_repos"]] if data.get("monitored_repos") else []
+    extra_raw = data.get("monitored_repos_extra", "") or ""
+    extra_repos = [clean_repo_name(x.strip()) for x in extra_raw.replace("\\n", ",").split(",") if x.strip()]
+    monitored_repos = [clean_repo_name(x) for x in checked_repos if x and str(x).strip()]
+    for r in extra_repos:
+        if r and r not in monitored_repos:
+            monitored_repos.append(r)
+    config_data["monitored_repos"] = list(dict.fromkeys(monitored_repos))
+
     updates = {
-        "monitored_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
         "trusted_repos": lambda v: [clean_repo_name(x.strip()) for x in v.replace("\\n", ",").split(",") if x.strip()],
         "default_branch": lambda v: v,
         "dev_branch": lambda v: v,

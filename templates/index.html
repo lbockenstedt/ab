@@ -500,8 +500,22 @@
                                 <input type="text" name="UPDATE_API_URL" value="{{ settings.UPDATE_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
-                                <label class="text-sm font-medium text-slate-600">Monitored Repositories (Comma Separated)</label>
-                                <textarea name="monitored_repos" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">{{ settings.monitored_repos | join(', ') }}</textarea>
+                                <label class="text-sm font-medium text-slate-600">Monitored Repositories</label>
+                                {% if repo_options %}
+                                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
+                                    {% for repo in repo_options %}
+                                    <label class="flex items-center gap-2 text-sm text-slate-700 min-w-0" title="{{ repo }}">
+                                        <input type="checkbox" name="monitored_repos" value="{{ repo }}" {% if repo in monitored_set %}checked{% endif %} class="rounded border-slate-300 focus:ring-[#01A982] flex-shrink-0">
+                                        <span class="truncate">{{ repo }}</span>
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                                <span class="text-xs text-slate-500">Tick the repos BugFixer should monitor. Populated from your GitHub account (cached 5 min). Add any not listed below.</span>
+                                {% else %}
+                                <span class="text-xs text-slate-400 block">Couldn't load your GitHub repo list (no token or fetch failed) — enter repos manually below.</span>
+                                {% endif %}
+                                <label class="text-xs text-slate-500">Additional repos (comma-separated, e.g. <code class="bg-slate-100 px-1 rounded">org/repo</code>)</label>
+                                <input type="text" name="monitored_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="owner/repo, org/another">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Trusted Repositories (Allow Direct Push)</label>
