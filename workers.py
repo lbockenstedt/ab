@@ -809,9 +809,14 @@ def scan_self_logs(gh_current, config):
             f.seek(start_offset)
             new_text = f.read()
 
-        # Persist the new read position. Saved immediately after reading so a
-        # crash or filing failure never causes the same lines to be re-read.
-        save_self_scan_offset(os.path.getsize(log_path), current_inode)
+        # Persist the END OF WHAT WE ACTUALLY READ, not a fresh getsize(). If we
+        # saved getsize() here, any lines appended between the read() above and
+        # the getsize() call would be skipped forever (the next scan starts past
+        # them). start_offset + bytes-read is exactly the position we consumed to,
+        # so nothing written after our read is lost. Saved immediately after
+        # reading so a crash or filing failure never re-reads the same lines.
+        next_offset = start_offset + len(new_text.encode("utf-8", "replace"))
+        save_self_scan_offset(next_offset, current_inode)
 
         # Patterns that are transient/expected and should never become GitHub issues.
         _SELF_SCAN_SKIP = (

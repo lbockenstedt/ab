@@ -127,12 +127,22 @@ def main():
         _normalize_for_dedup(wrapped) == _normalize_for_dedup(bare),
     )
 
-    # (6) Timestamp/number stripping: same snippet at different times compares equal.
+    # (6a) Timestamp drift alone (same line number) still compares equal — the
+    #      timestamp is stripped as noise.
     snip_a = "2026-06-10 03:53:05,214 [ERROR] opnsense: NameError time not imported at line 82"
-    snip_b = "2026-06-17 00:02:06,054 [ERROR] opnsense: NameError time not imported at line 901"
+    snip_b = "2026-06-17 00:02:06,054 [ERROR] opnsense: NameError time not imported at line 82"
     ok &= _check(
-        "timestamp+number drift does not affect normalized body",
+        "timestamp drift does not affect normalized body",
         _normalize_for_dedup(snip_a) == _normalize_for_dedup(snip_b),
+    )
+
+    # (6b) Line-number / error-code drift is now PRESERVED as a discriminator:
+    #      two snippets differing only by line number must NOT normalize equal,
+    #      so a genuinely-distinct bug is no longer folded into an existing issue.
+    snip_c = "2026-06-17 00:02:06,054 [ERROR] opnsense: NameError time not imported at line 901"
+    ok &= _check(
+        "line-number drift IS preserved (distinct errors stay distinct)",
+        _normalize_for_dedup(snip_a) != _normalize_for_dedup(snip_c),
     )
 
     # (7) Sanity: genuinely different errors do not match.

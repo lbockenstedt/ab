@@ -58,9 +58,15 @@ _EMOJI_RE = re.compile(
 
 # ISO-style timestamps: 2026-06-18 00:02:06,054  (optional comma-ms, T or space sep)
 _TS_RE = re.compile(r'\b\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}:\d{2}(?:,\d+)?\b')
-_NUM_RE = re.compile(r'\b\d+\b')
 _PUNCT_RE = re.compile(r'[^\w\s]')
 _WS_RE = re.compile(r'\s+')
+
+# Body-level duplicate threshold. Raised from the old 0.7 to 0.85: two error
+# snippets that share ~70% of their tokens are frequently DISTINCT bugs from the
+# same module (same stack-trace scaffolding, different failure), so 0.7 folded
+# genuinely-new bugs into an existing issue. 0.85 demands a much stronger core
+# overlap before declaring a body-level duplicate.
+_BODY_JACCARD_THRESHOLD = 0.85
 
 
 def strip_boilerplate(text):
@@ -82,22 +88,26 @@ def _apply_aliases(token_text):
 
 
 def _normalize_for_dedup(text):
-    """Aggressively normalize text for duplicate comparison.
+    """Normalize text for duplicate comparison.
 
     Lowercases, strips emoji + the automated-issue boilerplate wrapper, strips
-    timestamps and standalone numbers, drops punctuation, applies module
-    aliases, and collapses whitespace. Log snippets that differ only by
-    timestamp / issue-number / boilerplate / ``opns``-vs-``opnsense`` naming then
-    compare equal, so the SAME recurring error (rephrased by the LLM or logged at
-    a new time) is detected as a duplicate instead of creating a fresh issue
-    every cycle.
+    full timestamps, drops punctuation, applies module aliases, and collapses
+    whitespace. Log snippets that differ only by timestamp / boilerplate /
+    ``opns``-vs-``opnsense`` naming compare equal, so the SAME recurring error
+    (rephrased by the LLM or logged at a new time) is detected as a duplicate.
+
+    NOTE: numbers are deliberately PRESERVED. Stripping every standalone number
+    also erased the strongest discriminators between two DISTINCT errors —
+    exception line numbers, error/exit codes, HTTP status codes, PIDs — so two
+    unrelated bugs that differed only by such a number normalized identical and a
+    genuinely-new bug got folded into an existing issue. Only whole timestamps
+    (genuine noise) are removed; every other number is kept as a discriminator.
     """
     if not text:
         return ""
     t = str(text).lower()
     t = strip_boilerplate(t)
     t = _TS_RE.sub(" ", t)
-    t = _NUM_RE.sub(" ", t)
     t = _PUNCT_RE.sub(" ", t)
     t = _apply_aliases(t)
     t = _WS_RE.sub(" ", t).strip()
@@ -114,19 +124,42 @@ def _jaccard(a, b):
     return len(a & b) / float(len(a | b))
 
 
+def _body_containment_match(new_body, ex_body):
+    """True when one normalized body fully contains the other — the strongest
+    "same error" signal for recurring LOG snippets, and near-identical enough to
+    treat the two as the same underlying bug. Length-guarded so trivially short
+    bodies don't produce spurious substring hits."""
+    nb = _normalize_for_dedup(new_body)
+    eb = _normalize_for_dedup(ex_body)
+    nb_tokens = nb.split()
+    eb_tokens = eb.split()
+    if not nb or not eb or len(nb_tokens) < 5 or len(eb_tokens) < 5:
+        return False
+    return nb in eb or eb in nb
+
+
+def _body_signal_match(new_body, ex_body):
+    """True when there is a BODY-level duplicate signal — containment OR high
+    (>= _BODY_JACCARD_THRESHOLD) token overlap. Used to require actual body
+    evidence (not a title-only coincidence) before reopening a closed issue."""
+    if _body_containment_match(new_body, ex_body):
+        return True
+    nb_tokens = _normalize_for_dedup(new_body).split()
+    eb_tokens = _normalize_for_dedup(ex_body).split()
+    if len(nb_tokens) < 5 or len(eb_tokens) < 5:
+        return False
+    return _jaccard(set(nb_tokens), set(eb_tokens)) >= _BODY_JACCARD_THRESHOLD
+
+
 def _is_duplicate_match(new_title, new_body, ex_title, ex_body):
     """Returns True if a new error matches an existing issue, using normalized +
     fuzzy comparison so LLM rephrasing, timestamp drift, boilerplate wrapper,
     and module-name variants (opns/opnsense) don't defeat dedup."""
     nt = _normalize_for_dedup(new_title)
-    nb = _normalize_for_dedup(new_body)
     et = _normalize_for_dedup(ex_title)
-    eb = _normalize_for_dedup(ex_body)
 
     nt_tokens = nt.split()
-    nb_tokens = nb.split()
     et_tokens = et.split()
-    eb_tokens = eb.split()
 
     # Exact normalized title match (guard against tiny/generic titles).
     if nt and et and len(nt_tokens) >= 3 and len(et_tokens) >= 3 and nt == et:
@@ -137,13 +170,8 @@ def _is_duplicate_match(new_title, new_body, ex_title, ex_body):
     # High title token overlap.
     if nt and et and len(nt_tokens) >= 2 and _jaccard(set(nt_tokens), set(et_tokens)) >= 0.7:
         return True
-    # Body containment — the most reliable signal for recurring LOG errors: the
-    # normalized log-snippet core matches even though timestamps differ. Guard
-    # against very short bodies causing spurious substring matches.
-    if nb and eb and len(nb_tokens) >= 5 and len(eb_tokens) >= 5 and (nb in eb or eb in nb):
-        return True
-    # High body token overlap.
-    if nb and eb and len(nb_tokens) >= 5 and len(eb_tokens) >= 5 and \
-            _jaccard(set(nb_tokens), set(eb_tokens)) >= 0.7:
+    # Body-level signal: containment (most reliable for recurring LOG errors,
+    # matches even though timestamps differ) or high token overlap.
+    if _body_signal_match(new_body, ex_body):
         return True
     return False

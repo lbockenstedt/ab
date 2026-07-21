@@ -2,6 +2,7 @@
 import json, os, requests
 from datetime import datetime
 from dedup import _is_duplicate_match as _is_duplicate_match_impl, _jaccard as _jaccard_impl, _normalize_for_dedup as _normalize_for_dedup_impl, _token_set as _token_set_impl
+from dedup import _body_signal_match, _body_containment_match
 
 from main import (
     _in_update_cooldown,
@@ -315,6 +316,14 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
                         return issue, repo_name, (issue.state == 'closed')
 
                 if _is_duplicate_match(new_title, new_body, issue.title or "", issue_body):
+                    is_closed = (issue.state == 'closed')
+                    # Reopening a CLOSED issue is expensive (re-triggers an
+                    # ai-fix branch) and destructive if wrong, so it demands a
+                    # BODY-level signal — a title-only match (e.g. a generic
+                    # "NameError in X" title) is not enough to resurrect a closed
+                    # issue. An OPEN duplicate can still match on title alone.
+                    if is_closed and not _body_signal_match(new_body, issue_body):
+                        continue
                     # Global fallback (non-target repo): require a strong
                     # title-level signal so we don't cross-match unrelated
                     # modules on incidental body-wording overlap.
@@ -324,7 +333,7 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
                         if not (nt and et and
                                 _jaccard(set(nt.split()), set(et.split())) >= GLOBAL_FALLBACK_JACCARD):
                             continue
-                    return issue, repo_name, (issue.state == 'closed')
+                    return issue, repo_name, is_closed
         except Exception as e:
             logger.debug(f"Could not search for duplicates in {repo_name}: {e}")
         return None
@@ -420,17 +429,31 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
             duplicate_repo_display = duplicate_repo_name or current_repo_name
 
             # If the matching issue still carries the 'bugfixer-dismissed' label,
-            # it was intentionally marked as not a real issue — skip entirely.
-            # A human removing the label is the signal to resume normal processing.
+            # it was intentionally marked as not a real issue. Only suppress when
+            # the NEW error's body is near-identical to the dismissed issue's
+            # (normalized containment) — a mere title/0.7-Jaccard match is too
+            # weak to silence a genuinely-DIFFERENT bug that happens to share a
+            # title or some body wording with a dismissed one. When it is not a
+            # body-near-identical match, we treat the dismissed issue as NOT a
+            # match and fall through to file a fresh issue (and never reopen the
+            # dismissed one). A human removing the label resumes normal handling.
             existing_labels = [lbl.name for lbl in (existing_issue.labels or [])]
             if "bugfixer-dismissed" in existing_labels:
+                if _body_containment_match(body_text, existing_issue.body or ""):
+                    logger.info(
+                        f"Suppressing new issue for #{existing_issue.number} in "
+                        f"{duplicate_repo_display} — 'bugfixer-dismissed' label is "
+                        f"still present and the body is near-identical."
+                    )
+                    return existing_issue
                 logger.info(
-                    f"Suppressing new issue for #{existing_issue.number} in "
-                    f"{duplicate_repo_display} — 'bugfixer-dismissed' label is still present."
+                    f"Dismissed issue #{existing_issue.number} in {duplicate_repo_display} "
+                    f"matched only weakly (no body-level near-identity) — treating as a new "
+                    f"error and filing a fresh issue instead of suppressing."
                 )
-                return existing_issue
+                existing_issue = None
 
-            if was_closed:
+            if existing_issue and was_closed:
                 # The matching issue was closed (typically the bot merged a "fix"
                 # for it). Reopen it and record the recurrence instead of filing a
                 # brand-new issue + spawning another ai-fix-issue-* branch. This
@@ -456,17 +479,20 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                 return existing_issue
 
             # OPEN duplicate — keep the existing evidence-comment behavior.
-            logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {duplicate_repo_display}. Adding info.")
+            # Guarded by existing_issue because the dismissed-label branch above
+            # may have cleared it (weak match) to fall through to a fresh issue.
+            if existing_issue:
+                logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {duplicate_repo_display}. Adding info.")
 
-            existing_body = existing_issue.body or ""
-            if body_text.lower() not in existing_body.lower():
-                existing_issue.create_comment(
-                    f"🤖 **BugFixer Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}:**\n\n"
-                    f"```\n{body_text}\n```"
-                )
-                logger.info(f"Added additional evidence from {current_repo_name} to issue #{existing_issue.number}")
+                existing_body = existing_issue.body or ""
+                if body_text.lower() not in existing_body.lower():
+                    existing_issue.create_comment(
+                        f"🤖 **BugFixer Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}:**\n\n"
+                        f"```\n{body_text}\n```"
+                    )
+                    logger.info(f"Added additional evidence from {current_repo_name} to issue #{existing_issue.number}")
 
-            return existing_issue
+                return existing_issue
 
         full_title = f"🤖 Log Alert: {title_text}"
         full_body = (
