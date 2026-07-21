@@ -20,6 +20,7 @@ from main import (
     _apply_closed_label,
     _chat_lock,
     _diag_origin_head,
+    _diag_origin_version,
     _fetch_models_for_provider,
     _get_hub_agent_client,
     _get_provider_config,
@@ -221,13 +222,14 @@ async def diagnostics():
     config = load_config()
 
     # Startup stamp — which commit this process booted on.
-    running_commit, started_at, pid, main_mtime = None, None, None, None
+    running_commit, running_version, started_at, pid, main_mtime = None, None, None, None, None
     try:
         with open(STARTUP_STAMP_FILE, "r") as f:
             stamp = json.load(f)
         running_commit = stamp.get("commit")
         if running_commit == "unknown":
             running_commit = None
+        running_version = stamp.get("version")
         started_at = stamp.get("started_at")
         pid = stamp.get("pid")
         main_mtime = stamp.get("main_mtime")
@@ -245,6 +247,16 @@ async def diagnostics():
 
     update_state = load_update_state()
     update_pending_exists = os.path.exists(os.path.join(CONFIG_DIR, "update_pending"))
+
+    # Resolve the last-known-good commit's VERSION so the UI can show a
+    # version label instead of a raw commit SHA.
+    lkg_commit = update_state.get("last_known_good_commit")
+    lkg_version = None
+    if lkg_commit:
+        try:
+            lkg_version = git.Repo(os.getcwd()).git.show(f"{lkg_commit}:VERSION").strip() or None
+        except Exception:
+            lkg_version = None
 
     providers = []
     for n in (1, 2, 3, 4):
@@ -269,6 +281,9 @@ async def diagnostics():
             "disk": disk_commit,
             "origin": origin_commit,
             "label": get_version(),
+            "running_version": running_version,
+            "disk_version": get_version(),
+            "origin_version": _diag_origin_version(),
             "stale": bool(disk_commit and running_commit and disk_commit != running_commit),
         },
         "process": {"pid": pid, "started_at": started_at, "main_mtime": main_mtime},
@@ -276,6 +291,7 @@ async def diagnostics():
             "pending": update_pending_exists,
             "restart_pending": bool(state.get("restart_pending")),
             "last_known_good_commit": update_state.get("last_known_good_commit"),
+            "last_known_good_version": lkg_version,
             "failed_commits": update_state.get("failed_commits", []),
             "restart_log": state.get("restart_log", []),
         },

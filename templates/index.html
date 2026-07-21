@@ -1268,11 +1268,14 @@
                         <button onclick="diagAction('/update_now', 'Checking…')" class="py-1.5 px-3 rounded font-bold text-xs bg-slate-600 hover:bg-slate-700 text-white">Check for updates</button>
                     </div>
                 </div>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div class="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
                     <div><div class="text-slate-500">Running</div><div id="diag-v-running" class="font-mono text-slate-800">—</div></div>
                     <div><div class="text-slate-500">On disk</div><div id="diag-v-disk" class="font-mono text-slate-800">—</div></div>
                     <div><div class="text-slate-500">Origin</div><div id="diag-v-origin" class="font-mono text-slate-800">—</div></div>
-                    <div><div class="text-slate-500">Version</div><div id="diag-v-label" class="font-mono text-slate-800">{{ state.version }}</div></div>
+                </div>
+                <div class="mt-3 pt-3 border-t border-slate-100 text-sm flex items-center gap-2">
+                    <span class="text-slate-500">Version</span>
+                    <span id="diag-v-compare" class="font-bold text-slate-800 font-mono">{{ state.version }}</span>
                 </div>
                 <div class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500 grid grid-cols-2 md:grid-cols-3 gap-2">
                     <div>Started: <span id="diag-started" class="text-slate-700 font-mono">—</span></div>
@@ -1880,7 +1883,6 @@
         // Load scheduler status on page load if on settings view.
         if (document.getElementById('sched-status-box')) refreshSchedStatus();
 
-        function _diagShort(c) { return c ? String(c).slice(0, 7) : '—'; }
         function _diagPill(ok, label) {
             return ok
                 ? '<span class="status-pill pill-online">' + label + '</span>'
@@ -1892,10 +1894,20 @@
             try {
                 const d = await fetch('/api/diagnostics').then(r => r.json());
                 const v = d.versions || {};
-                document.getElementById('diag-v-running').textContent = _diagShort(v.running);
-                document.getElementById('diag-v-disk').textContent = _diagShort(v.disk);
-                document.getElementById('diag-v-origin').textContent = _diagShort(v.origin);
-                document.getElementById('diag-v-label').textContent = v.label || '—';
+                const rv = v.running_version || '—';
+                const dv = v.disk_version || v.label || '—';
+                const ov = v.origin_version || '—';
+                document.getElementById('diag-v-running').textContent = rv;
+                document.getElementById('diag-v-disk').textContent = dv;
+                document.getElementById('diag-v-origin').textContent = ov;
+                const cmp = document.getElementById('diag-v-compare');
+                if (rv !== '—' && dv !== '—' && rv !== dv) {
+                    cmp.textContent = rv + ' → ' + dv;
+                    cmp.classList.add('text-[#01A982]');
+                } else {
+                    cmp.textContent = dv;
+                    cmp.classList.remove('text-[#01A982]');
+                }
                 const proc = d.process || {};
                 document.getElementById('diag-started').textContent = proc.started_at || '—';
                 document.getElementById('diag-pid').textContent = (proc.pid != null) ? proc.pid : '—';
@@ -1903,7 +1915,7 @@
                 const up = d.update || {};
                 document.getElementById('diag-pending').textContent = (d.watchdog_signal || up.pending) ? 'yes' : 'no';
                 document.getElementById('diag-restart-pending').textContent = up.restart_pending ? 'yes' : 'no';
-                document.getElementById('diag-lkg').textContent = _diagShort(up.last_known_good_commit);
+                document.getElementById('diag-lkg').textContent = up.last_known_good_version || '—';
 
                 const banner = document.getElementById('diag-stale-banner');
                 const msg = document.getElementById('diag-stale-msg');

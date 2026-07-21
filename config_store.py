@@ -197,6 +197,7 @@ def write_startup_stamp():
             logger.warning(f"Startup stamp: could not read git commit: {ge}")
         stamp = {
             "commit": commit,
+            "version": get_version(),
             "started_at": datetime.now().isoformat(),
             "pid": os.getpid(),
             "main_mtime": os.path.getmtime(main.__file__),

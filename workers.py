@@ -1210,6 +1210,26 @@ def _diag_origin_head():
         return None
 
 
+def _diag_origin_version():
+    """Best-effort VERSION file content at origin HEAD (no network fetch).
+
+    Companion to _diag_origin_head: returns the version string the
+    Diagnostics panel shows for "Origin" instead of a commit SHA."""
+    try:
+        repo = git.Repo(os.getcwd())
+        branch = "main"
+        try:
+            branch = repo.active_branch.tracking_branch().name.split("/")[-1]
+        except Exception:
+            pass
+        try:
+            return repo.git.show(f"origin/{branch}:VERSION").strip() or None
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
 
 
 
