@@ -109,6 +109,37 @@
             color: var(--hpe-navy);
             font-weight: 700;
         }
+        /* LM-HUB horizontal sub-nav strip (mirrors #top-nav / .sub-nav-item in
+           lm/WebUI/index.html). Used on the Settings view to jump between the
+           8 configuration sections without leaving the single save form. */
+        .hpe-subnav {
+            background-color: var(--hpe-white);
+            border-bottom: 1px solid var(--hpe-border);
+        }
+        .sub-nav-item {
+            transition: all 0.2s ease;
+            cursor: pointer;
+            color: #475569; /* slate-600 */
+            border-bottom: 3px solid transparent;
+        }
+        .sub-nav-item:hover { color: #0f172a; } /* slate-900 */
+        .sub-nav-item.active {
+            color: var(--hpe-green);
+            font-weight: 600;
+            border-bottom-color: var(--hpe-green);
+        }
+        /* Neutral / secondary action button (LM btnSecCls token:
+           bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200). */
+        .btn-sec {
+            background-color: #f1f5f9; /* slate-100 */
+            color: #334155; /* slate-700 */
+            border: 1px solid #e2e8f0; /* slate-200 */
+            transition: all 0.2s ease;
+        }
+        .btn-sec:hover { background-color: #e2e8f0; } /* slate-200 */
+        /* Offset anchored sections so the sub-nav strip doesn't cover their
+           header when jumped to. */
+        section[id^="sec-"] { scroll-margin-top: 110px; }
         .cursor-blink {
             display: inline-block;
             width: 6px;
@@ -523,14 +554,27 @@
         {% if view == 'settings' %}
         <div class="max-w-6xl mx-auto">
             <div class="hpe-card p-8">
-                <div class="flex items-center gap-3 mb-8">
+                <div class="flex items-center gap-3 mb-6">
                     <i class="fas fa-sliders-h text-[#01A982] text-2xl"></i>
-                    <h3 class="text-2xl font-bold text-slate-900">Configuration</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">Configuration</h3>
+                </div>
+
+                <!-- LM-style horizontal sub-nav strip: jump-to-section tabs.
+                     Mirrors #top-nav / .sub-nav-item in lm/WebUI/index.html. -->
+                <div class="hpe-subnav h-11 flex items-center gap-5 px-1 text-sm font-medium -mx-2 mb-6 overflow-x-auto">
+                    <a href="#sec-github"    class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-github')">GitHub</a>
+                    <a href="#sec-llm"       class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-llm')">LLM</a>
+                    <a href="#sec-local-llm" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-local-llm')">Local LLM</a>
+                    <a href="#sec-qa"        class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-qa')">QA</a>
+                    <a href="#sec-automation" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-automation')">Automation</a>
+                    <a href="#sec-system"    class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-system')">System</a>
+                    <a href="#sec-chat"      class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-chat')">Chat</a>
+                    <a href="#sec-scheduler" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-subnav onclick="settingsJump(this,'sec-scheduler')">Scheduler</a>
                 </div>
 
                 <form action="/save_settings" method="post" class="space-y-10">
                     <!-- 1. GitHub & Repository Core -->
-                    <section>
+                    <section id="sec-github">
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-github text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub & Repository Core</h4>
@@ -597,7 +641,7 @@
                     </section>
 
                     <!-- 2. LLM Configuration -->
-                    <section>
+                    <section id="sec-llm">
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-brain text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">LLM Configuration</h4>
@@ -625,7 +669,7 @@
                                     <div class="space-y-2">
                                         <p class="text-xs text-slate-500">Uses the <strong>Claude Code</strong> session authenticated on this server — no API key needed. The <code class="bg-slate-100 px-1 rounded">claude</code> binary must be in PATH.</p>
                                         <div class="flex gap-2">
-                                            <button type="button" onclick="checkClaudeStatus()" class="flex-1 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold transition-colors border border-slate-300">Check Status</button>
+                                            <button type="button" onclick="checkClaudeStatus()" class="flex-1 py-1 text-xs btn-sec rounded font-bold">Check Status</button>
                                             <button type="button" onclick="startClaudeAuth()" class="flex-1 py-1 text-xs bg-violet-600 hover:bg-violet-700 text-white rounded font-bold transition-colors">Start Login Flow</button>
                                         </div>
                                         <div id="claude-cli-status" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 space-y-1">
@@ -647,7 +691,7 @@
                                     <div class="space-y-2">
                                         <input type="password" id="vault-key-{{ pname }}" placeholder="API Key" value="{{ cred.get('api_key','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <input type="text" id="vault-url-{{ pname }}" placeholder="Base URL (optional)" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
-                                        <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs bg-[#01A982] hover:bg-[#018f6e] text-white rounded font-bold transition-colors">Save {{ pname }} Credential</button>
+                                        <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs btn-primary rounded font-bold">Save {{ pname }} Credential</button>
                                     </div>
                                     {% endif %}
                                 </div>
@@ -659,7 +703,7 @@
                         <div class="mb-6">
                             <div class="flex items-center justify-between mb-3">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Step 2 — Provider / Model Entries</p>
-                                <button type="button" onclick="showAddEntry()" class="text-xs px-3 py-1 bg-[#01A982] hover:bg-[#018f6e] text-white rounded font-bold transition-colors">+ Add Entry</button>
+                                <button type="button" onclick="showAddEntry()" class="text-xs px-3 py-1 btn-primary rounded font-bold">+ Add Entry</button>
                             </div>
 
                             <!-- Add entry form (hidden by default) -->
@@ -684,8 +728,8 @@
                                     <input type="text" id="new-entry-reviewer" placeholder="Reviewer model (blank=same)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                                 <div class="flex gap-2">
-                                    <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs bg-[#01A982] text-white rounded font-bold">Add</button>
-                                    <button type="button" onclick="document.getElementById('add-entry-form').classList.add('hidden')" class="px-3 py-1 text-xs bg-slate-200 text-slate-700 rounded font-bold">Cancel</button>
+                                    <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs btn-primary rounded font-bold">Add</button>
+                                    <button type="button" onclick="document.getElementById('add-entry-form').classList.add('hidden')" class="px-3 py-1 text-xs btn-sec rounded font-bold">Cancel</button>
                                 </div>
                             </div>
 
@@ -722,8 +766,8 @@
                                             <input type="text" id="edit-reviewer-{{ entry.id }}" value="{{ entry.reviewer_model or '' }}" placeholder="Reviewer model (blank=same)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         </div>
                                         <div class="flex gap-2">
-                                            <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs bg-[#01A982] text-white rounded font-bold">Save</button>
-                                            <button type="button" onclick="cancelEdit('{{ entry.id }}')" class="px-3 py-1 text-xs bg-slate-200 text-slate-700 rounded font-bold">Cancel</button>
+                                            <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs btn-primary rounded font-bold">Save</button>
+                                            <button type="button" onclick="cancelEdit('{{ entry.id }}')" class="px-3 py-1 text-xs btn-sec rounded font-bold">Cancel</button>
                                         </div>
                                     </div>
                                 </div>
@@ -768,7 +812,7 @@
                     </section>
 
                     <!-- Local LLM (CPU-only) Setup -->
-                    <section>
+                    <section id="sec-local-llm">
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-microchip text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Local LLM (CPU-only) Setup</h4>
@@ -802,7 +846,7 @@
                         <div class="flex items-center gap-3">
                             <button type="button" onclick="startLocalLLMSetup()"
                                     id="local-llm-setup-btn"
-                                    class="py-2 px-4 rounded-lg font-bold bg-[#01A982] hover:bg-[#018f6e] text-white transition-all duration-200 text-sm">
+                                    class="py-2 px-4 rounded-lg font-bold btn-primary transition-all duration-200 text-sm">
                                 <i class="fas fa-bolt mr-2"></i>Setup Local LLM
                             </button>
                             <span id="local-llm-setup-state" class="text-xs text-slate-400"></span>
@@ -814,7 +858,7 @@
                     </section>
 
                     <!-- 3. QA & Verification -->
-                    <section>
+                    <section id="sec-qa">
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-vial text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">QA & Verification</h4>
@@ -842,7 +886,7 @@
                     </section>
 
                     <!-- 4. Automation & Deployment -->
-                    <section>
+                    <section id="sec-automation">
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-robot text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Automation & Deployment</h4>
@@ -879,9 +923,9 @@
                             <div id="hub-agent-message" class="text-xs text-slate-500 mb-2">{{ state.hub_agent_message }}</div>
                             <div class="flex items-center gap-2">
                                 <button type="button" onclick="hubAgentReregister()"
-                                        class="px-3 py-1 text-xs bg-[#01A982] hover:bg-[#018f6e] text-white rounded font-bold transition-colors">Re-register</button>
+                                        class="px-3 py-1 text-xs btn-primary rounded font-bold">Re-register</button>
                                 <button type="button" onclick="hubAgentRefresh()"
-                                        class="px-3 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold transition-colors border border-slate-300">Refresh</button>
+                                        class="px-3 py-1 text-xs btn-sec rounded font-bold">Refresh</button>
                             </div>
                             <p class="text-[11px] text-slate-500 mt-2">
                                 Approve <code class="bg-slate-100 px-1 rounded">bugfixer</code> in the Hub WebUI → Setup → Spoke Approvals
@@ -960,7 +1004,7 @@
                     </section>
 
                     <!-- System Settings -->
-                    <section>
+                    <section id="sec-system">
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-server text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">System Settings</h4>
@@ -974,7 +1018,7 @@
                     </section>
 
                     <!-- Chat Agent -->
-                    <section>
+                    <section id="sec-chat">
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-comment-dots text-slate-400"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Chat Agent</h4>
@@ -1034,10 +1078,10 @@
                     </section>
 
                     <!-- Scheduler -->
-                    <section>
+                    <section id="sec-scheduler">
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-clock text-[#01A982]"></i>
-                            <h3 class="font-bold text-slate-700">Scheduler</h3>
+                            <i class="fas fa-clock text-slate-400"></i>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Scheduler</h4>
                         </div>
 
                         <!-- Live status widget -->
@@ -1365,6 +1409,37 @@
                 const { message, type } = JSON.parse(raw);
                 if (message) showToast(message, type || 'info');
             } catch (e) { /* corrupt entry — ignore */ }
+        })();
+
+        // ---- Settings sub-nav: jump to a section + mark the active tab ----
+        // Mirrors LM's setSubView(): scroll the anchored section into view and
+        // toggle the .active underline onto the clicked sub-nav-item.
+        window.settingsJump = function (el, secId) {
+            const sec = document.getElementById(secId);
+            if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            document.querySelectorAll('[data-subnav]').forEach(n => n.classList.remove('active'));
+            if (el) el.classList.add('active');
+        };
+        // Highlight the tab for whichever section is currently in view.
+        (function () {
+            const tabs = Array.from(document.querySelectorAll('[data-subnav]'));
+            if (!tabs.length) return;
+            const main = document.querySelector('main');
+            const sections = tabs.map(t => {
+                const m = t.getAttribute('onclick').match(/'([^']+)'\s*\)$/);
+                return { tab: t, sec: m ? document.getElementById(m[1]) : null };
+            }).filter(s => s.sec);
+            const pick = () => {
+                const top = main ? main.getBoundingClientRect().top : 0;
+                let active = sections[0];
+                for (const s of sections) {
+                    if (s.sec.getBoundingClientRect().top - top - 120 <= 0) active = s;
+                }
+                tabs.forEach(t => t.classList.remove('active'));
+                if (active) active.tab.classList.add('active');
+            };
+            if (main) main.addEventListener('scroll', pick, { passive: true });
+            pick();
         })();
 
         // ---- Configurable page auto-refresh + Pause Refresh (footer) ----
