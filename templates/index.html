@@ -1498,7 +1498,15 @@
                 t.classList.toggle('active', t.getAttribute('data-tab') === secId);
             });
             document.querySelectorAll('[data-settings-section]').forEach(s => {
-                s.classList.toggle('hidden', s.id !== secId);
+                const show = s.id === secId;
+                // Toggle BOTH the `hidden` class (Tailwind utility) and the HTML
+                // `hidden` property/attribute. The template renders non-first
+                // sections with the bare `hidden` attribute (progressive
+                // enhancement — no flash before JS); toggling only the class
+                // would leave that attribute in place and keep the section
+                // invisible after a tab switch.
+                s.classList.toggle('hidden', !show);
+                s.hidden = !show;
             });
             const main = document.querySelector('main');
             if (main) main.scrollTop = 0;
