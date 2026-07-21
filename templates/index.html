@@ -206,7 +206,18 @@
 <body class="flex flex-col h-screen w-screen overflow-hidden">
     <!-- Topbar — spans full page width (LM-HUB shell) -->
     <header class="hpe-topbar h-14 flex-none flex items-center justify-between px-6">
-        <h1 class="text-white text-xl font-bold tracking-tight">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}System Logs{% elif view == 'hub-logs' %}Hub Module Logs{% elif view == 'settings' %}Configuration{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</h1>
+        <!-- Left: BugFixer icon | BugFixer | <current module> — mirrors LM's
+             (Logo | Lab Manager | <Module>) header pattern. The module label
+             tracks the active sidebar view so it always reads "where am I". -->
+        <div class="flex items-center gap-3 min-w-0">
+            <div class="bg-[#01A982] p-1.5 rounded-lg flex items-center shrink-0" title="BugFixer">
+                <i class="fas fa-robot text-white text-sm"></i>
+            </div>
+            <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
+            <h1 class="text-white text-xl font-bold tracking-tight shrink-0">BugFixer</h1>
+            <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
+            <span class="text-white/80 text-base font-semibold tracking-tight truncate">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}Logs{% elif view == 'hub-logs' %}Hub Logs{% elif view == 'settings' %}Settings{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</span>
+        </div>
         <!-- Hub agent connection status — mirrors LM's header status pattern
              (w-2 h-2 rounded-full, green/amber/red/slate by agent state) with a
              hover tooltip that drops DOWN from the header. Clickable → Diagnostics
