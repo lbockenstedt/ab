@@ -203,7 +203,18 @@
             background: none; border: none; color: inherit; font-size: 15px; line-height: 1; padding: 0; }
     </style>
 </head>
-<body class="flex h-screen w-screen overflow-hidden">
+<body class="flex flex-col h-screen w-screen overflow-hidden">
+    <!-- Topbar — spans full page width (LM-HUB shell) -->
+    <header class="hpe-topbar h-14 flex-none flex items-center justify-between px-6">
+        <h1 class="text-white">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}System Logs{% elif view == 'hub-logs' %}Hub Module Logs{% elif view == 'settings' %}Configuration{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</h1>
+        <div class="flex items-center gap-4 text-xs text-slate-300 font-mono">
+            <span>LLM <span class="text-white">{{ state.active_llm }}</span></span>
+            <span>Last Run <span class="text-white">{% if state.last_run and state.last_run != 'Never' and state.last_run|length >= 16 %}{{ state.last_run[5:16] }}{% else %}{{ state.last_run }}{% endif %}</span></span>
+        </div>
+    </header>
+
+    <!-- MIDDLE AREA: sidebar + viewport (header/footer span full width above/below) -->
+    <div class="flex flex-1 min-h-0 overflow-hidden">
     <!-- Sidebar (LM-HUB shell: white left nav) -->
     <aside class="hpe-sidebar w-56 flex-none flex flex-col">
         <div class="h-16 flex items-center gap-2 px-4 border-b border-slate-200 flex-none">
@@ -234,16 +245,6 @@
         </nav>
         <div class="px-4 py-3 border-t border-slate-200 text-[10px] text-slate-400 font-mono flex-none">{{ state.version }}</div>
     </aside>
-
-    <!-- Right column: topbar + viewport + action footer -->
-    <div class="flex flex-col flex-1 min-w-0">
-        <header class="hpe-topbar h-14 flex-none flex items-center justify-between px-6">
-            <h1 class="text-white">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}System Logs{% elif view == 'hub-logs' %}Hub Module Logs{% elif view == 'settings' %}Configuration{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</h1>
-            <div class="flex items-center gap-4 text-xs text-slate-300 font-mono">
-                <span>LLM <span class="text-white">{{ state.active_llm }}</span></span>
-                <span>Last Run <span class="text-white">{% if state.last_run and state.last_run != 'Never' and state.last_run|length >= 16 %}{{ state.last_run[5:16] }}{% else %}{{ state.last_run }}{% endif %}</span></span>
-            </div>
-        </header>
 
     <main class="flex-1 min-h-0 overflow-y-auto p-6">
         {% if view == 'status' %}
@@ -1319,6 +1320,7 @@
         </div>
         {% endif %}
     </main>
+    </div><!-- /middle row -->
 
     <footer class="h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all shrink-0" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
         <div class="flex justify-between w-full items-center">
@@ -1368,7 +1370,6 @@
             </div>
         </div>
     </footer>
-    </div><!-- /right column -->
     <script>
         // Lightweight toast notifier — replaces alert() for completion/error
         // messages so an action doesn't pop a blocking modal. Types: success |
