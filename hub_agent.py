@@ -427,6 +427,21 @@ class HubAgentClient:
                     info["sans"] = [n.value for n in san]
                 except Exception:  # noqa: BLE001 - no SAN ext
                     info["sans"] = []
+                # Extended Key Usage — the crux of "verifies as a chain but rejected
+                # as a CLIENT cert". A server verifying a client cert enforces the
+                # clientAuth purpose; a serverAuth-only cert fails mTLS even though
+                # its chain is valid. No EKU extension = usable for any purpose.
+                _eku_names = {"1.3.6.1.5.5.7.3.1": "serverAuth",
+                              "1.3.6.1.5.5.7.3.2": "clientAuth"}
+                try:
+                    eku = cert.extensions.get_extension_for_class(
+                        x509.ExtendedKeyUsage).value
+                    info["eku"] = [_eku_names.get(o.dotted_string, o.dotted_string)
+                                   for o in eku]
+                    info["client_auth"] = "1.3.6.1.5.5.7.3.2" in [o.dotted_string for o in eku]
+                except Exception:  # noqa: BLE001 - no EKU ext = any purpose OK
+                    info["eku"] = []
+                    info["client_auth"] = True
                 # Full chain breakdown: subject/issuer of EVERY cert in the file
                 # (leaf -> intermediate(s) -> root), so the Diagnostics page shows
                 # what the ROOT is — the whole question of whether the issuing CA is

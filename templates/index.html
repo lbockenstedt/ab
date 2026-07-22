@@ -2182,11 +2182,23 @@
                             }).join('');
                             chainBlock = '<div class="mt-1 text-slate-500 font-semibold">chain (leaf → root):</div>' + rows;
                         }
+                        // EKU — clientAuth is REQUIRED to present this as an mTLS
+                        // client cert; a serverAuth-only cert is rejected by the hub
+                        // even though its chain verifies.
+                        let ekuBlock = '';
+                        if (c.eku !== undefined) {
+                            const list = (c.eku && c.eku.length) ? c.eku.join(', ') : '(none — any purpose)';
+                            const ca = (c.client_auth === false)
+                                ? ' <span class="text-red-600 font-bold">✗ no clientAuth — cannot be an mTLS client cert</span>'
+                                : ' <span class="text-[#01A982] font-bold">✓ clientAuth</span>';
+                            ekuBlock = '<div>EKU: ' + list + ca + '</div>';
+                        }
                         el.innerHTML =
                             '<div>' + ss + '</div>' +
                             '<div>subject: ' + (c.subject || '—') + '</div>' +
                             '<div>issuer: ' + (c.issuer || '—') + '</div>' +
                             chainNote +
+                            ekuBlock +
                             (c.sans && c.sans.length ? '<div>SANs: ' + c.sans.join(', ') + '</div>' : '') +
                             (c.not_after ? '<div>expires: ' + c.not_after + '</div>' : '') +
                             chainBlock;
