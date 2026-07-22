@@ -1236,7 +1236,13 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             f"Last status: {last_err}. Check billing and API keys in settings."
         )
     except Exception as e:
-        logger.error(f"LLM request failed after all providers: {e}")
+        # A cooldown/rate-limit on every provider is an EXPECTED transient state
+        # (credits will refill / the window resets), not a fault to alarm on — log
+        # it as a warning. A genuine failure (bad key, real error) stays ERROR.
+        if last_err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
+            logger.warning(f"LLM request deferred — all providers cooling down: {e}")
+        else:
+            logger.error(f"LLM request failed after all providers: {e}")
         raise
 
 
