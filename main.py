@@ -109,6 +109,47 @@ SSL_KEY  = (os.environ.get("BUGFIXER_SSL_KEY", "/etc/bugfixer/key.pem") or "").s
 def _tls_enabled() -> bool:
     return bool(SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY))
 
+
+def _sync_webui_cert_from_mtls():
+    """One LE cert for BOTH roles: use the deployed mTLS/LE cert as the WebUI server
+    cert too. If the mTLS client cert (hub-client-cert.pem) is CA-issued and the
+    WebUI cert (cert.pem) is still the install-time SELF-SIGNED one, copy the LE
+    cert+key into the WebUI paths so uvicorn serves the trusted cert (browsers +
+    GitHub webhooks). INSTALL_CERT writes both going forward; this heals a
+    deployment whose WebUI cert was left self-signed by an older handler. Runs at
+    startup, before uvicorn binds. Never clobbers an already-CA-issued WebUI cert."""
+    client_cert = os.environ.get("BUGFIXER_HUB_CLIENT_CERT", "/etc/bugfixer/hub-client-cert.pem")
+    client_key = os.environ.get("BUGFIXER_HUB_CLIENT_KEY", "/etc/bugfixer/hub-client-key.pem")
+    if not (SSL_CERT and SSL_KEY and os.path.exists(client_cert) and os.path.exists(client_key)):
+        return
+
+    def _self_signed(path):
+        try:
+            from cryptography import x509
+            with open(path, "rb") as f:
+                c = x509.load_pem_x509_certificate(f.read())
+            return c.subject == c.issuer
+        except Exception:  # noqa: BLE001
+            return None
+
+    if _self_signed(client_cert) is not False:
+        return  # mTLS cert isn't a CA-issued cert — nothing to promote
+    web_self_signed = _self_signed(SSL_CERT) if os.path.exists(SSL_CERT) else True
+    if web_self_signed is False:
+        return  # WebUI already has a CA-issued cert — don't clobber it
+    try:
+        import shutil
+        shutil.copyfile(client_cert, SSL_CERT)
+        shutil.copyfile(client_key, SSL_KEY)
+        try:
+            os.chmod(SSL_KEY, 0o600)
+        except OSError:
+            pass
+        logger.info("WebUI cert synced from the mTLS/LE cert (%s -> %s) — serving "
+                    "the trusted cert instead of the self-signed one", client_cert, SSL_CERT)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("WebUI cert sync from mTLS cert failed: %s", e)
+
 def _local_health_url() -> str:
     scheme = "https" if _tls_enabled() else "http"
     return f"{scheme}://127.0.0.1:{SERVER_PORT}/api/health"
@@ -370,6 +411,12 @@ except Exception as _e:
 
 if __name__ == "__main__":
     import uvicorn
+    # Promote the deployed LE/mTLS cert to the WebUI cert if the WebUI is still
+    # self-signed (before uvicorn reads SSL_CERT/SSL_KEY).
+    try:
+        _sync_webui_cert_from_mtls()
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("WebUI cert sync skipped: %s", _e)
     if _tls_enabled():
         logger.info("Serving BugFixer UI on https://%s:%s (TLS)", SERVER_HOST, SERVER_PORT)
         uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT,
