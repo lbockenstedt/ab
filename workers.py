@@ -485,8 +485,46 @@ def _spawn_restart():
         cmd = ["systemctl", "restart", "bugfixer"]
     else:
         cmd = ["sudo", "-n", "/usr/local/bin/bugfixer-self-restart"]
-    _sp.Popen(cmd, start_new_session=True, stdout=_sp.DEVNULL,
-              stderr=_sp.DEVNULL, close_fds=True)
+    try:
+        p = _sp.Popen(cmd, start_new_session=True, stdout=_sp.PIPE,
+                      stderr=_sp.PIPE, close_fds=True)
+    except Exception as e:  # noqa: BLE001
+        logger.error("restart: could not spawn %s (%s) — hard-exiting so systemd "
+                     "Restart=always revives us", cmd, e)
+        return _exit_for_systemd_restart()
+    # The detached restarter returns rc 0 quickly (root `systemctl restart` SIGTERMs
+    # us mid-wait; the svc_bg helper hands off to a transient unit and returns). A
+    # FAILED `sudo -n` (no sudoers grant) returns non-zero FAST and previously
+    # vanished into /dev/null — the Restart button silently no-op'd. Detect that and
+    # fall back to a hard exit so systemd's Restart=always brings us back regardless.
+    try:
+        _out, _err = p.communicate(timeout=8)
+    except _sp.TimeoutExpired:
+        return  # still running → restart in progress
+    except Exception:  # noqa: BLE001
+        return
+    if p.returncode not in (0, None):
+        logger.error("restart: '%s' exited rc=%s (%s) — hard-exiting for systemd "
+                     "Restart=always", " ".join(cmd), p.returncode,
+                     (_err or b"").decode(errors="replace").strip()[:200])
+        _exit_for_systemd_restart()
+
+
+def _exit_for_systemd_restart():
+    """Last-resort restart: flush logs, then hard-exit. bugfixer.service is
+    Restart=always / RestartSec=10, so systemd revives the process — no sudo, no
+    cgroup race. Used when the detached restart path fails so the manual Restart
+    button (and cert-install restarts) can never silently no-op."""
+    try:
+        import logging as _l
+        for _h in _l.getLogger().handlers:
+            try:
+                _h.flush()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(0)
 
 def restart_worker():
     """Applies a pending restart independent of scan-cycle completion and paused state.
