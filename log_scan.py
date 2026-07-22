@@ -10,6 +10,7 @@ from main import (
     clean_repo_name,
     create_automated_issue,
     get_monitored_repos,
+    is_llm_cooldown_error,
     load_config,
     logger,
     resolve_module_repo,
@@ -325,7 +326,10 @@ def analyze_logs_for_errors(logs):
             return cleaned
         return []
     except Exception as e:
-        logger.error(f"Error analyzing logs: {e}")
+        if is_llm_cooldown_error(e):
+            logger.warning(f"Log analysis deferred — LLM providers cooling down: {e}")
+        else:
+            logger.error(f"Error analyzing logs: {e}")
         return []
 
 

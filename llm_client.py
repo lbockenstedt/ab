@@ -1246,6 +1246,16 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         raise
 
 
+def is_llm_cooldown_error(e) -> bool:
+    """True if this exception is the 'every LLM provider is cooling down / rate-
+    limited / out of credit' transient (raised by call_llm) — an EXPECTED deferral,
+    not a fault. Callers that wrap call_llm use it to log at WARNING instead of
+    ERROR so a routine billing cooldown doesn't read as a real failure."""
+    s = str(e).lower()
+    return any(k in s for k in ("credit_cooldown", "credit_exhausted",
+                                "rate_limited", "providers cooling down"))
+
+
 
 # Re-export every name this module defines (public + underscore) so
 # ``from llm_client import *`` in main preserves the full `from main import ...`

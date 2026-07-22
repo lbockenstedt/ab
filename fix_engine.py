@@ -18,6 +18,7 @@ from main import (
     bump_repo_version,
     call_llm,
     find_existing_pull_request,
+    is_llm_cooldown_error,
     load_config,
     load_processed,
     logger,
@@ -166,7 +167,10 @@ def analyze_issue(issue):
             return data.get("actionable", False), data.get("request", "More information is needed to proceed with a fix.")
         return False, "Information provided is not in a usable format. Please provide more details."
     except Exception as e:
-        logger.error(f"Error analyzing issue: {e}")
+        if is_llm_cooldown_error(e):
+            logger.warning(f"Issue analysis deferred — LLM providers cooling down: {e}")
+        else:
+            logger.error(f"Error analyzing issue: {e}")
         return True, ""
 
 
@@ -195,7 +199,10 @@ def identify_files_to_fix(repo_path, issue_body):
             return json.loads(match.group())
         return []
     except Exception as e:
-        logger.error(f"Error identifying files: {e}")
+        if is_llm_cooldown_error(e):
+            logger.warning(f"File identification deferred — LLM providers cooling down: {e}")
+        else:
+            logger.error(f"Error identifying files: {e}")
         return []
 
 
@@ -297,7 +304,10 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             if match:
                 votes.append({**json.loads(match.group()), "reviewer": r["name"]})
         except Exception as e:
-            logger.error(f"{r['name']} failed: {e}")
+            if is_llm_cooldown_error(e):
+                logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
+            else:
+                logger.error(f"{r['name']} failed: {e}")
             failed_reviewers.append(r["name"])
 
     if not votes:
