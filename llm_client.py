@@ -1127,9 +1127,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     ]
 
     def _try_provider(n, provider, model, key, url):
-        # claude_cli (Claude Code session) and LM Studio (local server) need no
-        # API key — only a model must be configured for them to be usable.
-        if provider == "claude_cli" or _is_lmstudio(provider):
+        # claude_cli (Claude Code session), LM Studio and Ollama (local/remote
+        # self-hosted servers) need no API key — only a model must be configured
+        # for them to be usable. (Ollama Cloud takes a key, but it's optional at
+        # this gate so a no-key local ollama is actually tried in failover.)
+        if provider == "claude_cli" or _is_lmstudio(provider) or _is_ollama(provider):
             if not model:
                 return None, "not_configured"
         elif not (key and model):
