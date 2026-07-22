@@ -596,6 +596,46 @@ class HubAgentClient:
             logger.error("Could not build wss SSL context: %s", e)
             return None
 
+    async def _handle_set_mtls_client_cert(self, msg, data):
+        """Install the Hub-Local-CA clientAuth cert the hub minted for our mTLS
+        CLIENT identity (public CAs no longer issue clientAuth). Written to the mTLS
+        client paths ONLY — the WebUI/server cert stays the LE cert. Ack, then
+        reconnect to present it. This is what finally makes bugfixer's HUB_REQUEST
+        channel (hub logs + fleet updates) authorize: the hub trusts its own CA and
+        SAN-pins us."""
+        status, message = "SUCCESS", "mtls client cert installed"
+        try:
+            cert = data.get("cert") or ""
+            key = data.get("key") or ""
+            if not cert or not key:
+                status, message = "ERROR", "missing cert/key"
+            else:
+                fc = cert if cert.endswith("\n") else cert + "\n"
+                pk = key if key.endswith("\n") else key + "\n"
+                os.makedirs(os.path.dirname(self._client_cert_file) or ".", exist_ok=True)
+                with open(self._client_cert_file, "w") as f:
+                    f.write(fc)
+                with open(self._client_key_file, "w") as f:
+                    f.write(pk)
+                try:
+                    os.chmod(self._client_key_file, 0o600)
+                except OSError:
+                    pass
+                self._present_cert = True
+                self._cert_ever_worked = False
+                self._cert_rejected = False
+                message = "hub-CA mTLS client cert installed — reconnecting to present it"
+                logger.info("SPOKE_SET_MTLS_CLIENT_CERT: %s", message)
+        except Exception as e:  # noqa: BLE001
+            status, message = "ERROR", str(e)
+            logger.warning("SPOKE_SET_MTLS_CLIENT_CERT failed: %s", e)
+        await self._ack(msg, status, message)
+        if status == "SUCCESS" and self._ws is not None:
+            try:
+                await self._ws.close(code=1012, reason="reconnect to present hub-CA mTLS cert")
+            except Exception:  # noqa: BLE001
+                pass
+
     async def _handle_install_cert(self, msg, data):
         """Install a hub-distributed (LE) cert. It serves TWO roles for bugfixer,
         both from the one deployment:
@@ -879,6 +919,10 @@ class HubAgentClient:
 
         if cmd_type == "INSTALL_CERT":
             await self._handle_install_cert(msg, data)
+            return
+
+        if cmd_type == "SPOKE_SET_MTLS_CLIENT_CERT":
+            await self._handle_set_mtls_client_cert(msg, data)
             return
 
         if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
