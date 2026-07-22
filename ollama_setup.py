@@ -169,7 +169,18 @@ def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
         resp = requests.post(base_url.rstrip("/") + "/api/create",
                               json={"name": name, "modelfile": modelfile, "stream": True},
                               stream=True, timeout=None)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            # Surface Ollama's error body. A 400 here is otherwise opaque —
+            # raise_for_status() only yields the status line, not the JSON
+            # message Ollama returns (e.g. "num_ctx exceeds model max context"
+            # or "invalid num_thread"). Drain the (short) error body so the
+            # Setup log shows the real reason instead of "400 Bad Request".
+            try:
+                body = resp.text.strip()
+            except Exception:
+                body = ""
+            raise RuntimeError(f"ollama /api/create failed ({resp.status_code}) for "
+                               f"{name}: {body or resp.reason}")
         saw_success = False
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw:
@@ -179,6 +190,9 @@ def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
             except Exception:
                 log_fn("  " + str(raw))
                 continue
+            # Ollama can return 200 and stream an {"error": ...} line on failure.
+            if obj.get("error"):
+                raise RuntimeError(f"ollama /api/create failed for {name}: {obj['error']}")
             status = obj.get("status", "")
             log_fn("  " + status, replace_last=True)
             if status == "success":
@@ -324,8 +338,15 @@ def run_local_llm_setup(model, num_ctx, cores):
         if num_ctx and int(num_ctx) > 0:
             ctx_k = int(num_ctx) // 1024
             derived_tag = f"{model}-{ctx_k}k" if ctx_k else f"{model}-{int(num_ctx)}"
-            _llm_setup_log(f"▶ Stage 4/7 — Creating context-tuned model {derived_tag} (num_ctx={int(num_ctx)}, num_thread={int(cores)})…")
-            modelfile = f"FROM {model}\nPARAMETER num_ctx {int(num_ctx)}\nPARAMETER num_thread {int(cores)}\n"
+            # Only emit num_thread when cores > 0. Ollama rejects
+            # `PARAMETER num_thread 0` with a 400 ("invalid num_thread");
+            # when omitted it auto-detects the CPU thread count, which is the
+            # safer default than a bogus 0 from an unset/blank field.
+            cores_i = int(cores) if cores else 0
+            _llm_setup_log(f"▶ Stage 4/7 — Creating context-tuned model {derived_tag} (num_ctx={int(num_ctx)}, num_thread={cores_i or 'auto'})…")
+            modelfile = f"FROM {model}\nPARAMETER num_ctx {int(num_ctx)}\n"
+            if cores_i > 0:
+                modelfile += f"PARAMETER num_thread {cores_i}\n"
             _ollama_http_create(derived_tag, modelfile, _llm_setup_log, base_url)
             _llm_setup_log(f"✓ Derived model {derived_tag} created")
         else:
