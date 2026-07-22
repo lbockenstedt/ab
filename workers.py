@@ -632,8 +632,13 @@ def scan_repo_issues(gh_current, config, processed):
                 sched = _schedule_check(config)
                 critical_label = (config.get("SCHEDULER_CRITICAL_LABEL") or "").strip()
 
-                to_fix = []
-                critical_to_fix = []
+                to_fix = []           # log-detected / generic automated-fix issues
+                critical_to_fix = []  # SCHEDULER_CRITICAL_LABEL — always run, first, uncapped
+                bug_to_fix = []       # bug-label (human-filed Bug) — run before log-detected
+                                      # and bypass the scheduler window (processed now, not at
+                                      # the next allowed slot). Subject to the per-cycle cap,
+                                      # but takes cap slots ahead of log-detected.
+                bug_label = (config.get("SCHEDULER_BUG_LABEL") or "Bug").strip()
                 for issue in issues:
                     try:
                         if issue.state != 'open' or issue.pull_request:
@@ -658,12 +663,16 @@ def scan_repo_issues(gh_current, config, processed):
                         issue_label_names = {lbl.name for lbl in issue.labels}
                         if critical_label and critical_label in issue_label_names:
                             critical_to_fix.append((repo_name, issue.number))
+                        elif bug_label and bug_label in issue_label_names:
+                            bug_to_fix.append((repo_name, issue.number))
                         else:
                             to_fix.append((repo_name, issue.number))
                     except Exception as e:
                         logger.exception(f"Failed to triage issue {issue_id}: {e}")
 
-                # Normal issues respect the scheduler; critical issues always run.
+                # Normal (log-detected) issues respect the scheduler; critical AND
+                # bug-label issues always run — bugs bypass the window so a human-filed
+                # bug is processed immediately, not at the next allowed slot.
                 if not sched["allowed"] and to_fix:
                     logger.info(
                         f"Scheduler: deferring {len(to_fix)} issue(s) in {repo_name} — {sched['reason']}"
@@ -674,7 +683,12 @@ def scan_repo_issues(gh_current, config, processed):
                         f"Critical-label override: processing {len(critical_to_fix)} critical issue(s) "
                         f"in {repo_name} regardless of schedule."
                     )
-                all_to_fix = critical_to_fix + to_fix
+                if bug_to_fix and not sched["allowed"]:
+                    logger.info(
+                        f"Bug-label override: processing {len(bug_to_fix)} bug(s) in {repo_name} "
+                        f"regardless of schedule (bugs bypass the scheduler)."
+                    )
+                all_to_fix = critical_to_fix + bug_to_fix + to_fix
 
                 if all_to_fix:
                     available, soonest_s = _any_provider_available(config)
@@ -687,17 +701,21 @@ def scan_repo_issues(gh_current, config, processed):
                         )
                     else:
                         max_per_cycle = int(config.get("MAX_ISSUES_PER_CYCLE") or 15)
-                        # Cap applies to normal issues only; critical issues are always included.
-                        capped_normal = to_fix[:max_per_cycle]
-                        deferred = len(to_fix) - len(capped_normal)
+                        # Bugs take the per-cycle cap ahead of log-detected (bugs first when
+                        # capacity is limited). Critical is outside the cap entirely.
+                        capped_bugs = bug_to_fix[:max_per_cycle]
+                        remaining = max(0, max_per_cycle - len(capped_bugs))
+                        capped_normal = to_fix[:remaining]
+                        deferred = (len(bug_to_fix) - len(capped_bugs)) + (len(to_fix) - len(capped_normal))
                         if deferred > 0:
                             logger.info(
-                                f"Found {len(all_to_fix)} issues in {repo_name} — processing first {max_per_cycle} "
-                                f"normal + {len(critical_to_fix)} critical this cycle, {deferred} deferred."
+                                f"Found {len(all_to_fix)} issues in {repo_name} — processing "
+                                f"{len(critical_to_fix)} critical + {len(capped_bugs)} bug + "
+                                f"{len(capped_normal)} normal this cycle, {deferred} deferred."
                             )
                         else:
                             logger.info(f"Found {len(all_to_fix)} issues to process in {repo_name} (max workers={max_workers}).")
-                        batch = critical_to_fix + capped_normal
+                        batch = critical_to_fix + capped_bugs + capped_normal
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(main.process_single_issue, r, n) for r, n in batch]
                             for future in futures:

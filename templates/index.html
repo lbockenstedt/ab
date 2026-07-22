@@ -1182,6 +1182,14 @@
                                 <p class="text-[10px] text-slate-400">Leave blank to disable the override.</p>
                             </div>
 
+                            <!-- Bug label (priority tier below critical, above log-detected) -->
+                            <div class="space-y-2">
+                                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Bug Label Priority</p>
+                                <p class="text-xs text-slate-400">Human-filed bugs with this label bypass the work-hours window and are processed before auto log-detected errors (bugs get the per-cycle cap first). Feature requests are unaffected (they aren't auto-processed).</p>
+                                <input type="text" name="SCHEDULER_BUG_LABEL" value="{{ settings.get('SCHEDULER_BUG_LABEL', 'Bug') }}" placeholder="e.g. Bug" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <p class="text-[10px] text-slate-400">Matches the label File-a-Bug applies (Bug). Leave blank to disable the priority tier.</p>
+                            </div>
+
                             <!-- Work hours -->
                             <div class="space-y-2">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Work Hours (24h)</p>
