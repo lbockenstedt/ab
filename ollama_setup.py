@@ -200,22 +200,32 @@ def run_local_llm_setup(model, num_ctx, cores):
         # Installed = the HTTP API answers OR the binary exists at a known path.
         # We do NOT rely on `which("ollama")` alone because the bugfixer service
         # runs under systemd with a minimal PATH that omits /usr/local/bin.
-        # bugfixer runs as svc_bg (no root), so the privileged stages — install
-        # ollama (curl|sh), ensure zstd, start the service, write the
-        # /etc/systemd/system/ollama.service.d CPU-tuning override, daemon-reload
-        # + restart — are delegated to /usr/local/bin/bugfixer-ollama-setup via
-        # passwordless sudo (granted in /etc/sudoers.d/bugfixer). The helper is
-        # idempotent (installs only if absent, starts only if down, applies the
-        # override only if it changed), so calling it unconditionally also
-        # covers the former Stage 5 tuning. It prints progress to stdout, which
-        # we relay into the setup log. HTTP-API stages (pull/create model,
-        # verify) stay here in svc_bg.
+        # bugfixer runs as svc_bg under a systemd unit whose
+        # CapabilityBoundingSet is locked to CAP_NET_BIND_SERVICE (least
+        # privilege). That bounding set omits CAP_SETGID/CAP_SETUID, so a
+        # setuid `sudo` spawned from the service CANNOT setgid(0) — sudo dies
+        # with "unable to change to root gid: Operation not permitted / error
+        # initializing audit plugin sudoers_audit" before it even runs the
+        # helper. Run the root helper as a TRANSIENT systemd unit instead
+        # (same pattern as bugfixer-self-restart): systemd-run asks PID 1 to
+        # spawn the unit owned by init, which is NOT subject to the service's
+        # capability bounding set, so it runs as real root with full caps.
+        # --pipe streams the helper's stdout/stderr back here (implies --wait)
+        # so we relay its progress and surface a non-zero exit before we
+        # depend on the API. The helper is idempotent (installs only if
+        # absent, starts only if down, applies the override only if it
+        # changed), so calling it unconditionally also covers the former
+        # Stage 5 tuning. HTTP-API stages (pull/create model, verify) stay
+        # here in svc_bg. /etc/sudoers.d/bugfixer still grants the helper path
+        # for back-compat/boxes without systemd-run, but the code path is
+        # systemd-run.
         _llm_setup_log("▶ Stage 1/7 — Prerequisites + installing/tuning Ollama (root helper)…")
         already_up = _ollama_reachable(base_url, timeout=5)
         bin_path = _ollama_bin_path()
         _llm_setup_log(f"  pre-check: ollama service {'up' if already_up else 'down'}, "
                        f"binary at {bin_path or 'unknown path'}")
-        helper_cmd = ["sudo", "-n", "/usr/local/bin/bugfixer-ollama-setup", str(int(cores))]
+        helper_cmd = ["systemd-run", "--pipe", "--quiet", "--collect", "--wait",
+                      "/usr/local/bin/bugfixer-ollama-setup", str(int(cores))]
         # The helper may restart ollama, so stream its progress synchronously
         # and surface failure before we depend on the API being up.
         proc = subprocess.run(helper_cmd, capture_output=True, text=True, timeout=900)
