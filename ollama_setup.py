@@ -164,11 +164,41 @@ def _ollama_http_pull(model, log_fn, base_url=OLLAMA_BASE_URL):
 
 
 def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
-    """Create a model via POST /api/create (inline modelfile), streaming status."""
+    """Create a derived model via POST /api/create, streaming status.
+
+    Ollama v0.5.5+ replaced the `modelfile` string body with structured fields:
+    `model` (the new name), `from` (the base model), `parameters` (a key-value
+    object), `stream`. Sending the old `{name, modelfile}` body to a current
+    server yields "neither 'from' or 'files' was specified" (the modelfile
+    string is no longer parsed). We parse our legacy modelfile text into the
+    new field-based body so create works on current Ollama. The modelfile text
+    is still the single source the caller builds (FROM + PARAMETER lines),
+    kept for readability and in case a future engine re-introduces it.
+    """
+    base_model, parameters = None, {}
+    for line in modelfile.splitlines():
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        key, rest = parts[0], parts[1] if len(parts) > 1 else ""
+        if key.upper() == "FROM":
+            base_model = rest.strip()
+        elif key.upper() == "PARAMETER":
+            kv = rest.split(None, 1)
+            if len(kv) == 2:
+                # Send numerics as ints (num_ctx/num_thread), not strings.
+                try:
+                    parameters[kv[0]] = int(kv[1])
+                except ValueError:
+                    parameters[kv[0]] = kv[1]
+    body = {"model": name, "stream": True}
+    if base_model:
+        body["from"] = base_model
+    if parameters:
+        body["parameters"] = parameters
     try:
         resp = requests.post(base_url.rstrip("/") + "/api/create",
-                              json={"name": name, "modelfile": modelfile, "stream": True},
-                              stream=True, timeout=None)
+                             json=body, stream=True, timeout=None)
         if resp.status_code != 200:
             # Surface Ollama's error body. A 400 here is otherwise opaque —
             # raise_for_status() only yields the status line, not the JSON
@@ -176,11 +206,11 @@ def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
             # or "invalid num_thread"). Drain the (short) error body so the
             # Setup log shows the real reason instead of "400 Bad Request".
             try:
-                body = resp.text.strip()
+                rbody = resp.text.strip()
             except Exception:
-                body = ""
+                rbody = ""
             raise RuntimeError(f"ollama /api/create failed ({resp.status_code}) for "
-                               f"{name}: {body or resp.reason}")
+                               f"{name}: {rbody or resp.reason}")
         saw_success = False
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw:
