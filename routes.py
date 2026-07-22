@@ -670,21 +670,19 @@ async def get_hub_logs_page(request: Request):
     hub_url = (config.get("HUB_QUERY_URL") or "").strip()
     fetch_error = None
     fetch_status = None
-    logs = None
-    try:
-        client = _get_hub_agent_client()
-        if not client:
-            fetch_error = "Hub agent not configured (set HUB_WS_URL and approve bugfixer in the Hub WebUI)"
-        else:
-            result = client.request_sync("GET_LOGS", {}, timeout=20)
-            if isinstance(result, dict):
-                fetch_status = 200
-                logs = get_hub_logs()
-            else:
-                fetch_status = None
-                fetch_error = "Hub agent not approved/connected — approve bugfixer in the Hub WebUI"
-    except Exception as ex:
-        fetch_error = str(ex)
+    # Sync model: the Hub Logs page reads the LOCAL mirror only — no live
+    # GET_LOGS pull on every page view. The poller's scan_hub_logs →
+    # sync_hub_logs refreshes the mirror once per cycle; this page just shows
+    # the latest synced snapshot. Connectivity is reflected by whether the
+    # mirror has recent data (and the Diagnostics card's hub status dot),
+    # not by a per-view live probe.
+    logs = get_hub_logs()
+    if logs:
+        fetch_status = 200
+    else:
+        fetch_error = ("No synced logs yet — waiting for the first scan cycle. "
+                       "If this persists, confirm bugfixer is approved+connected "
+                       "in the Hub WebUI (Setup → Spokes).")
     fetch_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return templates.TemplateResponse(
         request=request, name="index.html",

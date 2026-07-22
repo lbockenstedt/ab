@@ -17,18 +17,103 @@ from main import (
     save_processed,
     state,
     update_task_state,
+    CONFIG_DIR,
 )
 
+# ── Local hub-log sync (keep pulled logs on disk instead of a live pull) ─────
+# BugFixer used to do a fresh GET_LOGS WebSocket pull on every consumer call
+# (scan, verify, chat, logs page) — a "live pull" that discarded the data each
+# cycle. This is now a SYNC model: pull ONCE per cycle, PERSIST the logs to
+# local per-module files (a bounded, deduped archive that survives restarts
+# and is greppable offline), and have every reader read from local.
+#   sync_hub_logs()  — the one live pull+write per cycle; returns the fresh
+#                      list (or None when the Hub is unreachable, preserving
+#                      the suppression contract scan_hub_logs relies on).
+#   get_hub_logs()   — reads the LOCAL mirror only (no pull); used by on-demand
+#                      readers (chat, logs page, verify_production_fixes).
+HUB_LOG_DIR = os.path.join(CONFIG_DIR, "hub_logs")
+HUB_LOG_MAX_LINES = 20000   # per-module cap; oldest trimmed when exceeded
+HUB_LOG_DEDUP_TAIL = 500    # skip incoming lines already in this many recent locals
 
-def get_hub_logs():
-    """Fetches recent logs from the Hub for all modules via the Hub agent.
+_TS_PAT = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
 
-    BugFixer is now an authenticated WebSocket agent of the Hub (see hub_agent.py),
-    so it no longer hits the admin-cookie-gated HTTP /setup/logs/all endpoint that
-    always returned 401 for a static token. Logs come back as a signed HUB_RESPONSE
-    to a GET_LOGS request. Returns a list of {"module","log"} entries sorted
-    newest-first, or None when the agent isn't approved/connected yet.
-    """
+
+def _log_ts(entry):
+    m = _TS_PAT.match((entry.get('log') or '').strip())
+    return m.group(1) if m else ''
+
+
+def _module_log_path(module):
+    # module is a spoke/agent id or a /var/log/lm file basename — keep the
+    # filename safe and bounded.
+    safe = re.sub(r'[^A-Za-z0-9._-]', '_', str(module or "unknown"))[:120] or "unknown"
+    return os.path.join(HUB_LOG_DIR, safe + ".log")
+
+
+def _persist_hub_logs(raw_logs):
+    """Append each pulled line to ``<HUB_LOG_DIR>/<module>.log``, skipping
+    lines already in the file's recent tail (dedup), and trimming the head
+    when a file exceeds HUB_LOG_MAX_LINES. The Hub returns per-module lines
+    in oldest→newest order, so appends preserve chronological order.
+    Best-effort; never raises into the scan path."""
+    try:
+        os.makedirs(HUB_LOG_DIR, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"hub_log_sync: could not create {HUB_LOG_DIR}: {e}")
+        return
+    # Group pulled lines by module (preserve order within a module).
+    by_module = {}
+    for entry in raw_logs:
+        if not isinstance(entry, dict):
+            continue
+        line = (entry.get("log") or "").rstrip("\n")
+        if not line:
+            continue
+        by_module.setdefault(entry.get("module") or "unknown", []).append(line)
+    for mod, lines in by_module.items():
+        path = _module_log_path(mod)
+        try:
+            with open(path, "r") as f:
+                existing = f.read().splitlines()
+        except FileNotFoundError:
+            existing = []
+        except Exception as e:
+            logger.debug(f"hub_log_sync: could not read {path}: {e}")
+            existing = []
+        # Dedup against the recent tail (and within this batch).
+        tail = set(existing[-HUB_LOG_DEDUP_TAIL:]) if existing else set()
+        appended = 0
+        try:
+            with open(path, "a") as f:
+                for line in lines:
+                    if line in tail:
+                        continue
+                    tail.add(line)
+                    f.write(line + "\n")
+                    appended += 1
+        except Exception as e:
+            logger.warning(f"hub_log_sync: could not append to {path}: {e}")
+            continue
+        # Cap: if the file grew past the limit, rewrite keeping the newest N.
+        if appended:
+            try:
+                with open(path, "r") as f:
+                    all_lines = f.read().splitlines()
+                if len(all_lines) > HUB_LOG_MAX_LINES:
+                    with open(path, "w") as f:
+                        f.write("\n".join(all_lines[-HUB_LOG_MAX_LINES:]) + "\n")
+            except Exception as e:
+                logger.debug(f"hub_log_sync: cap trim failed for {path}: {e}")
+
+
+def sync_hub_logs():
+    """Pull hub logs once via GET_LOGS, PERSIST them to local per-module files
+    (append + dedup + cap), and return the freshly-pulled list of
+    {"module","log"} entries sorted newest-first — or None when the agent
+    isn't approved/connected yet (preserving the "unreachable → None" contract
+    scan_hub_logs relies on to suppress connectivity triage). This is the ONE
+    live pull per cycle; every other reader reads the local mirror via
+    get_hub_logs()."""
     client = _get_hub_agent_client()
     if not client:
         return None
@@ -38,13 +123,47 @@ def get_hub_logs():
     raw_logs = result.get("logs", [])
     if not isinstance(raw_logs, list):
         raw_logs = []
-    # Try to parse a timestamp from each log line so we can sort newest-first.
-    # Typical format: "2024-01-15 10:30:00 [INFO] …"
-    _TS_PAT = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
-    def _log_ts(entry):
-        m = _TS_PAT.match((entry.get('log') or '').strip())
-        return m.group(1) if m else ''
+    # Persist to local per-module files (best-effort; never blocks the scan).
+    if raw_logs:
+        try:
+            _persist_hub_logs(raw_logs)
+        except Exception as e:
+            logger.warning(f"hub_log_sync: persist failed ({e}); returning in-memory list only")
     return sorted(raw_logs, key=_log_ts, reverse=True)
+
+
+def get_hub_logs():
+    """Read hub logs from the LOCAL sync mirror
+    (``<HUB_LOG_DIR>/<module>.log``) instead of a live GET_LOGS pull. Returns a
+    list of {"module","log"} entries sorted newest-first, or [] when the
+    mirror is empty (first run / wiped). The mirror is refreshed once per
+    cycle by sync_hub_logs(); on-demand readers (chat, logs page,
+    verify_production_fixes) read this snapshot. To force a fresh pull+write,
+    call sync_hub_logs() directly. Returns [] (NOT None) — a local read is
+    never "unreachable"; the None contract belongs to sync_hub_logs()."""
+    try:
+        if not os.path.isdir(HUB_LOG_DIR):
+            return []
+    except Exception:
+        return []
+    out = []
+    try:
+        for name in os.listdir(HUB_LOG_DIR):
+            if not name.endswith(".log"):
+                continue
+            mod = name[:-4]
+            path = os.path.join(HUB_LOG_DIR, name)
+            try:
+                with open(path, "r") as f:
+                    for line in f:
+                        line = line.rstrip("\n")
+                        if line:
+                            out.append({"module": mod, "log": line})
+            except Exception as e:
+                logger.debug(f"hub_log_sync: could not read {path}: {e}")
+    except Exception as e:
+        logger.debug(f"hub_log_sync: listing {HUB_LOG_DIR} failed: {e}")
+    return sorted(out, key=_log_ts, reverse=True)
 
 
 def get_hub_state():
@@ -218,7 +337,11 @@ def verify_production_fixes(gh_current, processed):
     config = load_config()
     days_required = int(config.get("PROD_VERIFICATION_DAYS", 7))
 
-    # Fetch hub logs once for the whole verification pass.
+    # Read the LOCAL log mirror (refreshed once per cycle by scan_hub_logs →
+    # sync_hub_logs). This is one cycle behind the live pull by design — the
+    # 7-day PROD_VERIFICATION_DAYS gate bounds that staleness so a one-cycle
+    # lag can't flip a not-yet-clean issue to closed. Avoids a second live
+    # GET_LOGS pull per cycle (the sync model: one pull, local readers).
     hub_logs_cache = get_hub_logs()
 
     for issue_id, info in list(processed.items()):
@@ -824,7 +947,12 @@ def scan_hub_logs(gh_current, config):
     update_task_state(task_id="HubScan", task_name="Scanning Hub Logs", action="start")
     logger.info("Scanning Hub for new errors...")
     try:
-        hub_logs = get_hub_logs()
+        # One live pull per cycle: sync_hub_logs() GET_LOGS the Hub, persists
+        # the logs to local per-module files (the local mirror every other
+        # reader uses via get_hub_logs()), and returns the fresh list — or None
+        # when the Hub is unreachable (preserving the suppression contract
+        # below: do NOT file connectivity bugs while the Hub is down).
+        hub_logs = sync_hub_logs()
         if hub_logs:
             # Heartbeat triage runs on the RAW hub_logs (before filter_error_logs
             # drops heartbeat lines): if an expected module's [heartbeat] line is
@@ -907,8 +1035,10 @@ def scan_hub_logs(gh_current, config):
                 except Exception as e:
                     logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
         else:
-            # Hub unreachable: get_hub_logs() returned None — BugFixer cannot
-            # read Hub logs this cycle. That IS "not connected to the Hub",
+            # Hub unreachable: sync_hub_logs() returned None — BugFixer cannot
+            # read Hub logs this cycle (it did not pull, so the local mirror was
+            # not refreshed either; scan does NOT fall back to stale local data,
+            # which would risk re-filing already-handled errors). That IS "not connected to the Hub",
             # regardless of the last-known agent status. The WS layer
             # (hub_agent.py) only logs+reconnects on a dropped link without
             # flipping hub_agent_status, so that state can be stale ("approved")
@@ -934,6 +1064,7 @@ def scan_hub_logs(gh_current, config):
 
 __all__ = [
     'get_hub_logs',
+    'sync_hub_logs',
     'get_hub_state',
     'filter_error_logs',
     'analyze_logs_for_errors',
