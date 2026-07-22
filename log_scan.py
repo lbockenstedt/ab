@@ -682,6 +682,9 @@ def scan_bugs(gh_current, config, hub_logs):
             or report.get("summary") or ""
         severity = (report.get("report_json") and _safe_json_field(report.get("report_json"), "severity")) \
             or report.get("severity") or "medium"
+        rtype = (report.get("report_json") and _safe_json_field(report.get("report_json"), "type")) \
+            or report.get("type") or "bug"
+        is_feature = str(rtype).strip().lower() == "feature"
         ctx = report.get("context") or {}
         # Build a clean, public-safe issue body.
         ctx_lines = []
@@ -691,23 +694,41 @@ def scan_bugs(gh_current, config, hub_logs):
                 v = ctx.get(k)
                 if v:
                     ctx_lines.append(f"- **{k}**: {v}")
-        title = f"🤖 Bug Report: {str(explanation)[:80].strip()}"
-        body = (
-            f'**Filed via the LM WebUI "File a Bug" button**\n\n'
-            f"### What's wrong\n{explanation}\n\n"
-            f"### Context\n" + ("\n".join(ctx_lines) if ctx_lines else "_no context captured_") + "\n\n"
-            f"**Severity:** {severity}\n\n"
-            f"---\n"
-            f"<!-- bug-report-id: {rid} -->\n"
-            f"_Full console log, raw DOM, and screenshot are stored on the hub "
-            f"(report id `{rid}`) and are NOT included in this public issue. "
-            f"BugFixer pulls them from the hub as fix context._\n"
-        )
+        if is_feature:
+            # Feature request: file as an enhancement for human triage. NO
+            # ``automated-fix`` label → scan_repo_issues/process_single_issue
+            # will NOT attempt to auto-implement it (a feature is a product
+            # decision, not a fix). Severity/context still captured.
+            title = f"💡 Feature Request: {str(explanation)[:80].strip()}"
+            body = (
+                f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
+                f"### The request\n{explanation}\n\n"
+                f"### Context\n" + ("\n".join(ctx_lines) if ctx_lines else "_no context captured_") + "\n\n"
+                f"**Severity:** {severity}\n\n"
+                f"---\n"
+                f"<!-- bug-report-id: {rid} -->\n"
+                f"<!-- report-type: feature -->\n"
+            )
+            file_labels = ["enhancement"]
+        else:
+            title = f"🤖 Bug Report: {str(explanation)[:80].strip()}"
+            body = (
+                f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
+                f"### What's wrong\n{explanation}\n\n"
+                f"### Context\n" + ("\n".join(ctx_lines) if ctx_lines else "_no context captured_") + "\n\n"
+                f"**Severity:** {severity}\n\n"
+                f"---\n"
+                f"<!-- bug-report-id: {rid} -->\n"
+                f"_Full console log, raw DOM, and screenshot are stored on the hub "
+                f"(report id `{rid}`) and are NOT included in this public issue. "
+                f"BugFixer pulls them from the hub as fix context._\n"
+            )
+            file_labels = ["automated-fix", "Bug"]
         error_data = {"module": "hub", "title": title, "body": body, "repo": repo_name}
         try:
             gh_repo = gh_current.get_repo(repo_name)
             issue = create_automated_issue(gh_current, monitored_repos, gh_repo, error_data,
-                                           labels=["automated-fix", "Bug"], raw=True)
+                                           labels=file_labels, raw=True)
             if issue is None:
                 logger.info(f"scan_bugs: {rid} not filed this cycle (cooldown/dedup/no-op).")
                 continue
