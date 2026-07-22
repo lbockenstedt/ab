@@ -571,22 +571,22 @@
 
         {% if view == 'settings' %}
         <div>
-            <div class="hpe-card p-5">
-                <!-- LM-style horizontal sub-nav strip: one section per tab (mirrors
-                     #top-nav / .sub-nav-item / setSubView in lm/WebUI/index.html).
-                     Clicking a tab hides every settings section and shows the one it
-                     points at — exactly one tab's content is visible at a time. -->
-                <div class="hpe-subnav h-11 flex items-center gap-5 px-1 text-sm font-medium -mx-2 mb-6 overflow-x-auto">
-                    <button type="button" class="sub-nav-item active px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub</button>
-                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM</button>
-                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
-                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
-                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
-                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-system" onclick="settingsTab('sec-system')">System</button>
-                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
-                    <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
-                </div>
+            <!-- Full-bleed sub-nav strip matching LM's #top-nav (h-12 px-6 gap-6,
+                 white bg, bottom border). -mx-6 -mt-6 cancels <main>'s p-6 so it
+                 spans edge-to-edge under the header like LM's top nav; clicking a
+                 tab hides every settings section and shows the one it points at. -->
+            <div class="hpe-subnav h-12 flex items-center px-6 gap-6 text-sm font-medium text-slate-600 -mx-6 -mt-6 mb-6 shrink-0 overflow-x-auto">
+                <button type="button" class="sub-nav-item active px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-system" onclick="settingsTab('sec-system')">System</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
+            </div>
 
+            <div class="hpe-card p-5">
                 <form id="settings-form" action="/save_settings" method="post" class="space-y-8">
                     <!-- 1. GitHub & Repository Core -->
                     <section id="sec-github" data-settings-section>
