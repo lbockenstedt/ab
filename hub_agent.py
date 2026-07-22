@@ -596,6 +596,28 @@ class HubAgentClient:
             logger.error("Could not build wss SSL context: %s", e)
             return None
 
+    async def _handle_clear_mtls_client_cert(self, msg):
+        """Revocation: delete our mTLS client cert + stop presenting it (reconnect
+        cert-less). The WebUI/LE cert is untouched. HUB_REQUEST access ends."""
+        try:
+            for p in (self._client_cert_file, self._client_key_file):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+            self._present_cert = False
+            self._cert_ever_worked = False
+            logger.info("SPOKE_CLEAR_MTLS_CLIENT_CERT: mTLS client cert cleared (revoked)")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("SPOKE_CLEAR_MTLS_CLIENT_CERT failed: %s", e)
+        await self._ack(msg, "SUCCESS", "mtls client cert cleared")
+        if self._ws is not None:
+            try:
+                await self._ws.close(code=1012, reason="reconnect cert-less (revoked)")
+            except Exception:  # noqa: BLE001
+                pass
+
     async def _handle_set_mtls_client_cert(self, msg, data):
         """Install the Hub-Local-CA clientAuth cert the hub minted for our mTLS
         CLIENT identity (public CAs no longer issue clientAuth). Written to the mTLS
@@ -923,6 +945,10 @@ class HubAgentClient:
 
         if cmd_type == "SPOKE_SET_MTLS_CLIENT_CERT":
             await self._handle_set_mtls_client_cert(msg, data)
+            return
+
+        if cmd_type == "SPOKE_CLEAR_MTLS_CLIENT_CERT":
+            await self._handle_clear_mtls_client_cert(msg)
             return
 
         if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
