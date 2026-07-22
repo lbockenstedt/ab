@@ -818,6 +818,10 @@ async def settings_page(request: Request):
         val = os.getenv(k)
         if val: settings[k] = val
     config = load_config()
+    # Self-log scan defaults ON (self-diagnosis) until explicitly turned off
+    # via the Settings toggle; display-only default so the checkbox renders
+    # checked on a never-saved install.
+    config.setdefault("self_log_scan_enabled", True)
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
     settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
@@ -1047,6 +1051,10 @@ async def save_settings(request: Request):
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.
     config_data["heartbeat_triage_enabled"] = data.get("heartbeat_triage_enabled") == "on"
+    # Self-log scan: scan BugFixer's OWN logs for internal errors + file them
+    # as GitHub issues in self_diagnosis_repo. On by default (self-diagnosis);
+    # turn OFF to stop BugFixer from monitoring/filing its own logs.
+    config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
     config_data["SCHEDULER_ENABLED"] = data.get("SCHEDULER_ENABLED") == "on"
     config_data["SCHEDULER_WEEKEND_FULL"] = data.get("SCHEDULER_WEEKEND_FULL") == "on"

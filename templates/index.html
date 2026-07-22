@@ -649,6 +649,12 @@
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Self-Diagnosis Repository (Where BugFixer files its own bugs)</label>
                                 <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. lbockenstedt/bugfixer">
+                                <div class="flex items-center gap-3 mt-2">
+                                    <input type="checkbox" name="self_log_scan_enabled" id="self_log_scan_enabled" {{ 'checked' if settings.self_log_scan_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <label for="self_log_scan_enabled" class="text-xs font-medium text-slate-700" title="On by default: BugFixer scans its own logs for errors and files them in the self-diagnosis repo. Turn off to stop self-monitoring.">
+                                        Self-monitor BugFixer logs (file issues for BugFixer's own errors)
+                                    </label>
+                                </div>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-400 font-normal">(routes Hub log errors to the right repo)</span></label>

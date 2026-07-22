@@ -1101,7 +1101,13 @@ def run_scan_cycle():
 
         main.verify_production_fixes(gh_current, processed)
 
-        scan_self_logs(gh_current, config)
+        # Self-log scan is ON by default (self-diagnosis: scan BugFixer's own
+        # logs for errors + file them in self_diagnosis_repo). The Settings
+        # "Self-monitor BugFixer logs" toggle turns it OFF so BugFixer stops
+        # monitoring/filing its own logs. Default True preserves existing
+        # behavior for installs that never saved the key.
+        if config.get("self_log_scan_enabled", True):
+            scan_self_logs(gh_current, config)
 
         state["status"] = "Scanning"
         with ThreadPoolExecutor(max_workers=2) as executor:
