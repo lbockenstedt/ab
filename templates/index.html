@@ -239,12 +239,9 @@
     <div class="flex flex-1 min-h-0 overflow-hidden">
     <!-- Sidebar (LM-HUB shell: white left nav) -->
     <aside class="hpe-sidebar w-56 flex-none flex flex-col">
-        <div class="h-16 flex items-center gap-2 px-4 border-b border-slate-200 flex-none">
-            <div class="bg-[#01A982] p-2 rounded-lg">
-                <i class="fas fa-robot text-white"></i>
-            </div>
-            <span class="font-bold tracking-tight text-[#263040]">BugFixer</span>
-        </div>
+        <!-- Brand block moved to header (Logo | BugFixer | <module>); top spacer
+             keeps the nav from crowding the top, matching LM's sidebar. -->
+        <div class="pt-4"></div>
         <nav class="flex-1 overflow-y-auto py-2 px-2 space-y-1">
             <a href="/" class="nav-item {{ 'active' if view == 'status' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-chart-line w-4 text-center"></i>Dashboard
