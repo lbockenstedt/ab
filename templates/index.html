@@ -396,11 +396,11 @@
                         </button>
                     </div>
                     <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
-                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn active px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all" title="Active issues (closed hidden)">Active</button>
-                    <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Fixed</button>
-                    <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Failed</button>
-                    <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Non-Actionable</button>
-                    <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all">Closed</button>
+                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold border transition-all bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border-[#01A982]" title="Active issues (closed hidden)">Active</button>
+                    <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
+                    <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
+                    <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
+                    <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-3 py-1 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
                     <i class="fas fa-history text-slate-400 ml-4"></i>
                 </div>
             </div>
@@ -1974,11 +1974,12 @@
 
             const buttons = document.querySelectorAll('.filter-btn');
             buttons.forEach(btn => {
+                // LM tokens: selected filter = HPE-green primary chip; others = neutral slate chip.
                 const active = btn.dataset.filter === status;
-                btn.classList.toggle('bg-slate-800', active);
-                btn.classList.toggle('text-white', active);
-                btn.classList.toggle('bg-slate-200', !active);
-                btn.classList.toggle('text-slate-700', !active);
+                ['bg-[#01A982]/10', 'hover:bg-[#01A982]/20', 'text-[#01A982]', 'border-[#01A982]']
+                    .forEach(c => btn.classList.toggle(c, active));
+                ['bg-slate-100', 'hover:bg-slate-200', 'text-slate-600', 'border-slate-200']
+                    .forEach(c => btn.classList.toggle(c, !active));
             });
 
             // Only the Activity Feed table has data-status rows. Each main row is
