@@ -733,15 +733,22 @@ def scan_bugs(gh_current, config, hub_logs):
     _bi = {"last_run": time.time(), "enabled": bool(config.get("bug_report_enabled", True)),
            "hub_logs_seen": len(hub_logs or []), "markers_seen": 0,
            "reports_total": None, "filed_this_cycle": 0, "note": "", "error": ""}
+    # Feature requests are a parallel pipeline: same markers/fetch path, but each
+    # feature is GATED on admin approval in LM before bugfixer may file/work it.
+    # This surfaces "how many features are waiting on approval vs approved+filed"
+    # on the Diagnostics page (the "LM Feature Request Ingestion" card).
+    _fi = {"last_run": time.time(), "features_total": None, "awaiting_approval": 0,
+           "approved": 0, "filed_this_cycle": 0, "note": "", "error": ""}
     try:
         state["bug_ingest"] = _bi
+        state["feature_ingest"] = _fi
     except Exception:  # noqa: BLE001
         pass
     if not config.get("bug_report_enabled", True):
-        _bi["note"] = "bug_report_enabled is OFF (Settings)"
+        _bi["note"] = _fi["note"] = "bug_report_enabled is OFF (Settings)"
         return
     if not hub_logs:
-        _bi["note"] = "no hub logs this cycle (GET_LOGS empty — mTLS/HUB_REQUEST access?)"
+        _bi["note"] = _fi["note"] = "no hub logs this cycle (GET_LOGS empty — mTLS/HUB_REQUEST access?)"
         return
 
     # Parse [bug-report] id=... markers out of the raw hub logs (newest-first).
@@ -782,15 +789,28 @@ def scan_bugs(gh_current, config, hub_logs):
     if not hasattr(scan_bugs, "_filed"):
         scan_bugs._filed = set()
     filed_on_hub = set()
+    # Ids of feature requests still awaiting admin approval — the hub annotates
+    # each report gated_pending_approval; we must NOT file these until approved.
+    gated_ids = set()
     try:
         reports = client.request_sync("GET_BUG_REPORTS", {}, timeout=10)
         _rlist = (reports.get("reports") if isinstance(reports, dict) else []) or []
         _bi["reports_total"] = len(_rlist)
+        _feat = [r for r in _rlist if isinstance(r, dict) and (r.get("type") or "bug") == "feature"]
+        _fi["features_total"] = len(_feat)
         for r in _rlist:
-            if isinstance(r, dict) and r.get("filed"):
+            if not isinstance(r, dict):
+                continue
+            if r.get("filed"):
                 filed_on_hub.add(r.get("id"))
+            if r.get("gated_pending_approval"):
+                gated_ids.add(r.get("id"))
+        _fi["awaiting_approval"] = len(gated_ids)
+        _fi["approved"] = sum(1 for r in _feat
+                              if not r.get("gated_pending_approval") and not r.get("filed"))
     except Exception as e:
         _bi["error"] = f"GET_BUG_REPORTS failed: {e}"
+        _fi["error"] = f"GET_BUG_REPORTS failed: {e}"
         logger.warning(f"scan_bugs: GET_BUG_REPORTS failed: {e}")
     scan_bugs._filed |= filed_on_hub
 
@@ -805,8 +825,14 @@ def scan_bugs(gh_current, config, hub_logs):
 
     _bi["repo"] = repo_name
     filed_this_cycle = 0
+    feat_filed_this_cycle = 0
     for rid in seen_ids:
         if rid in scan_bugs._filed:
+            continue
+        # A feature awaiting admin approval is off-limits until approved. The hub
+        # also denies the full GET_BUG_REPORT for it, but skip early to avoid the
+        # round-trip and keep the "awaiting approval" count honest.
+        if rid in gated_ids:
             continue
         # Pull the full report from the hub. The body we file is clean; the
         # raw console/HTML/screenshot stay on the hub for fix context.
@@ -817,6 +843,10 @@ def scan_bugs(gh_current, config, hub_logs):
             continue
         if not isinstance(report, dict) or not report.get("id"):
             logger.warning(f"scan_bugs: report {rid} not found on hub (may have been evicted); skipping.")
+            continue
+        if report.get("gated_pending_approval"):
+            # Feature awaiting admin approval — hub withheld the full report.
+            gated_ids.add(rid)
             continue
         if report.get("filed"):
             scan_bugs._filed.add(rid)
@@ -883,14 +913,27 @@ def scan_bugs(gh_current, config, hub_logs):
                 logger.warning(f"scan_bugs: MARK_BUG_FILED {rid} failed: {me}")
             scan_bugs._filed.add(rid)
             filed_this_cycle += 1
-            logger.info(f"scan_bugs: filed bug report {rid} -> {repo_name}#{getattr(issue, 'number', '?')} ({issue_url})")
+            if is_feature:
+                feat_filed_this_cycle += 1
+            _kind = "feature request" if is_feature else "bug report"
+            logger.info(f"scan_bugs: filed {_kind} {rid} -> {repo_name}#{getattr(issue, 'number', '?')} ({issue_url})")
         except Exception as e:
             logger.error(f"scan_bugs: failed to file bug report {rid} in {repo_name}: {e}")
     _bi["filed_this_cycle"] = filed_this_cycle
+    _fi["filed_this_cycle"] = feat_filed_this_cycle
+    _fi["repo"] = repo_name
+    if not _fi["note"]:
+        if _fi.get("awaiting_approval"):
+            _fi["note"] = f"{_fi['awaiting_approval']} feature(s) awaiting admin approval in LM"
+        elif _fi.get("features_total"):
+            _fi["note"] = "all feature requests approved/filed"
+        else:
+            _fi["note"] = "no feature requests"
     if filed_this_cycle:
-        logger.info(f"scan_bugs: filed {filed_this_cycle} new bug report(s).")
+        logger.info(f"scan_bugs: filed {filed_this_cycle} new report(s) "
+                    f"({feat_filed_this_cycle} feature(s)).")
     else:
-        logger.debug("scan_bugs: no new unfilled bug reports this cycle.")
+        logger.debug("scan_bugs: no new unfilled bug/feature reports this cycle.")
 
 
 def _safe_json_field(json_str, field):

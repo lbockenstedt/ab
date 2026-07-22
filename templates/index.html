@@ -1416,6 +1416,33 @@
                 </p>
             </div>
 
+            <!-- LM Feature-Request ingestion card — feature requests share the same
+                 pipeline but are GATED on admin approval in LM: bugfixer only files
+                 (as an `enhancement` issue) once an admin approves. -->
+            <div class="hpe-card p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-bold text-[#263040]">LM Feature Request Ingestion</h3>
+                    <i class="fas fa-lightbulb text-[#01A982]"></i>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div><div class="text-slate-500">Features on hub</div><div id="diag-fi-total" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Awaiting approval</div><div id="diag-fi-awaiting" class="font-bold text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Approved (unfiled)</div><div id="diag-fi-approved" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Filed last cycle</div><div id="diag-fi-filed" class="font-mono text-slate-800">—</div></div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3 text-xs">
+                    <div>Target repo: <span id="diag-fi-repo" class="font-mono text-slate-700">—</span></div>
+                    <div>Last run: <span id="diag-fi-lastrun" class="font-mono text-slate-700">—</span></div>
+                </div>
+                <div id="diag-fi-note" class="hidden mt-2 text-xs text-amber-700"></div>
+                <div id="diag-fi-error" class="hidden mt-2 text-xs text-red-600 font-mono"></div>
+                <p class="text-[11px] text-slate-500 mt-2">
+                    Feature requests are held until an admin clicks <b>Approve</b> in LM (Bug/Feature Reports view).
+                    "Awaiting approval" &gt; 0 means those are withheld from bugfixer; once approved they become an
+                    <code class="bg-slate-100 px-1 rounded">enhancement</code> issue (no auto-fix — a human works the feature).
+                </p>
+            </div>
+
             <!-- Providers table -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
@@ -2265,6 +2292,21 @@
                 if (noteEl) { if (bi.note) { noteEl.classList.remove('hidden'); noteEl.textContent = 'ⓘ ' + bi.note; } else noteEl.classList.add('hidden'); }
                 const errEl = document.getElementById('diag-bi-error');
                 if (errEl) { if (bi.error) { errEl.classList.remove('hidden'); errEl.textContent = bi.error; } else errEl.classList.add('hidden'); }
+
+                // LM Feature-Request ingestion (approval-gated pipeline)
+                const fi = d.feature_ingest || {};
+                sT('diag-fi-total', fi.features_total != null ? fi.features_total : '—');
+                sT('diag-fi-awaiting', fi.awaiting_approval != null ? fi.awaiting_approval : '—');
+                const awEl = document.getElementById('diag-fi-awaiting');
+                if (awEl) awEl.className = 'font-bold ' + (fi.awaiting_approval ? 'text-amber-600' : 'text-[#01A982]');
+                sT('diag-fi-approved', fi.approved != null ? fi.approved : '—');
+                sT('diag-fi-filed', fi.filed_this_cycle != null ? fi.filed_this_cycle : '—');
+                sT('diag-fi-repo', fi.repo || '(default: hub repo)');
+                sT('diag-fi-lastrun', fi.last_run ? new Date(fi.last_run * 1000).toLocaleString() : 'not run yet');
+                const fnoteEl = document.getElementById('diag-fi-note');
+                if (fnoteEl) { if (fi.note) { fnoteEl.classList.remove('hidden'); fnoteEl.textContent = 'ⓘ ' + fi.note; } else fnoteEl.classList.add('hidden'); }
+                const ferrEl = document.getElementById('diag-fi-error');
+                if (ferrEl) { if (fi.error) { ferrEl.classList.remove('hidden'); ferrEl.textContent = fi.error; } else ferrEl.classList.add('hidden'); }
 
                 // Restart log
                 const logEl = document.getElementById('diag-restart-log');
