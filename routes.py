@@ -312,6 +312,7 @@ async def diagnostics():
         "providers": providers,
         "watchdog_signal": update_pending_exists,
         "hub_connection": _hub_connection_diag(),
+        "bug_ingest": state.get("bug_ingest", {}),
         "heartbeat": {
             "agent_status": state.get("hub_agent_status", "not_registered"),
             "approved": state.get("hub_agent_status") == "approved",

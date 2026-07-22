@@ -1390,6 +1390,32 @@
                 </p>
             </div>
 
+            <!-- LM Bug-Report ingestion card — the "File a Bug" pipeline flows over
+                 the mTLS-gated HUB_REQUEST channel (GET_LOGS + GET_BUG_REPORTS), so
+                 this shows whether filed bugs are reaching bugfixer. -->
+            <div class="hpe-card p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-bold text-[#263040]">LM Bug-Report Ingestion</h3>
+                    <i class="fas fa-bug text-[#01A982]"></i>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                    <div><div class="text-slate-500">Enabled</div><div id="diag-bi-enabled" class="font-bold text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Hub-log markers seen</div><div id="diag-bi-markers" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Reports on hub</div><div id="diag-bi-reports" class="font-mono text-slate-800">—</div></div>
+                    <div><div class="text-slate-500">Filed last cycle</div><div id="diag-bi-filed" class="font-mono text-slate-800">—</div></div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3 text-xs">
+                    <div>Target repo: <span id="diag-bi-repo" class="font-mono text-slate-700">—</span></div>
+                    <div>Last run: <span id="diag-bi-lastrun" class="font-mono text-slate-700">—</span></div>
+                </div>
+                <div id="diag-bi-note" class="hidden mt-2 text-xs text-amber-700"></div>
+                <div id="diag-bi-error" class="hidden mt-2 text-xs text-red-600 font-mono"></div>
+                <p class="text-[11px] text-slate-500 mt-2">
+                    LM "File a Bug" reports reach bugfixer over the mTLS HUB_REQUEST channel. "Hub-log markers seen" &gt; 0
+                    means GET_LOGS is working; a filed report becomes a GitHub issue (label <code class="bg-slate-100 px-1 rounded">automated-fix</code>) in the target repo.
+                </p>
+            </div>
+
             <!-- Providers table -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
@@ -2223,6 +2249,22 @@
                     renderCert('diag-hc-client-cert', hc.client_cert, false);
                     renderCert('diag-hc-webui-cert', hc.webui_cert, true);
                 }
+
+                // LM Bug-Report ingestion
+                const bi = d.bug_ingest || {};
+                const sT = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v == null ? '—' : v); };
+                sT('diag-bi-enabled', bi.enabled === false ? 'OFF' : (bi.enabled === true ? 'on' : '—'));
+                const enEl = document.getElementById('diag-bi-enabled');
+                if (enEl) enEl.className = 'font-bold ' + (bi.enabled === false ? 'text-amber-600' : 'text-[#01A982]');
+                sT('diag-bi-markers', bi.markers_seen != null ? bi.markers_seen : '—');
+                sT('diag-bi-reports', bi.reports_total != null ? bi.reports_total : '—');
+                sT('diag-bi-filed', bi.filed_this_cycle != null ? bi.filed_this_cycle : '—');
+                sT('diag-bi-repo', bi.repo || '(default: hub repo)');
+                sT('diag-bi-lastrun', bi.last_run ? new Date(bi.last_run * 1000).toLocaleString() : 'not run yet');
+                const noteEl = document.getElementById('diag-bi-note');
+                if (noteEl) { if (bi.note) { noteEl.classList.remove('hidden'); noteEl.textContent = 'ⓘ ' + bi.note; } else noteEl.classList.add('hidden'); }
+                const errEl = document.getElementById('diag-bi-error');
+                if (errEl) { if (bi.error) { errEl.classList.remove('hidden'); errEl.textContent = bi.error; } else errEl.classList.add('hidden'); }
 
                 // Restart log
                 const logEl = document.getElementById('diag-restart-log');

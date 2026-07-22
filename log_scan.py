@@ -726,9 +726,22 @@ def scan_bugs(gh_current, config, hub_logs):
     The issue carries 'automated-fix', so scan_repo_issues -> process_single_issue
     will then attempt a fix (once lbockenstedt/lm is in monitored_repos).
     """
+    # Ingestion status for the Diagnostics page (bug reports flow over the mTLS-gated
+    # HUB_REQUEST channel — GET_LOGS to find markers, GET_BUG_REPORTS/REPORT to
+    # fetch — so this makes "is the LM bug pipeline working" visible). Mutated in
+    # place; state holds the reference.
+    _bi = {"last_run": time.time(), "enabled": bool(config.get("bug_report_enabled", True)),
+           "hub_logs_seen": len(hub_logs or []), "markers_seen": 0,
+           "reports_total": None, "filed_this_cycle": 0, "note": "", "error": ""}
+    try:
+        state["bug_ingest"] = _bi
+    except Exception:  # noqa: BLE001
+        pass
     if not config.get("bug_report_enabled", True):
+        _bi["note"] = "bug_report_enabled is OFF (Settings)"
         return
     if not hub_logs:
+        _bi["note"] = "no hub logs this cycle (GET_LOGS empty — mTLS/HUB_REQUEST access?)"
         return
 
     # Parse [bug-report] id=... markers out of the raw hub logs (newest-first).
@@ -752,11 +765,14 @@ def scan_bugs(gh_current, config, hub_logs):
             continue
         seen_set.add(rid)
         seen_ids.append(rid)
+    _bi["markers_seen"] = len(seen_ids)
     if not seen_ids:
+        _bi["note"] = "no [bug-report] markers in hub logs (nothing filed in LM, or logs rotated)"
         return
 
     client = _get_hub_agent_client()
     if not client:
+        _bi["note"] = "no hub agent client"
         logger.warning("scan_bugs: no hub agent client; skipping bug-report filing.")
         return
 
@@ -768,10 +784,13 @@ def scan_bugs(gh_current, config, hub_logs):
     filed_on_hub = set()
     try:
         reports = client.request_sync("GET_BUG_REPORTS", {}, timeout=10)
-        for r in (reports.get("reports") if isinstance(reports, dict) else []) or []:
+        _rlist = (reports.get("reports") if isinstance(reports, dict) else []) or []
+        _bi["reports_total"] = len(_rlist)
+        for r in _rlist:
             if isinstance(r, dict) and r.get("filed"):
                 filed_on_hub.add(r.get("id"))
     except Exception as e:
+        _bi["error"] = f"GET_BUG_REPORTS failed: {e}"
         logger.warning(f"scan_bugs: GET_BUG_REPORTS failed: {e}")
     scan_bugs._filed |= filed_on_hub
 
@@ -780,9 +799,11 @@ def scan_bugs(gh_current, config, hub_logs):
     if not repo_name:
         repo_name = MODULE_TYPE_REPO.get("hub") or resolve_self_diagnosis_repo(config)
     if not repo_name:
+        _bi["note"] = "no bug_report_repo configured (Settings) and no hub repo resolved"
         logger.warning("scan_bugs: no bug_report_repo/hub repo resolved; skipping.")
         return
 
+    _bi["repo"] = repo_name
     filed_this_cycle = 0
     for rid in seen_ids:
         if rid in scan_bugs._filed:
@@ -865,6 +886,7 @@ def scan_bugs(gh_current, config, hub_logs):
             logger.info(f"scan_bugs: filed bug report {rid} -> {repo_name}#{getattr(issue, 'number', '?')} ({issue_url})")
         except Exception as e:
             logger.error(f"scan_bugs: failed to file bug report {rid} in {repo_name}: {e}")
+    _bi["filed_this_cycle"] = filed_this_cycle
     if filed_this_cycle:
         logger.info(f"scan_bugs: filed {filed_this_cycle} new bug report(s).")
     else:
