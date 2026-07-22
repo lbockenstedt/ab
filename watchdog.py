@@ -1,4 +1,4 @@
-import os, json, time, requests, subprocess, logging
+import os, sys, json, time, requests, subprocess, logging
 from datetime import datetime
 
 # Config
@@ -205,10 +205,41 @@ def handle_ollama_setup_request():
         logger.error(f"ollama-setup: watchdog error: {e}")
 
 
+_WATCHDOG_SRC = os.path.abspath(__file__)
+
+
+def _maybe_reload_on_code_change(orig_mtime):
+    """Re-exec the watchdog if watchdog.py changed on disk since we started.
+
+    The watchdog is a long-lived process that restarts bugfixer.service on
+    update — but NOTHING restarts the watchdog itself, so after an update pulls
+    a newer watchdog.py the running process keeps executing STALE in-memory code
+    (a newly-added handler like handle_ollama_setup_request never runs → the
+    ollama-setup request is silently never picked up). Compare the source mtime
+    each idle loop; on a change, os.execv into the new code. Only fires when the
+    loop is idle (between iterations), never mid-helper-run."""
+    try:
+        cur = os.path.getmtime(_WATCHDOG_SRC)
+    except OSError:
+        return
+    if cur != orig_mtime:
+        logger.info("WATCHDOG: watchdog.py changed on disk — re-execing to load new code.")
+        try:
+            os.execv(sys.executable, [sys.executable, _WATCHDOG_SRC])
+        except Exception as e:  # noqa: BLE001 - if exec fails, keep running old code
+            logger.error(f"WATCHDOG: self-reload exec failed ({e}); continuing on old code.")
+
+
 def main():
     logger.info("BugFixer Watchdog started.")
     _reset_stale_ollama_status()
+    try:
+        _src_mtime = os.path.getmtime(_WATCHDOG_SRC)
+    except OSError:
+        _src_mtime = None
     while True:
+        if _src_mtime is not None:
+            _maybe_reload_on_code_change(_src_mtime)
         try: handle_ollama_setup_request()
         except Exception as e:  # noqa: BLE001
             logger.error(f"ollama-setup handler error: {e}")

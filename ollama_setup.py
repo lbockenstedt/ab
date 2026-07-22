@@ -12,6 +12,7 @@ into main before ollama_setup, so they are imported directly — no lazy refs.
 """
 import json
 import os
+import subprocess
 import time
 import uuid
 from datetime import datetime
@@ -60,6 +61,20 @@ def _ollama_reachable(base_url=OLLAMA_BASE_URL, timeout=5):
         return resp.status_code == 200
     except Exception:
         return False
+
+
+def _watchdog_active():
+    """True/False if we could determine bugfixer-watchdog.service's active state,
+    None if the query itself failed. `systemctl is-active` is a read-only query
+    that needs no privilege, so the cap-locked main service can run it — this is
+    how we tell "watchdog is down" apart from "watchdog is up but not consuming"
+    (stale code) instead of waiting out the full 16-min poll for a blank timeout."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", "--quiet", "bugfixer-watchdog"],
+                           timeout=10)
+        return r.returncode == 0
+    except Exception:
+        return None
 
 
 def _wait_for_ollama(base_url, timeout=60):
@@ -220,6 +235,14 @@ def run_local_llm_setup(model, num_ctx, cores):
         bin_path = _ollama_bin_path()
         _llm_setup_log(f"  pre-check: ollama service {'up' if already_up else 'down'}, "
                        f"binary at {bin_path or 'unknown path'}")
+        # Fail fast if the watchdog service isn't even running — no point queuing
+        # a request nothing will consume, then waiting out a 16-min blank timeout.
+        if _watchdog_active() is False:
+            raise RuntimeError(
+                "bugfixer-watchdog.service is not active, so the privileged "
+                "ollama-setup helper can't run. Start it with "
+                "'systemctl restart bugfixer-watchdog' (check "
+                "'systemctl status bugfixer-watchdog' / 'journalctl -u bugfixer-watchdog').")
         req_path = os.path.join(CONFIG_DIR, "ollama_setup_request.json")
         status_path = os.path.join(CONFIG_DIR, "ollama_setup_status.json")
         # Clear any stale status so we read a fresh run (not a previous done/failed).
@@ -235,6 +258,15 @@ def run_local_llm_setup(model, num_ctx, cores):
         # 16-min hard cap (the helper itself has a 900s internal timeout) + the
         # watchdog's ~30s pickup latency.
         deadline = time.time() + 960
+        # Claim-detection backstop: the watchdog claims the request by DELETING the
+        # request file and writing a "running" status almost immediately (its loop
+        # is ~30s, and up to ~72s when busy verifying an update). If NEITHER the
+        # request file is gone NOR any status appeared within this grace, the
+        # watchdog is up but not consuming — almost always a stale watchdog process
+        # (watchdog.py was updated on disk but the long-lived process wasn't
+        # restarted). Fail fast with the exact remedy instead of hanging 16 min.
+        claim_deadline = time.time() + 120
+        claimed = False
         relay_len = 0
         final = None
         while time.time() < deadline:
@@ -243,6 +275,8 @@ def run_local_llm_setup(model, num_ctx, cores):
                     st = json.load(f)
             except Exception:
                 st = None
+            if not claimed and (st or not os.path.exists(req_path)):
+                claimed = True
             if st:
                 stream = st.get("stream") or ""
                 if len(stream) > relay_len:
@@ -253,6 +287,14 @@ def run_local_llm_setup(model, num_ctx, cores):
                 if st.get("state") in ("done", "failed"):
                     final = st
                     break
+            if not claimed and time.time() > claim_deadline:
+                try: os.remove(req_path)
+                except OSError: pass
+                raise RuntimeError(
+                    "bugfixer-watchdog is running but never picked up the ollama-setup "
+                    "request — it's likely executing stale code (watchdog.py was updated "
+                    "but the long-lived watchdog process wasn't restarted). Run "
+                    "'systemctl restart bugfixer-watchdog' and try again.")
             time.sleep(2)
         if not final:
             raise RuntimeError("ollama-setup helper did not finish in time — is bugfixer-watchdog "
