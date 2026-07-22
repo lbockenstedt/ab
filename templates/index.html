@@ -391,8 +391,8 @@
                         <button onclick="clearHistory()" class="px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-all border border-red-200">
                             <i class="fas fa-trash-alt mr-1"></i> Clear History
                         </button>
-                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-full text-xs font-bold bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Close every issue on GitHub (bugfixer-dismissed) and clear the whole history">
-                            <i class="fas fa-trash-alt mr-1"></i> Delete All
+                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-full text-xs font-bold bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (bugfixer-dismissed) and clear the whole history">
+                            <i class="fas fa-trash-alt mr-1"></i> Dismiss All
                         </button>
                     </div>
                     <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
@@ -433,7 +433,7 @@
                         <td class="px-6 py-4 text-center space-x-2">
                             <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded font-bold text-slate-600 border border-slate-200 transition-colors">Retry</button>
                             <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-1 bg-orange-100 hover:bg-orange-200 rounded font-bold text-orange-700 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
-                            <button onclick="deleteIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded font-bold text-red-700 transition-colors">Delete</button>
+                            <button onclick="deleteIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded font-bold text-red-700 transition-colors" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                             <button onclick="resolveIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-[#01A982]/10 hover:bg-[#01A982]/20 rounded font-bold text-[#01A982] border border-[#01A982] transition-colors" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                         </td>
                     </tr>
@@ -2859,9 +2859,9 @@
                 });
                 const data = await resp.json();
                 if (data.status === 'success') {
-                    reloadWithToast(data.message || 'Issue deleted.', 'success');
+                    reloadWithToast(data.message || 'Issue dismissed.', 'success');
                 } else {
-                    showToast(data.message || 'Error deleting issue.', 'error');
+                    showToast(data.message || 'Error dismissing issue.', 'error');
                 }
             } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }
@@ -2889,12 +2889,12 @@
         }
 
         async function deleteAllIssues() {
-            // Delete All = Clear History + close every issue on GitHub. The
-            // backend wipes local history immediately and closes on GitHub in a
-            // background thread (can't time out). No confirm popup — the success
-            // toast confirms it happened (per the user's toast-over-popup UX
-            // preference). The feed only shows <7d issues but this clears the
-            // ENTIRE history.
+            // Dismiss All = Clear History + dismiss (bugfixer-dismissed label +
+            // close) every issue on GitHub. The backend wipes local history
+            // immediately and closes on GitHub in a background thread (can't
+            // time out). No confirm popup — the success toast confirms it
+            // happened (per the user's toast-over-popup UX preference). The feed
+            // only shows <7d issues but this clears the ENTIRE history.
             try {
                 const resp = await fetch('/delete_all_issues', {
                     method: 'POST',
@@ -2903,9 +2903,9 @@
                 });
                 const data = await resp.json();
                 if (data.status === 'success') {
-                    reloadWithToast(data.message || 'All issues deleted.', 'success');
+                    reloadWithToast(data.message || 'All issues dismissed.', 'success');
                 } else {
-                    showToast(data.message || 'Error deleting all issues.', 'error');
+                    showToast(data.message || 'Error dismissing all issues.', 'error');
                 }
             } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }
