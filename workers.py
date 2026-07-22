@@ -39,6 +39,7 @@ from main import (
     _any_provider_available,
     _get_provider_config,
     _is_lmstudio,
+    _is_ollama,
     _llm_cb_snapshot,
     _local_health_url,
     _normalize_lmstudio_url,
@@ -78,6 +79,22 @@ def _check_provider_online(n, config):
         try:
             base = _normalize_lmstudio_url(base_url).rstrip("/")
             resp = requests.get(f"{base}/models", timeout=10)
+            if resp.status_code == 401:
+                return False
+            return resp.status_code < 300
+        except Exception:
+            return False
+    if _is_ollama(p):
+        # Ollama needs no API key — just confirm the server is reachable (/api/tags).
+        if not model:
+            return False
+        try:
+            base = (base_url or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
+            headers = {}
+            if api_key:
+                clean = api_key.strip().replace("Bearer ", "").strip()
+                headers["Authorization"] = f"Bearer {clean}"
+            resp = requests.get(f"{base}/api/tags", headers=headers, timeout=10)
             if resp.status_code == 401:
                 return False
             return resp.status_code < 300
@@ -1165,19 +1182,23 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             error = f"{attempted} — {_model_fetch_reason(e)}"
             logger.warning(f"LM Studio model fetch failed: {error} [{type(e).__name__}]")
         return {"models": out, "error": error}
-    if not api_key:
-        return {"models": [], "error": ""}
-    models = []
-    error = ""
-    attempted = ""
-    try:
-        if p == "ollama":
-            base = (base_url or "https://ollama.com").rstrip("/")
-            headers = {}
-            if api_key:
-                clean = api_key.strip().replace("Bearer ", "").strip()
-                headers["Authorization"] = f"Bearer {clean}"
-            attempted = f"{base}/api/tags"
+    if _is_ollama(p):
+        # Ollama exposes /api/tags; a self-hosted instance needs no auth key.
+        # Put this BEFORE the api_key gate so a local (no-key) ollama shows its
+        # models as a selectable option — without this, a no-key ollama fell
+        # through to the "api_key required" empty-list branch and never appeared.
+        # Ollama Cloud (https://ollama.com) takes a key, sent as a Bearer header
+        # when present. Default base_url: localhost for the no-key local case,
+        # ollama.com only when a key is set and no URL was given (cloud default).
+        base = (base_url or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
+        headers = {}
+        if api_key:
+            clean = api_key.strip().replace("Bearer ", "").strip()
+            headers["Authorization"] = f"Bearer {clean}"
+        attempted = f"{base}/api/tags"
+        out = []
+        error = ""
+        try:
             resp = requests.get(attempted, headers=headers, timeout=10)
             resp.raise_for_status()
             for m in resp.json().get("models", []):
@@ -1187,8 +1208,18 @@ def _fetch_models_for_provider(provider, api_key, base_url):
                 details = m.get("details", "")
                 if isinstance(details, dict):
                     details = details.get("family", str(details))
-                models.append({"name": name, "details": str(details)})
-        elif p == "anthropic":
+                out.append({"name": name, "details": str(details)})
+        except Exception as e:
+            error = f"{attempted} — {_model_fetch_reason(e)}"
+            logger.warning(f"Ollama model fetch failed: {error} [{type(e).__name__}]")
+        return {"models": out, "error": error}
+    if not api_key:
+        return {"models": [], "error": ""}
+    models = []
+    error = ""
+    attempted = ""
+    try:
+        if p == "anthropic":
             base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
             headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_API_VERSION}
             attempted = f"{base}/models"
@@ -1325,7 +1356,7 @@ __EXCLUDE = {"git", "json", "os", "py_compile", "requests", "time",
              "GithubException", "main",
              "ANTHROPIC_API_VERSION", "ANTHROPIC_BASE_URL", "GOOGLE_BASE_URL",
              "OPENAI_BASE_URL", "CONFIG_DIR", "SELF_SCAN_OFFSET_FILE",
-             "_any_provider_available", "_get_provider_config", "_is_lmstudio",
+             "_any_provider_available", "_get_provider_config", "_is_lmstudio", "_is_ollama",
              "_llm_cb_snapshot", "_local_health_url", "_normalize_lmstudio_url",
              "_provider_configured", "_provider_credit_cb_snapshot",
              "_set_update_cooldown", "get_log_path", "get_version", "load_config",

@@ -92,11 +92,28 @@ def _is_lmstudio(provider):
     return (provider or "").lower().strip().startswith("lmstudio")
 
 
+def _is_ollama(provider):
+    """True for any Ollama provider (``ollama``, ``ollama2``, ...).
+
+    Ollama exposes a no-key local/LAN HTTP API (``/api/chat``, ``/api/tags``).
+    A self-hosted instance needs no API key; Ollama Cloud (``https://ollama.com``)
+    does take a key, but the key is optional at the configured-check layer so the
+    local self-hosted case isn't forced to invent a dummy key. The vault keys
+    credentials by provider name, so each ``ollama<N>`` carries its own base_url —
+    letting a local instance and a remote instance coexist (e.g. ``ollama`` →
+    ``http://localhost:11434`` for the box running bugfixer, ``ollama2`` → a
+    remote host on the LAN/cloud). Matching by prefix means adding further
+    instances needs no code change here.
+    """
+    return (provider or "").lower().strip().startswith("ollama")
+
+
 def _provider_configured(provider, key, model):
     """A provider is usable when it has a model, and either an API key or is a no-key
-    provider (claude_cli session auth, LM Studio local server). Centralizes the no-key
-    exception so every configured-check site agrees on what "configured" means."""
-    return bool(model and (key or provider == "claude_cli" or _is_lmstudio(provider)))
+    provider (claude_cli session auth, LM Studio / Ollama local servers). Centralizes
+    the no-key exception so every configured-check site agrees on what "configured"
+    means."""
+    return bool(model and (key or provider == "claude_cli" or _is_lmstudio(provider) or _is_ollama(provider)))
 
 
 def _record_provider_result(n, status, reason=""):
@@ -337,8 +354,8 @@ def validate_llm_config_on_startup():
     ok = False
     for n in (1, 2):
         provider, api_key, model, _ = _get_provider_config(n, config)
-        # claude_cli and lmstudio don't need an API key (session auth / local server).
-        if model and (api_key or provider == "claude_cli" or _is_lmstudio(provider)):
+        # claude_cli, lmstudio and ollama don't need an API key (session auth / local server).
+        if model and (api_key or provider == "claude_cli" or _is_lmstudio(provider) or _is_ollama(provider)):
             logger.info(f"LLM Provider {n}: provider={provider!r} model={model!r} — configured.")
             ok = True
         else:
@@ -537,7 +554,7 @@ def _any_provider_available(config):
     any_free = False
     for n in (1, 2, 3, 4):
         provider, key, model, _ = _get_provider_config(n, config)
-        configured = model and (key or provider == "claude_cli" or _is_lmstudio(provider))
+        configured = model and (key or provider == "claude_cli" or _is_lmstudio(provider) or _is_ollama(provider))
         if not configured:
             continue  # not configured
         rem = _provider_credit_cb_remaining(n)
@@ -922,7 +939,7 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
 
 def _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
     """Call an Ollama-compatible API (local or Ollama Cloud). Uses /api/chat natively."""
-    base = (base_url or "https://ollama.com").rstrip("/")
+    base = (base_url or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
     endpoint = f"{base}/api/chat"
     headers = {}
     if api_key:
@@ -1056,7 +1073,7 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
         return _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if p == "google":
         return _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
-    if p == "ollama":
+    if _is_ollama(p):
         return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if p == "groq":
         effective_url = base_url or "https://api.groq.com/openai/v1"
