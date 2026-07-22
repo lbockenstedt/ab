@@ -1365,6 +1365,7 @@
                     <div><div class="text-slate-500">Log/update access (mTLS)</div><div id="diag-hc-mtls" class="font-bold text-slate-800">—</div></div>
                     <div><div class="text-slate-500">Client cert presented</div><div id="diag-hc-presented" class="font-mono text-slate-800">—</div></div>
                     <div><div class="text-slate-500">Cert ever accepted</div><div id="diag-hc-everok" class="font-mono text-slate-800">—</div></div>
+                    <div title="Extended Key Usage must include clientAuth to be presented as an mTLS client cert. A serverAuth-only cert verifies as a chain but is rejected on the wire."><div class="text-slate-500">Usable as client cert (clientAuth)</div><div id="diag-hc-clientauth" class="font-bold text-slate-800">—</div></div>
                 </div>
                 <div id="diag-hc-rejected" class="hidden mt-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
                     <i class="fas fa-exclamation-triangle mr-1"></i>The hub rejected the BugFixer client cert — mTLS log/update access is OFF.
@@ -2132,6 +2133,19 @@
                     setCls('diag-hc-mtls', 'font-bold ' + (hc.mtls_active ? 'text-[#01A982]' : 'text-red-600'));
                     setTxt('diag-hc-presented', yn(hc.presented_this_attempt));
                     setTxt('diag-hc-everok', yn(hc.cert_ever_worked));
+                    // clientAuth EKU verdict — the crux of "verifies but rejected".
+                    const cc = hc.client_cert || {};
+                    if (cc.client_auth === false) {
+                        setTxt('diag-hc-clientauth', 'NO — serverAuth only');
+                        setCls('diag-hc-clientauth', 'font-bold text-red-600');
+                    } else if (cc.client_auth === true) {
+                        const lbl = (cc.eku && cc.eku.length) ? 'yes' : 'yes (no EKU — any purpose)';
+                        setTxt('diag-hc-clientauth', lbl);
+                        setCls('diag-hc-clientauth', 'font-bold text-[#01A982]');
+                    } else {
+                        setTxt('diag-hc-clientauth', '—');
+                        setCls('diag-hc-clientauth', 'font-bold text-slate-500');
+                    }
                     // Rejection banner
                     const rej = document.getElementById('diag-hc-rejected');
                     if (rej) {
