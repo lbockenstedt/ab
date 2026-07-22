@@ -1231,6 +1231,50 @@ async def clear_history():
     return {"status": "success", "message": "All history and tasks have been cleared."}
 
 
+def _close_issue_on_github(issue_id: str):
+    """Close one issue on GitHub with the ``bugfixer-dismissed`` label + an
+    explanatory comment. Returns (ok, message). Best-effort per step — label
+    create/apply and the comment never raise. Shared by the single-issue
+    delete and the bulk delete-all sweep so the close logic isn't duplicated."""
+    if ":" not in issue_id:
+        raise ValueError("Invalid issue_id")
+    repo_name, issue_num_str = issue_id.rsplit(":", 1)
+    issue_num = int(issue_num_str)
+    config = load_config()
+    token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        raise ValueError("No GitHub token configured")
+    gh = Github(token)
+    repo = gh.get_repo(repo_name)
+    issue = repo.get_issue(issue_num)
+
+    # Ensure the dismissal label exists in the repo; create it if not.
+    label_name = "bugfixer-dismissed"
+    try:
+        repo.get_label(label_name)
+    except Exception:
+        try:
+            repo.create_label(label_name, "b60205",
+                              "Marked by BugFixer as not a real issue — will not be reopened")
+        except Exception as le:
+            logger.warning(f"Could not create label '{label_name}': {le}")
+    try:
+        issue.add_to_labels(label_name)
+    except Exception as le:
+        logger.warning(f"Could not apply label '{label_name}' to #{issue_num}: {le}")
+    try:
+        issue.create_comment(
+            "🤖 **BugFixer**: This issue has been marked as **not a real issue** and dismissed. "
+            "It will not be automatically reopened or processed again."
+        )
+    except Exception:
+        pass
+    if issue.state != "closed":
+        issue.edit(state="closed")
+        return True, f"Issue #{issue_num} labelled '{label_name}' and closed on GitHub."
+    return True, f"Issue #{issue_num} labelled '{label_name}' (was already closed)."
+
+
 @router.post("/delete_issue")
 async def delete_issue(request: Request):
     """Remove an issue from local history and close it on GitHub."""
@@ -1261,43 +1305,7 @@ async def delete_issue(request: Request):
     # Close the issue on GitHub.
     github_msg = ""
     try:
-        config = load_config()
-        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
-        if not token:
-            raise ValueError("No GitHub token configured")
-        gh = Github(token)
-        repo = gh.get_repo(repo_name)
-        issue = repo.get_issue(issue_num)
-
-        # Ensure the dismissal label exists in the repo; create it if not.
-        label_name = "bugfixer-dismissed"
-        try:
-            repo.get_label(label_name)
-        except Exception:
-            try:
-                repo.create_label(label_name, "b60205",
-                                  "Marked by BugFixer as not a real issue — will not be reopened")
-            except Exception as le:
-                logger.warning(f"Could not create label '{label_name}': {le}")
-
-        # Apply the label and close with an explanatory comment.
-        try:
-            issue.add_to_labels(label_name)
-        except Exception as le:
-            logger.warning(f"Could not apply label '{label_name}' to #{issue_num}: {le}")
-        try:
-            issue.create_comment(
-                "🤖 **BugFixer**: This issue has been marked as **not a real issue** and dismissed. "
-                "It will not be automatically reopened or processed again."
-            )
-        except Exception:
-            pass
-
-        if issue.state != "closed":
-            issue.edit(state="closed")
-            github_msg = f"Issue #{issue_num} labelled '{label_name}' and closed on GitHub."
-        else:
-            github_msg = f"Issue #{issue_num} labelled '{label_name}' (was already closed)."
+        _ok, github_msg = _close_issue_on_github(issue_id)
         logger.info(f"Dismissed issue {issue_id}: removed from history, {github_msg}")
     except Exception as e:
         github_msg = f"GitHub close failed: {e}"
@@ -1306,6 +1314,48 @@ async def delete_issue(request: Request):
     return {
         "status": "success",
         "message": f"{'Removed from history. ' if was_in_history else ''}{github_msg}",
+    }
+
+
+@router.post("/delete_all_issues")
+async def delete_all_issues(request: Request):
+    """Clear every issue from local history and close them all on GitHub.
+    Local history + counters are wiped immediately (the feed empties on
+    reload); the GitHub closes run in a background thread so a large set
+    can't time out the request. Mirrors the retry_all_failed background
+    pattern. Each issue is closed best-effort — one failure doesn't abort
+    the sweep."""
+    global state
+    processed = load_processed()
+    to_close = list(processed.keys())
+    if not to_close:
+        return {"status": "no_issues", "message": "No issues in history to delete."}
+
+    # Clear local history + counters now; close on GitHub in the background
+    # against the snapshot so the clear doesn't race the sweep.
+    state["processed"] = {}
+    state["success_count"] = 0
+    state["failure_count"] = 0
+    save_processed({})
+
+    def _bulk_close():
+        closed = failed = 0
+        for issue_id in to_close:
+            try:
+                ok, _msg = _close_issue_on_github(issue_id)
+                if ok:
+                    closed += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                failed += 1
+                logger.warning(f"delete_all: could not close {issue_id} on GitHub: {e}")
+        logger.info(f"delete_all_issues: closed {closed}/{len(to_close)} on GitHub, {failed} failed.")
+
+    threading.Thread(target=_bulk_close, daemon=True).start()
+    return {
+        "status": "success",
+        "message": f"Cleared {len(to_close)} issue(s) from history. Closing them on GitHub in the background.",
     }
 
 
@@ -1729,6 +1779,7 @@ __all__ = [
     'local_llm_status',
     'clear_history',
     'delete_issue',
+    'delete_all_issues',
     'resolve_issue',
     'update_now',
     'clear_credit_cooldown',

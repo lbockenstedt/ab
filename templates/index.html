@@ -391,6 +391,9 @@
                         <button onclick="clearHistory()" class="px-3 py-1 rounded-full text-xs font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-all border border-red-200">
                             <i class="fas fa-trash-alt mr-1"></i> Clear History
                         </button>
+                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-full text-xs font-bold bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Close every issue on GitHub (bugfixer-dismissed) and clear the whole history">
+                            <i class="fas fa-trash-alt mr-1"></i> Delete All
+                        </button>
                     </div>
                     <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
                     <button data-filter="all" onclick="filterActivity('all')" class="filter-btn active px-3 py-1 rounded-full text-xs font-bold bg-slate-200 text-slate-700 hover:bg-slate-300 transition-all" title="Active issues (closed hidden)">Active</button>
@@ -2827,6 +2830,28 @@
                     reloadWithToast(data.message || 'Issue resolved.', 'success');
                 } else {
                     showToast(data.message || 'Error resolving issue.', 'error');
+                }
+            } catch (e) { showToast('Request failed: ' + e, 'error'); }
+        }
+
+        async function deleteAllIssues() {
+            // Delete All = Clear History + close every issue on GitHub. The
+            // backend wipes local history immediately and closes on GitHub in a
+            // background thread (can't time out). Confirm plainly — the feed only
+            // shows <7d issues but this clears the ENTIRE history, so don't pin a
+            // visible-row count that would understate.
+            if (!confirm('Delete ALL issues?\n\nThis closes every issue on GitHub (bugfixer-dismissed) AND clears the entire history. This cannot be undone.')) return;
+            try {
+                const resp = await fetch('/delete_all_issues', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await resp.json();
+                if (data.status === 'success') {
+                    reloadWithToast(data.message || 'All issues deleted.', 'success');
+                } else {
+                    showToast(data.message || 'Error deleting all issues.', 'error');
                 }
             } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }
