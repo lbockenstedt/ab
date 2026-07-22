@@ -1296,10 +1296,9 @@
 
         {% if view == 'diagnostics' %}
         <div id="diag-root" class="space-y-6">
-            <!-- Header with a Copy-raw button so the full /api/diagnostics JSON can
-                 be copied and pasted for support without SSHing to the box. -->
-            <div class="flex items-center justify-between">
-                <h2 class="text-xl font-bold text-[#263040]">Diagnostics</h2>
+            <!-- Copy-raw button row — the "Diagnostics" title lives in the
+                 topbar now (BugFixer | Diagnostics), so only the action remains. -->
+            <div class="flex items-center justify-end">
                 <button id="diag-copy-btn" onclick="copyDiagnostics()"
                         class="btn-sec px-3 py-1.5 rounded font-bold text-xs flex items-center gap-2"
                         title="Copy the full raw diagnostics JSON to the clipboard">
