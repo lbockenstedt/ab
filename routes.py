@@ -1400,6 +1400,11 @@ async def resolve_issue(request: Request):
 
         if issue.state != "closed":
             issue.edit(state="closed")
+            try:
+                from fix_engine import _notify_bug_fixed
+                _notify_bug_fixed(issue)  # LM "File a Bug" → hub → UI shows "Fixed"
+            except Exception:
+                pass
             github_msg = f"Issue #{issue_num} closed on GitHub."
         else:
             github_msg = f"Issue #{issue_num} was already closed on GitHub."

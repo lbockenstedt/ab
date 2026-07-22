@@ -33,6 +33,30 @@ class QueueLocalException(Exception):
     pass
 
 
+_BUG_REPORT_ID_RE = re.compile(r'<!--\s*bug-report-id:\s*([0-9a-fA-F]+)\s*-->')
+
+
+def _notify_bug_fixed(issue):
+    """If a GitHub issue came from an LM 'File a Bug' report (hidden bug-report-id
+    marker in the body), tell the hub the issue is fixed so the LM bug-reports UI
+    shows 'Fixed' + the issue link. Best-effort + non-fatal."""
+    try:
+        m = _BUG_REPORT_ID_RE.search(getattr(issue, "body", "") or "")
+        if not m:
+            return
+        from hub_agent import hub_agent_client
+        if not hub_agent_client:
+            return
+        hub_agent_client.request_sync(
+            "MARK_BUG_FIXED",
+            {"id": m.group(1), "issue_url": getattr(issue, "html_url", "") or ""},
+            timeout=10)
+        logger.info(f"MARK_BUG_FIXED sent for bug-report {m.group(1)} "
+                    f"({getattr(issue, 'html_url', '')})")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_notify_bug_fixed skipped: {e}")
+
+
 @contextlib.contextmanager
 def _authenticated_remote(remote, plain_url, token):
     """Re-embeds the GitHub token on a remote only for the duration of a push/pull,
@@ -914,6 +938,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 # success_count += 1 above (QA pass) is undone here — the issue is Closed, not
                 # Resolved. Log-detected issues stay open for the production verification period.
                 issue.edit(state='closed')
+                _notify_bug_fixed(issue)  # LM "File a Bug" → hub → UI shows "Fixed"
                 _apply_closed_label(repo_obj, issue, issue_id)
                 state["success_count"] = max(0, state["success_count"] - 1)
                 state["closed_count"] = state.get("closed_count", 0) + 1
