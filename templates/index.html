@@ -2809,7 +2809,6 @@
         // ── End Local LLM Setup ────────────────────────────────────────────────
 
         async function deleteIssue(issueId) {
-            if (!confirm(`Delete ${issueId} from history and close it on GitHub?`)) return;
             try {
                 const resp = await fetch('/delete_issue', {
                     method: 'POST',
@@ -2826,7 +2825,6 @@
         }
 
         async function resolveIssue(issueId) {
-            if (!confirm(`Mark ${issueId} as resolved?\n\nThis closes the issue on GitHub (if not already closed) and moves it to Closed in BugFixer.`)) return;
             try {
                 const resp = await fetch('/resolve_issue', {
                     method: 'POST',
@@ -2851,10 +2849,10 @@
         async function deleteAllIssues() {
             // Delete All = Clear History + close every issue on GitHub. The
             // backend wipes local history immediately and closes on GitHub in a
-            // background thread (can't time out). Confirm plainly — the feed only
-            // shows <7d issues but this clears the ENTIRE history, so don't pin a
-            // visible-row count that would understate.
-            if (!confirm('Delete ALL issues?\n\nThis closes every issue on GitHub (bugfixer-dismissed) AND clears the entire history. This cannot be undone.')) return;
+            // background thread (can't time out). No confirm popup — the success
+            // toast confirms it happened (per the user's toast-over-popup UX
+            // preference). The feed only shows <7d issues but this clears the
+            // ENTIRE history.
             try {
                 const resp = await fetch('/delete_all_issues', {
                     method: 'POST',
