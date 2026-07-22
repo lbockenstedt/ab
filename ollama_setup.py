@@ -25,6 +25,7 @@ from main import (
     save_config,
     state,
     update_task_state,
+    CONFIG_DIR,
 )
 
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -189,7 +190,6 @@ def run_local_llm_setup(model, num_ctx, cores):
     verify. Each stage is idempotent. Progress is streamed via
     _llm_setup_log() into state['active_tasks']['LocalLLMSetup'].
     """
-    import subprocess
     task_id = "LocalLLMSetup"
     update_task_state(task_id, "Local LLM Setup", action="start")
     base_url = OLLAMA_BASE_URL
@@ -202,38 +202,65 @@ def run_local_llm_setup(model, num_ctx, cores):
         # runs under systemd with a minimal PATH that omits /usr/local/bin.
         # bugfixer runs as svc_bg under a systemd unit whose
         # CapabilityBoundingSet is locked to CAP_NET_BIND_SERVICE (least
-        # privilege). That bounding set omits CAP_SETGID/CAP_SETUID, so a
-        # setuid `sudo` spawned from the service CANNOT setgid(0) — sudo dies
-        # with "unable to change to root gid: Operation not permitted / error
-        # initializing audit plugin sudoers_audit" before it even runs the
-        # helper. Run the root helper as a TRANSIENT systemd unit instead
-        # (same pattern as bugfixer-self-restart): systemd-run asks PID 1 to
-        # spawn the unit owned by init, which is NOT subject to the service's
-        # capability bounding set, so it runs as real root with full caps.
-        # --pipe streams the helper's stdout/stderr back here (implies --wait)
-        # so we relay its progress and surface a non-zero exit before we
-        # depend on the API. The helper is idempotent (installs only if
+        # privilege). That bounding set omits CAP_SETGID/CAP_SETUID, so sudo
+        # spawned from the service can't setgid(0) ("unable to change to root
+        # gid: Operation not permitted"), and a direct `systemd-run` from the
+        # service is polkit-denied ("Failed to start transient service unit:
+        # Access denied"). bugfixer-WATCHDOG.service has no such restriction,
+        # so sudo works THERE (same privileged-arm pattern as spawn_restart).
+        # We delegate Stage 1 to the watchdog: write a request file, then poll
+        # the status file it streams the helper's output to, relaying new
+        # lines into the Setup log. The helper is idempotent (installs only if
         # absent, starts only if down, applies the override only if it
         # changed), so calling it unconditionally also covers the former
         # Stage 5 tuning. HTTP-API stages (pull/create model, verify) stay
-        # here in svc_bg. /etc/sudoers.d/bugfixer still grants the helper path
-        # for back-compat/boxes without systemd-run, but the code path is
-        # systemd-run.
-        _llm_setup_log("▶ Stage 1/7 — Prerequisites + installing/tuning Ollama (root helper)…")
+        # here in svc_bg. Paths kept in sync with watchdog.py.
+        _llm_setup_log("▶ Stage 1/7 — Prerequisites + installing/tuning Ollama (root helper via watchdog)…")
         already_up = _ollama_reachable(base_url, timeout=5)
         bin_path = _ollama_bin_path()
         _llm_setup_log(f"  pre-check: ollama service {'up' if already_up else 'down'}, "
                        f"binary at {bin_path or 'unknown path'}")
-        helper_cmd = ["systemd-run", "--pipe", "--quiet", "--collect", "--wait",
-                      "/usr/local/bin/bugfixer-ollama-setup", str(int(cores))]
-        # The helper may restart ollama, so stream its progress synchronously
-        # and surface failure before we depend on the API being up.
-        proc = subprocess.run(helper_cmd, capture_output=True, text=True, timeout=900)
-        for line in (proc.stdout or "").splitlines():
-            _llm_setup_log(f"  [helper] {line}")
-        if proc.returncode != 0:
-            tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-800:]
-            raise RuntimeError(f"ollama-setup helper exited {proc.returncode}: {tail}")
+        req_path = os.path.join(CONFIG_DIR, "ollama_setup_request.json")
+        status_path = os.path.join(CONFIG_DIR, "ollama_setup_status.json")
+        # Clear any stale status so we read a fresh run (not a previous done/failed).
+        try: os.remove(status_path)
+        except OSError: pass
+        try:
+            with open(req_path, "w") as f:
+                json.dump({"cores": int(cores), "requested_at": time.time()}, f)
+        except Exception as e:
+            raise RuntimeError(f"could not write ollama-setup request: {e}")
+        _llm_setup_log("  queued with the watchdog — waiting for it to pick up the request…")
+        # Poll the status file, relaying NEW stream lines, until done/failed/timeout.
+        # 16-min hard cap (the helper itself has a 900s internal timeout) + the
+        # watchdog's ~30s pickup latency.
+        deadline = time.time() + 960
+        relay_len = 0
+        final = None
+        while time.time() < deadline:
+            try:
+                with open(status_path, "r") as f:
+                    st = json.load(f)
+            except Exception:
+                st = None
+            if st:
+                stream = st.get("stream") or ""
+                if len(stream) > relay_len:
+                    for line in stream[relay_len:].splitlines():
+                        if line.strip():
+                            _llm_setup_log(f"  [helper] {line}")
+                    relay_len = len(stream)
+                if st.get("state") in ("done", "failed"):
+                    final = st
+                    break
+            time.sleep(2)
+        if not final:
+            raise RuntimeError("ollama-setup helper did not finish in time — is bugfixer-watchdog "
+                               "running? The watchdog runs the privileged helper; check "
+                               "'systemctl status bugfixer-watchdog'.")
+        if final.get("state") != "done":
+            tail = (final.get("stream") or "").strip()[-800:]
+            raise RuntimeError(f"ollama-setup helper exited {final.get('returncode')}: {tail}")
         _llm_setup_log("✓ Ollama installed/tuned by helper")
 
         # ---- Stage 2: confirm the ollama service is reachable ----

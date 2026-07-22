@@ -6,6 +6,16 @@ CONFIG_DIR = "/etc/bugfixer"
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 UPDATE_PENDING_FILE = os.path.join(CONFIG_DIR, "update_pending")
 STARTUP_STAMP_FILE = os.path.join(CONFIG_DIR, "startup_stamp.json")
+# Privileged ollama-setup delegation. bugfixer.service runs under a locked
+# CapabilityBoundingSet (CAP_NET_BIND_SERVICE only) so it can neither sudo
+# (setgid(0) EPERM) nor systemd-run (polkit denied) a root helper. The watchdog
+# service has no such restriction — sudo works here (same pattern as
+# spawn_restart). The main service writes a request file; we run the helper as
+# root via sudo and stream its output to a status file it polls + relays to the
+# Setup log. Paths kept in sync with ollama_setup.py.
+OLLAMA_SETUP_REQUEST = os.path.join(CONFIG_DIR, "ollama_setup_request.json")
+OLLAMA_SETUP_STATUS = os.path.join(CONFIG_DIR, "ollama_setup_status.json")
+OLLAMA_SETUP_HELPER = "/usr/local/bin/bugfixer-ollama-setup"
 # Derive the health probe from the same env the server binds on (unified-443:
 # HTTPS on :443 by default). Kept in lockstep with main.py's SERVER_PORT / SSL
 # settings so the watchdog never probes the wrong scheme/port.
@@ -112,9 +122,96 @@ def rollback():
         logger.error(f"WATCHDOG: Rollback failed: {e}")
         return False
 
+def _write_ollama_status(state, stream, returncode=None):
+    try:
+        with open(OLLAMA_SETUP_STATUS, "w") as f:
+            json.dump({"state": state, "stream": stream,
+                       "returncode": returncode, "updated_at": time.time()}, f)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"ollama-setup: could not write status: {e}")
+
+
+def _reset_stale_ollama_status():
+    """On startup, mark a leftover 'running' status as failed so the main
+    service's poll doesn't hang forever after the watchdog was restarted
+    (e.g. via Update) mid-setup."""
+    try:
+        if os.path.exists(OLLAMA_SETUP_STATUS):
+            with open(OLLAMA_SETUP_STATUS, "r") as f:
+                st = json.load(f)
+            if st.get("state") == "running":
+                st["state"] = "failed"
+                st["stream"] = (st.get("stream") or "") + "\n[watchdog restarted mid-setup]"
+                st["returncode"] = -1
+                st["updated_at"] = time.time()
+                with open(OLLAMA_SETUP_STATUS, "w") as f:
+                    json.dump(st, f)
+                logger.warning("ollama-setup: reset stale 'running' status (watchdog restarted)")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def handle_ollama_setup_request():
+    """Run the privileged ollama-setup helper on behalf of bugfixer.service.
+
+    The main service is locked to CAP_NET_BIND_SERVICE and can't escalate; the
+    watchdog can (sudo works here). It writes a request file; we claim it, run
+    the helper as root via sudo, stream its combined stdout/stderr to the
+    status file, and mark done/failed. Blocking — the helper is a rare manual
+    action and bounded (≤900s); update-pending detection just waits it out."""
+    if not os.path.exists(OLLAMA_SETUP_REQUEST):
+        return
+    try:
+        with open(OLLAMA_SETUP_REQUEST, "r") as f:
+            req = json.load(f)
+        cores = str(int(req.get("cores", 0)))
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"ollama-setup: bad request file: {e}")
+        try: os.remove(OLLAMA_SETUP_REQUEST)
+        except Exception:  # noqa: BLE001
+            pass
+        _write_ollama_status("failed", f"bad request: {e}", -1)
+        return
+    # Claim the request so a second click doesn't double-run and the main
+    # service sees 'running' immediately.
+    try: os.remove(OLLAMA_SETUP_REQUEST)
+    except Exception:  # noqa: BLE001
+        pass
+    _write_ollama_status("running", "")
+    logger.info(f"ollama-setup: running helper (cores={cores}) on behalf of bugfixer.service")
+    cmd = ["sudo", "-n", OLLAMA_SETUP_HELPER, cores]
+    stream = []
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1)
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            stream.append(line)
+            if len(stream) > 4000:  # cap memory + status file size
+                stream = stream[-4000:]
+            _write_ollama_status("running", "\n".join(stream))
+        proc.wait(timeout=900)
+        state = "done" if proc.returncode == 0 else "failed"
+        _write_ollama_status(state, "\n".join(stream), proc.returncode)
+        logger.info(f"ollama-setup: helper exited rc={proc.returncode} ({state})")
+    except subprocess.TimeoutExpired:
+        try: proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        _write_ollama_status("failed", "\n".join(stream) + "\n[helper timed out after 900s]", -1)
+        logger.error("ollama-setup: helper timed out")
+    except Exception as e:  # noqa: BLE001
+        _write_ollama_status("failed", "\n".join(stream) + f"\n[watchdog error: {e}]", -1)
+        logger.error(f"ollama-setup: watchdog error: {e}")
+
+
 def main():
     logger.info("BugFixer Watchdog started.")
+    _reset_stale_ollama_status()
     while True:
+        try: handle_ollama_setup_request()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"ollama-setup handler error: {e}")
         if os.path.exists(UPDATE_PENDING_FILE):
             pending_commit = ""
             try:
