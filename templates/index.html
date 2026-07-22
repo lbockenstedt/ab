@@ -982,6 +982,12 @@
                                     Bypass Skeptical Reviewer
                                 </label>
                             </div>
+                            <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                                <input type="checkbox" name="heartbeat_triage_enabled" id="heartbeat_triage_enabled" {{ 'checked' if settings.heartbeat_triage_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="heartbeat_triage_enabled" class="text-xs font-medium text-slate-700" title="Off by default: only errors file issues. On: also file issues for modules with a missing/stale heartbeat (no error needed).">
+                                    Heartbeat Triage (file issues for missing heartbeats)
+                                </label>
+                            </div>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6">
                             <div class="space-y-2">

@@ -1041,6 +1041,10 @@ async def save_settings(request: Request):
     config_data["bug_report_enabled"] = data.get("bug_report_enabled") != "off"
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
     config_data["skip_review"] = data.get("skip_review") == "on"
+    # Heartbeat triage files issues for modules with a missing/stale heartbeat
+    # but NO error in the logs. Off by default (error-log-only filing); opt-in
+    # if you want dead-module detection independent of the error log.
+    config_data["heartbeat_triage_enabled"] = data.get("heartbeat_triage_enabled") == "on"
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
     config_data["SCHEDULER_ENABLED"] = data.get("SCHEDULER_ENABLED") == "on"
     config_data["SCHEDULER_WEEKEND_FULL"] = data.get("SCHEDULER_WEEKEND_FULL") == "on"

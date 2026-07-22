@@ -1010,6 +1010,90 @@ def _bug_report_fix_context(issue_body):
     )
 
 
+# Bounded excerpt of the source module's local hub-log mirror appended to the
+# fix prompt so the LLM sees the surrounding log context for an auto-filed
+# error issue — not just the single error snippet in the issue body.
+_MODULE_LOG_FIX_MAX_CHARS = 8000
+_MODULE_LOG_CTX_LINES = 6   # context lines each side of a matched error line
+_MODULE_LOG_FALLBACK_TAIL = 40
+_mod_log_err_pat = re.compile(
+    r'\[(ERROR|CRITICAL)\]|Traceback|Exception|Error[: ]|Failed',
+    re.IGNORECASE,
+)
+
+
+def _module_log_fix_context(issue_body):
+    """Append the source module's related logs to an auto-filed error issue's
+    fix context.
+
+    Auto-filed error issues (from analyze_logs_for_errors) carry a hidden
+    ``<!-- bf-module: <module> -->`` marker (see github_ops.create_automated_issue).
+    This reads that module's local hub-log mirror
+    (``<HUB_LOG_DIR>/<module>.log``, the one sync_hub_logs persists each cycle)
+    and returns a bounded excerpt — error-signature lines with a small context
+    window around each, capped to _MODULE_LOG_FIX_MAX_CHARS — so apply_ai_fix /
+    review_fix get the surrounding log data, not just the one error line in the
+    public issue body. Mirrors _bug_report_fix_context: best-effort, returns ""
+    on any miss/failure (never blocks the fix).
+
+    Reusing the local mirror (not a live GET_LOGS pull) keeps the fix step
+    offline-safe and bounded; the mirror is refreshed once per scan cycle.
+    """
+    if not isinstance(issue_body, str) or not issue_body:
+        return ""
+    m = re.search(r'<!--\s*bf-module:\s*([^\s>]+)\s*-->', issue_body)
+    if not m:
+        return ""
+    module = m.group(1)
+    path = _module_log_path(module)
+    if not path or not os.path.exists(path):
+        logger.debug(f"fix-context: no local log mirror for module={module!r}")
+        return ""
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+    except Exception as e:
+        logger.warning(f"fix-context: could not read {path}: {e}")
+        return ""
+    if not lines:
+        return ""
+
+    # Build an excerpt: indices of error-signature lines, each with a context
+    # window, merged + deduped in file order. Falls back to the last N lines if
+    # no error line is present (the issue's error may have already rotated out).
+    err_idx = [i for i, ln in enumerate(lines) if _mod_log_err_pat.search(ln)]
+    if err_idx:
+        # Keep the most recent error lines (tail of err_idx) with context.
+        keep = set()
+        for i in err_idx[-12:]:
+            lo = max(0, i - _MODULE_LOG_CTX_LINES)
+            hi = min(len(lines), i + _MODULE_LOG_CTX_LINES + 1)
+            keep.update(range(lo, hi))
+        excerpt = [ln for i, ln in enumerate(lines) if i in keep]
+    else:
+        excerpt = lines[-_MODULE_LOG_FALLBACK_TAIL:]
+
+    # Hard cap by character budget (truncate at the cap, oldest-first dropped).
+    out = []
+    total = 0
+    for ln in excerpt:
+        if total + len(ln) + 1 > _MODULE_LOG_FIX_MAX_CHARS:
+            out.append("…[log excerpt truncated]")
+            break
+        out.append(ln)
+        total += len(ln) + 1
+    if not out:
+        return ""
+    excerpt_text = "\n".join(out)
+    return (
+        f"\n\n--- Related logs for module `{module}` (local hub-log mirror) ---\n"
+        f"These are the surrounding log lines from the module that raised the "
+        f"error (kept locally, not in the public issue). Use them to localize "
+        f"and fix the fault; focus on the [ERROR]/Traceback lines.\n\n"
+        f"```\n{excerpt_text}\n```\n"
+    )
+
+
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
@@ -1027,10 +1111,22 @@ def scan_hub_logs(gh_current, config):
             # drops heartbeat lines): if an expected module's [heartbeat] line is
             # missing or stale, file/reopen an issue so a dead or hung module is
             # caught even when it is emitting no errors.
-            try:
-                scan_heartbeats(gh_current, config, hub_logs)
-            except Exception as hb_err:
-                logger.error(f"Heartbeat scan failed: {hb_err}")
+            #
+            # GATED behind `heartbeat_triage_enabled` (default OFF) per the
+            # "error log only" directive: heartbeat triage files issues with NO
+            # error in the logs (pure heartbeat absence), which is not an
+            # error-log trigger. Automatic issue filing should come only from
+            # the LLM error-analysis path below. Opt-in via Settings so a dead
+            # module still surfaces if an admin explicitly wants heartbeat triage.
+            if config.get("heartbeat_triage_enabled"):
+                try:
+                    scan_heartbeats(gh_current, config, hub_logs)
+                except Exception as hb_err:
+                    logger.error(f"Heartbeat scan failed: {hb_err}")
+            else:
+                # Surface WHY no heartbeat issues are filed (disabled, not
+                # suppressed by connectivity) so the Diagnostics UI is honest.
+                _record_hb_suppression("heartbeat triage disabled (error-log-only mode)")
             # File-a-Bug triage: the WebUI footer button logs a short
             # [bug-report] marker line; scan_bugs filters the RAW hub_logs for
             # those markers (before filter_error_logs drops them), pulls the
@@ -1142,6 +1238,7 @@ __all__ = [
     'scan_bugs',
     '_safe_json_field',
     '_bug_report_fix_context',
+    '_module_log_fix_context',
     'verify_production_fixes',
     'MODULE_TYPE_REPO',
     'HEARTBEAT_STALE_S_DEFAULT',

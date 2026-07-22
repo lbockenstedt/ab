@@ -495,11 +495,23 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                 return existing_issue
 
         full_title = f"🤖 Log Alert: {title_text}"
+        # Hidden module marker so the fix step can pull the source module's
+        # related logs from the local hub_logs mirror as fix context (see
+        # log_scan._module_log_fix_context). Mirrors the File-a-Bug
+        # <!-- bug-report-id --> marker pattern. Only on the non-raw path —
+        # raw (scan_bugs) carries its own bug-report-id marker instead. The
+        # marker is appended AFTER body_text so it never participates in the
+        # dedup/containment match (which compares body_text, not full_body).
+        module_marker = ""
+        _mod = error_data.get("module")
+        if not raw and _mod and str(_mod).strip():
+            module_marker = f"\n\n<!-- bf-module: {str(_mod).strip()} -->"
         full_body = (
             f"**Automated Error Detection**\n\n"
             f"The BugFixer Hub analysis detected a potential issue in the logs:\n\n"
             f"### Log Evidence:\n```\n{body_text}\n```\n\n"
             f"This issue has been automatically created for fixing."
+            f"{module_marker}"
         )
         # raw=True (used by scan_bugs for user-filed "File a Bug" reports): use
         # the caller-provided title/body verbatim — no "Log Alert" prefix and no

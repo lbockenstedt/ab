@@ -7,6 +7,7 @@ from main import (
     CHAT_CONFIG_DEFAULTS,
     _apply_closed_label,
     _bug_report_fix_context,
+    _module_log_fix_context,
     _find_claude_cli_slot,
     _get_provider_config,
     _get_reviewer_model,
@@ -693,7 +694,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # --> marker. Pull the full console/HTML/screenshot from the hub and
             # append them to the body fed to the AI fix/review — the public
             # issue stays clean, but the AI gets the rich artifacts as context.
-            fix_body = (issue.body or "") + _bug_report_fix_context(issue.body or "")
+            # For auto-filed error issues, _module_log_fix_context appends the
+            # source module's surrounding logs from the local hub-log mirror so
+            # the fix is informed by related log data, not just the error snippet.
+            fix_body = (issue.body or "") + _bug_report_fix_context(issue.body or "") + _module_log_fix_context(issue.body or "")
 
             for attempt in range(1, max_attempts + 1):
                 try:
