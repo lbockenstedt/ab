@@ -747,7 +747,9 @@
                                         <option value="">— save credential first —</option>
                                     </select>
                                     <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <input type="text" id="new-entry-reviewer" placeholder="Reviewer model (blank=same)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select id="new-entry-reviewer" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="">— same as model —</option>
+                                    </select>
                                 </div>
                                 <div class="flex gap-2">
                                     <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs btn-primary rounded font-bold">Add</button>
@@ -786,7 +788,9 @@
                                                 <option value="{{ entry.model }}" selected>{{ entry.model }}</option>
                                             </select>
                                             <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <input type="text" id="edit-reviewer-{{ entry.id }}" value="{{ entry.reviewer_model or '' }}" placeholder="Reviewer model (blank=same)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <select id="edit-reviewer-{{ entry.id }}" data-saved="{{ entry.reviewer_model or '' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                                {% if entry.reviewer_model %}<option value="{{ entry.reviewer_model }}" selected>{{ entry.reviewer_model }}</option>{% else %}<option value="" selected>— same as model —</option>{% endif %}
+                                            </select>
                                         </div>
                                         <div class="flex gap-2">
                                             <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs btn-primary rounded font-bold">Save</button>
@@ -2580,7 +2584,7 @@
             {name: 'claude-haiku-4-5-20251001', details: 'Claude Haiku 4.5'},
         ];
 
-        function _fillModelSelect(sel, models, currentModel, provider) {
+        function _fillModelSelect(sel, models, currentModel, provider, blankLabel) {
             sel.innerHTML = '';
             if (models.length === 0) {
                 const o = document.createElement('option');
@@ -2601,7 +2605,7 @@
                 return;
             }
             const blank = document.createElement('option');
-            blank.value = ''; blank.textContent = '— pick a model —';
+            blank.value = ''; blank.textContent = blankLabel || '— pick a model —';
             sel.appendChild(blank);
             let matched = false;
             models.forEach(m => {
@@ -2617,9 +2621,18 @@
             }
         }
 
+        // Reviewer Model is optional: a blank value means "use the entry's main
+        // model" (the backend treats an empty reviewer_model as same-as-model).
+        // Same option list as the model select, but the blank choice reads
+        // "— same as model —" instead of "— pick a model —".
+        function _fillReviewerSelect(sel, models, currentReviewer, provider) {
+            _fillModelSelect(sel, models, currentReviewer, provider, '— same as model —');
+        }
+
         async function loadVaultModels() {
             const provider = document.getElementById('new-entry-provider')?.value;
             const sel = document.getElementById('new-entry-model');
+            const reviewerSel = document.getElementById('new-entry-reviewer');
             if (!sel || !provider) return;
             sel.innerHTML = '<option value="">Loading…</option>';
             sel.disabled = true;
@@ -2629,6 +2642,7 @@
             if (provider === 'claude_cli') {
                 sel.disabled = false;
                 _fillModelSelect(sel, _CLAUDE_CLI_MODELS, '', provider);
+                _fillReviewerSelect(reviewerSel, _CLAUDE_CLI_MODELS, '', provider);
                 updateDefaultRpm();
                 return;
             }
@@ -2652,8 +2666,10 @@
                     o.value = ''; o.textContent = '⚠ ' + data.error;
                     o.style.color = '#b91c1c';
                     sel.appendChild(o);
+                    if (reviewerSel) reviewerSel.innerHTML = '<option value="">— same as model —</option>';
                 } else {
                     _fillModelSelect(sel, models, '', provider);
+                    _fillReviewerSelect(reviewerSel, models, '', provider);
                 }
             } catch(e) {
                 sel.disabled = false;
@@ -2661,6 +2677,7 @@
                 const err = document.createElement('option');
                 err.value = ''; err.textContent = 'Error loading models';
                 sel.appendChild(err);
+                if (reviewerSel) reviewerSel.innerHTML = '<option value="">— same as model —</option>';
             }
         }
 
@@ -2696,12 +2713,15 @@
             const sel = document.getElementById(`edit-model-${id}`);
             if (!sel || !provider) return;
             const currentModel = sel.value;
+            const reviewerSel = document.getElementById(`edit-reviewer-${id}`);
+            const savedReviewer = reviewerSel?.dataset.saved || '';
             sel.innerHTML = '<option value="">Loading…</option>';
             sel.disabled = true;
             // claude_cli has a fixed model roster — no server call needed.
             if (provider === 'claude_cli') {
                 sel.disabled = false;
                 _fillModelSelect(sel, _CLAUDE_CLI_MODELS, currentModel, provider);
+                _fillReviewerSelect(reviewerSel, _CLAUDE_CLI_MODELS, savedReviewer, provider);
                 return;
             }
             const vaultBaseUrl = (document.getElementById('vault-url-' + provider)?.value || '').trim();
@@ -2722,8 +2742,16 @@
                     o.value = currentModel; o.textContent = '⚠ ' + data.error;
                     o.style.color = '#b91c1c';
                     sel.appendChild(o);
+                    if (reviewerSel) {
+                        reviewerSel.innerHTML = '';
+                        const ro = document.createElement('option');
+                        ro.value = savedReviewer; ro.textContent = savedReviewer || '— same as model —';
+                        if (!savedReviewer) ro.selected = true;
+                        reviewerSel.appendChild(ro);
+                    }
                 } else {
                     _fillModelSelect(sel, models, currentModel, provider);
+                    _fillReviewerSelect(reviewerSel, models, savedReviewer, provider);
                 }
             } catch(e) {
                 sel.disabled = false;
@@ -2731,6 +2759,13 @@
                 const o = document.createElement('option');
                 o.value = currentModel; o.textContent = currentModel;
                 sel.appendChild(o);
+                if (reviewerSel) {
+                    reviewerSel.innerHTML = '';
+                    const ro = document.createElement('option');
+                    ro.value = savedReviewer; ro.textContent = savedReviewer || '— same as model —';
+                    if (!savedReviewer) ro.selected = true;
+                    reviewerSel.appendChild(ro);
+                }
             }
         }
 
