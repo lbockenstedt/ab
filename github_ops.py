@@ -1,6 +1,6 @@
 """GitHub API integration: repo resolution, label/version ops, duplicate detection, and automated issue creation (extracted from main.py)."""
 import json, os, requests
-from datetime import datetime
+from datetime import datetime, timezone
 from dedup import _is_duplicate_match as _is_duplicate_match_impl, _jaccard as _jaccard_impl, _normalize_for_dedup as _normalize_for_dedup_impl, _token_set as _token_set_impl
 from dedup import _body_signal_match, _body_containment_match
 
@@ -297,12 +297,21 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
             # state='all' so we see recently-closed recurrences too; newest-first
             # so the most relevant (recently updated) issues are scanned first.
             issues = repo.get_issues(state='all', sort='updated', direction='desc')
-            now = datetime.utcnow()
+            # tz-aware: PyGithub returns tz-aware closed_at/updated_at. A naive
+            # utcnow() here raises "can't subtract offset-naive and offset-aware
+            # datetimes", which the outer except swallows → the whole dedup search
+            # returns None → a CLOSED recurrence (e.g. a resolved bug reopening)
+            # is never matched and a duplicate issue is filed instead.
+            now = datetime.now(timezone.utc)
             for issue in issues:
                 # Skip closed issues older than the recurrence window — they are
                 # unlikely to be the same recurrence and would risk stale matches.
                 if issue.state == 'closed':
                     closed_at = getattr(issue, 'closed_at', None) or issue.updated_at
+                    if closed_at is not None and closed_at.tzinfo is None:
+                        # Older PyGithub versions returned naive UTC — coerce so the
+                        # subtraction below never raises.
+                        closed_at = closed_at.replace(tzinfo=timezone.utc)
                     if closed_at and (now - closed_at).days > DEDUP_CLOSED_WINDOW_DAYS:
                         continue
                 issue_body = issue.body or ""
@@ -335,7 +344,9 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
                             continue
                     return issue, repo_name, is_closed
         except Exception as e:
-            logger.debug(f"Could not search for duplicates in {repo_name}: {e}")
+            # WARNING (not debug): a swallowed failure here silently defeats
+            # dedup — the caller files a duplicate / re-files a dismissed error.
+            logger.warning(f"Duplicate search failed for {repo_name}; may file a duplicate: {e}")
         return None
 
     # 1. Target repo first — the recurrence almost always lands in the same repo.
