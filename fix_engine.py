@@ -201,6 +201,18 @@ def analyze_issue(issue):
     for i, comment in enumerate(comments, 1):
         full_context += f"Comment {i}: {comment.body}\n"
 
+    # For a user-filed "File a Bug" report the raw browser console / DOM / screenshot
+    # live on the hub (NOT in the public issue body) and are pulled in as fix context
+    # at fix time. Give triage that SAME context so it can't reject an actionable
+    # report for "missing console output" — the console it's asking for already exists.
+    is_bug_report = bool(_BUG_REPORT_ID_RE.search(issue.body or ""))
+    try:
+        bug_ctx = _bug_report_fix_context(issue.body or "")
+    except Exception:  # noqa: BLE001
+        bug_ctx = ""
+    if bug_ctx.strip():
+        full_context += f"\n{bug_ctx}\n"
+
     config = load_config()
     strictness = config.get("TRIAGE_STRICTNESS", "Moderate")
 
@@ -211,10 +223,21 @@ def analyze_issue(issue):
     else:
         strictness_instruction = "Specifically, for UI or runtime errors, prefer console logs or stack traces, but if the description is detailed enough for a senior engineer to hypothesize the bug accurately, mark it as actionable."
 
+    bug_report_note = (
+        "IMPORTANT: This is a user-filed 'File a Bug' report. Its full browser console, "
+        "DOM, and screenshot are stored on the hub and are ALREADY provided to the fix "
+        "step as context (and included above when available). Do NOT mark it "
+        "non-actionable for 'missing console output' / 'please provide the console' — "
+        "that data exists. A clear error message (e.g. a ReferenceError like "
+        "\"Can't find variable: X\") is itself actionable for a senior engineer.\n"
+        if is_bug_report else ""
+    )
+
     prompt = (
         f"{full_context}\n\n"
         f"Determine if this issue contains enough information to provide a code fix. \n"
         f"{strictness_instruction}\n"
+        f"{bug_report_note}"
         f"Note: If this is an automated log alert, the provided log snippet is the primary evidence. Do not request a stack trace if a clear error is already present in the logs.\n"
         f"If information is missing, specify exactly what is needed (e.g., 'Please provide the browser console output').\n\n"
         "Return ONLY a JSON object: {\"actionable\": boolean, \"request\": \"message if not actionable\"}"
