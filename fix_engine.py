@@ -273,9 +273,24 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         logger.warning("All reviewer LLM providers appear offline. Signaling retry queue.")
         return {"status": "queue_for_retry", "reason": "all_reviewers_offline"}
 
+    # Show reviewers the actual working-tree DIFF (parse_and_apply already wrote
+    # the change) rather than dumping full file bodies — a targeted edit to a large
+    # file would otherwise flood the review prompt with ~1MB of unchanged code and
+    # blow the provider limit. Fall back to (capped) file bodies if no diff.
     fix_details = ""
-    for path, code in proposed_fixes.items():
-        fix_details += f"\n--- FILE: {path} ---\n{code}\n"
+    try:
+        diff_text = git.Repo(repo_path).git.diff("HEAD")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"review_fix: git diff unavailable ({e}); using file bodies")
+        diff_text = ""
+    if diff_text.strip():
+        if len(diff_text) > 20000:
+            diff_text = diff_text[:20000] + "\n… [diff truncated for review] …"
+        fix_details = f"\n--- DIFF (working tree vs HEAD) ---\n{diff_text}\n"
+    else:
+        for path, code in proposed_fixes.items():
+            body = str(code) if len(str(code)) <= 8000 else _trunc(str(code), 8000)
+            fix_details += f"\n--- FILE: {path} ---\n{body}\n"
 
     prompt = (
         f"Issue Description: {issue_body}\n\n"
@@ -345,6 +360,104 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques}
 
 
+def _safe_repo_target(repo_root, filepath):
+    """Resolve *filepath* under *repo_root*, rejecting absolute paths, ``..``
+    traversal, and symlinks that escape the repo. Returns the absolute path or
+    None (logging the reason). Shared by the full-file and targeted-edit apply
+    paths so both enforce identical containment."""
+    if (not isinstance(filepath, str) or os.path.isabs(filepath)
+            or ".." in filepath.replace("\\", "/").split("/")):
+        logger.error(f"Refusing to apply fix with unsafe path: {filepath!r}")
+        return None
+    full_path = os.path.abspath(os.path.join(repo_root, filepath))
+    try:
+        if os.path.commonpath([repo_root, full_path]) != repo_root:
+            logger.error(f"Refusing to apply fix escaping repo root: {filepath!r}")
+            return None
+    except ValueError:
+        logger.error(f"Refusing to apply fix with unresolvable path: {filepath!r}")
+        return None
+    if os.path.islink(full_path):
+        try:
+            link_target = os.path.abspath(os.readlink(full_path))
+            if os.path.commonpath([repo_root, link_target]) != repo_root:
+                logger.error(f"Refusing to write through symlink escaping repo: {filepath!r}")
+                return None
+        except Exception:  # noqa: BLE001
+            logger.error(f"Refusing to write through unresolvable symlink: {filepath!r}")
+            return None
+    return full_path
+
+
+# Common English / report-boilerplate words that are NOT code identifiers — kept
+# out of the file-windowing search so we anchor on real symbols (e.g. a mistyped
+# function name) rather than noise words that match half the file.
+_ISSUE_STOP_TOKENS = {
+    "error", "cannot", "undefined", "reading", "variable", "reference",
+    "referenceerror", "typeerror", "null", "function", "return", "const", "await",
+    "async", "true", "false", "none", "type", "line", "view", "http", "https",
+    "report", "context", "severity", "filed", "console", "unknown", "this", "that",
+    "with", "from", "have", "hubversion", "webuiversion", "useragent", "currentview",
+    "currentsubview", "currenttenant", "tenant", "user", "runtime", "browser",
+    "button", "request", "feature", "what", "wrong", "auto", "find", "properties",
+}
+
+
+def _issue_identifiers(issue_body):
+    """Pull candidate code identifiers from an issue body (prioritising the
+    ``Error:`` line) so a large file can be windowed around the buggy region
+    instead of blindly head-truncated. Returns identifiers most-relevant-first,
+    de-noised of common English / markup words."""
+    text = str(issue_body or "")
+    seen, out = set(), []
+
+    def _add(tok):
+        k = tok.lower()
+        if len(tok) < 4 or k in _ISSUE_STOP_TOKENS or k in seen:
+            return
+        seen.add(k)
+        out.append(tok)
+
+    err_lines = [ln for ln in text.splitlines()
+                 if ln.strip().lower().lstrip("*").startswith("error")]
+    for ln in err_lines:
+        for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", ln):
+            _add(t)
+    for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", text):
+        _add(t)
+    return out[:12]
+
+
+def _targeted_file_context(content, identifiers, max_chars, window=60):
+    """For a large file, return only the regions AROUND lines that mention one of
+    *identifiers* (±*window* lines, overlapping windows merged), verbatim (no line
+    numbers, so the model can copy an exact search snippet). Returns None when no
+    identifier matches, so the caller falls back to head-truncation."""
+    if not identifiers:
+        return None
+    lines = content.split("\n")
+    n = len(lines)
+    hits = [i for i, ln in enumerate(lines) if any(idn in ln for idn in identifiers)]
+    if not hits:
+        return None
+    ranges = []
+    for i in hits:
+        s, e = max(0, i - window), min(n, i + window + 1)
+        if ranges and s <= ranges[-1][1]:
+            ranges[-1][1] = max(ranges[-1][1], e)
+        else:
+            ranges.append([s, e])
+    parts, total = [], 0
+    for s, e in ranges:
+        seg = f"\n... (showing lines {s + 1}-{e}) ...\n" + "\n".join(lines[s:e])
+        if total + len(seg) > max_chars:
+            parts.append(seg[:max(0, max_chars - total)] + "\n... [window truncated] ...")
+            break
+        parts.append(seg)
+        total += len(seg)
+    return "\n".join(parts)
+
+
 def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None):
     config = load_config()
     max_files = int(config.get("FIX_MAX_FILES", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"])
@@ -357,6 +470,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
     # request stays under provider limits (groq 413, ollama truncation) and the
     # returned fix JSON parses cleanly instead of hitting "unmatched '}'".
     relevant_files = relevant_files[:max_files]
+    identifiers = _issue_identifiers(issue_body)
     context_code = ""
     for f_path in relevant_files:
         full_p = os.path.join(repo_path, f_path)
@@ -365,7 +479,19 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
                 with open(full_p, 'r') as f:
                     content = f.read()
                 if len(content) > max_file_chars:
-                    content = _trunc(content, max_file_chars)
+                    # Large file: window around the buggy region (identifiers from
+                    # the issue) so the model actually SEES the bug. A blind head
+                    # truncation hides a bug that lives past the cutoff — e.g. line
+                    # 20357 of a 22k-line file is never shown, so the model "fixes"
+                    # blind and returns a truncated whole-file rewrite. Fall back to
+                    # head-truncation only when no identifier matches.
+                    windowed = _targeted_file_context(content, identifiers, max_file_chars)
+                    if windowed is None:
+                        content = _trunc(content, max_file_chars)
+                        logger.info(f"apply_ai_fix: {f_path} head-truncated (no issue identifier matched)")
+                    else:
+                        content = windowed
+                        logger.info(f"apply_ai_fix: {f_path} windowed around issue identifiers ({len(content)} chars)")
                 context_code += f"\n--- FILE: {f_path} ---\n{content}\n"
                 if len(context_code) >= max_ctx_chars:
                     context_code = context_code[:max_ctx_chars] + "\n…[context truncated to stay under provider limit]\n"
@@ -373,20 +499,37 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
                     break
             except Exception as e:
                 logger.error(f"Could not read file {f_path}: {e}")
+    # Ask for TARGETED search/replace edits, not a full-file rewrite: a local model
+    # cannot faithfully reproduce a large file, and a truncated rewrite would delete
+    # real code (the truncated-rewrite guard then aborts the whole fix). An edit
+    # only needs the changed snippet, so it scales to any file size.
+    fix_format = (
+        "Return ONLY a JSON object with two keys:\n"
+        "  \"confidence\": a float from 0.0 to 1.0, and\n"
+        "  \"edits\": a list of targeted edits, each an object "
+        "{\"file\": <path>, \"search\": <snippet>, \"replace\": <snippet>}.\n"
+        "Rules for each edit:\n"
+        "- \"search\" MUST be an EXACT substring of the current file content shown "
+        "above — copy it character-for-character INCLUDING indentation, and include "
+        "enough surrounding lines that it appears exactly once.\n"
+        "- Make the SMALLEST change that fixes the issue. Do NOT return the whole "
+        "file; return only the snippet(s) that change.\n"
+        "- Multiple edits are allowed and may target different files.\n"
+        "Example: {\"confidence\": 0.97, \"edits\": [{\"file\": \"WebUI/main.js\", "
+        "\"search\": \"    await badName();\", \"replace\": \"    await goodName();\"}]}"
+    )
     if error_context:
         prompt = (
             f"Issue: {issue_body}\n\n"
             f"Current Relevant Code:\n{context_code}\n\n"
             f"Previous attempt failed with error:\n{error_context}\n\n"
-            "Provide a corrected version of the code. Return ONLY a JSON object with two keys: 'confidence' (a float from 0.0 to 1.0) and 'fixes' (another object where keys are file paths and values are the full new file content). "
-            "Example: {\"confidence\": 0.98, \"fixes\": {\"src/main.py\": \"full code here\"}}"
+            f"{fix_format}"
         )
     else:
         prompt = (
             f"Issue: {issue_body}\n\n"
             f"Current Relevant Code:\n{context_code}\n\n"
-            "Provide a corrected version of the code. Return ONLY a JSON object with two keys: 'confidence' (a float from 0.0 to 1.0) and 'fixes' (another object where keys are file paths and values are the full new file content). "
-            "Example: {\"confidence\": 0.98, \"fixes\": {\"src/main.py\": \"full code here\"}}"
+            f"{fix_format}"
         )
     try:
         return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider)
@@ -426,33 +569,68 @@ def parse_and_apply(content, repo_path):
                 logger.debug(f"Failed content: {content[:500]}")
                 return False, {}, 0.0
 
-        fixes = data.get("fixes", {})
+        fixes = data.get("fixes", {}) or {}
+        edits = data.get("edits", []) or []
         confidence = data.get("confidence", 0.0)
         repo_root = os.path.abspath(repo_path)
         applied = {}
-        for filepath, code in fixes.items():
-            # Confine writes to the cloned repo: reject absolute paths, traversal,
-            # and symlinks that escape the repo root (prevents arbitrary file write).
-            if not isinstance(filepath, str) or os.path.isabs(filepath) or ".." in filepath.replace("\\", "/").split("/"):
-                logger.error(f"Refusing to apply fix with unsafe path: {filepath!r}")
-                continue
-            full_path = os.path.abspath(os.path.join(repo_root, filepath))
-            try:
-                if os.path.commonpath([repo_root, full_path]) != repo_root:
-                    logger.error(f"Refusing to apply fix escaping repo root: {filepath!r}")
+
+        # --- 1) Targeted search/replace edits (preferred) -------------------
+        # An edit changes only the snippet it names, so it scales to files the
+        # model cannot reproduce whole and never trips the truncated-rewrite
+        # guard. Edits to the same file compose in order. We only write (and mark
+        # applied) files whose content actually changed.
+        if isinstance(edits, list) and edits:
+            orig_contents, file_contents = {}, {}
+            for ed in edits:
+                if not isinstance(ed, dict):
                     continue
-            except ValueError:
-                logger.error(f"Refusing to apply fix with unresolvable path: {filepath!r}")
-                continue
-            if os.path.islink(full_path):
-                try:
-                    link_target = os.path.abspath(os.readlink(full_path))
-                    if os.path.commonpath([repo_root, link_target]) != repo_root:
-                        logger.error(f"Refusing to write through symlink escaping repo: {filepath!r}")
+                filepath = ed.get("file") or ed.get("filepath") or ed.get("path")
+                search = ed.get("search")
+                replace = ed.get("replace")
+                if not isinstance(filepath, str) or not isinstance(search, str) or replace is None:
+                    logger.error(f"Skipping malformed edit (need file/search/replace): {str(ed)[:160]!r}")
+                    continue
+                if search == "":
+                    logger.error(f"Skipping edit with empty search for {filepath!r}")
+                    continue
+                full_path = _safe_repo_target(repo_root, filepath)
+                if not full_path:
+                    continue
+                if not os.path.isfile(full_path):
+                    logger.error(f"Skipping edit: target file does not exist: {filepath!r}")
+                    continue
+                if full_path not in file_contents:
+                    try:
+                        with open(full_path, encoding="utf-8", errors="replace") as ef:
+                            file_contents[full_path] = ef.read()
+                        orig_contents[full_path] = file_contents[full_path]
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(f"Could not read {filepath!r} for edit: {e}")
                         continue
-                except Exception:
-                    logger.error(f"Refusing to write through unresolvable symlink: {filepath!r}")
+                current = file_contents[full_path]
+                count = current.count(search)
+                if count == 0:
+                    logger.error(f"Edit search snippet not found in {filepath!r}; skipping this edit")
                     continue
+                if count > 1:
+                    logger.warning(f"Edit search matches {count}× in {filepath!r}; applying to all occurrences")
+                file_contents[full_path] = current.replace(search, str(replace))
+            for full_path, new_content in file_contents.items():
+                if new_content == orig_contents.get(full_path):
+                    continue  # every edit for this file failed to match — no change
+                rel = os.path.relpath(full_path, repo_root)
+                with open(full_path, "w") as f:
+                    f.write(new_content)
+                applied[rel] = new_content
+                logger.info(f"Applied targeted edit(s) to file: {rel}")
+
+        # --- 2) Full-file replacements (legacy / new files) ------------------
+        for filepath, code in fixes.items():
+            # Confine writes to the cloned repo (abs/traversal/symlink escape).
+            full_path = _safe_repo_target(repo_root, filepath)
+            if not full_path:
+                continue
             # SAFETY: never let a "fix" rewrite a large file into a stub. A model
             # given a TRUNCATED view of a big file sometimes returns only a
             # skeleton, or a placeholder like "rest of file unchanged", which would
