@@ -662,6 +662,12 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
     billing/credit exhaustion so call_llm() can trip the per-provider 1-hour CB.
     """
     max_retries = int(config.get("LLM_MAX_RETRIES", 5))
+    # 5xx (esp. 503 "model overloaded / high demand") won't clear in a few seconds
+    # of backoff — a DIFFERENT provider is the fix. Cap same-provider 5xx retries
+    # low so call_llm's failover moves to the next provider fast instead of
+    # hammering the overloaded one through the full 429 retry budget. (429 = rate
+    # limit still uses the full max_retries, since waiting genuinely helps there.)
+    max_5xx = int(config.get("LLM_5XX_MAX_RETRIES", 1))
     backoff_base = float(config.get("LLM_BACKOFF_BASE", 2.0))
     backoff_max = float(config.get("LLM_BACKOFF_MAX", 60.0))
     timeout_val = int(config.get("LLM_TIMEOUT", 900))
@@ -716,6 +722,10 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                 resp.raise_for_status()
 
             if 500 <= resp.status_code < 600:
+                # Give up after max_5xx same-provider attempts so call_llm fails over
+                # to the next provider (a 503 "high demand" needs a different model,
+                # not more retries against the overloaded one).
+                give_up = is_last or attempt >= max_5xx
                 wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
                 _llm_cb_trip(wait_time, f"{resp.status_code} attempt {attempt+1}/{max_retries+1}")
                 err_body = ""
@@ -723,8 +733,8 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                     err_body = resp.text[:1000]
                 except Exception:
                     pass
-                if is_last:
-                    logger.error(f"LLM {resp.status_code} at {endpoint} after {max_retries+1} attempts. body={err_body!r}")
+                if give_up:
+                    logger.warning(f"LLM {resp.status_code} at {endpoint} after {attempt+1} attempt(s) — failing over to the next provider. body={err_body!r}")
                     resp.close()
                     resp.raise_for_status()
                 logger.warning(f"LLM {resp.status_code} at {endpoint}. Backing off {wait_time:.1f}s. body={err_body!r}")
@@ -738,7 +748,8 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
 
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
-            if not is_last and status and (status == 429 or 500 <= status < 600):
+            _5xx_retry_ok = 500 <= (status or 0) < 600 and attempt < max_5xx
+            if not is_last and status and (status == 429 or _5xx_retry_ok):
                 wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
                 _llm_cb_trip(wait_time, f"HTTPError {status}")
                 logger.warning(f"LLM HTTPError {status} at {endpoint}. Backing off {wait_time:.1f}s.")
@@ -1196,6 +1207,12 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             return None, e
 
     try:
+        # Bind for the except handler on EVERY path: the force_provider (reviewer)
+        # and force_cloud=False paths return/raise before the failover loop assigns
+        # last_err, so without this the handler hit "cannot access local variable
+        # 'last_err'" (UnboundLocalError), which crashed reviewers and masked the
+        # real provider error.
+        last_err = None
         # force_provider=N: use that slot only, no failover.
         if force_provider in (1, 2, 3, 4):
             row = all_providers[force_provider - 1]
