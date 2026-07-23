@@ -233,6 +233,133 @@ def _hub_connection_diag():
         return {"available": False, "error": str(e)}
 
 
+def _system_stats():
+    """Live host + process + LLM telemetry for the Diagnostics page. Never raises —
+    every field degrades to None/[] so the panel can render partial data. psutil is
+    used when present; load average + core count fall back to os primitives."""
+    import time
+    out = {"cpu": {}, "memory": {}, "disk": {}, "processes": [], "llm": {}, "uptime": {}}
+    try:
+        out["cpu"]["cores"] = os.cpu_count()
+    except Exception:
+        pass
+    try:
+        la = os.getloadavg()  # 1/5/15 min; unavailable on some platforms
+        out["cpu"]["load_avg"] = [round(x, 2) for x in la]
+        if out["cpu"].get("cores"):
+            out["cpu"]["load_pct_1m"] = round(100.0 * la[0] / out["cpu"]["cores"], 1)
+    except Exception:
+        pass
+
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+
+    if psutil is not None:
+        try:
+            out["cpu"]["percent"] = psutil.cpu_percent(interval=0.15)
+        except Exception:
+            pass
+        try:
+            vm = psutil.virtual_memory()
+            out["memory"] = {
+                "total_gb": round(vm.total / 1073741824, 1),
+                "used_gb": round((vm.total - vm.available) / 1073741824, 1),
+                "available_gb": round(vm.available / 1073741824, 1),
+                "percent": vm.percent,
+            }
+        except Exception:
+            pass
+        try:
+            du = psutil.disk_usage(os.getcwd())
+            out["disk"] = {
+                "total_gb": round(du.total / 1073741824, 1),
+                "used_gb": round(du.used / 1073741824, 1),
+                "free_gb": round(du.free / 1073741824, 1),
+                "percent": du.percent,
+            }
+        except Exception:
+            pass
+        try:
+            boot = psutil.boot_time()
+            out["uptime"]["host_seconds"] = int(time.time() - boot)
+        except Exception:
+            pass
+        # Processes of interest: this app + any ollama/llm runtimes.
+        try:
+            me = psutil.Process().pid
+            procs = []
+            for p in psutil.process_iter(["pid", "name", "cmdline", "memory_info", "cpu_percent", "create_time"]):
+                try:
+                    nm = (p.info.get("name") or "").lower()
+                    cmd = " ".join(p.info.get("cmdline") or []).lower()
+                    is_me = p.info["pid"] == me
+                    if not (is_me or "ollama" in nm or "ollama" in cmd
+                            or "bugfixer" in cmd or "llama" in nm):
+                        continue
+                    mi = p.info.get("memory_info")
+                    procs.append({
+                        "pid": p.info["pid"],
+                        "name": p.info.get("name"),
+                        "label": "bugfixer" if is_me else (p.info.get("name") or "proc"),
+                        "rss_mb": round(mi.rss / 1048576, 1) if mi else None,
+                        "cpu_percent": p.info.get("cpu_percent"),
+                        "self": is_me,
+                    })
+                except Exception:
+                    continue
+            out["processes"] = sorted(procs, key=lambda x: (x["rss_mb"] or 0), reverse=True)[:20]
+        except Exception:
+            pass
+
+    # LLM slots — provider/model + live online + cooldown, compact for the page.
+    try:
+        cfg = load_config()
+        slots = []
+        for n in (1, 2, 3, 4):
+            provider, key, model, base_url = _get_provider_config(n, cfg)
+            cb = (state.get("provider_credit_cb") or {}).get(n) or {}
+            slots.append({
+                "slot": n,
+                "tier": "P1 (CPU)" if n == 1 else f"P{n} (external)",
+                "provider": provider,
+                "model": model,
+                "configured": _provider_configured(provider, key, model),
+                "online": state.get(f"provider_{n}_online", False),
+                "cooldown_active": bool(cb.get("active")),
+                "cooldown_remaining_min": cb.get("cooldown_remaining_min"),
+                "rpm": _get_provider_rpm(n, cfg),
+                "last_result": (state.get("provider_last_result") or {}).get(n),
+            })
+        out["llm"] = {
+            "slots": slots,
+            "circuit_breaker": state.get("llm_circuit_breaker"),
+            "active_llm": state.get("active_llm"),
+            "daily_fixes_count": state.get("daily_fixes_count"),
+            "local_ensemble": bool(cfg.get("local_ensemble")),
+            "crosscheck_target": cfg.get("CPU_CROSSCHECK_TARGET"),
+        }
+    except Exception:
+        pass
+
+    # BugFixer process uptime from the startup stamp.
+    try:
+        with open(STARTUP_STAMP_FILE, "r") as f:
+            started = json.load(f).get("started_at")
+        if started:
+            out["uptime"]["started_at"] = started
+    except Exception:
+        pass
+    return out
+
+
+@router.get("/api/system-stats")
+async def system_stats():
+    """Host/process/LLM telemetry for the Diagnostics → System panel."""
+    return _system_stats()
+
+
 @router.get("/api/diagnostics")
 async def diagnostics():
     """Surfaces running-vs-disk-vs-origin versions, stale-code state, per-provider

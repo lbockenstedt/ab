@@ -1640,6 +1640,47 @@
                 </div>
             </div>
 
+            <!-- System (host + process) telemetry — populated by refreshDiagnostics() -->
+            <div class="hpe-card p-5">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-bold text-[#263040]">System</h3>
+                    <button onclick="refreshDiagnostics()" class="text-xs text-slate-500 hover:text-slate-700"><i class="fas fa-sync-alt"></i> refresh</button>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                    <div class="p-3 rounded-lg bg-slate-50 border border-slate-100">
+                        <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">CPU</div>
+                        <div id="diag-sys-cpu" class="text-2xl font-bold text-slate-800">—</div>
+                        <div id="diag-sys-cpu-sub" class="text-xs text-slate-500 mt-1">—</div>
+                    </div>
+                    <div class="p-3 rounded-lg bg-slate-50 border border-slate-100">
+                        <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">Memory</div>
+                        <div id="diag-sys-mem" class="text-2xl font-bold text-slate-800">—</div>
+                        <div id="diag-sys-mem-sub" class="text-xs text-slate-500 mt-1">—</div>
+                    </div>
+                    <div class="p-3 rounded-lg bg-slate-50 border border-slate-100">
+                        <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">Disk</div>
+                        <div id="diag-sys-disk" class="text-2xl font-bold text-slate-800">—</div>
+                        <div id="diag-sys-disk-sub" class="text-xs text-slate-500 mt-1">—</div>
+                    </div>
+                    <div class="p-3 rounded-lg bg-slate-50 border border-slate-100">
+                        <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">Uptime</div>
+                        <div id="diag-sys-uptime" class="text-2xl font-bold text-slate-800">—</div>
+                        <div id="diag-sys-uptime-sub" class="text-xs text-slate-500 mt-1">—</div>
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs text-slate-500 uppercase tracking-wider mb-2">Processes (BugFixer + LLM runtimes)</div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead class="text-left text-xs text-slate-500 uppercase tracking-wider">
+                                <tr><th class="py-2 pr-3">PID</th><th class="py-2 pr-3">Process</th><th class="py-2 pr-3">RSS (MB)</th><th class="py-2 pr-3">CPU %</th></tr>
+                            </thead>
+                            <tbody id="diag-sys-procs"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <!-- Update / Restart card -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
@@ -2276,6 +2317,44 @@
                 ? '<span class="status-pill pill-online">' + label + '</span>'
                 : '<span class="status-pill pill-offline">' + label + '</span>';
         }
+        function _fmtUptime(s) {
+            if (s == null) return '—';
+            const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+            if (d > 0) return d + 'd ' + h + 'h';
+            if (h > 0) return h + 'h ' + m + 'm';
+            return m + 'm';
+        }
+        async function refreshSystemStats() {
+            try {
+                const s = await fetch('/api/system-stats').then(r => r.json());
+                const cpu = s.cpu || {}, mem = s.memory || {}, disk = s.disk || {}, up = s.uptime || {};
+                const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+                // CPU: prefer sampled percent, else load%/1m
+                const cpuPct = (cpu.percent != null) ? cpu.percent : cpu.load_pct_1m;
+                setTxt('diag-sys-cpu', (cpuPct != null ? cpuPct + '%' : '—'));
+                setTxt('diag-sys-cpu-sub', (cpu.cores != null ? cpu.cores + ' cores' : '')
+                    + (cpu.load_avg ? ' · load ' + cpu.load_avg.join('/') : ''));
+                setTxt('diag-sys-mem', (mem.percent != null ? mem.percent + '%' : '—'));
+                setTxt('diag-sys-mem-sub', (mem.used_gb != null ? mem.used_gb + ' / ' + mem.total_gb + ' GB' : 'psutil not installed'));
+                setTxt('diag-sys-disk', (disk.percent != null ? disk.percent + '%' : '—'));
+                setTxt('diag-sys-disk-sub', (disk.free_gb != null ? disk.free_gb + ' GB free' : ''));
+                setTxt('diag-sys-uptime', _fmtUptime(up.host_seconds));
+                setTxt('diag-sys-uptime-sub', up.started_at ? ('svc since ' + String(up.started_at).replace('T', ' ').slice(0, 16)) : '');
+                const pb = document.getElementById('diag-sys-procs');
+                if (pb) {
+                    const procs = s.processes || [];
+                    pb.innerHTML = procs.length ? procs.map(p =>
+                        '<tr class="border-t border-slate-100">'
+                        + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + p.pid + '</td>'
+                        + '<td class="py-2 pr-3 text-slate-700">' + (p.name || '—')
+                            + (p.self ? ' <span class="text-xs text-[#01A982] font-bold">(self)</span>' : '') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.rss_mb != null ? p.rss_mb : '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.cpu_percent != null ? p.cpu_percent : '—') + '</td>'
+                        + '</tr>').join('')
+                        : '<tr><td colspan="4" class="py-2 text-xs text-slate-400">psutil not installed — process list unavailable</td></tr>';
+                }
+            } catch (e) { /* diagnostics must never throw in the UI */ }
+        }
         async function refreshDiagnostics() {
             const root = document.getElementById('diag-root');
             if (!root) return;
@@ -2337,6 +2416,8 @@
                         + '</tr>';
                 }).join('');
                 body.innerHTML = rows;
+
+                refreshSystemStats();
 
                 // Hub & Heartbeat Triage
                 const hb = d.heartbeat || {};
