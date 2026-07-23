@@ -235,6 +235,109 @@ def analyze_issue(issue):
         return True, ""
 
 
+# Frequent words that can look identifier-ish in a report but are never the symbol
+# we're hunting; keeps the bare-token pass from grepping for English prose.
+_IDENT_STOPWORDS = frozenset({
+    "error", "report", "issue", "severity", "context", "filed", "fixed",
+    "webui", "https", "http", "github", "console", "trace", "traceback", "stack",
+    "function", "variable", "undefined", "return", "async", "await", "const", "class",
+})
+
+# Error-message shapes that explicitly name a missing/offending symbol. Highest
+# signal — a "Can't find variable: X" / "X is not defined" names the exact token.
+_IDENT_PATTERNS = (
+    r"can'?t find variable:?\s*([A-Za-z_$][\w$]+)",
+    r"\b([A-Za-z_$][\w$]+)\s+is not defined\b",
+    r"name '([A-Za-z_][\w]+)' is not defined",
+    r"has no attribute '([A-Za-z_][\w]+)'",
+    r"cannot find (?:name|module|symbol|variable) '?([A-Za-z_$][\w$]+)'?",
+    r"ReferenceError:\s*([A-Za-z_$][\w$]+)",
+    r"NameError:[^']*'([A-Za-z_][\w]+)'",
+    r"AttributeError:[^']*'([A-Za-z_][\w]+)'",
+)
+
+# Binary / asset extensions never worth reading for a symbol grep.
+_GREP_SKIP_EXT = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".pdf", ".zip", ".gz", ".tgz",
+    ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".mov", ".bin", ".so", ".pyc",
+    ".lock", ".map", ".min.js", ".min.css",
+})
+
+
+def _looks_code_like(tok):
+    """True if a bare token looks like a code symbol (camelCase, snake_case, has a
+    digit or $) rather than an ordinary English word — so the grep pass targets real
+    identifiers, not prose."""
+    if "_" in tok or "$" in tok or any(c.isdigit() for c in tok):
+        return True
+    # camelCase / PascalCase boundary: an inner lower→UPPER transition.
+    return any(a.islower() and b.isupper() for a, b in zip(tok, tok[1:]))
+
+
+def _extract_issue_identifiers(issue_body):
+    """Pull likely code symbols out of an issue body, most-specific first: explicit
+    error-message captures, then quoted/backticked code-ish tokens, then bare
+    code-like identifiers. Returns an ordered, de-duplicated, capped list."""
+    import re
+    text = issue_body or ""
+    found = []
+
+    def _add(tok):
+        if not tok:
+            return
+        tok = tok.strip()
+        if len(tok) < 4 or tok.lower() in _IDENT_STOPWORDS or tok in found:
+            return
+        found.append(tok)
+
+    for pat in _IDENT_PATTERNS:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            for g in m.groups():
+                _add(g)
+    for m in re.finditer(r"[`'\"]([A-Za-z_$][\w$.]{3,})[`'\"]", text):
+        _add(m.group(1))
+    for m in re.finditer(r"\b([A-Za-z_$][\w$]{3,})\b", text):
+        tok = m.group(1)
+        if _looks_code_like(tok):
+            _add(tok)
+    return found[:12]
+
+
+def _grep_files_for_identifiers(repo_path, all_files, identifiers):
+    """Rank repo files by how many of the issue's identifiers they literally contain.
+
+    The LLM file-guesser biases toward plausible-looking files and misses the actual
+    fix site (e.g. it kept picking backend .py for a `ensureLDAPTennants` typo that
+    lives in WebUI/main.js). A literal grep for the named symbol is deterministic —
+    the file that CONTAINS the token is almost always where the fix goes. Ranked by
+    distinct-identifiers-matched, then total hits."""
+    if not identifiers:
+        return []
+    scores = {}
+    for rel in all_files:
+        low = rel.lower()
+        if any(low.endswith(ext) for ext in _GREP_SKIP_EXT):
+            continue
+        full = os.path.join(repo_path, rel)
+        try:
+            if os.path.getsize(full) > 2_000_000:  # skip huge/generated files
+                continue
+            with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception:
+            continue
+        distinct = total = 0
+        for ident in identifiers:
+            c = content.count(ident)
+            if c:
+                distinct += 1
+                total += c
+        if distinct:
+            scores[rel] = (distinct, total)
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    return [rel for rel, _ in ranked]
+
+
 def identify_files_to_fix(repo_path, issue_body):
     logger.info("Identifying relevant files for fix...")
     all_files = []
@@ -245,6 +348,18 @@ def identify_files_to_fix(repo_path, issue_body):
             if any(x in rel_path for x in [".git", "node_modules", "__pycache__", "venv", ".env"]):
                 continue
             all_files.append(rel_path)
+
+    # Deterministic anchor: grep the repo for the exact symbols named in the issue
+    # (e.g. "Can't find variable: ensureLDAPTennants") and rank those files FIRST —
+    # the file that literally contains the token is the fix site, regardless of what
+    # the LLM guesses. Capped so it augments, not floods, the candidate list.
+    identifiers = _extract_issue_identifiers(issue_body)
+    grep_hits = _grep_files_for_identifiers(repo_path, all_files, identifiers)[:8]
+    if identifiers:
+        logger.info("File identification: issue identifiers %s → grep matched %d file(s)%s",
+                    identifiers[:6], len(grep_hits),
+                    (": " + ", ".join(grep_hits[:5])) if grep_hits else " (none)")
+
     file_list_str = "\n".join(all_files)
     prompt = (
         f"Issue Description: {issue_body}\n\n"
@@ -252,19 +367,28 @@ def identify_files_to_fix(repo_path, issue_body):
         "Identify which files are most likely relevant to fixing this issue. "
         "Return ONLY a JSON array of file paths: [\"path/to/file1\", \"path/to/file2\"]"
     )
+    llm_files = []
     try:
         res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.")
         import re
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:
-            return json.loads(match.group())
-        return []
+            llm_files = json.loads(match.group())
     except Exception as e:
         if is_llm_cooldown_error(e):
             logger.warning(f"File identification deferred — LLM providers cooling down: {e}")
         else:
             logger.error(f"Error identifying files: {e}")
-        return []
+        # A grep hit alone is still a usable answer even if the LLM leg failed.
+        return grep_hits
+
+    # Merge: grep hits first (literal symbol location beats a guess), then any
+    # LLM-suggested files not already covered. De-duped, order preserved.
+    merged = list(grep_hits)
+    for f in (llm_files or []):
+        if isinstance(f, str) and f not in merged:
+            merged.append(f)
+    return merged
 
 
 def prepare_environment(repo_path):
