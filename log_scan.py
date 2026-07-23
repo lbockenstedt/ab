@@ -803,6 +803,12 @@ def scan_bugs(gh_current, config, hub_logs):
     # in a prior process lifetime. _filed is the per-process dedup fast-path.
     if not hasattr(scan_bugs, "_filed"):
         scan_bugs._filed = set()
+    # Reports the hub still LISTS but can no longer serve the full body for (its
+    # artifacts were evicted): remember them (rid -> last-probe ts) so we skip
+    # silently instead of GET_BUG_REPORT-ing + warning every single cycle. Re-probed
+    # occasionally in case the body ever comes back.
+    if not hasattr(scan_bugs, "_evicted"):
+        scan_bugs._evicted = {}
     filed_on_hub = set()
     # Ids of feature requests still awaiting admin approval — the hub annotates
     # each report gated_pending_approval; we must NOT file these until approved.
@@ -849,6 +855,13 @@ def scan_bugs(gh_current, config, hub_logs):
         # round-trip and keep the "awaiting approval" count honest.
         if rid in gated_ids:
             continue
+        # Known-evicted (hub lists it but can't serve the body): skip silently until
+        # the re-probe window elapses, so we don't warn every cycle for a report
+        # that will never return.
+        _EVICTED_RETRY_SECONDS = 6 * 3600
+        _ev_ts = scan_bugs._evicted.get(rid)
+        if _ev_ts is not None and (time.time() - _ev_ts) < _EVICTED_RETRY_SECONDS:
+            continue
         # Pull the full report from the hub. The body we file is clean; the
         # raw console/HTML/screenshot stay on the hub for fix context.
         try:
@@ -857,8 +870,13 @@ def scan_bugs(gh_current, config, hub_logs):
             logger.warning(f"scan_bugs: GET_BUG_REPORT {rid} failed: {e}")
             continue
         if not isinstance(report, dict) or not report.get("id"):
-            logger.warning(f"scan_bugs: report {rid} not found on hub (may have been evicted); skipping.")
+            if rid not in scan_bugs._evicted:
+                logger.warning(f"scan_bugs: report {rid} not found on hub (may have been evicted); "
+                               f"remembering + skipping (re-check in ~{_EVICTED_RETRY_SECONDS // 3600}h).")
+            scan_bugs._evicted[rid] = time.time()
             continue
+        # Recovered — the hub can serve it again; forget the eviction so it's handled normally.
+        scan_bugs._evicted.pop(rid, None)
         if report.get("gated_pending_approval"):
             # Feature awaiting admin approval — hub withheld the full report.
             gated_ids.add(rid)
