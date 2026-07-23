@@ -453,9 +453,49 @@ def parse_and_apply(content, repo_path):
                 except Exception:
                     logger.error(f"Refusing to write through unresolvable symlink: {filepath!r}")
                     continue
+            # SAFETY: never let a "fix" rewrite a large file into a stub. A model
+            # given a TRUNCATED view of a big file sometimes returns only a
+            # skeleton, or a placeholder like "rest of file unchanged", which would
+            # DELETE the real code (e.g. a 22,832-line main.js collapsed to a
+            # 28-line stub). Abort the WHOLE fix if the new content is a truncation
+            # placeholder or drops a large fraction of an existing non-trivial file
+            # — a truncated rewrite means the model's output can't be trusted.
+            new_code = code.strip()
+            existing = ""
+            if os.path.isfile(full_path):
+                try:
+                    with open(full_path, encoding="utf-8", errors="replace") as ef:
+                        existing = ef.read()
+                except Exception:  # noqa: BLE001
+                    existing = ""
+            if existing:
+                low = new_code.lower()
+                trunc_markers = (
+                    "too large to reproduce", "only the fix is shown", "rest of the file",
+                    "rest of file unchanged", "unchanged from the original", "... unchanged",
+                    "full file is too large", "truncated for brevity", "remainder of the file",
+                    "existing code here", "keep the rest", "<full file", "rest of the code",
+                    "// ... (rest", "# ... (rest",
+                )
+                if any(m in low for m in trunc_markers):
+                    logger.error(
+                        f"ABORTING fix: new content for {filepath} contains a truncation/placeholder "
+                        f"marker — the model did not reproduce the whole file; applying it would delete "
+                        f"real code."
+                    )
+                    return False, {}, 0.0
+                old_lines = existing.count("\n") + 1
+                new_lines = new_code.count("\n") + 1
+                if old_lines >= 40 and new_lines < old_lines * 0.4:
+                    logger.error(
+                        f"ABORTING fix: writing {filepath} would shrink it from {old_lines} to "
+                        f"{new_lines} lines (>60% deleted) — almost certainly a truncated rewrite, "
+                        f"not a targeted fix."
+                    )
+                    return False, {}, 0.0
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w") as f:
-                f.write(code.strip())
+                f.write(new_code)
             applied[filepath] = code
             logger.info(f"Applied fix to file: {filepath}")
         if not applied:
