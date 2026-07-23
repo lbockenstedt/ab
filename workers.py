@@ -660,10 +660,17 @@ def scan_repo_issues(gh_current, config, processed):
                                 pass
                             # For awaiting_review, we let it proceed to check the 1-hour timer in process_single_issue
 
+                        # Case-INSENSITIVE label match: BugFixer files with "Bug",
+                        # but GitHub applies the repo's EXISTING lowercase "bug"
+                        # label, so an exact match misses it and a real LM bug report
+                        # drops into the log-detected tier — which fix_logdetected_
+                        # enabled can gate OFF. Match lower-cased so LM bug reports
+                        # always land in bug_to_fix (bypass scheduler + that gate).
                         issue_label_names = {lbl.name for lbl in issue.labels}
-                        if critical_label and critical_label in issue_label_names:
+                        _labels_lc = {n.lower() for n in issue_label_names}
+                        if critical_label and critical_label.lower() in _labels_lc:
                             critical_to_fix.append((repo_name, issue.number))
-                        elif bug_label and bug_label in issue_label_names:
+                        elif bug_label and bug_label.lower() in _labels_lc:
                             bug_to_fix.append((repo_name, issue.number))
                         elif config.get("fix_logdetected_enabled", False):
                             # Log-detected / automated-fix issues are auto-FIXED only
