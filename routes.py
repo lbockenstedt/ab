@@ -47,6 +47,7 @@ from main import (
     load_chats,
     load_config,
     load_processed,
+    recompute_issue_counters,
     load_update_state,
     logger,
     parse_module_repo_map,
@@ -1615,15 +1616,25 @@ async def reopen_issue(request: Request):
     except Exception as e:  # noqa: BLE001
         logger.error(f"Reopen failed for {issue_id}: {e}")
         return JSONResponse(status_code=500, content={"message": f"Reopen failed: {e}"})
-    # Clear the stored processed state so the scanner/retry treats it as fresh
-    # (a 'fixed' status would otherwise make scan_repo_issues skip it).
+    # Mark the issue "reopened" (rather than deleting its record) so: (a) the base
+    # closed/resolved counter drops NOW that it's no longer closed, and (b) the flag
+    # carries into the eventual re-close so it's tallied in the ReOpened buckets — not
+    # double-counted in the base "Issues Closed" total. Status "reopened" is not a
+    # terminal status the scanner skips, and the direct re-queue below drives the fix.
     try:
         processed = load_processed()
-        if issue_id in processed:
-            del processed[issue_id]
-            save_processed(processed)
+        prior = processed.get(issue_id, {})
+        processed[issue_id] = {
+            "status": "reopened",
+            "reopened": True,
+            "original_body": prior.get("original_body", ""),
+            "timestamp": datetime.now().isoformat(),
+        }
+        save_processed(processed)
+        recompute_issue_counters(processed)
+        state["processed"] = processed
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"Reopen: could not clear processed state for {issue_id}: {e}")
+        logger.warning(f"Reopen: could not update processed state for {issue_id}: {e}")
     logger.info(f"Manual reopen: {issue_id}")
 
     def run_fix():

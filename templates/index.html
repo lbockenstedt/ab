@@ -336,6 +336,14 @@
                             <span class="text-slate-500 text-sm">Issues Closed</span>
                             <span class="font-bold text-slate-600">{{ state.closed_count }}</span>
                         </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-slate-500 text-sm">Issues ReOpened - Resolved</span>
+                            <span class="font-bold text-amber-600">{{ state.reopened_resolved_count }}</span>
+                        </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-slate-500 text-sm">Issues ReOpened - Closed</span>
+                            <span class="font-bold text-amber-600">{{ state.reopened_closed_count }}</span>
+                        </div>
                     </div>
                 </div>
             </div>

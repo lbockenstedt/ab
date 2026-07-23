@@ -22,6 +22,7 @@ from main import (
     is_llm_cooldown_error,
     load_config,
     load_processed,
+    recompute_issue_counters,
     logger,
     resolve_self_diagnosis_repo,
     save_processed,
@@ -887,6 +888,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         # --- Resume from awaiting_review ---
         processed = load_processed()
         issue_info = processed.get(issue_id, {})
+        # Was this issue reopened (by the operator or a recurrence)? If so, its
+        # eventual close/resolve is tallied in the ReOpened buckets, and the flag
+        # is carried into the terminal processed entry.
+        was_reopened = bool(issue_info.get("reopened"))
         if issue_info.get("status") == "awaiting_review":
             last_attempt = issue_info.get("timestamp")
             if last_attempt:
@@ -1246,11 +1251,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 "files": list(fixes.keys()),
                 "commit_type": commit_type,
                 "decision_reason": decision_reason,
+                "reopened": was_reopened,
                 "original_body": issue.body
             }
 
             save_processed(processed)
             state["processed"] = processed
+            recompute_issue_counters(processed)
             state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
 
             update_task_state(task_id=issue_id, action="end")
@@ -1267,6 +1274,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         # Always release the claim — on success, failure, or exception — so a later
         # legitimate re-trigger (e.g. operator Reopen) isn't permanently blocked.
         _release_issue(issue_id)
+        # Reconcile the dashboard counters to the processed store after every run,
+        # so any terminal-status change (closed/failed/resolved) is reflected exactly
+        # once regardless of which path we took.
+        try:
+            recompute_issue_counters()
+        except Exception:  # noqa: BLE001 — counters are cosmetic, never fail the run
+            pass
 
 
 __all__ = [
