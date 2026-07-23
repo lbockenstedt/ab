@@ -986,7 +986,23 @@
                                 </datalist>
                                 <button type="button" onclick="mmPull()" id="mm-pull-btn" class="btn-primary px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
                             </div>
-                            <p class="text-[11px] text-slate-400 mb-3">Suggestions are common models; any name from <span class="font-mono">ollama.com/library</span> works. Pull downloads from Ollama's cloud registry to the endpoint above.</p>
+                            <p class="text-[11px] text-slate-400 mb-3">Type any name from <span class="font-mono">ollama.com/library</span>, or click Pull on one below. Pull downloads from Ollama's cloud registry to the endpoint above.</p>
+
+                            <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Popular models — click Pull to download</p>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-4">
+                                {% for m, sz in [
+                                    ('qwen2.5-coder:7b','~4.7 GB'), ('qwen2.5-coder:14b','~9 GB'),
+                                    ('qwen2.5-coder:32b','~20 GB'), ('qwen2.5:72b','~47 GB'),
+                                    ('llama3.1:8b','~4.9 GB'), ('llama3.3:70b','~43 GB'),
+                                    ('deepseek-coder-v2:16b','~8.9 GB'), ('gemma2:27b','~16 GB') ] %}
+                                <div class="flex items-center justify-between py-1 px-2 rounded bg-slate-50 border border-slate-100">
+                                    <span class="font-mono text-xs text-slate-700">{{ m }} <span class="text-slate-400">{{ sz }}</span></span>
+                                    <button type="button" onclick="mmPull('{{ m }}')" class="btn-sec text-[11px] px-2 py-0.5 rounded font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
+                                </div>
+                                {% endfor %}
+                            </div>
+
+                            <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Installed models</p>
                             <div id="mm-list" class="text-xs text-slate-400 italic">Click List to load installed models.</div>
                             <div id="mm-pull-status" class="hidden mt-3 text-xs rounded p-3 bg-slate-900 border border-slate-700">
                                 <div id="mm-pull-line" class="font-medium text-slate-200 mb-2"></div>
@@ -3106,8 +3122,8 @@
             } catch (e) { showToast('Delete failed: ' + e, 'error'); }
         }
 
-        async function mmPull() {
-            const model = (document.getElementById('mm-pull-model')?.value || '').trim();
+        async function mmPull(preset) {
+            const model = ((typeof preset === 'string' && preset) || document.getElementById('mm-pull-model')?.value || '').trim();
             if (!model) { showToast('Enter a model name (e.g. qwen2.5-coder:14b)', 'warn'); return; }
             const btn = document.getElementById('mm-pull-btn');
             const box = document.getElementById('mm-pull-status');
