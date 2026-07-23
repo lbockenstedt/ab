@@ -950,7 +950,9 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
 
 def _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
     """Call an Ollama-compatible API (local or Ollama Cloud). Uses /api/chat natively."""
-    base = (base_url or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
+    # base_url is resolved upstream in _call_provider (localhost for "ollama",
+    # ollama.com for "ollama2"); default to localhost for any direct caller.
+    base = (base_url or "http://localhost:11434").rstrip("/")
     endpoint = f"{base}/api/chat"
     headers = {}
     if api_key:
@@ -1085,7 +1087,13 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     if p == "google":
         return _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if _is_ollama(p):
-        return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+        # Default a blank base_url by PROVIDER NAME, not by "is a key present":
+        # "ollama" is the LOCAL slot → localhost, even when a key is set (the
+        # Settings→Local LLM flow auto-creates a key the user can't clear, and that
+        # must NOT redirect a local provider to the cloud). "ollama2" is the REMOTE
+        # slot → the Ollama Cloud host. An explicit base_url always wins.
+        eff_url = base_url or ("https://ollama.com" if p == "ollama2" else "http://localhost:11434")
+        return _request_ollama(model, api_key, eff_url, messages, tools, effective_stream, task_id, config)
     if p == "groq":
         effective_url = base_url or "https://api.groq.com/openai/v1"
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
