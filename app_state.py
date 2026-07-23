@@ -38,10 +38,17 @@ def update_task_state(task_id, task_name="Unknown Task", action="start"):
     try:
         if action == "start":
             with _task_state_lock:
+                # Same task_id restarting for a new sub-step (e.g. the next CPU-ensemble
+                # model) — carry the previous reasoning forward instead of blanking the
+                # "AI Thought Process" panel to empty between the many short model calls.
+                prev = state["active_tasks"].get(task_id) or {}
+                carried = prev.get("stream") or ""
+                if carried:
+                    carried = carried.rstrip() + f"\n\n── {task_name} ──\n"
                 state["active_tasks"][task_id] = {
                     "name": task_name,
                     "start_time": datetime.now(),
-                    "stream": ""
+                    "stream": carried,
                 }
             logger.info(f"Task started: {task_id} - {task_name}")
         elif action == "end":
