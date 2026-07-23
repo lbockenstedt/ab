@@ -844,6 +844,203 @@ async def hub_logs_raw():
     })
 
 
+_LOG_ANALYSIS_LOCK = threading.Lock()
+_LOG_ANALYSIS_TASK = "LogAnalysis"
+_LOG_ANALYSIS_MAX_CHARS = 16000
+_LOG_ANALYSIS_WINDOW_MIN = 15          # pre-compute snapshot window
+_LOG_ANALYSIS_PRECOMPUTE_EVERY = 900   # refresh the idle snapshot at most this often (s)
+
+
+def _parse_log_ts(line):
+    """Parse the leading 'YYYY-MM-DD HH:MM:SS' of a log line, or None."""
+    try:
+        return datetime.strptime((line or "")[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _window_lines_since(lines, minutes, get_text=lambda x: x, newest_first=False):
+    """Keep only lines within the last `minutes`. `lines` may be strings or dicts
+    (via get_text). Chronological (oldest-first) by default; set newest_first for
+    a top-down list (e.g. hub rows). Continuation lines with no timestamp inherit
+    the current keep state. Empty result → caller should fall back to a line tail."""
+    from datetime import timedelta
+    cutoff = datetime.now() - timedelta(minutes=minutes)
+    out = []
+    if newest_first:
+        for item in lines:
+            ts = _parse_log_ts(get_text(item))
+            if ts is not None and ts < cutoff:
+                break
+            out.append(item)
+        out.reverse()
+    else:
+        keeping = False
+        for item in lines:
+            ts = _parse_log_ts(get_text(item))
+            if ts is not None:
+                keeping = ts >= cutoff
+            if keeping:
+                out.append(item)
+    return out
+
+
+def _collect_logs_for_analysis(source, window_minutes=None):
+    """Return (title, text) of recent logs for `source` ('self' | 'hub'). With
+    window_minutes, restrict to that trailing time window (falling back to a line
+    tail if too little is in-window); else the last lines. Char-capped for the LLM."""
+    if source == "hub":
+        rows = get_hub_logs() or []
+        if window_minutes:
+            win = _window_lines_since(rows, window_minutes,
+                                      get_text=lambda r: r.get("log", "") if isinstance(r, dict) else str(r),
+                                      newest_first=True)
+            rows = win if len(win) >= 3 else rows[:400]
+        else:
+            rows = rows[:600]
+        lines = [f"[{r.get('module', '?')}] {r.get('log', '')}" if isinstance(r, dict) else str(r) for r in rows]
+        text = "\n".join(lines)
+        title = f"Hub logs (last {window_minutes} min)" if window_minutes else "Hub logs (mirrored)"
+    else:
+        try:
+            with open(get_log_path(), "r") as f:
+                all_lines = f.readlines()
+        except Exception as e:  # noqa: BLE001
+            return "BugFixer service logs", f"(could not read BugFixer log: {e})"
+        if window_minutes:
+            win = _window_lines_since(all_lines, window_minutes)
+            all_lines = win if len(win) >= 5 else all_lines[-400:]
+        else:
+            all_lines = all_lines[-400:]
+        text = "".join(all_lines)
+        title = f"BugFixer service logs (last {window_minutes} min)" if window_minutes else "BugFixer service logs"
+    if len(text) > _LOG_ANALYSIS_MAX_CHARS:
+        text = text[-_LOG_ANALYSIS_MAX_CHARS:]
+    return title, text
+
+
+def _run_log_analysis(source, window_minutes=None, precomputed=False):
+    """Read the current logs and ask BugFixer's own LLM whether anything is wrong,
+    what it means, and what to check. Streams into the LogAnalysis task (live
+    'thought process') and stores the final answer in state['log_analysis']."""
+    from main import call_llm, is_llm_cooldown_error  # re-exported from llm_client
+    title, log_text = _collect_logs_for_analysis(source, window_minutes=window_minutes)
+    update_task_state(task_id=_LOG_ANALYSIS_TASK, task_name=f"Analyzing {title}", action="start")
+    try:
+        system_prompt = (
+            "You are a senior SRE reading application logs for the user. Be concise, "
+            "specific, and calm. Do not invent problems that aren't in the logs."
+        )
+        prompt = (
+            f"These are the most recent {title} for the BugFixer system. Analyze them and answer:\n\n"
+            "1. **Is there a problem?** Answer yes or no up front.\n"
+            "2. **If yes:** what is going wrong, in plain language — and what it most likely "
+            "means / what to check next. Quote the key log line(s) verbatim.\n"
+            "3. **If everything looks healthy:** say so in one line and note anything minor worth watching.\n\n"
+            "Prefer WARNING/ERROR/traceback lines. Keep it under ~250 words.\n\n"
+            f"----- LOGS -----\n{log_text}\n----- END LOGS -----"
+        )
+        result = call_llm(prompt, system_prompt=system_prompt, task_id=_LOG_ANALYSIS_TASK)
+        result = (result or "").strip() or "(the LLM returned an empty analysis)"
+        state["log_analysis"] = {
+            "running": False, "source": source, "title": title, "precomputed": precomputed,
+            "result": result, "error": None, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if is_llm_cooldown_error(e):
+            msg = f"All LLM providers are cooling down / unavailable: {e}"
+        logger.warning(f"log-analysis failed: {e}")
+        state["log_analysis"] = {
+            "running": False, "source": source, "title": title, "precomputed": precomputed,
+            "result": "", "error": msg, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    finally:
+        update_task_state(task_id=_LOG_ANALYSIS_TASK, action="end")
+
+
+def _log_analysis_busy():
+    """True if the system is doing LLM-heavy work (a fix build/review/triage/chat) —
+    the idle pre-compute must not compete with that for the single LLM slot."""
+    for t in (state.get("active_tasks") or {}).values():
+        name = (t.get("name") or "").lower()
+        if any(k in name for k in ("build", "review", "triag", "fix attempt", "verif", "chat", "identify")):
+            return True
+    return False
+
+
+def log_health_worker():
+    """When BugFixer is idle, pre-compute a health snapshot of the last 15 minutes of
+    its own logs so the Log Analysis panel shows a ready answer on page open. Cheap,
+    respects the single LLM slot (skips while a fix/chat is running), and refreshes at
+    most every _LOG_ANALYSIS_PRECOMPUTE_EVERY seconds. The user's Refresh button
+    (runLogAnalysis) always overrides with a live run."""
+    import time as _t
+    last = 0.0
+    while True:
+        try:
+            _t.sleep(60)
+            if state.get("paused") or state.get("blackout"):
+                continue
+            if (_t.time() - last) < _LOG_ANALYSIS_PRECOMPUTE_EVERY:
+                continue
+            if _log_analysis_busy():
+                continue
+            if not _LOG_ANALYSIS_LOCK.acquire(blocking=False):
+                continue
+            try:
+                state["log_analysis"] = {"running": True, "source": "self", "title": None,
+                                         "result": "", "error": None, "at": None, "precomputed": True}
+                _run_log_analysis("self", window_minutes=_LOG_ANALYSIS_WINDOW_MIN, precomputed=True)
+                last = _t.time()
+            finally:
+                _LOG_ANALYSIS_LOCK.release()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"log_health_worker cycle error: {e}")
+            _t.sleep(30)
+
+
+@router.post("/api/log-analysis/run")
+async def log_analysis_run(request: Request):
+    """Kick off an LLM analysis of the current logs. Body: {"source": "self"|"hub"}.
+    Non-blocking — the UI polls /api/log-analysis for progress + the final result."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    source = "hub" if str((body or {}).get("source")) == "hub" else "self"
+    if not _LOG_ANALYSIS_LOCK.acquire(blocking=False):
+        return JSONResponse({"ok": False, "error": "An analysis is already running."}, status_code=409)
+    try:
+        # Seed a running marker the UI can poll immediately.
+        state["log_analysis"] = {"running": True, "source": source, "title": None,
+                                 "result": "", "error": None, "at": None}
+
+        def _worker():
+            try:
+                _run_log_analysis(source)
+            finally:
+                _LOG_ANALYSIS_LOCK.release()
+
+        threading.Thread(target=_worker, name="log-analysis", daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        _LOG_ANALYSIS_LOCK.release()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return {"ok": True, "task_id": _LOG_ANALYSIS_TASK}
+
+
+@router.get("/api/log-analysis")
+async def log_analysis_status():
+    """Current log-analysis state: running flag, the live partial (LLM tokens streamed
+    so far), and the final result/error once done."""
+    la = dict(state.get("log_analysis") or {"running": False, "result": "", "error": None})
+    # While running, surface the live streamed tokens as the partial.
+    if la.get("running"):
+        task = (state.get("active_tasks") or {}).get(_LOG_ANALYSIS_TASK) or {}
+        la["partial"] = task.get("stream", "")
+    return la
+
+
 DEFAULT_ENV = {
     "GITHUB_TOKEN": "",
     "LLM_PROVIDER_1": "openai",
@@ -2130,6 +2327,9 @@ __all__ = [
     'chat_delete',
     'chat_clear',
     'chat_confirm_fix',
+    'log_analysis_run',
+    'log_analysis_status',
+    'log_health_worker',
     'DEFAULT_ENV',
     'router',
 ]

@@ -515,8 +515,18 @@
 
         {% if view == 'logs' %}
         <div class="hpe-card rounded-2xl overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-200 flex justify-end items-center bg-white">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white gap-2 flex-wrap">
+                <button onclick="runLogAnalysis('self')" id="log-analysis-btn" class="px-4 py-2 btn-primary rounded-lg font-bold text-sm">
+                    <i class="fas fa-wand-magic-sparkles mr-2"></i> Log Analysis
+                </button>
                 <span class="text-xs text-slate-500 font-mono">Last 100 lines</span>
+            </div>
+            <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
+                <div class="flex items-center gap-2 mb-2">
+                    <span class="text-xs font-bold uppercase tracking-wider text-indigo-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</span>
+                    <span id="log-analysis-meta" class="text-[11px] text-slate-400"></span>
+                </div>
+                <div id="log-analysis-body" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded-lg border border-slate-200 p-4 max-h-96 overflow-y-auto">—</div>
             </div>
             <div class="p-4 bg-slate-50 border-b border-slate-200 flex justify-center">
                 <button onclick="copyLogs()" class="px-6 py-2 bg-white hover:bg-slate-100 rounded-lg font-bold text-slate-700 transition-all duration-200 border border-slate-300 shadow-sm text-sm">
@@ -539,9 +549,17 @@
                     </p>
                 </div>
                 <div class="flex gap-2 flex-wrap">
+                    <button onclick="runLogAnalysis('hub')" id="log-analysis-btn" class="py-1 px-3 text-xs btn-primary rounded font-bold"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</button>
                     <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300">↻ Refresh</button>
                     <button onclick="showHubRaw()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300">Debug Raw</button>
                 </div>
+            </div>
+            <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
+                <div class="flex items-center gap-2 mb-2">
+                    <span class="text-xs font-bold uppercase tracking-wider text-indigo-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</span>
+                    <span id="log-analysis-meta" class="text-[11px] text-slate-400"></span>
+                </div>
+                <div id="log-analysis-body" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded-lg border border-slate-200 p-4 max-h-96 overflow-y-auto">—</div>
             </div>
             {% if hub_fetch_error %}
             <div class="px-6 py-3 bg-red-50 border-b border-red-200 text-xs text-red-700 font-mono">
@@ -2044,6 +2062,73 @@
                 showToast('Request failed: ' + e, 'error');
             }
         }
+
+        // ── Log Analysis: BugFixer's own LLM reads the logs and reports health ──
+        let _logAnalysisTimer = null;
+        function _laEls() {
+            return {
+                btn: document.getElementById('log-analysis-btn'),
+                panel: document.getElementById('log-analysis-panel'),
+                body: document.getElementById('log-analysis-body'),
+                meta: document.getElementById('log-analysis-meta'),
+            };
+        }
+        function _laRender(la) {
+            const { body, meta, btn } = _laEls();
+            if (la.running) {
+                if (body) body.textContent = la.partial || 'Reading the logs…';
+                if (meta) meta.textContent = 'analyzing ' + (la.source === 'hub' ? 'hub logs' : 'service logs') + '…';
+                if (btn) btn.disabled = true;
+                return;
+            }
+            if (btn) btn.disabled = false;
+            if (la.error) { if (body) body.textContent = '⚠ ' + la.error; }
+            else if (la.result) { if (body) body.textContent = la.result; }
+            else if (body) body.textContent = 'No analysis yet — click Log Analysis to run one.';
+            if (meta) {
+                const tag = la.precomputed ? ' · auto snapshot (click Log Analysis for a live run)' : '';
+                meta.textContent = (la.title ? la.title + ' · ' : '') + (la.at ? 'analyzed ' + la.at : '') + tag;
+            }
+        }
+        async function pollLogAnalysis() {
+            try {
+                const la = await fetch('/api/log-analysis').then(r => r.json());
+                _laRender(la);
+                if (!la.running && _logAnalysisTimer) { clearInterval(_logAnalysisTimer); _logAnalysisTimer = null; }
+            } catch (e) { /* keep polling */ }
+        }
+        async function runLogAnalysis(source) {
+            const { panel, body, meta, btn } = _laEls();
+            if (panel) panel.classList.remove('hidden');
+            if (body) body.textContent = 'Reading the logs…';
+            if (meta) meta.textContent = '';
+            if (btn) btn.disabled = true;
+            try {
+                const r = await fetch('/api/log-analysis/run', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source: source || 'self' })
+                }).then(r => r.json());
+                if (!r.ok) { if (body) body.textContent = r.error || 'Could not start analysis.'; if (btn) btn.disabled = false; return; }
+            } catch (e) {
+                if (body) body.textContent = 'Failed to start analysis: ' + e; if (btn) btn.disabled = false; return;
+            }
+            if (_logAnalysisTimer) clearInterval(_logAnalysisTimer);
+            _logAnalysisTimer = setInterval(pollLogAnalysis, 1500);
+            pollLogAnalysis();
+        }
+        // On page open, show the last cached/pre-computed analysis if there is one.
+        async function initLogAnalysis() {
+            if (!document.getElementById('log-analysis-panel')) return;
+            try {
+                const la = await fetch('/api/log-analysis').then(r => r.json());
+                if (la && (la.result || la.error || la.running)) {
+                    document.getElementById('log-analysis-panel').classList.remove('hidden');
+                    _laRender(la);
+                    if (la.running) { _logAnalysisTimer = setInterval(pollLogAnalysis, 1500); }
+                }
+            } catch (e) { /* no cached analysis */ }
+        }
+        initLogAnalysis();
 
         function copyLogs() {
             const logElement = document.getElementById('system-logs-text');
