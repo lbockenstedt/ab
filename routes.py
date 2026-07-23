@@ -1024,7 +1024,9 @@ async def log_analysis_run(request: Request):
 
         def _worker():
             try:
-                _run_log_analysis(source)
+                # Analyze only the recent window (same as the idle precompute), so the
+                # LLM sees just the last-N-min of activity, not the whole tail.
+                _run_log_analysis(source, window_minutes=_LOG_ANALYSIS_WINDOW_MIN)
             finally:
                 _LOG_ANALYSIS_LOCK.release()
 
