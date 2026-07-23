@@ -945,16 +945,24 @@ def scan_bugs(gh_current, config, hub_logs):
                 logger.info(f"scan_bugs: {rid} not filed this cycle (cooldown/dedup/no-op).")
                 continue
             issue_url = getattr(issue, "html_url", "") or ""
+            # Dedup: this report matched an EXISTING issue (recurrence / same error)
+            # rather than filing a fresh one. Mark it "duplicate" (→ links the same
+            # issue) instead of "filed" so the LM UI is honest about it. The hub's
+            # MARK_BUG_FIXED cascade later flips every report on this issue_url to
+            # fixed once bugfixer closes it, so the issue_url must be recorded here.
+            was_dup = bool(getattr(issue, "_bf_was_duplicate", False))
+            mark_msg = "MARK_BUG_DUPLICATE" if was_dup else "MARK_BUG_FILED"
             try:
-                client.request_sync("MARK_BUG_FILED", {"id": rid, "issue_url": issue_url}, timeout=10)
+                client.request_sync(mark_msg, {"id": rid, "issue_url": issue_url}, timeout=10)
             except Exception as me:
-                logger.warning(f"scan_bugs: MARK_BUG_FILED {rid} failed: {me}")
+                logger.warning(f"scan_bugs: {mark_msg} {rid} failed: {me}")
             scan_bugs._filed.add(rid)
             filed_this_cycle += 1
             if is_feature:
                 feat_filed_this_cycle += 1
             _kind = "feature request" if is_feature else "bug report"
-            logger.info(f"scan_bugs: filed {_kind} {rid} -> {repo_name}#{getattr(issue, 'number', '?')} ({issue_url})")
+            _verb = "matched existing (duplicate)" if was_dup else "filed"
+            logger.info(f"scan_bugs: {_verb} {_kind} {rid} -> {repo_name}#{getattr(issue, 'number', '?')} ({issue_url})")
         except Exception as e:
             logger.error(f"scan_bugs: failed to file bug report {rid} in {repo_name}: {e}")
     _bi["filed_this_cycle"] = filed_this_cycle

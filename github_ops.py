@@ -448,6 +448,13 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                         f"{duplicate_repo_name or current_repo_name} "
                         f"(state={existing_issue.state}, was_closed={was_closed}) — will "
                         f"{'reopen' if was_closed else 'add evidence to'} it, not file a duplicate.")
+            # Signal to callers (scan_bugs) that this issue is a dedup of an existing
+            # one, so a File-a-Bug report can be marked "duplicate" (→ same issue),
+            # not "filed". Best-effort attribute stamp; harmless if it can't be set.
+            try:
+                existing_issue._bf_was_duplicate = True
+            except Exception:
+                pass
         else:
             logger.info(f"[dedup] NO MATCH for {title_text[:80]!r} — filing a NEW issue.")
 
@@ -558,6 +565,10 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
             labels=applied_labels
         )
         logger.info(f"Created automated issue #{issue.number} for {current_repo_name}")
+        try:
+            issue._bf_was_duplicate = False
+        except Exception:
+            pass
         return issue
     except Exception as e:
         logger.error(f"Failed to handle automated issue creation: {e}")
