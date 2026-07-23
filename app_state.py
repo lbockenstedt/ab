@@ -80,6 +80,8 @@ closed_count = sum(1 for i in processed_init.values() if i.get("status") == "clo
 # Auto-committed + GitHub-closed, but awaiting a HUMAN to verify the issue is gone
 # (then they click Resolved → resolved, or Re-open → reprocess).
 pending_verification_count = sum(1 for i in processed_init.values() if i.get("status") == "pending_verification")
+# Issues the triage step judged not actionable (not a real bug / can't fix from logs).
+non_actionable_count = sum(1 for i in processed_init.values() if i.get("status") == "non-actionable")
 
 state = {
     "status": "Idle", "active_llm": "Unknown",
@@ -97,6 +99,7 @@ state = {
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "pending_verification_count": pending_verification_count,
+    "non_actionable_count": non_actionable_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "provider_credit_cb": _provider_credit_cb_snapshot(),
     "paused": False,
@@ -133,6 +136,7 @@ def recompute_issue_counters(processed=None):
     state["success_count"] = sum(1 for i in vals if i.get("status") in _RESOLVED_STATUSES)
     state["closed_count"] = sum(1 for i in vals if i.get("status") == "closed")
     state["pending_verification_count"] = sum(1 for i in vals if i.get("status") == "pending_verification")
+    state["non_actionable_count"] = sum(1 for i in vals if i.get("status") == "non-actionable")
     state["failure_count"] = sum(1 for i in vals if i.get("status") == "failed")
     return state
 
@@ -147,6 +151,7 @@ __all__ = [
     "failure_count",
     "closed_count",
     "pending_verification_count",
+    "non_actionable_count",
     "recompute_issue_counters",
     "update_task_state",
     "_task_state_lock",

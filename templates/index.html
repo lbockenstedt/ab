@@ -340,6 +340,10 @@
                             <span class="text-slate-500 text-sm">Issues Closed</span>
                             <span class="font-bold text-slate-600">{{ state.closed_count }}</span>
                         </div>
+                        <div class="flex justify-between items-center">
+                            <span class="text-slate-500 text-sm">Non-Actionable</span>
+                            <span class="font-bold text-orange-600">{{ state.non_actionable_count }}</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -401,21 +405,25 @@
 
         <!-- Processed Table -->
         <div class="mt-8 hpe-card rounded-2xl overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white">
-                <h3 class="text-lg font-bold text-[#263040] whitespace-nowrap">Status</h3>
-                <div class="flex gap-2 items-center">
-                    <div class="flex gap-2 items-center mr-4 border-r border-slate-200 pr-4">
-                        <button onclick="retryAll(null)" class="btn-primary px-3 py-1 rounded-md text-xs font-bold">
+            <div class="px-6 py-4 border-b border-slate-200 bg-white flex flex-col gap-3">
+                <!-- Row 1: title + bulk actions -->
+                <div class="flex justify-between items-center flex-wrap gap-2">
+                    <h3 class="text-lg font-bold text-[#263040] whitespace-nowrap">Status</h3>
+                    <div class="flex gap-2 items-center flex-wrap">
+                        <button onclick="retryAll(null)" class="btn-primary px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap">
                             <i class="fas fa-redo-alt mr-1"></i> Retry All
                         </button>
-                        <button onclick="clearHistory()" class="btn-danger px-3 py-1 rounded-md text-xs font-bold">
+                        <button onclick="clearHistory()" class="btn-danger px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap">
                             <i class="fas fa-trash-alt mr-1"></i> Clear History
                         </button>
-                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-md text-xs font-bold bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (bugfixer-dismissed) and clear the whole history">
+                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (bugfixer-dismissed) and clear the whole history">
                             <i class="fas fa-trash-alt mr-1"></i> Dismiss All
                         </button>
                     </div>
-                    <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
+                </div>
+                <!-- Row 2: filters -->
+                <div class="flex items-center flex-wrap gap-2">
+                    <span class="text-xs font-bold text-slate-500 uppercase mr-1">Filter:</span>
                     <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border-[#01A982]" title="Active issues (closed hidden)">Active</button>
                     <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
                     <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
@@ -423,7 +431,7 @@
                     <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
                     <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
                     <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
-                    <i class="fas fa-history text-slate-400 ml-4"></i>
+                    <i class="fas fa-history text-slate-400 ml-2"></i>
                 </div>
             </div>
             <table class="w-full text-left text-sm">
