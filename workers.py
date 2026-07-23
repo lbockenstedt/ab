@@ -223,6 +223,18 @@ def _trigger_spoke_updates(config):
         logger.warning("Hub agent not approved/connected — skipping update trigger")
         _set_update_cooldown(config)
         return "Hub agent not approved/connected — update not triggered"
+    # The hub returns {hub, spokes, agents} on success but an ERROR ENVELOPE
+    # ({"status":"error","message":...}) when it rejects the request — most
+    # commonly the H1 authz denial (the BugFixer client cert must be pinned via
+    # the LE module AND presented over mTLS). That envelope is also a dict, so a
+    # bare isinstance check would report a hollow "hub= | spokes= | agents="
+    # SUCCESS for a request the hub never honored. Require all three result keys.
+    if not all(k in result for k in ("hub", "spokes", "agents")):
+        msg = result.get("message") or result.get("status") or "hub rejected the update request"
+        logger.warning(f"Hub update NOT triggered: {msg}")
+        # Do NOT start the restart cooldown — nothing is restarting, and
+        # suppressing issue filing would hide real errors.
+        return f"Hub update NOT triggered: {msg}"
     hub = result.get("hub") or {}
     spokes = result.get("spokes") or {}
     agents = result.get("agents") or {}
