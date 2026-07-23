@@ -1319,6 +1319,34 @@ def is_llm_cooldown_error(e) -> bool:
                                 "rate_limited", "providers cooling down"))
 
 
+LOG_ANALYSIS_SYSTEM_PROMPT = (
+    "You are a senior SRE reading application logs for the user. Be concise, "
+    "specific, and calm. Do not invent problems that aren't in the logs."
+)
+_LOG_ANALYSIS_MAX_CHARS = 16000
+
+
+def analyze_logs(log_text, title="logs", task_id=None):
+    """Ask the configured LLM whether anything is wrong in `log_text`, what it means,
+    and what to check — the shared brain behind BugFixer's Log Analysis panel AND the
+    LM hub's delegated ANALYZE_LOGS request. Returns the analysis string (raises on
+    LLM failure so callers can classify cooldown vs. error). Char-caps the tail."""
+    text = log_text or ""
+    if len(text) > _LOG_ANALYSIS_MAX_CHARS:
+        text = text[-_LOG_ANALYSIS_MAX_CHARS:]
+    prompt = (
+        f"These are the most recent {title}. Analyze them and answer:\n\n"
+        "1. **Is there a problem?** Answer yes or no up front.\n"
+        "2. **If yes:** what is going wrong, in plain language — and what it most likely "
+        "means / what to check next. Quote the key log line(s) verbatim.\n"
+        "3. **If everything looks healthy:** say so in one line and note anything minor worth watching.\n\n"
+        "Prefer WARNING/ERROR/traceback lines. Keep it under ~250 words.\n\n"
+        f"----- LOGS -----\n{text}\n----- END LOGS -----"
+    )
+    result = call_llm(prompt, system_prompt=LOG_ANALYSIS_SYSTEM_PROMPT, task_id=task_id)
+    return (result or "").strip() or "(the LLM returned an empty analysis)"
+
+
 
 # Re-export every name this module defines (public + underscore) so
 # ``from llm_client import *`` in main preserves the full `from main import ...`

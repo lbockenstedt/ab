@@ -923,25 +923,12 @@ def _run_log_analysis(source, window_minutes=None, precomputed=False):
     """Read the current logs and ask BugFixer's own LLM whether anything is wrong,
     what it means, and what to check. Streams into the LogAnalysis task (live
     'thought process') and stores the final answer in state['log_analysis']."""
-    from main import call_llm, is_llm_cooldown_error  # re-exported from llm_client
+    from main import analyze_logs, is_llm_cooldown_error  # re-exported from llm_client
     title, log_text = _collect_logs_for_analysis(source, window_minutes=window_minutes)
     update_task_state(task_id=_LOG_ANALYSIS_TASK, task_name=f"Analyzing {title}", action="start")
     try:
-        system_prompt = (
-            "You are a senior SRE reading application logs for the user. Be concise, "
-            "specific, and calm. Do not invent problems that aren't in the logs."
-        )
-        prompt = (
-            f"These are the most recent {title} for the BugFixer system. Analyze them and answer:\n\n"
-            "1. **Is there a problem?** Answer yes or no up front.\n"
-            "2. **If yes:** what is going wrong, in plain language — and what it most likely "
-            "means / what to check next. Quote the key log line(s) verbatim.\n"
-            "3. **If everything looks healthy:** say so in one line and note anything minor worth watching.\n\n"
-            "Prefer WARNING/ERROR/traceback lines. Keep it under ~250 words.\n\n"
-            f"----- LOGS -----\n{log_text}\n----- END LOGS -----"
-        )
-        result = call_llm(prompt, system_prompt=system_prompt, task_id=_LOG_ANALYSIS_TASK)
-        result = (result or "").strip() or "(the LLM returned an empty analysis)"
+        result = analyze_logs(log_text, title=f"{title} for the BugFixer system",
+                              task_id=_LOG_ANALYSIS_TASK)
         state["log_analysis"] = {
             "running": False, "source": source, "title": title, "precomputed": precomputed,
             "result": result, "error": None, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

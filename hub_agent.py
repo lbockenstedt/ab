@@ -368,6 +368,42 @@ class HubAgentClient:
         finally:
             self._pending.pop(msg_id, None)
 
+    async def _handle_analyze_logs(self, msg, data):
+        """The LM hub has no LLM of its own, so it delegates Log Analysis to us (we
+        own the models + already read hub logs). Run analyze_logs off the event-loop
+        thread and reply with the result; correlation_id lets the hub's
+        request_response match the answer. The hub must use a long timeout (LLM)."""
+        import asyncio as _aio
+        from llm_client import analyze_logs, is_llm_cooldown_error
+        title = str(data.get("title") or "logs")[:200]
+        log_text = data.get("logs") or ""
+        status, analysis, error = "ok", "", None
+        try:
+            if not str(log_text).strip():
+                status, error = "error", "no logs provided"
+            else:
+                analysis = await _aio.get_event_loop().run_in_executor(
+                    None, lambda: analyze_logs(log_text, title))
+        except Exception as e:  # noqa: BLE001
+            status = "error"
+            error = (f"all LLM providers are cooling down / unavailable: {e}"
+                     if is_llm_cooldown_error(e) else str(e))
+            logger.warning("ANALYZE_LOGS failed: %s", e)
+        if self._ws is None or self.signer is None:
+            return
+        reply = {
+            "correlation_id": msg.get("header", {}).get("message_id"),
+            "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
+                       "sender_id": self.spoke_id, "destination_id": "hub"},
+            "payload": {"type": "COMMAND_RESULT",
+                        "data": {"status": status, "analysis": analysis,
+                                 "error": error, "title": title}},
+        }
+        try:
+            await self._ws.send(encode_frame(self.signer, reply))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ANALYZE_LOGS reply send failed: %s", e)
+
     async def _ack(self, msg, status="SUCCESS", message=""):
         """Send a COMMAND_RESULT the hub's mailbox treats as an acknowledgement
         (correlation_id = the inbound message_id), so a DURABLE push is cleared and
@@ -971,6 +1007,10 @@ class HubAgentClient:
                 self.hub_secrets = self.hub_secrets[:3]
                 self.on_hub_secret(new_hub_secret)
                 logger.info("Hub secret stored for %s", self.spoke_id)
+            return
+
+        if cmd_type == "ANALYZE_LOGS":
+            await self._handle_analyze_logs(msg, data)
             return
 
         if cmd_type == "HUB_RESPONSE":
