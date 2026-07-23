@@ -59,8 +59,15 @@ def main():
     ok = True
 
     # A 22k-line file with the typo at line 20357 and the real fn at 20307 —
-    # both far past a 12k-char head-truncation.
+    # both far past a 12k-char head-truncation. The top 2000 lines are FLOODED
+    # with the common identifier "ldap" (also an issue identifier): a naive
+    # file-order window would exhaust its budget on this noise and never reach the
+    # buggy region — which is exactly how BugFixer once "fixed" the crash with a
+    # no-op stub instead of the typo. The rare-identifier-first ranking must still
+    # surface the buggy call AND its correctly-spelled twin.
     lines = [f"// filler line {i}" for i in range(1, 22823)]
+    for j in range(0, 2000):
+        lines[j] = f"// ldap helper reference {j}"
     lines[20306] = "async function ensureLDAPTenants(force) {"
     lines[20356] = "    await ensureLDAPTennants();"
     big = "\n".join(lines)

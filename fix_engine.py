@@ -428,34 +428,55 @@ def _issue_identifiers(issue_body):
     return out[:12]
 
 
-def _targeted_file_context(content, identifiers, max_chars, window=60):
-    """For a large file, return only the regions AROUND lines that mention one of
-    *identifiers* (±*window* lines, overlapping windows merged), verbatim (no line
-    numbers, so the model can copy an exact search snippet). Returns None when no
-    identifier matches, so the caller falls back to head-truncation."""
+def _targeted_file_context(content, identifiers, max_chars, window=60, max_hits_per_id=4):
+    """For a large file, return only the regions AROUND lines that mention the
+    issue's identifiers — RAREST identifier first — verbatim (no line numbers, so
+    the model can copy an exact search snippet). Returns None when no identifier
+    matches, so the caller falls back to head-truncation.
+
+    Ranking by rarity is essential: a distinctive symbol (e.g. the exact mistyped
+    function name) usually pinpoints the bug AND sits next to its correctly-spelled
+    twin, while a common word from the issue ("ldap", "user") can match hundreds of
+    lines. Emitting windows in file order let the common word fill the whole budget
+    with noise before ever reaching the buggy region, so the model saw only "symbol
+    not found" and invented a no-op stub instead of fixing the typo. We instead emit
+    the rarest identifiers' neighbourhoods first (capped per identifier), so the
+    pinpoint region — with its correct twin — is always in-context."""
     if not identifiers:
         return None
     lines = content.split("\n")
     n = len(lines)
-    hits = [i for i, ln in enumerate(lines) if any(idn in ln for idn in identifiers)]
-    if not hits:
+    id_hits = []
+    for idn in identifiers:
+        hits = [i for i, ln in enumerate(lines) if idn in ln]
+        if hits:
+            id_hits.append((len(hits), idn, hits))
+    if not id_hits:
         return None
-    ranges = []
-    for i in hits:
-        s, e = max(0, i - window), min(n, i + window + 1)
-        if ranges and s <= ranges[-1][1]:
-            ranges[-1][1] = max(ranges[-1][1], e)
-        else:
-            ranges.append([s, e])
+    id_hits.sort(key=lambda t: t[0])  # rarest (most distinctive) identifier first
+
+    covered = []  # emitted [start, end) ranges — skip windows that overlap these
+
+    def _overlaps(s, e):
+        return any(s < ce and cs < e for cs, ce in covered)
+
     parts, total = [], 0
-    for s, e in ranges:
-        seg = f"\n... (showing lines {s + 1}-{e}) ...\n" + "\n".join(lines[s:e])
-        if total + len(seg) > max_chars:
-            parts.append(seg[:max(0, max_chars - total)] + "\n... [window truncated] ...")
-            break
-        parts.append(seg)
-        total += len(seg)
-    return "\n".join(parts)
+    for _cnt, _idn, hits in id_hits:
+        for i in hits[:max_hits_per_id]:
+            s, e = max(0, i - window), min(n, i + window + 1)
+            if _overlaps(s, e):
+                continue
+            seg = f"\n... (showing lines {s + 1}-{e}) ...\n" + "\n".join(lines[s:e])
+            if total + len(seg) > max_chars:
+                # Budget exhausted. The rare/distinctive regions are emitted first,
+                # so whatever is already collected is the most relevant context.
+                if parts:
+                    return "\n".join(parts)
+                return seg[:max(0, max_chars)] + "\n... [window truncated] ..."
+            parts.append(seg)
+            covered.append((s, e))
+            total += len(seg)
+    return "\n".join(parts) if parts else None
 
 
 def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None):
