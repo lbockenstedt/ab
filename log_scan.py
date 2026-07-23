@@ -409,6 +409,13 @@ def verify_production_fixes(gh_current, processed):
                 logger.error(f"Error verifying {issue_id}: {e}")
 
 
+# Canonical module_type -> repo map. The KEY is the module_type a spoke DECLARES
+# (see each spoke's source), NOT the repo basename. Several differ — "certificates"
+# -> le and "storage" -> truenas — and those previously matched NOTHING (not the
+# static map, not a repo basename), so le/truenas errors fell through every resolver
+# and were silently dropped (no issue filed). module_types that DO equal their repo
+# basename (nw, bugfixer) are listed explicitly too, so this map is authoritative
+# rather than relying on basename auto-match.
 MODULE_TYPE_REPO = {
     "firewall": "lbockenstedt/opnsense",
     "hypervisor": "lbockenstedt/pxmx",
@@ -416,6 +423,10 @@ MODULE_TYPE_REPO = {
     "ipam": "lbockenstedt/netbox",
     "directory": "lbockenstedt/ldap",
     "simulation": "lbockenstedt/cs",
+    "certificates": "lbockenstedt/le",
+    "storage": "lbockenstedt/truenas",
+    "nw": "lbockenstedt/nw",
+    "bugfixer": "lbockenstedt/bugfixer",
     "dhcp": "lbockenstedt/dhcp",
     "dns": "lbockenstedt/dns",
     "hub": "lbockenstedt/lm",
