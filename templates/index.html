@@ -325,6 +325,10 @@
                     </div>
                     <div class="pt-4 border-t border-slate-100 space-y-2">
                         <div class="flex justify-between items-center">
+                            <span class="text-slate-500 text-sm">Pending Verification</span>
+                            <span class="font-bold text-amber-600">{{ state.pending_verification_count }}</span>
+                        </div>
+                        <div class="flex justify-between items-center">
                             <span class="text-slate-500 text-sm">Issues Resolved</span>
                             <span class="font-bold text-green-600">{{ state.success_count }}</span>
                         </div>
@@ -421,6 +425,7 @@
                     </div>
                     <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
                     <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border-[#01A982]" title="Active issues (closed hidden)">Active</button>
+                    <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
                     <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
                     <button data-filter="resolved" onclick="filterActivity('resolved')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Resolved</button>
                     <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
@@ -445,6 +450,7 @@
                         <td class="px-6 py-4 text-slate-600">
                             {% if info.status == 'fixed' %}AI fix pushed / PR opened
                             {% elif info.status == 'verified' %}Verified clean in production
+                            {% elif info.status == 'pending_verification' %}Pending verification — auto-committed; confirm the issue is gone, then Resolve (or Re-open)
                             {% elif info.status == 'resolved' %}Resolved (human-confirmed)
                             {% elif info.status == 'closed' %}Closed on GitHub (resolved)
                             {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
@@ -454,7 +460,7 @@
                             {% else %}{{ info.status }}{% endif %}
                         </td>
                         <td class="px-6 py-4 text-right">
-                            <span class="px-2 py-1 rounded text-xs font-bold {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
+                            <span class="px-2 py-1 rounded text-xs font-bold {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
                         <td class="px-6 py-4 text-center space-x-2">
                             <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-xs px-2 py-1 rounded font-bold">Retry</button>

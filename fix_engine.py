@@ -1521,21 +1521,15 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             except Exception as ce:
                 logger.warning(f"Could not post success comment to {issue_id}: {ce}")
 
-            is_log_detected = "log-detected" in [lbl.name for lbl in issue.get_labels()]
             issue_id = f"{repo_name}:{issue_num}"
-            if not is_log_detected:
-                # Resolved + closed immediately: apply the closed label, record the terminal
-                # `closed` status, and move this issue out of Resolved into Closed. The
-                # success_count += 1 above (QA pass) is undone here — the issue is Closed, not
-                # Resolved. Log-detected issues stay open for the production verification period.
-                issue.edit(state='closed')
-                _notify_bug_fixed(issue)  # LM "File a Bug" → hub → UI shows "Fixed"
-                _apply_closed_label(repo_obj, issue, issue_id)
-                state["success_count"] = max(0, state["success_count"] - 1)
-                state["closed_count"] = state.get("closed_count", 0) + 1
-                new_status = "closed"
-            else:
-                new_status = "awaiting_prod_verification"
+            # Auto-committed → close on GitHub, then hold in PENDING VERIFICATION: a
+            # human opens BugFixer, confirms the issue is actually gone and clicks
+            # Resolved (→ Resolved bucket), or clicks Re-open if it's still there.
+            # EVERY direct-commit fix goes here — one consistent human-check gate.
+            issue.edit(state='closed')
+            _notify_bug_fixed(issue)  # LM "File a Bug" → hub → UI shows "Fixed"
+            _apply_closed_label(repo_obj, issue, issue_id)
+            new_status = "pending_verification"
 
             processed = load_processed()
             processed[issue_id] = {

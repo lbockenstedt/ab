@@ -75,6 +75,9 @@ failure_count = sum(1 for i in processed_init.values() if i.get("status") == "fa
 closed_count = sum(1 for i in processed_init.values() if i.get("status") == "closed" and not _is_reopened(i))
 reopened_resolved_count = sum(1 for i in processed_init.values() if i.get("status") in _RESOLVED_STATUSES and _is_reopened(i))
 reopened_closed_count = sum(1 for i in processed_init.values() if i.get("status") == "closed" and _is_reopened(i))
+# Auto-committed + GitHub-closed, but awaiting a HUMAN to verify the issue is gone
+# (then they click Resolved → resolved, or Re-open → reprocess).
+pending_verification_count = sum(1 for i in processed_init.values() if i.get("status") == "pending_verification")
 
 state = {
     "status": "Idle", "active_llm": "Unknown",
@@ -92,6 +95,7 @@ state = {
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "reopened_resolved_count": reopened_resolved_count, "reopened_closed_count": reopened_closed_count,
+    "pending_verification_count": pending_verification_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "provider_credit_cb": _provider_credit_cb_snapshot(),
     "paused": False,
@@ -129,6 +133,7 @@ def recompute_issue_counters(processed=None):
     state["closed_count"] = sum(1 for i in vals if i.get("status") == "closed" and not _is_reopened(i))
     state["reopened_resolved_count"] = sum(1 for i in vals if i.get("status") in _RESOLVED_STATUSES and _is_reopened(i))
     state["reopened_closed_count"] = sum(1 for i in vals if i.get("status") == "closed" and _is_reopened(i))
+    state["pending_verification_count"] = sum(1 for i in vals if i.get("status") == "pending_verification")
     state["failure_count"] = sum(1 for i in vals if i.get("status") == "failed")
     return state
 
@@ -144,6 +149,7 @@ __all__ = [
     "closed_count",
     "reopened_resolved_count",
     "reopened_closed_count",
+    "pending_verification_count",
     "recompute_issue_counters",
     "update_task_state",
     "_task_state_lock",
