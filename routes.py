@@ -769,7 +769,7 @@ DEFAULT_ENV = {
     "SCHEDULER_WORK_CAP_PCT": "25",
     "SCHEDULER_WORK_POLL_INTERVAL": "600",
     "SCHEDULER_CRITICAL_LABEL": "critical",
-    "SCHEDULER_BUG_LABEL": "Bug",
+    "SCHEDULER_BUG_LABEL": "bug",
 }
 
 
@@ -1035,7 +1035,7 @@ async def save_settings(request: Request):
         "SCHEDULER_WORK_CAP_PCT": lambda v: int(v) if str(v).strip().isdigit() else 25,
         "SCHEDULER_WORK_POLL_INTERVAL": lambda v: int(v) if str(v).strip().isdigit() else 600,
         "SCHEDULER_CRITICAL_LABEL": lambda v: v.strip() if v else "critical",
-        "SCHEDULER_BUG_LABEL": lambda v: v.strip() if v else "Bug",
+        "SCHEDULER_BUG_LABEL": lambda v: v.strip() if v else "bug",
         "QA_API_URL": lambda v: v.strip() if v else "",
         "QA_REPO": lambda v: v.strip() if v else "",
         "QA_TEST_COMMAND": lambda v: v.strip() if v else "pytest",

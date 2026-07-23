@@ -638,7 +638,7 @@ def scan_repo_issues(gh_current, config, processed):
                                       # and bypass the scheduler window (processed now, not at
                                       # the next allowed slot). Subject to the per-cycle cap,
                                       # but takes cap slots ahead of log-detected.
-                bug_label = (config.get("SCHEDULER_BUG_LABEL") or "Bug").strip()
+                bug_label = (config.get("SCHEDULER_BUG_LABEL") or "bug").strip()
                 for issue in issues:
                     try:
                         if issue.state != 'open' or issue.pull_request:

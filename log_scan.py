@@ -910,7 +910,7 @@ def scan_bugs(gh_current, config, hub_logs):
                 f"(report id `{rid}`) and are NOT included in this public issue. "
                 f"BugFixer pulls them from the hub as fix context._\n"
             )
-            file_labels = ["automated-fix", "Bug"]
+            file_labels = ["automated-fix", (config.get("SCHEDULER_BUG_LABEL") or "bug").strip()]
         error_data = {"module": "hub", "title": title, "body": body, "repo": repo_name}
         try:
             gh_repo = gh_current.get_repo(repo_name)
