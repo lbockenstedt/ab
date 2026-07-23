@@ -241,15 +241,24 @@ def _gb(b):
     return f"{b / 1024 ** 3:.1f}GB"
 
 
-def run_local_llm_setup(model, num_ctx, cores):
+def run_local_llm_setup(model, num_ctx, cores, slot=4):
     """Background pipeline for the one-click local (CPU-only) LLM setup.
 
     Stages: install Ollama → ensure service → pull model → create context-tuned
-    derived model → write systemd override + restart → configure slot 4 →
-    verify. Each stage is idempotent. Progress is streamed via
+    derived model → write systemd override + restart → configure the chosen
+    provider slot → verify. Each stage is idempotent. Progress is streamed via
     _llm_setup_log() into state['active_tasks']['LocalLLMSetup'].
+
+    slot: which BugFixer provider slot (1-4) to assign the local model to. The
+    caller's choice is honored; falls back to 4 only if it's missing/invalid.
     """
     task_id = "LocalLLMSetup"
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        slot = 4
+    if slot not in (1, 2, 3, 4):
+        slot = 4
     update_task_state(task_id, "Local LLM Setup", action="start")
     base_url = OLLAMA_BASE_URL
     derived_tag = model
@@ -410,8 +419,8 @@ def run_local_llm_setup(model, num_ctx, cores):
             )
         _llm_setup_log("✓ systemd override confirmed (read-only)")
 
-        # ---- Stage 6: configure BugFixer provider slot 4 ----
-        _llm_setup_log("▶ Stage 6/7 — Configuring BugFixer provider slot 4 (P4)…")
+        # ---- Stage 6: configure the chosen BugFixer provider slot ----
+        _llm_setup_log(f"▶ Stage 6/7 — Configuring BugFixer provider slot {slot} (P{slot})…")
         config = load_config()
         config.setdefault("llm_credentials", {})["ollama"] = {"api_key": "", "base_url": base_url}
         entries = config.setdefault("llm_entries", [])
@@ -429,9 +438,9 @@ def run_local_llm_setup(model, num_ctx, cores):
         else:
             entry["label"] = "Local Ollama (CPU)"
             entry["model"] = derived_tag
-        config.setdefault("llm_slots", {})["4"] = entry["id"]
+        config.setdefault("llm_slots", {})[str(slot)] = entry["id"]
         save_config(config)
-        _llm_setup_log(f"✓ Slot 4 → {entry['label']} / {derived_tag}")
+        _llm_setup_log(f"✓ Slot {slot} → {entry['label']} / {derived_tag}")
 
         # ---- Stage 7: verify ----
         _llm_setup_log("▶ Stage 7/7 — Verifying Ollama responds with the model…")

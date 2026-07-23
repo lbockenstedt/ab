@@ -1226,7 +1226,8 @@ async def get_llm_config():
 async def local_llm_setup(request: Request):
     """Kick off the one-click local (CPU-only) LLM setup in the background.
 
-    Body (all optional, defaults applied): {model, num_ctx, cores}.
+    Body (all optional, defaults applied): {model, num_ctx, cores, slot}.
+    slot (1-4) is the provider slot to assign the local model to; honored as given.
     Returns immediately with the task_id the UI polls via /api/task-details.
     """
     try:
@@ -1242,9 +1243,15 @@ async def local_llm_setup(request: Request):
         cores = int(data.get("cores") or state.get("cpu_count") or os.cpu_count() or 4)
     except (TypeError, ValueError):
         cores = os.cpu_count() or 4
+    try:
+        slot = int(data.get("slot") or 4)
+    except (TypeError, ValueError):
+        slot = 4
+    if slot not in (1, 2, 3, 4):
+        slot = 4
     if "LocalLLMSetup" in state.get("active_tasks", {}):
         return JSONResponse(status_code=409, content={"status": "busy", "message": "A local LLM setup is already running."})
-    threading.Thread(target=run_local_llm_setup, args=(model, num_ctx, cores), daemon=True).start()
+    threading.Thread(target=run_local_llm_setup, args=(model, num_ctx, cores, slot), daemon=True).start()
     return {"status": "started", "task_id": "LocalLLMSetup"}
 
 

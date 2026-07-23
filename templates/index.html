@@ -906,7 +906,7 @@
                             provider slot <strong>P4</strong>. Min: ~24 GB RAM, 8+ cores, ~22 GB disk, no GPU.
                             <span class="text-slate-400">Requires root (the app already runs privileged systemctl).</span>
                         </p>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-4">
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-4">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Model</label>
                                 <input type="text" id="local-llm-model" value="qwen2.5-coder:32b"
@@ -923,6 +923,17 @@
                                 <input type="number" id="local-llm-cores" value="{{ state.cpu_count }}" min="1"
                                        class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                 <span class="text-xs text-slate-400">Detected {{ state.cpu_count }} cores.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Provider slot</label>
+                                <select id="local-llm-slot"
+                                        class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                    <option value="1">P1</option>
+                                    <option value="2">P2</option>
+                                    <option value="3">P3</option>
+                                    <option value="4" selected>P4</option>
+                                </select>
+                                <span class="text-xs text-slate-400">Which slot to assign this model to.</span>
                             </div>
                         </div>
                         <div class="flex items-center gap-3">
@@ -2915,6 +2926,7 @@
             const model = (document.getElementById('local-llm-model')?.value || 'qwen2.5-coder:32b').trim();
             const num_ctx = parseInt(document.getElementById('local-llm-ctx')?.value || '32768', 10) || 0;
             const cores = parseInt(document.getElementById('local-llm-cores')?.value || '1', 10) || 1;
+            const slot = parseInt(document.getElementById('local-llm-slot')?.value || '4', 10) || 4;
 
             if (!confirm(
                 `This will:\n` +
@@ -2922,7 +2934,7 @@
                 `  • pull ${model} (~20 GB download, several minutes)\n` +
                 `  • create a context-tuned model (num_ctx=${num_ctx || 'default'})\n` +
                 `  • write a systemd override + restart the ollama service\n` +
-                `  • configure BugFixer slot P4 → ${model}\n\n` +
+                `  • configure BugFixer slot P${slot} → ${model}\n\n` +
                 `Continue?`
             )) return;
 
@@ -2941,7 +2953,7 @@
                 const resp = await fetch('/api/local-llm/setup', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model, num_ctx, cores })
+                    body: JSON.stringify({ model, num_ctx, cores, slot })
                 });
                 const data = await resp.json();
                 if (!resp.ok || data.status === 'busy') {
