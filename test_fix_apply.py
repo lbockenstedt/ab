@@ -21,28 +21,30 @@ import os
 import re
 import sys
 import tempfile
+import threading
 
 
 def _load_funcs():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fix_engine.py")
     src = open(path).read()
     tree = ast.parse(src)
-    want = {"_safe_repo_target", "_issue_identifiers",
-            "_targeted_file_context", "parse_and_apply"}
+    want = {"_safe_repo_target", "_issue_identifiers", "_targeted_file_context",
+            "parse_and_apply", "_claim_issue", "_release_issue"}
+    want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues"}
     segs = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
             segs.append(ast.get_source_segment(src, node))
         if isinstance(node, ast.Assign):
             for t in node.targets:
-                if getattr(t, "id", "") == "_ISSUE_STOP_TOKENS":
+                if getattr(t, "id", "") in want_assign:
                     segs.append(ast.get_source_segment(src, node))
 
     class _L:
         def __getattr__(self, _):
             return lambda *a, **k: None
 
-    ns = {"os": os, "json": json, "re": re, "logger": _L()}
+    ns = {"os": os, "json": json, "re": re, "threading": threading, "logger": _L()}
     exec("\n\n".join(segs), ns)
     return ns
 
@@ -97,6 +99,17 @@ def main():
         {"file": "../escape.txt", "search": "a", "replace": "b"}]})
     esc_ok, esc_applied, _ = ns["parse_and_apply"](esc, d)
     ok &= _check("path traversal in an edit is rejected", esc_ok is False and not esc_applied)
+
+    # In-flight claim: two workers can't process the same issue concurrently
+    # (the reopen re-queue + a scan both grabbing an issue → duplicate commits).
+    claim, release = ns["_claim_issue"], ns["_release_issue"]
+    ok &= _check("first claim of an issue succeeds", claim("lm:102") is True)
+    ok &= _check("second concurrent claim is rejected", claim("lm:102") is False)
+    ok &= _check("a different issue is unaffected", claim("lm:103") is True)
+    release("lm:102")
+    ok &= _check("claim succeeds again after release (re-trigger)", claim("lm:102") is True)
+    release("lm:999")  # releasing a non-held id must not raise
+    ok &= _check("releasing a non-held id is a safe no-op", True)
 
     print()
     if ok:

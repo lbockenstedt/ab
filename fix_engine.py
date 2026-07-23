@@ -1,5 +1,5 @@
 """AI fix pipeline: issue analysis, sandboxed fix generation/application, verification, and per-issue orchestration (extracted from main.py)."""
-import contextlib, git, json, os, re, requests, tempfile, time
+import contextlib, git, json, os, re, requests, tempfile, threading, time
 from datetime import datetime
 from github import Github, GithubException
 
@@ -808,10 +808,39 @@ def verify_fix(repo_path, repo_name, config):
         return False, error_msg
 
 
+# In-flight claim: BugFixer runs as ONE process (background scan ThreadPoolExecutor
+# + the FastAPI request thread that services the manual/reopen triggers), so a
+# process-wide lock is enough to guarantee a given issue is worked by at most one
+# worker at a time. Without it, the reopen re-queue and a concurrent scan both
+# grabbed the same still-open issue, produced two competing fix commits (the loser
+# couldn't fast-forward), and posted duplicate "resolved" comments — one citing a
+# commit that never reached the default branch.
+_inflight_lock = threading.Lock()
+_inflight_issues = set()
+
+
+def _claim_issue(issue_id):
+    """Atomically claim *issue_id* for processing. Returns False if another worker
+    already holds it (caller should skip — do NOT release what it didn't claim)."""
+    with _inflight_lock:
+        if issue_id in _inflight_issues:
+            return False
+        _inflight_issues.add(issue_id)
+        return True
+
+
+def _release_issue(issue_id):
+    with _inflight_lock:
+        _inflight_issues.discard(issue_id)
+
+
 def process_single_issue(repo_name, issue_num, llm_preference=None):
     """Core logic to fix a single issue. Used by poller and manual triggers."""
     global state
     issue_id = f"{repo_name}:{issue_num}"
+    if not _claim_issue(issue_id):
+        logger.info(f"{issue_id}: already being processed by another worker — skipping duplicate.")
+        return False, "Already being processed"
     try:
         config = load_config()
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
@@ -1213,6 +1242,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         except Exception as cleanup_err:
             logger.error(f"Failed to clean up task state for {issue_id}: {cleanup_err}")
         return False, str(e)
+    finally:
+        # Always release the claim — on success, failure, or exception — so a later
+        # legitimate re-trigger (e.g. operator Reopen) isn't permanently blocked.
+        _release_issue(issue_id)
 
 
 __all__ = [
