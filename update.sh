@@ -7,9 +7,17 @@ echo "🔄 Updating BugFixer from GitHub..."
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$DIR"
 
-# 1. Pull latest changes
+# 1. Fetch + hard-reset to origin/main. /opt/bugfixer is a deployment mirror, so a
+# plain `git pull` aborts on "local changes would be overwritten" if any tracked
+# file was dirtied at runtime. Reset is robust to that (matches the in-process
+# self-update). Any local changes are intentionally discarded.
 if [ -d ".git" ]; then
-    git pull origin main
+    git fetch origin main
+    if ! git diff --quiet HEAD; then
+        echo "⚠️  Local changes present — discarding (deployment mirror):"
+        git status --porcelain
+    fi
+    git reset --hard origin/main
 else
     echo "❌ Error: This directory is not a git repository. Please run setup.sh first."
     exit 1

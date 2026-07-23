@@ -433,7 +433,24 @@ def check_for_updates():
             logger.warning(f"Remote head {remote_head[:7]} is in failed_commits blocklist. Skipping pull.")
             return False, f"Update skipped: remote head {remote_head[:7]} is a known-bad commit."
 
-        self_repo.remotes.origin.pull()
+        # Advance to the fetched remote head. /opt/bugfixer is a DEPLOYMENT MIRROR,
+        # not a dev tree — a plain `git pull` aborts with "local changes would be
+        # overwritten" the moment any tracked file is dirtied at runtime, wedging
+        # self-update forever. Hard-reset to the fetched head instead (robust to a
+        # dirty worktree), logging what gets discarded so the dirtying cause stays
+        # visible. Fall back to pull only if we couldn't read the remote head.
+        if remote_head:
+            try:
+                if self_repo.is_dirty(untracked_files=False):
+                    dirty = self_repo.git.status("--porcelain")
+                    logger.warning("Self-update: worktree has local changes; hard-resetting to "
+                                   "origin/%s (deployment mirror). Discarding:\n%s", tracked, dirty)
+                self_repo.git.reset("--hard", remote_head)
+            except Exception as re:
+                logger.warning(f"Self-update: hard-reset to {remote_head[:7]} failed ({re}); falling back to pull.")
+                self_repo.remotes.origin.pull()
+        else:
+            self_repo.remotes.origin.pull()
         new_commit = self_repo.head.commit.hexsha
 
         if old_commit != new_commit:
