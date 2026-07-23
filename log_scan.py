@@ -898,18 +898,20 @@ def scan_bugs(gh_current, config, hub_logs):
             )
             file_labels = ["enhancement"]
         else:
-            # Title stays a stable, generic label; the error text goes on its own
-            # (second) line at the top of the body rather than being crammed into
-            # the single title line. Dedup no longer needs the error in the title —
-            # it matches on the body error signature, and _normalize_for_dedup
-            # strips the "Bug Report" boilerplate so the constant title carries no
-            # token signal (two DISTINCT errors can't false-match on title alone).
+            # Title is "🤖 Bug Report - <short error summary>" so the issue is
+            # scannable at a glance; the FULL error text still leads the body on
+            # its own line (not crammed into the title). _normalize_for_dedup
+            # strips the "Bug Report" boilerplate, so title dedup compares just the
+            # error summary — two reports of the SAME error share a title (match),
+            # two DISTINCT errors don't (no false match); the body error signature
+            # is the backup signal.
             _err = next((ln.strip() for ln in str(explanation).splitlines()
                          if ln.strip().lower().startswith("error:") and len(ln.strip()) > 6), "")
             _msg = _err[6:].strip() if _err.lower().startswith("error:") else \
                 (_err or str(explanation).strip()[:200].strip())
             _err_line = f"**Error:** {_msg}\n\n" if _msg else ""
-            title = "🤖 Bug Report"
+            _summary = " ".join(_msg.split())[:80].strip()  # single-line, capped for the title
+            title = f"🤖 Bug Report - {_summary}" if _summary else "🤖 Bug Report"
             body = (
                 f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
                 f"{_err_line}"

@@ -156,27 +156,31 @@ def main():
         ),
     )
 
-    # (8) Constant-title WebUI bug reports: since the title is now a fixed
-    # "🤖 Bug Report" label with the error moved into the body, dedup MUST be
-    # driven by the body. The boilerplate title must NOT let two DISTINCT errors
-    # false-match, and the SAME error across two filings must still match.
-    _CONST_TITLE = "🤖 Bug Report"
-    _webui = lambda err, view, ver: (
-        f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
-        f"**Error:** {err}\n\n"
-        f"### What's wrong\n[Auto-filed from a runtime browser error]\n\n"
-        f"Error: {err}\nView: {view}\n\n### Context\n- hubVersion: {ver}\n"
-    )
-    same_a = _webui("Can't find variable: ensureLDAPTennants", "ldap / Users", ".1215")
-    same_b = _webui("Can't find variable: ensureLDAPTennants", "ldap / Users", ".1216")
-    diff_b = _webui("Cannot read properties of undefined reading foo", "dns / Zones", ".1216")
+    # (8) WebUI bug reports: title is "🤖 Bug Report - <short error summary>",
+    # error also on its own body line. _normalize_for_dedup strips the "Bug
+    # Report" boilerplate, so dedup compares the error summary (title) plus the
+    # body signature. SAME error across two filings must match; two DISTINCT
+    # errors must NOT — even though both share the "Bug Report" prefix.
+    def _webui(err, view, ver):
+        summary = " ".join(err.split())[:80].strip()
+        title = f"🤖 Bug Report - {summary}" if summary else "🤖 Bug Report"
+        body = (
+            f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
+            f"**Error:** {err}\n\n"
+            f"### What's wrong\n[Auto-filed from a runtime browser error]\n\n"
+            f"Error: {err}\nView: {view}\n\n### Context\n- hubVersion: {ver}\n"
+        )
+        return title, body
+    same_at, same_a = _webui("Can't find variable: ensureLDAPTennants", "ldap / Users", ".1215")
+    same_bt, same_b = _webui("Can't find variable: ensureLDAPTennants", "ldap / Users", ".1216")
+    diff_bt, diff_b = _webui("Cannot read properties of undefined reading foo", "dns / Zones", ".1216")
     ok &= _check(
-        "constant title: SAME browser error across two filings matches (body-driven)",
-        _is_duplicate_match(_CONST_TITLE, same_a, _CONST_TITLE, same_b),
+        "summary-title: SAME browser error across two filings matches",
+        _is_duplicate_match(same_bt, same_b, same_at, same_a),
     )
     ok &= _check(
-        "constant title: DISTINCT browser errors do NOT false-match on the label",
-        not _is_duplicate_match(_CONST_TITLE, same_a, _CONST_TITLE, diff_b),
+        "summary-title: DISTINCT browser errors do NOT false-match on the 'Bug Report' prefix",
+        not _is_duplicate_match(diff_bt, diff_b, same_at, same_a),
     )
 
     print()
