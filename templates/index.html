@@ -430,7 +430,6 @@
                 <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
                     <tr class="border-b border-slate-200">
                         <th class="px-6 py-3 font-medium">Issue ID</th>
-                        <th class="px-6 py-3 font-medium">Result</th>
                         <th class="px-6 py-3 font-medium text-right">Status</th>
                         <th class="px-6 py-3 font-medium text-center">Actions</th>
                     </tr>
@@ -438,34 +437,36 @@
                 <tbody class="divide-y divide-slate-200">
                     {% for issue_id, info in state.processed.items() %}
                     <tr class="hover:bg-slate-50 transition-colors" data-status="{{ info.status }}">
-                        <td class="px-6 py-4 font-mono text-[#01A982]">{{ issue_id }}</td>
-                        <td class="px-6 py-4 text-slate-600">
-                            {% if info.status == 'fixed' %}AI fix pushed / PR opened
-                            {% elif info.status == 'verified' %}Verified clean in production
-                            {% elif info.status == 'pending_verification' %}Pending verification — auto-committed; confirm the issue is gone, then Resolve (or Re-open)
-                            {% elif info.status == 'resolved' %}Resolved (human-confirmed)
-                            {% elif info.status == 'closed' %}Closed on GitHub (resolved)
-                            {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
-                            {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
-                            {% elif info.status == 'non-actionable' %}Non-actionable: {{ (info.reason or '')[:80] }}
-                            {% elif info.status == 'failed' %}Failed: {{ (info.error or '')[:80] }}
-                            {% else %}{{ info.status }}{% endif %}
+                        <td class="px-6 py-3 font-mono text-[#01A982] align-middle">{{ issue_id }}</td>
+                        <td class="px-6 py-3 text-right align-middle">
+                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
-                        <td class="px-6 py-4 text-right">
-                            <span class="px-2 py-1 rounded text-xs font-bold {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
-                        </td>
-                        <td class="px-6 py-4 text-center space-x-2">
-                            <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-xs px-2 py-1 rounded font-bold">Retry</button>
-                            <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2 py-1 rounded font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
-                            <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-1 rounded font-bold bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
-                            <button onclick="deleteIssue('{{ issue_id }}')" class="btn-danger text-xs px-2 py-1 rounded font-bold" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                            <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-1 rounded font-bold" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                        <td class="px-6 py-3 align-middle">
+                            <div class="flex flex-wrap gap-1.5 justify-center items-center">
+                                <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap">Retry</button>
+                                <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
+                                <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
+                                <button onclick="deleteIssue('{{ issue_id }}')" class="btn-danger text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                            </div>
                         </td>
                     </tr>
                     <tr class="bg-slate-50/50">
-                        <td colspan="4" class="px-6 py-2 text-slate-500 text-[10px] italic border-b border-slate-100">
+                        <td colspan="3" class="px-6 py-2 border-b border-slate-100">
                             <div class="flex flex-col gap-2">
-                                <div class="flex items-center flex-wrap gap-x-2">
+                                <div class="text-slate-600 text-xs">
+                                    {% if info.status == 'fixed' %}AI fix pushed / PR opened
+                                    {% elif info.status == 'verified' %}Verified clean in production
+                                    {% elif info.status == 'pending_verification' %}Pending verification — auto-committed; confirm the issue is gone, then Resolve (or Re-open)
+                                    {% elif info.status == 'resolved' %}Resolved (human-confirmed)
+                                    {% elif info.status == 'closed' %}Closed on GitHub (resolved)
+                                    {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
+                                    {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
+                                    {% elif info.status == 'non-actionable' %}Non-actionable: {{ (info.reason or '')[:80] }}
+                                    {% elif info.status == 'failed' %}Failed: {{ (info.error or '')[:80] }}
+                                    {% else %}{{ info.status }}{% endif %}
+                                </div>
+                                <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-[10px] italic">
                                     {% if info.status == 'fixed' or info.status == 'verified' or info.status == 'closed' %}
                                         <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
                                         <span class="mx-2 text-slate-300">|</span>
@@ -505,7 +506,7 @@
                     {% endfor %}
                     {% if not state.processed %}
                     <tr>
-                        <td colspan="4" class="px-6 py-8 text-center text-slate-400 italic">No issues processed yet.</td>
+                        <td colspan="3" class="px-6 py-8 text-center text-slate-400 italic">No issues processed yet.</td>
                     </tr>
                     {% endif %}
                 </tbody>
