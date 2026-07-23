@@ -438,9 +438,18 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
 
         current_repo_name = error_data.get('repo') or gh_repo.full_name
 
+        logger.info(f"[dedup] Checking for an existing issue matching {title_text[:80]!r} "
+                    f"(target {current_repo_name}, +{len(monitored_repos)} monitored repos)…")
         existing_issue, duplicate_repo_name, was_closed = find_global_duplicate_issue(
             gh_current, monitored_repos, error_data
         )
+        if existing_issue:
+            logger.info(f"[dedup] MATCH → #{existing_issue.number} in "
+                        f"{duplicate_repo_name or current_repo_name} "
+                        f"(state={existing_issue.state}, was_closed={was_closed}) — will "
+                        f"{'reopen' if was_closed else 'add evidence to'} it, not file a duplicate.")
+        else:
+            logger.info(f"[dedup] NO MATCH for {title_text[:80]!r} — filing a NEW issue.")
 
         if existing_issue:
             duplicate_repo_display = duplicate_repo_name or current_repo_name
