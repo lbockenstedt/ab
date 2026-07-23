@@ -864,8 +864,17 @@ async def hub_logs_raw():
 _LOG_ANALYSIS_LOCK = threading.Lock()
 _LOG_ANALYSIS_TASK = "LogAnalysis"
 _LOG_ANALYSIS_MAX_CHARS = 16000
-_LOG_ANALYSIS_WINDOW_MIN = 15          # pre-compute snapshot window
-_LOG_ANALYSIS_PRECOMPUTE_EVERY = 900   # refresh the idle snapshot at most this often (s)
+_LOG_ANALYSIS_WINDOW_DEFAULT = 30      # default window (min) — configurable via Settings
+
+
+def _log_analysis_window_min():
+    """Configured log-analysis window / precompute interval in minutes (Settings →
+    log_analysis_interval_min; default 30). Governs both how far back the LLM looks AND
+    how often the idle precompute runs."""
+    try:
+        return max(1, int(load_config().get("log_analysis_interval_min", _LOG_ANALYSIS_WINDOW_DEFAULT)))
+    except (TypeError, ValueError):
+        return _LOG_ANALYSIS_WINDOW_DEFAULT
 
 
 def _parse_log_ts(line):
@@ -976,11 +985,11 @@ def _log_analysis_busy():
 
 
 def log_health_worker():
-    """When BugFixer is idle, pre-compute a health snapshot of the last 15 minutes of
-    its own logs so the Log Analysis panel shows a ready answer on page open. Cheap,
-    respects the single LLM slot (skips while a fix/chat is running), and refreshes at
-    most every _LOG_ANALYSIS_PRECOMPUTE_EVERY seconds. The user's Refresh button
-    (runLogAnalysis) always overrides with a live run."""
+    """When BugFixer is idle, pre-compute a health snapshot of the last N minutes of its
+    own logs so the Log Analysis panel shows a ready answer on page open. Cheap, respects
+    the single LLM slot (skips while a fix/chat is running), and refreshes at most every
+    N minutes — N = log_analysis_interval_min (Settings, default 30). The user's Refresh
+    button (runLogAnalysis) always overrides with a live run."""
     import time as _t
     last = 0.0
     while True:
@@ -988,7 +997,8 @@ def log_health_worker():
             _t.sleep(60)
             if state.get("paused") or state.get("blackout"):
                 continue
-            if (_t.time() - last) < _LOG_ANALYSIS_PRECOMPUTE_EVERY:
+            window_min = _log_analysis_window_min()
+            if (_t.time() - last) < window_min * 60:
                 continue
             if _log_analysis_busy():
                 continue
@@ -997,7 +1007,7 @@ def log_health_worker():
             try:
                 state["log_analysis"] = {"running": True, "source": "self", "title": None,
                                          "result": "", "error": None, "at": None, "precomputed": True}
-                _run_log_analysis("self", window_minutes=_LOG_ANALYSIS_WINDOW_MIN, precomputed=True)
+                _run_log_analysis("self", window_minutes=window_min, precomputed=True)
                 last = _t.time()
             finally:
                 _LOG_ANALYSIS_LOCK.release()
@@ -1026,7 +1036,7 @@ async def log_analysis_run(request: Request):
             try:
                 # Analyze only the recent window (same as the idle precompute), so the
                 # LLM sees just the last-N-min of activity, not the whole tail.
-                _run_log_analysis(source, window_minutes=_LOG_ANALYSIS_WINDOW_MIN)
+                _run_log_analysis(source, window_minutes=_log_analysis_window_min())
             finally:
                 _LOG_ANALYSIS_LOCK.release()
 
@@ -1403,6 +1413,13 @@ async def save_settings(request: Request):
         config_data["CPU_CROSSCHECK_TARGET"] = max(0.5, min(1.0, float(_cct))) if _cct else 0.90
     except (TypeError, ValueError):
         config_data["CPU_CROSSCHECK_TARGET"] = 0.90
+    # Log Analysis window / idle-precompute interval in minutes (default 30). Governs
+    # both how far back the LLM looks and how often the idle snapshot refreshes.
+    _lai = str(data.get("log_analysis_interval_min") or "").strip()
+    try:
+        config_data["log_analysis_interval_min"] = max(1, int(_lai)) if _lai else 30
+    except (TypeError, ValueError):
+        config_data["log_analysis_interval_min"] = 30
     # Heartbeat triage files issues for modules with a missing/stale heartbeat
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.
