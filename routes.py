@@ -1523,14 +1523,18 @@ async def resolve_issue(request: Request):
 
         if issue.state != "closed":
             issue.edit(state="closed")
-            try:
-                from fix_engine import _notify_bug_fixed
-                _notify_bug_fixed(issue)  # LM "File a Bug" → hub → UI shows "Fixed"
-            except Exception:
-                pass
             github_msg = f"Issue #{issue_num} closed on GitHub."
         else:
             github_msg = f"Issue #{issue_num} was already closed on GitHub."
+        # Human sign-off → tell the hub the bug report is fixed, ALWAYS — even when the
+        # issue was already closed on GitHub. (This used to be inside the "if not
+        # closed" branch, so an already-closed issue never flipped the LM report to
+        # Fixed.)
+        try:
+            from fix_engine import _notify_bug_fixed
+            _notify_bug_fixed(issue)  # LM "File a Bug" → hub → UI shows "Fixed"
+        except Exception:
+            pass
         # Apply the closed label (best-effort; existing labels kept).
         _apply_closed_label(repo, issue, issue_id)
         logger.info(f"Resolved issue {issue_id}: status -> closed, {github_msg}")
@@ -1541,29 +1545,21 @@ async def resolve_issue(request: Request):
             "message": f"GitHub close failed: {e}. Local status left unchanged.",
         })
 
-    # GitHub close succeeded — now update local processed history to `closed` and
-    # move the issue out of its prior System-Health bucket into Closed.
+    # GitHub close succeeded — clicking Resolved is a HUMAN sign-off, so the issue
+    # moves into the RESOLVED bucket (status "resolved"), NOT Closed. Counters are
+    # re-derived from the store so it lands in exactly one bucket.
     processed = load_processed()
     local_msg = "No local history entry to update, but "
     if issue_id in processed:
         entry = processed[issue_id]
-        prev_status = entry.get("status")
-        # Remove the issue from whichever bucket it was counted in, then place it in Closed.
-        if prev_status == "failed":
-            state["failure_count"] = max(0, state.get("failure_count", 0) - 1)
-        elif prev_status in ("fixed", "verified", "awaiting_prod_verification"):
-            state["success_count"] = max(0, state.get("success_count", 0) - 1)
-        entry["status"] = "closed"
+        entry["status"] = "resolved"
         entry["timestamp"] = datetime.now().isoformat()
-        entry["decision_reason"] = "Manually marked as resolved and closed on GitHub."
+        entry["decision_reason"] = "Human-confirmed resolved."
         processed[issue_id] = entry
-        state["processed"] = processed
-        # Only bump Closed if it wasn't already closed locally — re-resolving an
-        # already-closed issue must not double-count.
-        if prev_status != "closed":
-            state["closed_count"] = state.get("closed_count", 0) + 1
         save_processed(processed)
-        local_msg = "Already marked closed locally. " if prev_status == "closed" else "Marked as closed. "
+        recompute_issue_counters(processed)
+        state["processed"] = processed
+        local_msg = "Marked resolved (human-confirmed). "
 
     return {
         "status": "success",

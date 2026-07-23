@@ -56,8 +56,9 @@ def update_task_state(task_id, task_name="Unknown Task", action="start"):
 config_on_start = load_config()
 processed_init = load_processed()
 
-# Statuses that count as "resolved" (fix verified, not yet GitHub-closed).
-_RESOLVED_STATUSES = ("fixed", "verified", "awaiting_prod_verification")
+# Statuses that count as "resolved". "resolved" = a human clicked Resolved
+# (human-confirmed sign-off); the others are fix-verified/awaiting states.
+_RESOLVED_STATUSES = ("fixed", "verified", "awaiting_prod_verification", "resolved")
 
 
 def _is_reopened(info):

@@ -422,6 +422,7 @@
                     <span class="text-xs font-bold text-slate-500 uppercase mr-2">Filter:</span>
                     <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border-[#01A982]" title="Active issues (closed hidden)">Active</button>
                     <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
+                    <button data-filter="resolved" onclick="filterActivity('resolved')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Resolved</button>
                     <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
                     <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
                     <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
@@ -444,6 +445,7 @@
                         <td class="px-6 py-4 text-slate-600">
                             {% if info.status == 'fixed' %}AI fix pushed / PR opened
                             {% elif info.status == 'verified' %}Verified clean in production
+                            {% elif info.status == 'resolved' %}Resolved (human-confirmed)
                             {% elif info.status == 'closed' %}Closed on GitHub (resolved)
                             {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
                             {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
@@ -2155,7 +2157,7 @@
             document.querySelectorAll('tbody tr[data-status]').forEach(row => {
                 const s = (row.dataset.status || '').toLowerCase();
                 let show;
-                if (status === 'all')         show = s !== 'closed';      // active: closed hidden
+                if (status === 'all')         show = s !== 'closed' && s !== 'resolved';  // active: closed + resolved hidden
                 else if (status === 'closed') show = s === 'closed';
                 else                          show = s === status;
                 row.style.display = show ? '' : 'none';
