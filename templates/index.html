@@ -810,6 +810,8 @@
                                     <select id="new-entry-reviewer" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="">— same as model —</option>
                                     </select>
+                                    <input type="text" id="new-entry-baseurl" placeholder="Base URL (optional — e.g. http://gpu-box:11434)" title="Per-entry endpoint. Overrides the shared credential — lets 3 ollama entries target local CPU / LAN GPU / cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="text" id="new-entry-apikey" placeholder="API key (optional — overrides shared)" title="Per-entry key. Set only for a cloud endpoint that needs one." class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                                 <div class="flex gap-2">
                                     <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs btn-primary rounded font-bold">Add</button>
@@ -2758,11 +2760,13 @@
             const model = document.getElementById('new-entry-model')?.value;
             const rpm = parseInt(document.getElementById('new-entry-rpm')?.value || '0');
             const reviewer_model = document.getElementById('new-entry-reviewer')?.value.trim() || '';
+            const base_url = document.getElementById('new-entry-baseurl')?.value.trim() || '';
+            const api_key = document.getElementById('new-entry-apikey')?.value.trim() || '';
             if (!model) { showToast('Please select a model.', 'warn'); return; }
             const resp = await fetch('/api/llm/entries', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model})
+                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model, base_url, api_key})
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to add entry.', 'error');

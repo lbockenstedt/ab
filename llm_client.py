@@ -158,8 +158,13 @@ def _get_provider_config(n, config):
             provider = (entry.get("provider") or "openai").lower().strip()
             model = (entry.get("model") or "").strip()
             cred = credentials.get(provider) or {}
-            api_key = (cred.get("api_key") or "").strip()
-            base_url = (cred.get("base_url") or entry.get("base_url") or "").strip()
+            # Per-ENTRY base_url/api_key take precedence over the shared per-provider
+            # credential, so multiple entries of the same provider can target
+            # different endpoints — e.g. three `ollama` entries pointing at local CPU
+            # (localhost), a remote-GPU box on the LAN, and Ollama Cloud. Falls back
+            # to the shared credential when the entry doesn't override.
+            api_key = (entry.get("api_key") or cred.get("api_key") or "").strip()
+            base_url = (entry.get("base_url") or cred.get("base_url") or "").strip()
             return provider, api_key, model, base_url
 
     # Legacy flat config fallback.

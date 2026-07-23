@@ -1158,6 +1158,11 @@ async def create_llm_entry(request: Request):
         "model": (data.get("model") or "").strip(),
         "rpm": int(data.get("rpm") or 0),
         "reviewer_model": (data.get("reviewer_model") or "").strip(),
+        # Per-entry base_url / api_key override the shared per-provider credential,
+        # so e.g. three `ollama` entries can independently target local CPU
+        # (http://localhost:11434), a remote-GPU box on the LAN, and Ollama Cloud.
+        "base_url": (data.get("base_url") or "").strip(),
+        "api_key": (data.get("api_key") or "").strip(),
     }
     if not entry["model"]:
         return JSONResponse(status_code=400, content={"error": "model required"})
@@ -1180,6 +1185,12 @@ async def update_llm_entry(entry_id: str, request: Request):
             e["model"] = (data.get("model") or e.get("model") or "").strip()
             e["rpm"] = int(data.get("rpm") or e.get("rpm") or 0)
             e["reviewer_model"] = (data.get("reviewer_model") or "").strip()
+            # Per-entry overrides. Only overwrite when the key is present in the
+            # payload so a partial update doesn't wipe an existing value.
+            if "base_url" in data:
+                e["base_url"] = (data.get("base_url") or "").strip()
+            if "api_key" in data:
+                e["api_key"] = (data.get("api_key") or "").strip()
             save_config(config)
             return {"status": "ok", "entry": e}
     return JSONResponse(status_code=404, content={"error": "entry not found"})
