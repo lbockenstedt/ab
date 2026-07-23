@@ -137,6 +137,22 @@
             transition: all 0.2s ease;
         }
         .btn-sec:hover { background-color: #e2e8f0; } /* slate-200 */
+        /* Buttons never wrap to a second line, and their label + optional icon
+           are vertically centred. Applied to every <button> so toolbars stay a
+           single tidy row regardless of the per-button size/colour utilities.
+           display is intentionally NOT set here to avoid clobbering the Tailwind
+           `flex`/`w-full` utilities some buttons already use. */
+        button { white-space: nowrap; }
+        .btn-primary, .btn-sec, .filter-btn { align-items: center; justify-content: center; gap: 0.375rem; }
+        /* Soft danger variant (LM red-100 token) — matches btn-primary/btn-sec so
+           Dismiss / Clear actions are a consistent size + shape, colour aside. */
+        .btn-danger {
+            background-color: #fee2e2; /* red-100 */
+            color: #b91c1c;            /* red-700 */
+            border: 1px solid #fecaca; /* red-200 */
+            transition: all 0.2s ease;
+        }
+        .btn-danger:hover { background-color: #fecaca; } /* red-200 */
         /* Offset anchored sections so the sub-nav strip doesn't cover their
            header when jumped to. */
         section[id^="sec-"] { scroll-margin-top: 110px; }
@@ -385,10 +401,10 @@
                 <h3 class="text-lg font-bold text-[#263040]">Activity Feed</h3>
                 <div class="flex gap-2 items-center">
                     <div class="flex gap-2 items-center mr-4 border-r border-slate-200 pr-4">
-                        <button onclick="retryAll(null)" class="px-3 py-1 rounded-md text-xs font-bold bg-[#01A982]/10 text-[#01A982] hover:bg-[#01A982]/20 transition-all border border-[#01A982]">
+                        <button onclick="retryAll(null)" class="btn-primary px-3 py-1 rounded-md text-xs font-bold">
                             <i class="fas fa-redo-alt mr-1"></i> Retry All
                         </button>
-                        <button onclick="clearHistory()" class="px-3 py-1 rounded-md text-xs font-bold bg-red-100 text-red-700 hover:bg-red-200 transition-all border border-red-200">
+                        <button onclick="clearHistory()" class="btn-danger px-3 py-1 rounded-md text-xs font-bold">
                             <i class="fas fa-trash-alt mr-1"></i> Clear History
                         </button>
                         <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-md text-xs font-bold bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (bugfixer-dismissed) and clear the whole history">
@@ -431,11 +447,11 @@
                             <span class="px-2 py-1 rounded text-xs font-bold {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
                         <td class="px-6 py-4 text-center space-x-2">
-                            <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded font-bold text-slate-600 border border-slate-200 transition-colors">Retry</button>
-                            <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-sky-100 hover:bg-sky-200 rounded font-bold text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
-                            <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-1 bg-orange-100 hover:bg-orange-200 rounded font-bold text-orange-700 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
-                            <button onclick="deleteIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded font-bold text-red-700 transition-colors" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                            <button onclick="resolveIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-[#01A982]/10 hover:bg-[#01A982]/20 rounded font-bold text-[#01A982] border border-[#01A982] transition-colors" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                            <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-xs px-2 py-1 rounded font-bold">Retry</button>
+                            <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2 py-1 rounded font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
+                            <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-1 rounded font-bold bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
+                            <button onclick="deleteIssue('{{ issue_id }}')" class="btn-danger text-xs px-2 py-1 rounded font-bold" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                            <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-1 rounded font-bold" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                         </td>
                     </tr>
                     <tr class="bg-slate-50/50">
@@ -727,7 +743,7 @@
                                         <p class="text-xs text-slate-500">Uses the <strong>Claude Code</strong> session authenticated on this server — no API key needed. The <code class="bg-slate-100 px-1 rounded">claude</code> binary must be in PATH.</p>
                                         <div class="flex gap-2">
                                             <button type="button" onclick="checkClaudeStatus()" class="flex-1 py-1 text-xs btn-sec rounded font-bold">Check Status</button>
-                                            <button type="button" onclick="startClaudeAuth()" class="flex-1 py-1 text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] rounded font-bold transition-colors">Start Login Flow</button>
+                                            <button type="button" onclick="startClaudeAuth()" class="flex-1 py-1 text-xs btn-primary rounded font-bold">Start Login Flow</button>
                                         </div>
                                         <div id="claude-cli-status" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 space-y-1">
                                             <div id="claude-cli-status-line" class="font-medium"></div>
@@ -1366,8 +1382,8 @@
                 <div id="diag-stale-banner" class="hidden mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium flex items-center justify-between gap-3">
                     <span><i class="fas fa-exclamation-triangle mr-2"></i><span id="diag-stale-msg">Running code is stale — restart needed</span></span>
                     <div class="flex gap-2">
-                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded font-bold text-xs">Restart now</button>
-                        <button onclick="diagAction('/update_now', 'Checking…')" class="py-1.5 px-3 rounded-md font-bold text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors">Check for updates</button>
+                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs">Restart now</button>
+                        <button onclick="diagAction('/update_now', 'Checking…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs">Check for updates</button>
                     </div>
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
@@ -1520,8 +1536,8 @@
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-bold text-[#263040]">Update &amp; Restart</h3>
                     <div class="flex gap-2">
-                        <button onclick="diagAction('/update_now', 'Checking…')" class="py-1.5 px-3 rounded-md font-bold text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors"><i class="fas fa-cloud-download-alt mr-1"></i>Check for updates</button>
-                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary py-1.5 px-3 rounded font-bold text-xs">Restart now</button>
+                        <button onclick="diagAction('/update_now', 'Checking…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs"><i class="fas fa-cloud-download-alt mr-1"></i>Check for updates</button>
+                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs">Restart now</button>
                     </div>
                 </div>
                 <div class="text-xs text-slate-500 grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
