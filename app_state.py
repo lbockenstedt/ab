@@ -61,20 +61,15 @@ processed_init = load_processed()
 _RESOLVED_STATUSES = ("fixed", "verified", "awaiting_prod_verification", "resolved")
 
 
-def _is_reopened(info):
-    return bool(info.get("reopened"))
-
-
 # Counters are DERIVED from the processed store (the single source of truth) so a
 # reopen → re-close cycle can never double-count (the old running-increment model
-# drifted: an issue closed, reopened, then re-closed was tallied twice). An issue
-# that was reopened is tallied in the separate ReOpened buckets, not the base ones.
-success_count = sum(1 for i in processed_init.values() if i.get("status") in _RESOLVED_STATUSES and not _is_reopened(i))
+# drifted: an issue closed, reopened, then re-closed was tallied twice). Reopened
+# issues fold back into the base buckets — recurrence is now tracked through the
+# pending-verification workflow, not separate ReOpened counters.
+success_count = sum(1 for i in processed_init.values() if i.get("status") in _RESOLVED_STATUSES)
 failure_count = sum(1 for i in processed_init.values() if i.get("status") == "failed")
 # Issues closed on GitHub and recorded locally as `closed` (terminal resolved state).
-closed_count = sum(1 for i in processed_init.values() if i.get("status") == "closed" and not _is_reopened(i))
-reopened_resolved_count = sum(1 for i in processed_init.values() if i.get("status") in _RESOLVED_STATUSES and _is_reopened(i))
-reopened_closed_count = sum(1 for i in processed_init.values() if i.get("status") == "closed" and _is_reopened(i))
+closed_count = sum(1 for i in processed_init.values() if i.get("status") == "closed")
 # Auto-committed + GitHub-closed, but awaiting a HUMAN to verify the issue is gone
 # (then they click Resolved → resolved, or Re-open → reprocess).
 pending_verification_count = sum(1 for i in processed_init.values() if i.get("status") == "pending_verification")
@@ -94,7 +89,6 @@ state = {
     "version": get_version(), "llm_stream": "",
     "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
-    "reopened_resolved_count": reopened_resolved_count, "reopened_closed_count": reopened_closed_count,
     "pending_verification_count": pending_verification_count,
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "provider_credit_cb": _provider_credit_cb_snapshot(),
@@ -124,15 +118,13 @@ def recompute_issue_counters(processed=None):
     """Re-derive the issue counters from the processed store and write them into
     `state`. Call after ANY change to a processed entry's status/reopened flag
     (close, reopen, dismiss, delete) so the dashboard totals always match reality
-    instead of drifting from running +=/-= increments. Reopened issues land in the
-    ReOpened buckets; everything else in the base buckets."""
+    instead of drifting from running +=/-= increments. Reopened issues fold into the
+    base buckets — recurrence is tracked via the pending-verification workflow."""
     if processed is None:
         processed = load_processed()
     vals = list(processed.values())
-    state["success_count"] = sum(1 for i in vals if i.get("status") in _RESOLVED_STATUSES and not _is_reopened(i))
-    state["closed_count"] = sum(1 for i in vals if i.get("status") == "closed" and not _is_reopened(i))
-    state["reopened_resolved_count"] = sum(1 for i in vals if i.get("status") in _RESOLVED_STATUSES and _is_reopened(i))
-    state["reopened_closed_count"] = sum(1 for i in vals if i.get("status") == "closed" and _is_reopened(i))
+    state["success_count"] = sum(1 for i in vals if i.get("status") in _RESOLVED_STATUSES)
+    state["closed_count"] = sum(1 for i in vals if i.get("status") == "closed")
     state["pending_verification_count"] = sum(1 for i in vals if i.get("status") == "pending_verification")
     state["failure_count"] = sum(1 for i in vals if i.get("status") == "failed")
     return state
@@ -147,8 +139,6 @@ __all__ = [
     "success_count",
     "failure_count",
     "closed_count",
-    "reopened_resolved_count",
-    "reopened_closed_count",
     "pending_verification_count",
     "recompute_issue_counters",
     "update_task_state",
