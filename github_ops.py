@@ -1,5 +1,5 @@
 """GitHub API integration: repo resolution, label/version ops, duplicate detection, and automated issue creation (extracted from main.py)."""
-import json, os, requests
+import json, os, re, requests
 from datetime import datetime, timezone
 from dedup import _is_duplicate_match as _is_duplicate_match_impl, _jaccard as _jaccard_impl, _normalize_for_dedup as _normalize_for_dedup_impl, _token_set as _token_set_impl
 from dedup import _body_signal_match, _body_containment_match
@@ -178,15 +178,19 @@ def _ensure_label(gh_repo, name):
 
 
 def bump_repo_version(repo_path):
-    """Increments the patch component of the N.N.N version in the target repo's
-    VERSION file, mirroring the version-bump.yml CI (X.Y.Z -> X.Y.Z+1) and writing
-    a trailing newline so the file matches every repo's shared scheme.
+    """Increment the target repo's VERSION by bumping the LAST numeric run in place,
+    preserving its zero-pad width — EXACTLY mirroring the version-bump.yml CI so the
+    target's scheme is never clobbered.
 
-    Previously this wrote a "V.NN" string, which did not match the N.N.N scheme
-    every target repo uses — it corrupted the target's VERSION and made the
-    target's CI bump (IFS='.' read) produce garbage like "V.01.1". Bumping the
-    patch in place keeps the target's scheme intact. int(..., 10) avoids any
-    octal interpretation of leading-zero patches (e.g. "01")."""
+    The fleet scheme is ``n.nn`` (e.g. ``0.01`` → ``0.02`` … ``0.99``; production is
+    set to ``1.00`` by hand). This function is scheme-agnostic and also handles
+    ``N.N.N`` (``0.0.1`` → ``0.0.2``) and legacy leading-dot (``.1219`` → ``.1220``).
+
+    Previously it ONLY understood 3-part ``N.N.N`` and RESET every other scheme to
+    ``0.0.1`` — which silently clobbered a hub on the ``.NNNN`` scheme (``.1219`` →
+    ``0.0.1``). Incrementing the last run in place (zero-pad preserved) keeps
+    ``0.09`` → ``0.10``. It does NOT carry (``0.99`` → ``0.100``), exactly like the
+    CI — the ``1.00`` production milestone is set by hand, well before 0.99."""
     version_file = os.path.join(repo_path, "VERSION")
     current_version = ""
     if os.path.exists(version_file):
@@ -196,14 +200,16 @@ def bump_repo_version(repo_path):
         except Exception as e:
             logger.error(f"Error reading version file: {e}")
 
-    new_version = "0.0.1"
-    parts = current_version.split(".")
-    if len(parts) == 3:
-        try:
-            parts[2] = str(int(parts[2], 10) + 1)
-            new_version = ".".join(parts)
-        except ValueError:
-            new_version = "0.0.1"
+    nums = list(re.finditer(r"\d+", current_version))
+    if not nums:
+        # No numeric segment yet — seed the n.nn scheme.
+        new_version = "0.01"
+    else:
+        last = nums[-1]
+        width = len(last.group())
+        # int(..., 10) avoids octal interpretation of a leading-zero run (e.g. "01").
+        val = int(last.group(), 10) + 1
+        new_version = current_version[:last.start()] + str(val).zfill(width) + current_version[last.end():]
 
     try:
         with open(version_file, "w") as f:
