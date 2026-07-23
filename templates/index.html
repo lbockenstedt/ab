@@ -2044,18 +2044,20 @@
             }
         }
 
-        // Activity Feed filter state. Persisted in localStorage so a manual selection
-        // survives the status view's 30s auto-reload; defaults to 'all' (= active,
-        // closed issues hidden).
+        // Status filter state. Defaults to 'all' (= Active; closed issues hidden) on
+        // every fresh load so a stale saved filter can't hide awaiting/reopened rows
+        // ("nothing in status"). sessionStorage (not localStorage) keeps a manual
+        // selection only for the tab's session — surviving the 30s auto-reload but
+        // resetting to Active on a new visit.
         let _activityFilter = 'all';
         try {
-            const saved = localStorage.getItem('bf_activity_filter');
+            const saved = sessionStorage.getItem('bf_activity_filter');
             if (saved) _activityFilter = saved;
         } catch (e) {}
 
         function filterActivity(status) {
             _activityFilter = status;
-            try { localStorage.setItem('bf_activity_filter', status); } catch (e) {}
+            try { sessionStorage.setItem('bf_activity_filter', status); } catch (e) {}
 
             const buttons = document.querySelectorAll('.filter-btn');
             buttons.forEach(btn => {
