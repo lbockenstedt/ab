@@ -259,11 +259,16 @@ def analyze_issue(issue):
 
 
 # Frequent words that can look identifier-ish in a report but are never the symbol
-# we're hunting; keeps the bare-token pass from grepping for English prose.
+# we're hunting; keeps the bare-token pass from grepping for English prose. Includes
+# browser/user-agent tokens that leak in from the captured console context.
 _IDENT_STOPWORDS = frozenset({
     "error", "report", "issue", "severity", "context", "filed", "fixed",
     "webui", "https", "http", "github", "console", "trace", "traceback", "stack",
     "function", "variable", "undefined", "return", "async", "await", "const", "class",
+    # browser / user-agent noise from the captured console/DOM
+    "applewebkit", "mozilla", "gecko", "khtml", "safari", "chrome", "firefox",
+    "edge", "version", "windows", "macintosh", "linux", "webkit", "x11", "intel",
+    "wow64", "trident", "opera", "mobile", "android", "iphone", "ipad",
 })
 
 # Error-message shapes that explicitly name a missing/offending symbol. Highest
@@ -303,6 +308,9 @@ def _extract_issue_identifiers(issue_body):
     code-like identifiers. Returns an ordered, de-duplicated, capped list."""
     import re
     text = issue_body or ""
+    # Drop HTML-comment markers (<!-- bug-report-id: bd1f… -->, <!-- report-type: … -->,
+    # <!-- bf-module: … -->) so their hex ids/values aren't mistaken for code symbols.
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
     found = []
 
     def _add(tok):
