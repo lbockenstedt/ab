@@ -27,10 +27,19 @@ fi
 # 3. Restart service
 echo "♻️ Restarting bugfixer service..."
 if [ "$(id -u)" != "0" ]; then
-    # Non-root (svc_bg via sudoers): use the race-free root helper that
-    # re-execs into a transient systemd unit so the restart survives this
-    # shell exiting. Mirrors main.py _spawn_restart / watchdog.spawn_restart.
-    exec sudo -n /usr/local/bin/bugfixer-self-restart
+    # Non-root (svc_bg): bugfixer.service is cap-locked (CAP_NET_BIND_SERVICE
+    # only), so `sudo -n bugfixer-self-restart` fails ("unable to change to root
+    # gid"). Delegate to bugfixer-watchdog (the unrestricted privileged arm)
+    # via the same restart_request file the in-process _spawn_restart uses; the
+    # watchdog performs the restart within ~10s. If the watchdog isn't active,
+    # fall back to the root helper so a standalone `./update.sh` still works.
+    if systemctl is-active --quiet bugfixer-watchdog; then
+        printf '{"requested_at": %s}\n' "$(date +%s)" > /etc/bugfixer/restart_request
+        echo "  delegated restart to bugfixer-watchdog."
+    else
+        echo "  bugfixer-watchdog not active — using root helper."
+        exec sudo -n /usr/local/bin/bugfixer-self-restart
+    fi
 else
     systemctl restart bugfixer
 fi
