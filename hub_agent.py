@@ -405,6 +405,41 @@ class HubAgentClient:
         except Exception as e:  # noqa: BLE001
             logger.warning("ANALYZE_LOGS reply send failed: %s", e)
 
+    async def _handle_escalate_log_issue(self, msg, data):
+        """Tier-2: the LM hub's log sentinel flagged a real problem in a module and
+        escalated it here for deep triage. File a GitHub issue (module repo, deduped)
+        so the RepoScan -> fix pipeline engages; BugFixer's fix step can pull ALL logs.
+        Runs off-thread (GitHub I/O) and replies with the filing outcome."""
+        import asyncio as _aio
+        module = str(data.get("module") or "hub")
+        log_slice = data.get("logs") or data.get("log_slice") or ""
+        analysis = data.get("analysis") or ""
+        verdict = data.get("verdict") or "escalate"
+        status, detail = "ok", ""
+        try:
+            from log_scan import file_escalated_issue
+            ok, detail = await _aio.get_event_loop().run_in_executor(
+                None, lambda: file_escalated_issue(module, log_slice, analysis, verdict))
+            status = "ok" if ok else "error"
+            logger.info("ESCALATE_LOG_ISSUE module=%s -> %s (%s)", module,
+                        "filed" if ok else "not filed", detail)
+        except Exception as e:  # noqa: BLE001
+            status, detail = "error", str(e)
+            logger.warning("ESCALATE_LOG_ISSUE failed for module=%s: %s", module, e)
+        if self._ws is None or self.signer is None:
+            return
+        reply = {
+            "correlation_id": msg.get("header", {}).get("message_id"),
+            "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
+                       "sender_id": self.spoke_id, "destination_id": "hub"},
+            "payload": {"type": "COMMAND_RESULT",
+                        "data": {"status": status, "detail": detail, "module": module}},
+        }
+        try:
+            await self._ws.send(encode_frame(self.signer, reply))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ESCALATE_LOG_ISSUE reply send failed: %s", e)
+
     async def _ack(self, msg, status="SUCCESS", message=""):
         """Send a COMMAND_RESULT the hub's mailbox treats as an acknowledgement
         (correlation_id = the inbound message_id), so a DURABLE push is cleared and
@@ -1012,6 +1047,10 @@ class HubAgentClient:
 
         if cmd_type == "ANALYZE_LOGS":
             await self._handle_analyze_logs(msg, data)
+            return
+
+        if cmd_type == "ESCALATE_LOG_ISSUE":
+            await self._handle_escalate_log_issue(msg, data)
             return
 
         if cmd_type == "HUB_RESPONSE":

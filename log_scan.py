@@ -1,7 +1,7 @@
 """Hub log ingestion and scanning: error/heartbeat/bug detection and production-fix verification (extracted from main.py)."""
 import json, os, re, requests, time
 from datetime import datetime
-from github import GithubException
+from github import Github, GithubException
 
 from main import (
     _apply_closed_label,
@@ -1154,6 +1154,43 @@ def _module_log_fix_context(issue_body):
     )
 
 
+def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config=None):
+    """Tier-2 deep-triage entry point. The LM hub's per-module log sentinel flagged a
+    real problem and shipped {module, offending log slice, its analysis} down to us.
+    File a GitHub issue in the module's repo (deduped via create_automated_issue) so the
+    normal RepoScan -> process_single_issue fix pipeline engages; BugFixer's fix step can
+    then pull ALL logs as needed. Returns (ok: bool, detail: str)."""
+    config = config or load_config()
+    module = (module or "hub").strip()
+    try:
+        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+        if not token:
+            return False, "no GITHUB_TOKEN configured"
+        gh = Github(token)
+        monitored_repos = get_monitored_repos(config)
+        repo_name = (MODULE_TYPE_REPO.get(module.lower())
+                     or resolve_module_repo(module, monitored_repos, config))
+        if not repo_name:
+            return False, f"no repo maps to module {module!r} (add a module_repo_map entry)"
+        first_line = next((ln.strip() for ln in (analysis or "").splitlines() if ln.strip()), "")
+        summary = " ".join(first_line.split())[:90] or f"{module} log problem"
+        title = f"Hub log alert ({module}): {summary}"
+        body = (
+            f"**Escalated by the LM hub log sentinel** (verdict: `{verdict}`, module: `{module}`).\n\n"
+            f"### Analysis\n{analysis or '(none)'}\n\n"
+            f"### Offending log lines\n```\n{(log_slice or '')[:6000]}\n```\n"
+        )
+        error_data = {"module": module, "title": title, "body": body, "repo": repo_name}
+        repo_obj = gh.get_repo(repo_name)
+        issue = create_automated_issue(gh, monitored_repos, repo_obj, error_data)
+        if issue is None:
+            return True, f"deduped/no-op in {repo_name}"
+        return True, f"{repo_name}#{getattr(issue, 'number', '?')}"
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"file_escalated_issue failed for module={module!r}: {e}")
+        return False, str(e)
+
+
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
@@ -1207,7 +1244,16 @@ def scan_hub_logs(gh_current, config):
                 f"error-relevant entries for LLM analysis."
             )
             actionable_errors = []
-            if not error_logs:
+            # Hub-gated triage (default ON): the LM hub's per-module log sentinel now
+            # owns first-pass hub-log analysis and escalates real problems back to us
+            # via file_escalated_issue. So BugFixer no longer scrubs+LLM-analyzes hub
+            # logs itself every cycle (the redundant "always processing logs" pass) —
+            # it still syncs the mirror (fix context) and runs scan_bugs above. Set
+            # hub_gated_triage=false to restore BugFixer's standalone hub-log triage.
+            if config.get("hub_gated_triage", True):
+                logger.info("Hub-log triage delegated to the LM hub sentinel "
+                            "(hub_gated_triage on); skipping BugFixer's own error analysis this cycle.")
+            elif not error_logs:
                 logger.info("No error-level Hub log entries this cycle. Skipping LLM analysis.")
             else:
                 actionable_errors = analyze_logs_for_errors(error_logs)
@@ -1308,6 +1354,7 @@ __all__ = [
     'scan_hub_logs',
     'scan_heartbeats',
     'scan_bugs',
+    'file_escalated_issue',
     '_safe_json_field',
     '_bug_report_fix_context',
     '_module_log_fix_context',
