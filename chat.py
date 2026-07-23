@@ -691,6 +691,31 @@ def _chat_force_provider(config):
     return v if v in (1, 2, 3, 4) else None
 
 
+_TOOLCALL_TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+
+def _parse_text_tool_calls(text):
+    """Some models (esp. via ollama) emit tool calls as ``<tool_call>{...}</tool_call>``
+    TEXT instead of the structured tool_calls field. Extract any such blocks so the
+    agent loop can execute them, and return (cleaned_text, tool_calls) with the tags
+    stripped so raw ``tool_calls`` JSON never leaks into the visible answer."""
+    if not text or "<tool_call>" not in text:
+        return text, []
+    calls = []
+    for m in _TOOLCALL_TAG_RE.finditer(text):
+        try:
+            obj = json.loads(m.group(1))
+        except Exception:  # noqa: BLE001
+            continue
+        fn = obj.get("function") if isinstance(obj.get("function"), dict) else {}
+        name = obj.get("name") or fn.get("name")
+        args = obj.get("arguments") or fn.get("arguments") or obj.get("parameters") or {}
+        if name:
+            calls.append({"function": {"name": name, "arguments": args}})
+    cleaned = _TOOLCALL_TAG_RE.sub("", text).strip()
+    return cleaned, calls
+
+
 def _run_chat_reply_simple(chat_id, config):
     """Legacy single-turn chat path: used when CHAT_TOOLS_ENABLED is False (or as
     the graceful-degradation fallback). Streams one call_llm reply with a plain
@@ -797,6 +822,11 @@ def run_chat_reply(chat_id):
                 break
             text = result.get("text") or ""
             tool_calls = result.get("tool_calls") or []
+            # Fallback: model emitted tool calls as <tool_call>{…}</tool_call> text
+            # rather than structured tool_calls — parse + execute them, and strip the
+            # tags so the raw JSON never shows in the answer.
+            if not tool_calls:
+                text, tool_calls = _parse_text_tool_calls(text)
             last_text = text
             if not tool_calls:
                 final_text = text
@@ -852,6 +882,9 @@ def run_chat_reply(chat_id):
 
         if final_text is None:
             final_text = last_text or ""
+        # Defense in depth: strip any residual <tool_call> tags before display.
+        if final_text and "<tool_call>" in final_text:
+            final_text, _ = _parse_text_tool_calls(final_text)
         if final_text and final_text.strip():
             append_chat_message(chat_id, {
                 "role": "assistant",
