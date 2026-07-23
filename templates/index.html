@@ -958,6 +958,26 @@
                             <div id="local-llm-setup-status-line" class="font-medium text-slate-200 mb-2"></div>
                             <pre id="local-llm-setup-log" class="whitespace-pre-wrap break-all text-[11px] text-green-400 max-h-80 overflow-y-auto font-mono"></pre>
                         </div>
+
+                        <!-- Manage Models: list / pull / delete on any ollama endpoint -->
+                        <div class="mt-8 pt-6 border-t border-slate-200">
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Manage Ollama Models</h4>
+                            <p class="text-xs text-slate-400 mb-3">List, pull, and remove models on an Ollama endpoint. Point it at your local box (default) or a remote one (e.g. the M4) via the Endpoint field.</p>
+                            <div class="flex flex-wrap gap-2 items-center mb-3">
+                                <input type="text" id="mm-baseurl" value="http://localhost:11434" placeholder="Endpoint (http://host:11434)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <button type="button" onclick="mmRefresh()" class="btn-sec px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-sync-alt mr-1"></i>List</button>
+                            </div>
+                            <div class="flex flex-wrap gap-2 items-center mb-3">
+                                <input type="text" id="mm-pull-model" placeholder="Model to pull (e.g. qwen2.5-coder:14b)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <button type="button" onclick="mmPull()" id="mm-pull-btn" class="btn-primary px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
+                            </div>
+                            <div id="mm-list" class="text-xs text-slate-400 italic">Click List to load models.</div>
+                            <div id="mm-pull-status" class="hidden mt-3 text-xs rounded p-3 bg-slate-900 border border-slate-700">
+                                <div id="mm-pull-line" class="font-medium text-slate-200 mb-2"></div>
+                                <pre id="mm-pull-log" class="whitespace-pre-wrap break-all text-[11px] text-green-400 max-h-56 overflow-y-auto font-mono"></pre>
+                            </div>
+                        </div>
+
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
                         </div>
@@ -3025,6 +3045,75 @@
             }
         }
         // ── End Local LLM Setup ────────────────────────────────────────────────
+
+        // ── Manage Ollama Models (list / pull / delete on any endpoint) ────────
+        function _mmBase() { return (document.getElementById('mm-baseurl')?.value || 'http://localhost:11434').trim(); }
+        function _mmEsc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+        let _mmPullPoll = null;
+
+        async function mmRefresh() {
+            const list = document.getElementById('mm-list');
+            if (!list) return;
+            list.innerHTML = '<span class="italic text-slate-400">Loading…</span>';
+            try {
+                const r = await fetch('/api/local-llm/models?base_url=' + encodeURIComponent(_mmBase()));
+                const d = await r.json();
+                const models = d.models || [];
+                if (!models.length) { list.innerHTML = '<span class="italic text-slate-400">No models found at this endpoint.</span>'; return; }
+                list.innerHTML = models.map(m => {
+                    const n = _mmEsc(m.name);
+                    return `<div class="flex items-center justify-between py-1.5 border-b border-slate-100">
+                        <span class="font-mono text-slate-700">${n} <span class="text-slate-400">(${m.size_gb} GB)</span></span>
+                        <button onclick="mmDelete('${n}')" class="btn-danger text-xs px-2 py-1 rounded font-bold">Delete</button>
+                    </div>`;
+                }).join('');
+            } catch (e) { list.innerHTML = '<span class="text-red-600">Failed to list: ' + _mmEsc(String(e)) + '</span>'; }
+        }
+
+        async function mmDelete(name) {
+            if (!confirm('Delete model ' + name + ' from ' + _mmBase() + '?')) return;
+            try {
+                const r = await fetch('/api/local-llm/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model: name, base_url: _mmBase() }) });
+                const d = await r.json();
+                if (r.ok) { showToast(d.message || 'Deleted', 'success'); mmRefresh(); }
+                else showToast(d.message || 'Delete failed', 'error');
+            } catch (e) { showToast('Delete failed: ' + e, 'error'); }
+        }
+
+        async function mmPull() {
+            const model = (document.getElementById('mm-pull-model')?.value || '').trim();
+            if (!model) { showToast('Enter a model name (e.g. qwen2.5-coder:14b)', 'warn'); return; }
+            const btn = document.getElementById('mm-pull-btn');
+            const box = document.getElementById('mm-pull-status');
+            const lineEl = document.getElementById('mm-pull-line');
+            const logEl = document.getElementById('mm-pull-log');
+            if (box) box.classList.remove('hidden');
+            if (lineEl) lineEl.textContent = 'Starting pull…';
+            if (logEl) logEl.textContent = '';
+            if (btn) btn.disabled = true;
+            try {
+                const r = await fetch('/api/local-llm/pull', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model, base_url: _mmBase() }) });
+                const d = await r.json();
+                if (!r.ok) { if (lineEl) lineEl.textContent = d.message || 'Could not start pull.'; if (btn) btn.disabled = false; return; }
+                if (_mmPullPoll) clearInterval(_mmPullPoll);
+                _mmPullPoll = setInterval(async () => {
+                    try {
+                        const t = await fetch('/api/task-details?task_id=LocalLLMPull');
+                        if (t.status === 404) {
+                            clearInterval(_mmPullPoll); _mmPullPoll = null;
+                            if (lineEl) lineEl.textContent = 'Done.';
+                            if (btn) btn.disabled = false;
+                            mmRefresh();
+                            return;
+                        }
+                        const td = await t.json();
+                        if (logEl) { logEl.textContent = td.stream || ''; logEl.scrollTop = logEl.scrollHeight; }
+                        if (lineEl) lineEl.textContent = 'Pulling ' + model + '…';
+                    } catch (_) { /* ignore */ }
+                }, 1500);
+            } catch (e) { if (lineEl) lineEl.textContent = 'Pull failed: ' + e; if (btn) btn.disabled = false; }
+        }
+        // ── End Manage Ollama Models ───────────────────────────────────────────
 
         async function deleteIssue(issueId) {
             try {

@@ -55,6 +55,10 @@ from main import (
     rename_conversation,
     run_chat_reply,
     run_local_llm_setup,
+    run_local_llm_pull,
+    _ollama_models_detailed,
+    _ollama_delete,
+    OLLAMA_BASE_URL,
     run_scan_cycle,
     save_chats,
     save_config,
@@ -1275,6 +1279,49 @@ async def local_llm_status():
         "last": state.get("local_llm_setup") or {},
         "cpu_count": state.get("cpu_count") or os.cpu_count() or 4,
     }
+
+
+@router.get("/api/local-llm/models")
+async def local_llm_models(base_url: str = ""):
+    """List the models on an ollama endpoint (defaults to the local server).
+    Pass ?base_url=http://<host>:11434 to manage a remote instance (e.g. the M4)."""
+    url = (base_url or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
+    return {"base_url": url, "models": _ollama_models_detailed(url)}
+
+
+@router.post("/api/local-llm/pull")
+async def local_llm_pull(request: Request):
+    """Pull a model in the background. Body: {model, base_url?}. Poll progress via
+    /api/task-details?task_id=LocalLLMPull."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    model = (data.get("model") or "").strip()
+    if not model:
+        return JSONResponse(status_code=400, content={"message": "model required"})
+    base_url = (data.get("base_url") or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
+    if "LocalLLMPull" in state.get("active_tasks", {}):
+        return JSONResponse(status_code=409, content={"message": "A model pull is already running."})
+    threading.Thread(target=run_local_llm_pull, args=(model, base_url), daemon=True).start()
+    return {"status": "started", "task_id": "LocalLLMPull"}
+
+
+@router.post("/api/local-llm/delete")
+async def local_llm_delete(request: Request):
+    """Delete a model. Body: {model, base_url?}."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    model = (data.get("model") or "").strip()
+    if not model:
+        return JSONResponse(status_code=400, content={"message": "model required"})
+    base_url = (data.get("base_url") or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
+    ok, msg = _ollama_delete(model, base_url)
+    if not ok:
+        return JSONResponse(status_code=502, content={"message": f"Delete failed: {msg}"})
+    return {"status": "ok", "message": f"{model}: {msg}"}
 
 
 @router.post("/clear_history")

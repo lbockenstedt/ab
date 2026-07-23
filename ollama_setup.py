@@ -103,6 +103,43 @@ def _ollama_tags(base_url=OLLAMA_BASE_URL):
         return set()
 
 
+def _ollama_models_detailed(base_url=OLLAMA_BASE_URL):
+    """Return [{name, size, size_gb, modified}] for the models on an ollama
+    endpoint (empty list on failure). Powers the Manage-Models UI."""
+    try:
+        resp = requests.get(base_url.rstrip("/") + "/api/tags", timeout=15)
+        resp.raise_for_status()
+        out = []
+        for m in resp.json().get("models", []):
+            name = m.get("name") or ""
+            if not name:
+                continue
+            size = int(m.get("size") or 0)
+            out.append({
+                "name": name,
+                "size": size,
+                "size_gb": round(size / 1e9, 1),
+                "modified": m.get("modified_at") or "",
+            })
+        out.sort(key=lambda x: x["name"])
+        return out
+    except Exception as e:
+        logger.debug(f"ollama detailed /api/tags failed: {e}")
+        return []
+
+
+def _ollama_delete(name, base_url=OLLAMA_BASE_URL):
+    """Delete a model via DELETE /api/delete. Returns (ok, message)."""
+    try:
+        resp = requests.delete(base_url.rstrip("/") + "/api/delete",
+                               json={"name": name}, timeout=60)
+        if resp.status_code in (200, 404):
+            return True, ("deleted" if resp.status_code == 200 else "not found")
+        return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
 def _ollama_bin_path():
     """Locate the ollama binary, checking common install paths (not just PATH).
 
@@ -459,6 +496,38 @@ def run_local_llm_setup(model, num_ctx, cores, slot=4):
         summary = {"state": "failed", "message": str(e)}
     finally:
         state["local_llm_setup"] = {**summary, "updated": datetime.now().isoformat()}
+        update_task_state(task_id, action="end")
+
+
+def run_local_llm_pull(model, base_url=OLLAMA_BASE_URL):
+    """Background: pull a single model onto an ollama endpoint, streaming progress
+    into the LocalLLMPull task (the UI polls /api/task-details?task_id=LocalLLMPull)."""
+    task_id = "LocalLLMPull"
+    base_url = (base_url or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
+    update_task_state(task_id, f"Pulling {model}", action="start")
+
+    def _log(line, replace_last=False):
+        with _task_state_lock:
+            task = state["active_tasks"].get(task_id)
+            if task is None:
+                return
+            s = task["stream"]
+            if replace_last and s:
+                idx = s.rfind("\n")
+                task["stream"] = (s[:idx + 1] if idx != -1 else "") + line + "\n"
+            else:
+                task["stream"] = s + line + "\n"
+
+    try:
+        _log(f"▶ Pulling {model} from {base_url} …")
+        _ollama_http_pull(model, _log, base_url)   # raises on failure
+        _log(f"✓ {model} is ready.")
+        state["local_llm_pull"] = {"state": "ok", "model": model, "updated": datetime.now().isoformat()}
+    except Exception as e:  # noqa: BLE001
+        _log(f"✗ pull failed: {e}")
+        state["local_llm_pull"] = {"state": "failed", "model": model, "error": str(e),
+                                   "updated": datetime.now().isoformat()}
+    finally:
         update_task_state(task_id, action="end")
 
 
