@@ -11,6 +11,9 @@ from main import (
     _find_claude_cli_slot,
     _get_provider_config,
     _get_reviewer_model,
+    _get_escalation_models,
+    _is_ollama,
+    _ollama_models_detailed,
     _is_triage_only,
     _provider_configured,
     _trigger_spoke_updates,
@@ -480,7 +483,7 @@ def _targeted_file_context(content, identifiers, max_chars, window=60, max_hits_
     return "\n".join(parts) if parts else None
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None):
+def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None, model_override=None):
     config = load_config()
     max_files = int(config.get("FIX_MAX_FILES", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"])
     max_file_chars = int(config.get("FIX_MAX_FILE_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"])
@@ -554,7 +557,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
             f"{fix_format}"
         )
     try:
-        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider)
+        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider, model_override=model_override)
     except Exception as e:
         raise Exception(f"Fix generation failed: {e}")
 
@@ -964,12 +967,26 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # verified fix is accepted even if below the bar (best effort).
             min_conf = float(config.get("MIN_BUILDER_CONFIDENCE", 0.80) or 0.80)
             escalate = (force_cloud is None and force_provider is None)
+            # Build ladder: ordered [(slot, model_override)] steps. Each slot expands
+            # to its escalation_models (a manual ratchet like 7b→14b→32b), OR — when a
+            # model entry is "*" on an ollama slot — to EVERY model installed on that
+            # endpoint, sorted ASCENDING by size so it ramps smallest-first (never
+            # starts at 32b). Only after the whole local ratchet fails does it move to
+            # the next (GPU/cloud) slot.
             ladder = []
             if escalate:
                 for _n in (1, 2, 3, 4):
                     _p, _k, _m, _u = _get_provider_config(_n, config)
-                    if _provider_configured(_p, _k, _m):
-                        ladder.append(_n)
+                    if not _provider_configured(_p, _k, _m):
+                        continue
+                    _models = _get_escalation_models(_n, config)
+                    if _is_ollama(_p) and any(x == "*" for x in _models):
+                        detailed = sorted(_ollama_models_detailed(_u or "http://localhost:11434"),
+                                          key=lambda d: d.get("size", 0))
+                        _models = [d["name"] for d in detailed] or [_m]
+                        logger.info(f"Slot P{_n}: ramp-by-size across {len(_models)} local model(s): {', '.join(_models)}")
+                    for _mdl in _models:
+                        ladder.append((_n, _mdl))
                 if len(ladder) > 1:
                     max_attempts = max(max_attempts, len(ladder))
                 else:
@@ -998,11 +1015,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     # Escalation: pick THIS attempt's builder from the ladder (cheap
                     # first, escalate on low confidence). Pins to the user's choice
                     # when one was given.
-                    att_fc, att_fp = force_cloud, force_provider
+                    att_fc, att_fp, att_model = force_cloud, force_provider, None
                     if escalate and ladder:
-                        att_fp = ladder[(attempt - 1) % len(ladder)]
+                        att_fp, att_model = ladder[(attempt - 1) % len(ladder)]
                         att_fc = None
-                        logger.info(f"Attempt {attempt}: builder = provider slot P{att_fp}.")
+                        logger.info(f"Attempt {attempt}/{max_attempts}: builder = P{att_fp} model={att_model or 'slot default'}.")
 
                     # --- Resume from awaiting_review ---
                     pending_fix = issue_info.get("pending_fix") if attempt == 1 and issue_info.get("status") == "awaiting_review" else None
@@ -1015,7 +1032,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             processed[issue_id]["status"] = "processing"
                             save_processed(processed)
                     elif not pending_fix:
-                        fix_code = apply_ai_fix(path, fix_body, error_context, force_cloud=att_fc, task_id=issue_id, force_provider=att_fp)
+                        fix_code = apply_ai_fix(path, fix_body, error_context, force_cloud=att_fc, task_id=issue_id, force_provider=att_fp, model_override=att_model)
                         success_applied, fixes, confidence = parse_and_apply(fix_code, path)
 
                     if not success_applied:

@@ -1169,6 +1169,9 @@ async def create_llm_entry(request: Request):
         # (http://localhost:11434), a remote-GPU box on the LAN, and Ollama Cloud.
         "base_url": (data.get("base_url") or "").strip(),
         "api_key": (data.get("api_key") or "").strip(),
+        # Build-ratchet models for THIS slot: comma-separated (e.g. 7b,14b,32b) or
+        # "*" = every model installed on this ollama endpoint, ramped smallest-first.
+        "escalation_models": (data.get("escalation_models") or "").strip(),
     }
     if not entry["model"]:
         return JSONResponse(status_code=400, content={"error": "model required"})
@@ -1197,6 +1200,8 @@ async def update_llm_entry(entry_id: str, request: Request):
                 e["base_url"] = (data.get("base_url") or "").strip()
             if "api_key" in data:
                 e["api_key"] = (data.get("api_key") or "").strip()
+            if "escalation_models" in data:
+                e["escalation_models"] = (data.get("escalation_models") or "").strip()
             save_config(config)
             return {"status": "ok", "entry": e}
     return JSONResponse(status_code=404, content={"error": "entry not found"})

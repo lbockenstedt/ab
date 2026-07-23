@@ -197,6 +197,28 @@ def _get_reviewer_model(n, config):
     return (config.get(f"REVIEWER_MODEL_{n}") or "").strip()
 
 
+def _get_escalation_models(n, config):
+    """Ordered list of models the BUILDER escalates through ON slot n before the run
+    moves to the next slot — e.g. a CPU slot that ratchets 7b -> 14b -> 32b. Read
+    from the entry's ``escalation_models`` (comma-string or list); falls back to the
+    slot's single model. Returns at least one element (the model, or None = slot
+    default)."""
+    _p, _k, model, _u = _get_provider_config(n, config)
+    em = None
+    entry_id = (config.get("llm_slots") or {}).get(str(n))
+    if entry_id:
+        for e in (config.get("llm_entries") or []):
+            if e.get("id") == entry_id:
+                em = e.get("escalation_models")
+                break
+    lst = []
+    if isinstance(em, str):
+        lst = [x.strip() for x in em.split(",") if x.strip()]
+    elif isinstance(em, list):
+        lst = [str(x).strip() for x in em if str(x).strip()]
+    return lst or ([model] if model else [None])
+
+
 def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
     """Parse a Retry-After header into a wait time in seconds."""
     if retry_after_header:

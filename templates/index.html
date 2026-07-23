@@ -811,6 +811,7 @@
                                     </select>
                                     <input type="text" id="new-entry-baseurl" placeholder="Base URL (optional — e.g. http://gpu-box:11434)" title="Per-entry endpoint. Overrides the shared credential — lets 3 ollama entries target local CPU / LAN GPU / cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <input type="text" id="new-entry-apikey" placeholder="API key (optional — overrides shared)" title="Per-entry key. Set only for a cloud endpoint that needs one." class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="text" id="new-entry-escalation" placeholder="Ratchet models (optional — 7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every model installed on this ollama endpoint. Blank = just the model above." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                 </div>
                                 <div class="flex gap-2">
                                     <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs btn-primary rounded font-bold">Add</button>
@@ -853,6 +854,7 @@
                                             </select>
                                             <input type="text" id="edit-baseurl-{{ entry.id }}" value="{{ entry.base_url or '' }}" placeholder="Base URL (e.g. http://localhost:11434)" title="Per-entry endpoint. Overrides the shared credential — set localhost for a local CPU ollama, a LAN IP for a GPU box, or https://ollama.com for cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-apikey-{{ entry.id }}" value="{{ entry.api_key or '' }}" placeholder="API key (optional — overrides shared)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="text" id="edit-escalation-{{ entry.id }}" value="{{ entry.escalation_models or '' }}" placeholder="Ratchet models (7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every installed model on this endpoint." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         </div>
                                         <div class="flex gap-2">
                                             <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs btn-primary rounded font-bold">Save</button>
@@ -2826,11 +2828,12 @@
             const reviewer_model = document.getElementById('new-entry-reviewer')?.value.trim() || '';
             const base_url = document.getElementById('new-entry-baseurl')?.value.trim() || '';
             const api_key = document.getElementById('new-entry-apikey')?.value.trim() || '';
+            const escalation_models = document.getElementById('new-entry-escalation')?.value.trim() || '';
             if (!model) { showToast('Please select a model.', 'warn'); return; }
             const resp = await fetch('/api/llm/entries', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model, base_url, api_key})
+                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model, base_url, api_key, escalation_models})
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to add entry.', 'error');
@@ -2923,11 +2926,12 @@
             const reviewer_model = document.getElementById(`edit-reviewer-${id}`)?.value.trim() || '';
             const base_url = document.getElementById(`edit-baseurl-${id}`)?.value.trim() || '';
             const api_key = document.getElementById(`edit-apikey-${id}`)?.value.trim() || '';
+            const escalation_models = document.getElementById(`edit-escalation-${id}`)?.value.trim() || '';
             if (!model) { showToast('Please select a model.', 'warn'); return; }
             const resp = await fetch(`/api/llm/entries/${id}`, {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model, base_url, api_key})
+                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model, base_url, api_key, escalation_models})
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to save entry.', 'error');
