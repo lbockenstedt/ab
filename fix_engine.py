@@ -40,6 +40,62 @@ class QueueLocalException(Exception):
 
 
 _BUG_REPORT_ID_RE = re.compile(r'<!--\s*bug-report-id:\s*([0-9a-fA-F]+)\s*-->')
+_FIX_COMMIT_RE = re.compile(r'Commit:\s*`?([0-9a-f]{7,40})`?')
+
+
+def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=None):
+    """For a REOPENED, previously-fixed issue: figure out what changed the fix's
+    files SINCE our fix landed, so the builder triages from the regression cause
+    instead of re-analysing the whole error from scratch.
+
+    Resolves the prior fix sha from the processed record or, failing that, BugFixer's
+    "Commit: `<sha>`" resolved comment on the issue. Then, in the fresh clone, runs
+    `git log <sha>..HEAD` and `git diff <sha>..HEAD` scoped to the fix's files.
+    Returns a context block to append to fix_body (or "" if there's nothing useful —
+    no known fix sha, sha not in history, or the files were untouched since)."""
+    sha = (prior_commit or "").strip()
+    if not sha:
+        try:
+            for c in issue.get_comments():
+                m = _FIX_COMMIT_RE.search(c.body or "")
+                if m:
+                    sha = m.group(1)  # keep the LAST (most recent) fix commit cited
+        except Exception:  # noqa: BLE001
+            pass
+    if not sha:
+        return ""
+    try:
+        repo_git.git.cat_file("-e", f"{sha}^{{commit}}")  # sha present in this clone?
+    except Exception:  # noqa: BLE001
+        return ""
+    files = [f for f in (prior_files or []) if f and "VERSION" not in f]
+    if not files:
+        try:
+            files = [ln.strip() for ln in repo_git.git.show(
+                sha, "--name-only", "--pretty=format:").splitlines()
+                if ln.strip() and "VERSION" not in ln]
+        except Exception:  # noqa: BLE001
+            files = []
+    try:
+        rng = f"{sha}..HEAD"
+        log = repo_git.git.log(rng, "--oneline", "--", *files) if files else repo_git.git.log(rng, "--oneline")
+        diff = repo_git.git.diff(rng, "--", *files) if files else ""
+    except Exception:  # noqa: BLE001
+        return ""
+    if not log.strip():
+        return ""  # our fix's files are untouched since — nothing to trace back to
+    if len(diff) > 8000:
+        diff = diff[:8000] + "\n… [diff truncated] …"
+    logger.info(f"Regression triage: fix {sha[:10]}, {len(files)} file(s), {len(log.splitlines())} commit(s) since.")
+    return (
+        "\n\n--- REGRESSION CONTEXT (issue was previously fixed, then reopened) ---\n"
+        f"BugFixer previously fixed this as commit {sha[:10]}. Since then the file(s) it "
+        "touched were changed again — that most likely REINTRODUCED the bug.\n"
+        f"Commits to those files since the fix:\n{log}\n\n"
+        f"Diff of those files since the fix:\n{diff or '(no line changes captured)'}\n"
+        "Trace the regression to the change above and fix from there — do not re-solve "
+        "the original error from scratch."
+    )
 
 
 def _notify_bug_fixed(issue):
@@ -1104,6 +1160,19 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # source module's surrounding logs from the local hub-log mirror so
             # the fix is informed by related log data, not just the error snippet.
             fix_body = (issue.body or "") + _bug_report_fix_context(issue.body or "") + _module_log_fix_context(issue.body or "")
+            # Reopened + previously fixed → prepend "what changed since our fix" so the
+            # builder triages from the regression cause, not from zero.
+            if was_reopened:
+                try:
+                    _reg = _regression_triage_context(
+                        repo_git, issue,
+                        issue_info.get("prior_fix_commit") or issue_info.get("commit"),
+                        issue_info.get("prior_fix_files") or issue_info.get("files"))
+                    if _reg:
+                        fix_body += _reg
+                        logger.info(f"Added regression-triage context for reopened {issue_id}.")
+                except Exception as _re:  # noqa: BLE001
+                    logger.debug(f"regression triage context skipped for {issue_id}: {_re}")
 
             # ── CPU-first ensemble (opt-in via local_ensemble) ──────────────────
             # P1 = local CPU: ratchet its models smallest→largest, cross-check with

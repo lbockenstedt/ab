@@ -1699,6 +1699,10 @@ async def reopen_issue(request: Request):
             "status": "reopened",
             "reopened": True,
             "original_body": prior.get("original_body", ""),
+            # Preserve the prior fix so the re-fix can diff "what changed since" and
+            # triage the regression (falls back to parsing the issue's Commit: comment).
+            "prior_fix_commit": prior.get("commit"),
+            "prior_fix_files": prior.get("files"),
             "timestamp": datetime.now().isoformat(),
         }
         save_processed(processed)
