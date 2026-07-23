@@ -20,6 +20,7 @@ import collections
 import json
 import os
 import random
+import re
 import threading
 import time
 from datetime import datetime
@@ -1329,29 +1330,51 @@ _LOG_ANALYSIS_MAX_CHARS = 16000
 def analyze_logs(log_text, title="logs", task_id=None):
     """Ask the configured LLM whether anything is wrong in `log_text`, what it means,
     and what to check — the shared brain behind BugFixer's Log Analysis panel AND the
-    LM hub's delegated ANALYZE_LOGS request. Returns the analysis string (raises on
-    LLM failure so callers can classify cooldown vs. error). Char-caps the tail."""
+    LM hub's delegated ANALYZE_LOGS request. Returns the analysis string, which BEGINS
+    with a machine-parseable `VERDICT: none|watch|escalate` line (see parse_log_verdict).
+    Raises on LLM failure so callers can classify cooldown vs. error. Char-caps the tail."""
     text = log_text or ""
     if len(text) > _LOG_ANALYSIS_MAX_CHARS:
         text = text[-_LOG_ANALYSIS_MAX_CHARS:]
     prompt = (
-        f"These are the most recent {title}. Analyze them and answer:\n\n"
-        "1. **Is there a problem?** Answer yes or no up front.\n"
-        "2. **If yes:** what is going wrong, in plain language — and what it most likely "
+        f"These are the most recent {title}. Analyze them.\n\n"
+        "Begin your reply with EXACTLY one of these lines (nothing before it):\n"
+        "  VERDICT: none      — logs look healthy, no action needed\n"
+        "  VERDICT: watch     — a minor issue worth noting, but no fix needed yet\n"
+        "  VERDICT: escalate  — a real problem (ERROR-class, repeated, or novel) that "
+        "should be investigated/fixed\n\n"
+        "Then, on the following lines, answer:\n"
+        "1. **Is there a problem?** yes/no up front.\n"
+        "2. **If yes:** what is going wrong, in plain language — what it most likely "
         "means / what to check next. Quote the key log line(s) verbatim.\n"
-        "3. **If everything looks healthy:** say so in one line and note anything minor worth watching.\n\n"
-        "Prefer WARNING/ERROR/traceback lines. Keep it under ~250 words.\n\n"
+        "3. **If healthy:** say so in one line and note anything minor worth watching.\n\n"
+        "Prefer WARNING/ERROR/traceback lines. Reserve `escalate` for genuine faults, "
+        "not routine warnings. Keep it under ~250 words.\n\n"
         f"----- LOGS -----\n{text}\n----- END LOGS -----"
     )
     result = call_llm(prompt, system_prompt=LOG_ANALYSIS_SYSTEM_PROMPT, task_id=task_id)
-    return (result or "").strip() or "(the LLM returned an empty analysis)"
+    return (result or "").strip() or "VERDICT: none\n(the LLM returned an empty analysis)"
+
+
+_LOG_VERDICT_RE = re.compile(r"VERDICT:\s*(none|watch|escalate)\b", re.IGNORECASE)
+
+
+def parse_log_verdict(text):
+    """Split an analyze_logs result into (verdict, cleaned_text). verdict is one of
+    'none'|'watch'|'escalate' (defaults to 'none' if the model omitted the line).
+    cleaned_text has the VERDICT line stripped for display."""
+    s = text or ""
+    m = _LOG_VERDICT_RE.search(s)
+    verdict = m.group(1).lower() if m else "none"
+    cleaned = _LOG_VERDICT_RE.sub("", s, count=1).strip() if m else s.strip()
+    return verdict, cleaned
 
 
 
 # Re-export every name this module defines (public + underscore) so
 # ``from llm_client import *`` in main preserves the full `from main import ...`
 # surface, including underscore helpers a bare star-import would otherwise skip.
-__EXCLUDE = {"collections", "json", "os", "random", "threading", "time",
+__EXCLUDE = {"collections", "json", "os", "random", "re", "threading", "time",
              "datetime", "requests",
              "main", "logger", "load_config"}
 __all__ = [__n for __n in dir() if not __n.startswith("__") and __n not in __EXCLUDE]

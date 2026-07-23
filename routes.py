@@ -923,14 +923,16 @@ def _run_log_analysis(source, window_minutes=None, precomputed=False):
     """Read the current logs and ask BugFixer's own LLM whether anything is wrong,
     what it means, and what to check. Streams into the LogAnalysis task (live
     'thought process') and stores the final answer in state['log_analysis']."""
-    from main import analyze_logs, is_llm_cooldown_error  # re-exported from llm_client
+    from main import analyze_logs, parse_log_verdict, is_llm_cooldown_error  # re-exported from llm_client
     title, log_text = _collect_logs_for_analysis(source, window_minutes=window_minutes)
     update_task_state(task_id=_LOG_ANALYSIS_TASK, task_name=f"Analyzing {title}", action="start")
     try:
-        result = analyze_logs(log_text, title=f"{title} for the BugFixer system",
-                              task_id=_LOG_ANALYSIS_TASK)
+        raw = analyze_logs(log_text, title=f"{title} for the BugFixer system",
+                           task_id=_LOG_ANALYSIS_TASK)
+        verdict, result = parse_log_verdict(raw)  # strip the machine VERDICT line for display
         state["log_analysis"] = {
             "running": False, "source": source, "title": title, "precomputed": precomputed,
+            "verdict": verdict,
             "result": result, "error": None, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
     except Exception as e:  # noqa: BLE001

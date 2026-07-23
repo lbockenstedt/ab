@@ -374,16 +374,17 @@ class HubAgentClient:
         thread and reply with the result; correlation_id lets the hub's
         request_response match the answer. The hub must use a long timeout (LLM)."""
         import asyncio as _aio
-        from llm_client import analyze_logs, is_llm_cooldown_error
+        from llm_client import analyze_logs, parse_log_verdict, is_llm_cooldown_error
         title = str(data.get("title") or "logs")[:200]
         log_text = data.get("logs") or ""
-        status, analysis, error = "ok", "", None
+        status, analysis, verdict, error = "ok", "", "none", None
         try:
             if not str(log_text).strip():
                 status, error = "error", "no logs provided"
             else:
-                analysis = await _aio.get_event_loop().run_in_executor(
+                raw = await _aio.get_event_loop().run_in_executor(
                     None, lambda: analyze_logs(log_text, title))
+                verdict, analysis = parse_log_verdict(raw)
         except Exception as e:  # noqa: BLE001
             status = "error"
             error = (f"all LLM providers are cooling down / unavailable: {e}"
@@ -396,7 +397,7 @@ class HubAgentClient:
             "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
                        "sender_id": self.spoke_id, "destination_id": "hub"},
             "payload": {"type": "COMMAND_RESULT",
-                        "data": {"status": status, "analysis": analysis,
+                        "data": {"status": status, "analysis": analysis, "verdict": verdict,
                                  "error": error, "title": title}},
         }
         try:
