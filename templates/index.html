@@ -967,11 +967,27 @@
                                 <input type="text" id="mm-baseurl" value="http://localhost:11434" placeholder="Endpoint (http://host:11434)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <button type="button" onclick="mmRefresh()" class="btn-sec px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-sync-alt mr-1"></i>List</button>
                             </div>
-                            <div class="flex flex-wrap gap-2 items-center mb-3">
-                                <input type="text" id="mm-pull-model" placeholder="Model to pull (e.g. qwen2.5-coder:14b)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                            <div class="flex flex-wrap gap-2 items-center mb-1">
+                                <input type="text" id="mm-pull-model" list="mm-model-suggestions" placeholder="Model to pull (type or pick — e.g. qwen2.5-coder:14b)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <datalist id="mm-model-suggestions">
+                                    <option value="qwen2.5-coder:7b"></option>
+                                    <option value="qwen2.5-coder:14b"></option>
+                                    <option value="qwen2.5-coder:32b"></option>
+                                    <option value="qwen2.5:32b"></option>
+                                    <option value="qwen2.5:72b"></option>
+                                    <option value="llama3.1:8b"></option>
+                                    <option value="llama3.3:70b"></option>
+                                    <option value="deepseek-coder-v2:16b"></option>
+                                    <option value="gemma2:27b"></option>
+                                    <option value="codellama:13b"></option>
+                                    <option value="mistral:7b"></option>
+                                    <option value="phi4"></option>
+                                    <option value="nomic-embed-text"></option>
+                                </datalist>
                                 <button type="button" onclick="mmPull()" id="mm-pull-btn" class="btn-primary px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
                             </div>
-                            <div id="mm-list" class="text-xs text-slate-400 italic">Click List to load models.</div>
+                            <p class="text-[11px] text-slate-400 mb-3">Suggestions are common models; any name from <span class="font-mono">ollama.com/library</span> works. Pull downloads from Ollama's cloud registry to the endpoint above.</p>
+                            <div id="mm-list" class="text-xs text-slate-400 italic">Click List to load installed models.</div>
                             <div id="mm-pull-status" class="hidden mt-3 text-xs rounded p-3 bg-slate-900 border border-slate-700">
                                 <div id="mm-pull-line" class="font-medium text-slate-200 mb-2"></div>
                                 <pre id="mm-pull-log" class="whitespace-pre-wrap break-all text-[11px] text-green-400 max-h-56 overflow-y-auto font-mono"></pre>
