@@ -516,11 +516,17 @@
 
         {% if view == 'logs' %}
         <div class="hpe-card rounded-2xl overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white gap-2 flex-wrap">
-                <button onclick="runLogAnalysis('self')" id="log-analysis-btn" class="px-4 py-2 btn-primary rounded-lg font-bold text-sm">
-                    <i class="fas fa-wand-magic-sparkles mr-2"></i> Log Analysis
-                </button>
-                <span class="text-xs text-slate-500 font-mono">Last 100 lines</span>
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-2">
+                <div>
+                    <p class="text-xs text-slate-400">Newest entries first · Last 100 lines
+                        {% if log_rows %} · {{ log_rows|length }} entries{% endif %}
+                    </p>
+                </div>
+                <div class="flex gap-2 flex-wrap">
+                    <button onclick="runLogAnalysis('self')" id="log-analysis-btn" class="py-1 px-3 text-xs btn-primary rounded font-bold"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</button>
+                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300">↻ Refresh</button>
+                    <button onclick="copyLogs()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300"><i class="fas fa-copy mr-1"></i>Copy</button>
+                </div>
             </div>
             <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
                 <div class="flex items-center gap-2 mb-2">
@@ -529,14 +535,33 @@
                 </div>
                 <div id="log-analysis-body" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded-lg border border-slate-200 p-4 max-h-96 overflow-y-auto">—</div>
             </div>
-            <div class="p-4 bg-slate-50 border-b border-slate-200 flex justify-center">
-                <button onclick="copyLogs()" class="px-6 py-2 bg-white hover:bg-slate-100 rounded-lg font-bold text-slate-700 transition-all duration-200 border border-slate-300 shadow-sm text-sm">
-                    <i class="fas fa-copy mr-2"></i> Copy All Logs to Clipboard
-                </button>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-slate-50 text-slate-500 uppercase text-xs sticky top-0">
+                        <tr class="border-b border-slate-200">
+                            <th class="px-6 py-3 font-medium w-28">Component</th>
+                            <th class="px-6 py-3 font-medium w-40">Timestamp</th>
+                            <th class="px-6 py-3 font-medium">Log Message</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-200">
+                        {% if log_rows %}
+                            {% for log in log_rows %}
+                            <tr class="hover:bg-slate-50 transition-colors">
+                                <td class="px-6 py-4 font-mono text-xs text-slate-600 align-top">{{ log.module }}</td>
+                                <td class="px-6 py-4 text-slate-500 text-xs font-mono align-top whitespace-nowrap">{{ log.log[:19] if log.log and log.log[0].isdigit() else '' }}</td>
+                                <td class="px-6 py-4 text-slate-700 font-mono text-xs whitespace-pre-wrap">{{ log.log }}</td>
+                            </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="3" class="px-6 py-8 text-center text-slate-400 italic">No logs available.</td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
             </div>
-            <div class="bg-slate-900 p-6 overflow-x-auto">
-                <pre id="system-logs-text" class="font-mono text-xs leading-relaxed text-slate-300 whitespace-pre-wrap">{{ logs }}</pre>
-            </div>
+            <pre id="system-logs-text" class="hidden">{{ logs }}</pre>
         </div>
         {% endif %}
 

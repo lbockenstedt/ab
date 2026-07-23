@@ -789,13 +789,30 @@ async def toggle_model(request: Request):
 
 @router.get("/logs")
 async def get_logs(request: Request):
+    logs = ""
+    log_rows = []
     try:
         current_log = get_log_path()
         with open(current_log, "r") as f:
             lines = f.readlines()
-            logs = "".join(reversed(lines[-100:]))
-    except Exception as e: logs = f"Error reading logs from {get_log_path()}: {e}"
-    return templates.TemplateResponse(request=request, name="index.html", context={"view": "logs", "logs": logs, "state": state})
+        tail = [l.rstrip("\n") for l in lines[-100:]]
+        logs = "\n".join(reversed(tail))  # raw string kept for the Copy button
+        # Structured rows (newest first) so the Logs view renders in the SAME
+        # Component | Timestamp | Message table as Hub Logs. Parse "TS - COMPONENT
+        # - LEVEL - msg"; a line without that shape (traceback continuation) gets
+        # a blank component and shows verbatim.
+        for line in reversed(tail):
+            if not line.strip():
+                continue
+            parts = line.split(" - ", 2)
+            module = parts[1].strip() if len(parts) >= 3 and line[:4].isdigit() else ""
+            log_rows.append({"module": module, "log": line})
+    except Exception as e:
+        logs = f"Error reading logs from {get_log_path()}: {e}"
+        log_rows = [{"module": "", "log": logs}]
+    return templates.TemplateResponse(request=request, name="index.html",
+                                      context={"view": "logs", "logs": logs,
+                                               "log_rows": log_rows, "state": state})
 
 
 @router.get("/hub-logs")
