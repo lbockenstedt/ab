@@ -838,12 +838,26 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             version_bumped = False
             new_v = None
             can_actually_direct_push = False
+            new_v = None
             if can_direct_push and final_verdict == "Approve":
                 new_v = bump_repo_version(path)
                 if new_v:
                     version_bumped = True
                     logger.info(f"Bumped target repository {repo_name} version to {new_v}")
 
+            # COMMIT the fix (+ any version bump) BEFORE any push. The direct-push
+            # path below used to push HEAD *before* this commit ran, so it pushed
+            # the pre-fix base (a no-op) and the fix commit only ever existed
+            # LOCALLY — yet the issue was told "pushed to main / Commit <sha>" and
+            # closed, while nothing landed on origin (the false-fix bug). Commit
+            # first so the push actually carries the fix.
+            commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
+            if version_bumped:
+                commit_msg += f" (Version Bump to {new_v})"
+            repo_git.git.add(A=True)  # re-stage so a version bump made after the earlier add(A=True) is included
+            repo_git.index.commit(commit_msg)
+
+            if can_direct_push and final_verdict == "Approve":
                 try:
                     with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
                         repo_git.remotes.origin.push(f"HEAD:{base_branch}")
@@ -862,11 +876,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         logger.warning(f"Direct push failed even after rebase: {re_err}. Falling back to PR.")
                         decision_reason = f"Direct push failed: {re_err}"
                         can_actually_direct_push = False
-
-            commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
-            if version_bumped:
-                commit_msg += f" (Version Bump to {new_v})"
-            repo_git.index.commit(commit_msg)
 
             if can_actually_direct_push:
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: {decision_reason}")
