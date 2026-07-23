@@ -1194,8 +1194,15 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
     global state
-    update_task_state(task_id="HubScan", task_name="Scanning Hub Logs", action="start")
-    logger.info("Scanning Hub for new errors...")
+    # With hub_gated_triage on (default), the LM hub sentinel owns hub-log analysis, so
+    # this phase no longer SCANS hub logs for errors — it just syncs the local mirror
+    # (fix context) + files File-a-Bug reports. Name the task honestly so it doesn't
+    # read as a redundant "scan".
+    _gated = config.get("hub_gated_triage", True)
+    update_task_state(task_id="HubScan",
+                      task_name="Syncing Hub Logs" if _gated else "Scanning Hub Logs",
+                      action="start")
+    logger.info("Syncing Hub logs (mirror + bug reports)…" if _gated else "Scanning Hub for new errors...")
     try:
         # One live pull per cycle: sync_hub_logs() GET_LOGS the Hub, persists
         # the logs to local per-module files (the local mirror every other
@@ -1235,28 +1242,30 @@ def scan_hub_logs(gh_current, config):
                 scan_bugs(gh_current, config, hub_logs)
             except Exception as bug_err:
                 logger.error(f"Bug-report scan failed: {bug_err}")
-            # Scrub to error-relevant entries only before paying for an LLM
-            # call: keeps the prompt small (avoids context-overflow 500s) and
-            # focuses the model on actionable errors instead of INFO noise.
-            error_logs = filter_error_logs(hub_logs)
-            logger.info(
-                f"Hub logs scrubbed: {len(hub_logs)} entries -> {len(error_logs)} "
-                f"error-relevant entries for LLM analysis."
-            )
             actionable_errors = []
             # Hub-gated triage (default ON): the LM hub's per-module log sentinel now
             # owns first-pass hub-log analysis and escalates real problems back to us
             # via file_escalated_issue. So BugFixer no longer scrubs+LLM-analyzes hub
             # logs itself every cycle (the redundant "always processing logs" pass) —
-            # it still syncs the mirror (fix context) and runs scan_bugs above. Set
-            # hub_gated_triage=false to restore BugFixer's standalone hub-log triage.
+            # it still syncs the mirror (fix context) and runs scan_bugs above. Skip the
+            # scrub entirely when gated (no point). Set hub_gated_triage=false to restore
+            # BugFixer's standalone hub-log triage.
             if config.get("hub_gated_triage", True):
-                logger.info("Hub-log triage delegated to the LM hub sentinel "
-                            "(hub_gated_triage on); skipping BugFixer's own error analysis this cycle.")
-            elif not error_logs:
-                logger.info("No error-level Hub log entries this cycle. Skipping LLM analysis.")
+                logger.debug("Hub-log triage delegated to the LM hub sentinel "
+                             "(hub_gated_triage on); BugFixer only synced the mirror + bug reports.")
             else:
-                actionable_errors = analyze_logs_for_errors(error_logs)
+                # Scrub to error-relevant entries only before paying for an LLM call:
+                # keeps the prompt small (avoids context-overflow 500s) and focuses the
+                # model on actionable errors instead of INFO noise.
+                error_logs = filter_error_logs(hub_logs)
+                logger.info(
+                    f"Hub logs scrubbed: {len(hub_logs)} entries -> {len(error_logs)} "
+                    f"error-relevant entries for LLM analysis."
+                )
+                if not error_logs:
+                    logger.info("No error-level Hub log entries this cycle. Skipping LLM analysis.")
+                else:
+                    actionable_errors = analyze_logs_for_errors(error_logs)
             monitored_repos = get_monitored_repos(config)
             for error in actionable_errors:
                 # Defensive: ensure error is a dict (analyze_logs_for_errors already
