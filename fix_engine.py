@@ -1085,7 +1085,17 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         logger.error(f"No LLM providers configured for issue {issue_id}: {inner_e}")
                         update_task_state(task_id=issue_id, action="end")
                         return False, "No LLM providers configured"
-                    raise
+                    # A provider/apply/verify error on THIS attempt must NOT kill the
+                    # whole run — record it and let the loop escalate to the next
+                    # provider (e.g. a pinned P1 that's unreachable → try P2/P3).
+                    logger.warning(f"Attempt {attempt} errored ({inner_e}); escalating to the next provider/attempt.")
+                    error_context = f"Previous attempt failed with: {str(inner_e)[:300]}"
+                    try:
+                        repo_git.git.reset("--hard", "HEAD")
+                        repo_git.git.clean("-fd")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
 
             if not success:
                 state["failure_count"] += 1

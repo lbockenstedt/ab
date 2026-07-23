@@ -679,6 +679,18 @@ def _confirm_fix_marker(descriptor):
     )
 
 
+def _chat_force_provider(config):
+    """Which provider slot the Chat uses. Pinning a dedicated fast slot (e.g. the
+    M4 GPU) keeps chat snappy independent of the fix-builder ladder — whose P1 may
+    be a slow CPU. Returns an int 1-4, or None to use the normal failover chain."""
+    v = config.get("chat_slot")
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return None
+    return v if v in (1, 2, 3, 4) else None
+
+
 def _run_chat_reply_simple(chat_id, config):
     """Legacy single-turn chat path: used when CHAT_TOOLS_ENABLED is False (or as
     the graceful-degradation fallback). Streams one call_llm reply with a plain
@@ -693,7 +705,7 @@ def _run_chat_reply_simple(chat_id, config):
             return
         messages = conv.get("messages", [])
         window = [{"role": "system", "content": system_prompt}] + messages[-window_size:]
-        reply = call_llm("", messages=window, task_id=chat_id)
+        reply = call_llm("", messages=window, task_id=chat_id, force_provider=_chat_force_provider(config))
         if reply and reply.strip():
             append_chat_message(chat_id, {
                 "role": "assistant",
@@ -750,7 +762,7 @@ def run_chat_reply(chat_id):
         # No GitHub token -> no tools, but the index still informs the answer.
         if gh is None:
             _set_chat_stream_status(chat_id, "Thinking…")
-            reply = call_llm("", messages=messages, task_id=chat_id)  # streaming string
+            reply = call_llm("", messages=messages, task_id=chat_id, force_provider=_chat_force_provider(config))  # streaming string
             if reply and reply.strip():
                 append_chat_message(chat_id, {
                     "role": "assistant",
@@ -767,13 +779,13 @@ def run_chat_reply(chat_id):
         for iteration in range(max_iter):
             _set_chat_stream_status(chat_id, "Thinking…" if iteration == 0 else "Working…")
             try:
-                result = call_llm("", messages=messages, task_id=chat_id, tools=tools, stream=False)
+                result = call_llm("", messages=messages, task_id=chat_id, tools=tools, stream=False, force_provider=_chat_force_provider(config))
             except Exception as e:
                 # Tool-capable /api/chat failed (e.g. cloud without /api/chat tool
                 # support). Degrade to one streaming index-only turn and finish.
                 logger.warning(f"Chat tool turn {iteration} failed ({e}); degrading to index-only answer.")
                 try:
-                    reply = call_llm("", messages=messages[:], task_id=chat_id)
+                    reply = call_llm("", messages=messages[:], task_id=chat_id, force_provider=_chat_force_provider(config))
                     final_text = reply or ""
                 except Exception as ee:
                     _set_chat_stream_error(chat_id, f"LLM error: {ee}")
