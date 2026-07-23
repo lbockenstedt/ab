@@ -956,6 +956,24 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             repo_git.remotes.origin.set_url(repo_obj.clone_url)
 
             max_attempts = 3
+            # Confidence escalation: when the user hasn't pinned a provider, walk the
+            # configured provider slots in order across attempts (a cheap first pass
+            # → escalate) instead of retrying the SAME model. A fix that verifies but
+            # whose confidence is below MIN_BUILDER_CONFIDENCE is not accepted — we
+            # escalate to the next provider (e.g. CPU → GPU → Cloud). Last provider's
+            # verified fix is accepted even if below the bar (best effort).
+            min_conf = float(config.get("MIN_BUILDER_CONFIDENCE", 0.80) or 0.80)
+            escalate = (force_cloud is None and force_provider is None)
+            ladder = []
+            if escalate:
+                for _n in (1, 2, 3, 4):
+                    _p, _k, _m, _u = _get_provider_config(_n, config)
+                    if _provider_configured(_p, _k, _m):
+                        ladder.append(_n)
+                if len(ladder) > 1:
+                    max_attempts = max(max_attempts, len(ladder))
+                else:
+                    escalate = False  # nothing to escalate to
             success = False
             error_context = None
             final_verdict = "Reject"
@@ -977,6 +995,15 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
                     logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
 
+                    # Escalation: pick THIS attempt's builder from the ladder (cheap
+                    # first, escalate on low confidence). Pins to the user's choice
+                    # when one was given.
+                    att_fc, att_fp = force_cloud, force_provider
+                    if escalate and ladder:
+                        att_fp = ladder[(attempt - 1) % len(ladder)]
+                        att_fc = None
+                        logger.info(f"Attempt {attempt}: builder = provider slot P{att_fp}.")
+
                     # --- Resume from awaiting_review ---
                     pending_fix = issue_info.get("pending_fix") if attempt == 1 and issue_info.get("status") == "awaiting_review" else None
                     if pending_fix:
@@ -988,7 +1015,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             processed[issue_id]["status"] = "processing"
                             save_processed(processed)
                     elif not pending_fix:
-                        fix_code = apply_ai_fix(path, fix_body, error_context, force_cloud=force_cloud, task_id=issue_id, force_provider=force_provider)
+                        fix_code = apply_ai_fix(path, fix_body, error_context, force_cloud=att_fc, task_id=issue_id, force_provider=att_fp)
                         success_applied, fixes, confidence = parse_and_apply(fix_code, path)
 
                     if not success_applied:
@@ -1001,7 +1028,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             review_verdict = "Approve"
                         else:
                             update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
-                            review = review_fix(path, fix_body, fixes, force_cloud=force_cloud, task_id=issue_id, builder_n=force_provider)
+                            review = review_fix(path, fix_body, fixes, force_cloud=att_fc, task_id=issue_id, builder_n=att_fp)
 
                             # --- Handle Queue for Retry ---
                             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
@@ -1030,9 +1057,25 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             verified, failure_msg = True, "QA disabled"
 
                         if verified:
+                            final_confidence = (confidence + review_conf) / 2
+                            # Low confidence + a stronger provider still untried →
+                            # discard this fix and escalate to the next ladder slot.
+                            if (escalate and final_confidence < min_conf
+                                    and attempt < max_attempts and attempt < len(ladder)):
+                                logger.info(
+                                    f"Fix verified but confidence {final_confidence:.0%} < "
+                                    f"{min_conf:.0%} — escalating to the next provider.")
+                                error_context = (
+                                    f"The previous provider's fix passed tests but only reached "
+                                    f"{final_confidence:.0%} confidence. Produce a more robust fix.")
+                                try:
+                                    repo_git.git.reset("--hard", "HEAD")
+                                    repo_git.git.clean("-fd")
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                continue
                             success = True
                             state["success_count"] += 1
-                            final_confidence = (confidence + review_conf) / 2
                             final_verdict = review_verdict
                             break
                         else:
