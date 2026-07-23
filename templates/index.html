@@ -1043,6 +1043,10 @@
                                     <label for="local_ensemble" class="text-sm font-medium text-slate-700">CPU ensemble (P1 ratchets local models + all-local cross-check → external P2/P3 confirm → human)</label>
                                 </div>
                                 <span class="text-xs text-slate-500">P1 builds with every installed local model smallest→largest, all local models cross-check each fix, and once the CPU consensus hits the target below it's confirmed by one external slot (ramp P2→P3). If every external slot rejects, it's held for human review — never auto-committed. Accuracy over speed.</span>
+                                <div class="flex items-center gap-2 mt-2">
+                                    <input type="checkbox" name="ensemble_skip_external_at_full" id="ensemble_skip_external_at_full" {{ 'checked' if settings.ensemble_skip_external_at_full else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <label for="ensemble_skip_external_at_full" class="text-xs font-medium text-slate-700">Skip the external check when the CPU cross-check is unanimous at ~100% (commit directly)</label>
+                                </div>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">CPU cross-check target (0–1)</label>

@@ -1065,6 +1065,7 @@ async def save_settings(request: Request):
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
     config_data["skip_review"] = data.get("skip_review") == "on"
     config_data["local_ensemble"] = data.get("local_ensemble") == "on"
+    config_data["ensemble_skip_external_at_full"] = data.get("ensemble_skip_external_at_full") == "on"
     _cct = str(data.get("CPU_CROSSCHECK_TARGET") or "").strip()
     try:
         config_data["CPU_CROSSCHECK_TARGET"] = max(0.5, min(1.0, float(_cct))) if _cct else 0.90

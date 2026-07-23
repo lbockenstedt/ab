@@ -507,6 +507,13 @@ def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
                     err = f"CPU-confident fix failed tests: {vmsg}"
                     logger.info(err)
                     continue
+            # Optional: a UNANIMOUS ~100% CPU consensus can skip the external check
+            # entirely (opt-in). The local ensemble already agreed completely.
+            if (config.get("ensemble_skip_external_at_full")
+                    and cross["verdict"] == "Approve" and cross["confidence"] >= 0.999):
+                logger.info(f"CPU cross-check unanimous ~100% ({cross['n']} reviewers) — "
+                            "skipping external confirmation, auto-commit.")
+                return "commit", fixes, cross["confidence"]
             # Single external confirmation with THIS cycle's slot.
             ext = _crosscheck_review(path, fix_body, ext_slot, [None], None, config, task_id)
             if ext["verdict"] == "Approve":
