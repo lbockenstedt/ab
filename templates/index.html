@@ -432,6 +432,7 @@
                         </td>
                         <td class="px-6 py-4 text-center space-x-2">
                             <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded font-bold text-slate-600 border border-slate-200 transition-colors">Retry</button>
+                            <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-sky-100 hover:bg-sky-200 rounded font-bold text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
                             <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-1 bg-orange-100 hover:bg-orange-200 rounded font-bold text-orange-700 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
                             <button onclick="deleteIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-red-100 hover:bg-red-200 rounded font-bold text-red-700 transition-colors" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                             <button onclick="resolveIssue('{{ issue_id }}')" class="text-xs px-2 py-1 bg-[#01A982]/10 hover:bg-[#01A982]/20 rounded font-bold text-[#01A982] border border-[#01A982] transition-colors" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
@@ -2993,6 +2994,22 @@
                     reloadWithToast(data.message || 'Issue dismissed.', 'success');
                 } else {
                     showToast(data.message || 'Error dismissing issue.', 'error');
+                }
+            } catch (e) { showToast('Request failed: ' + e, 'error'); }
+        }
+
+        async function reopenIssue(issueId) {
+            try {
+                const resp = await fetch('/reopen_issue', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ issue_id: issueId })
+                });
+                const data = await resp.json();
+                if (data.status === 'triggered') {
+                    reloadWithToast(data.message || 'Reopened + re-queued.', 'success');
+                } else {
+                    showToast(data.message || 'Error reopening issue.', 'error');
                 }
             } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }

@@ -1567,6 +1567,66 @@ async def retry_issue(request: Request):
     return {"status": "triggered", "message": f"Retry started for {issue_id}"}
 
 
+@router.post("/reopen_issue")
+async def reopen_issue(request: Request):
+    """Reopen a BugFixer-closed issue on GitHub and re-queue it — for when BugFixer
+    reported a fix that did NOT actually resolve the bug (e.g. it committed +
+    verified in its sandbox but the push never landed). Reopens the issue, strips
+    the ``bugfixer-closed`` / ``bugfixer-dismissed`` labels that suppress
+    re-processing, clears its stored processed state, and kicks off a fresh fix."""
+    data = await request.json()
+    issue_id = data.get("issue_id")
+    if not issue_id or ":" not in issue_id:
+        return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
+    repo_name, issue_num_str = issue_id.rsplit(":", 1)
+    try:
+        issue_num = int(issue_num_str)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"message": "Invalid issue number"})
+    config = load_config()
+    token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return JSONResponse(status_code=400, content={"message": "No GitHub token configured"})
+    try:
+        gh = Github(token)
+        repo = gh.get_repo(repo_name)
+        issue = repo.get_issue(issue_num)
+        for lbl in ("bugfixer-closed", "bugfixer-dismissed"):
+            try:
+                issue.remove_from_labels(lbl)
+            except Exception:  # noqa: BLE001 — label may not be present
+                pass
+        if issue.state != "open":
+            issue.edit(state="open")
+        try:
+            issue.create_comment(
+                "🔁 **BugFixer**: Reopened by the operator — the previous fix did not "
+                "actually resolve this. Re-queued for another attempt."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Reopen failed for {issue_id}: {e}")
+        return JSONResponse(status_code=500, content={"message": f"Reopen failed: {e}"})
+    # Clear the stored processed state so the scanner/retry treats it as fresh
+    # (a 'fixed' status would otherwise make scan_repo_issues skip it).
+    try:
+        processed = load_processed()
+        if issue_id in processed:
+            del processed[issue_id]
+            save_processed(processed)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Reopen: could not clear processed state for {issue_id}: {e}")
+    logger.info(f"Manual reopen: {issue_id}")
+
+    def run_fix():
+        success, msg = process_single_issue(repo_name, issue_num)
+        logger.info(f"Reopen re-fix {'ok' if success else 'FAILED'} for {issue_id}: {msg}")
+
+    threading.Thread(target=run_fix, daemon=True).start()
+    return {"status": "triggered", "message": f"Reopened + re-queued {issue_id}"}
+
+
 @router.post("/retry_all_failed")
 async def retry_all_failed(request: Request):
     """Retries all issues that currently have a 'failed' or 'non-actionable' status with a given LLM preference."""

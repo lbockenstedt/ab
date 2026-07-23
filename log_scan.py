@@ -898,7 +898,13 @@ def scan_bugs(gh_current, config, hub_logs):
             )
             file_labels = ["enhancement"]
         else:
-            title = f"🤖 Bug Report: {str(explanation)[:80].strip()}"
+            # Prefer the actual "Error: …" line for the title (auto-filed browser
+            # errors bury it after a boilerplate prefix), so the title is readable
+            # AND two reports of the SAME error share a title → dedup matches them
+            # instead of opening a fresh issue each time.
+            _err = next((ln.strip() for ln in str(explanation).splitlines()
+                         if ln.strip().lower().startswith("error:") and len(ln.strip()) > 6), "")
+            title = f"🤖 Bug Report: {(_err or str(explanation).strip())[:100].strip()}"
             body = (
                 f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
                 f"### What's wrong\n{explanation}\n\n"
