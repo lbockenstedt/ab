@@ -822,6 +822,17 @@ async def settings_page(request: Request):
     # via the Settings toggle; display-only default so the checkbox renders
     # checked on a never-saved install.
     config.setdefault("self_log_scan_enabled", True)
+    # Source knobs (default ON keeps the LM bug-fix pipeline working; the per-
+    # module log grid + fix-log-detected are opt-in, default OFF, so the operator
+    # enables noisy sources one at a time).
+    config.setdefault("bug_reports_enabled", True)
+    config.setdefault("feature_requests_enabled", True)
+    config.setdefault("fix_logdetected_enabled", False)
+    config.setdefault("enabled_log_modules", [])
+    # Module list for the per-module log-filing grid = the operator's module→repo
+    # map keys (a module must map to a repo before its logs can be filed).
+    _mrm = config.get("module_repo_map") or {}
+    log_module_options = sorted(_mrm.keys()) if isinstance(_mrm, dict) else []
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
     settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
@@ -861,6 +872,7 @@ async def settings_page(request: Request):
         "monitored_set": monitored_set,
         "trusted_options": trusted_options,
         "trusted_set": trusted_set,
+        "log_module_options": log_module_options,
         "state": state,
     })
 
@@ -1051,6 +1063,22 @@ async def save_settings(request: Request):
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.
     config_data["heartbeat_triage_enabled"] = data.get("heartbeat_triage_enabled") == "on"
+    # ── Source noise-control knobs ────────────────────────────────────────────
+    # BugFixes from LM (default ON — keeps the bug-fix pipeline working).
+    config_data["bug_reports_enabled"] = data.get("bug_reports_enabled") != "off"
+    # Feature Requests from LM (default ON; independently toggleable).
+    config_data["feature_requests_enabled"] = data.get("feature_requests_enabled") != "off"
+    # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical
+    # always fix). Stops the fixer churning on log-scraped issues.
+    config_data["fix_logdetected_enabled"] = data.get("fix_logdetected_enabled") == "on"
+    # Per-module hub-log auto-filing: only CHECKED modules have their errors
+    # filed as issues. Empty = OFF for every module (the default) → enable one at
+    # a time. getlist so repeated checkbox values aren't collapsed by dict(form_data).
+    if hasattr(form_data, "getlist"):
+        config_data["enabled_log_modules"] = list(dict.fromkeys(form_data.getlist("enabled_log_modules")))
+    else:
+        _elm = form_data.get("enabled_log_modules", [])
+        config_data["enabled_log_modules"] = _elm if isinstance(_elm, list) else ([_elm] if _elm else [])
     # Self-log scan: scan BugFixer's OWN logs for internal errors + file them
     # as GitHub issues in self_diagnosis_repo. On by default (self-diagnosis);
     # turn OFF to stop BugFixer from monitoring/filing its own logs.

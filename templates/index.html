@@ -661,6 +661,35 @@
                                 <textarea name="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
                                 <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
                             </div>
+                            <div class="space-y-3 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
+                                <label class="text-sm font-semibold text-slate-700">BugFixer Sources <span class="text-slate-400 font-normal">(turn noisy sources on one at a time)</span></label>
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="bug_reports_enabled" id="bug_reports_enabled" {{ 'checked' if settings.get('bug_reports_enabled', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <label for="bug_reports_enabled" class="text-xs font-medium text-slate-700" title="File &amp; auto-fix BUG reports submitted via the LM WebUI. On by default.">BugFixes from LM — file &amp; fix bug reports from the LM WebUI</label>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="feature_requests_enabled" id="feature_requests_enabled" {{ 'checked' if settings.get('feature_requests_enabled', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <label for="feature_requests_enabled" class="text-xs font-medium text-slate-700" title="File FEATURE requests from the LM WebUI (enhancement issues; never auto-implemented).">Feature Requests from LM — file feature requests from the LM WebUI</label>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="fix_logdetected_enabled" id="fix_logdetected_enabled" {{ 'checked' if settings.get('fix_logdetected_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-400">(Bug &amp; Critical always fix)</span></label>
+                                </div>
+                                <label class="text-xs font-medium text-slate-600 block mt-2">Hub-log auto-filing — per module <span class="text-slate-400 font-normal">(none checked = OFF; enable one at a time)</span></label>
+                                {% if log_module_options %}
+                                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
+                                    {% for m in log_module_options %}
+                                    <label class="flex items-center gap-2 text-sm text-slate-700 min-w-0" title="{{ m }}">
+                                        <input type="checkbox" name="enabled_log_modules" value="{{ m }}" {% if m in settings.get('enabled_log_modules', []) %}checked{% endif %} class="rounded border-slate-300 focus:ring-[#01A982] flex-shrink-0">
+                                        <span class="truncate">{{ m }}</span>
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                                <span class="text-xs text-slate-500">Only checked modules have their Hub-log errors filed as issues. Add modules in the Module → Repo Map above to control them here.</span>
+                                {% else %}
+                                <span class="text-xs text-slate-400 block">No module→repo mappings yet — add <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs above, then choose which modules' logs to file here.</span>
+                                {% endif %}
+                            </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>

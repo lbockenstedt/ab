@@ -665,7 +665,11 @@ def scan_repo_issues(gh_current, config, processed):
                             critical_to_fix.append((repo_name, issue.number))
                         elif bug_label and bug_label in issue_label_names:
                             bug_to_fix.append((repo_name, issue.number))
-                        else:
+                        elif config.get("fix_logdetected_enabled", False):
+                            # Log-detected / automated-fix issues are auto-FIXED only
+                            # when enabled (Settings, default OFF) — so the fixer
+                            # stops churning on log-scraped issues. Critical + Bug
+                            # (incl. LM bug reports) always fix.
                             to_fix.append((repo_name, issue.number))
                     except Exception as e:
                         logger.exception(f"Failed to triage issue {issue_id}: {e}")

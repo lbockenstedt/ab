@@ -863,6 +863,15 @@ def scan_bugs(gh_current, config, hub_logs):
         rtype = (report.get("report_json") and _safe_json_field(report.get("report_json"), "type")) \
             or report.get("type") or "bug"
         is_feature = str(rtype).strip().lower() == "feature"
+        # Per-type ingest knobs (Settings): "BugFixes from LM" and "Feature
+        # Requests from LM" toggle independently. Bug reports default ON (keep the
+        # bug-fix pipeline working); a disabled type is skipped (not filed).
+        if is_feature and not config.get("feature_requests_enabled", True):
+            _fi["note"] = "feature_requests_enabled is OFF (Settings)"
+            continue
+        if not is_feature and not config.get("bug_reports_enabled", True):
+            _bi["note"] = "bug_reports_enabled is OFF (Settings)"
+            continue
         ctx = report.get("context") or {}
         # Build a clean, public-safe issue body.
         ctx_lines = []
@@ -1166,6 +1175,18 @@ def scan_hub_logs(gh_current, config):
                 # the LLM's repo guess (which previously dumped everything into the
                 # self-diagnosis repo). The module is authoritative.
                 module = error.get('module')
+                # Per-module log-filing knob (Settings → enabled_log_modules).
+                # DEFAULT EMPTY = OFF for every module, so hub-log auto-filing files
+                # nothing until the operator enables modules ONE AT A TIME — this is
+                # the switch that kills the false-issue noise. Bug/feature reports
+                # (scan_bugs) and heartbeat triage are separate paths, unaffected.
+                _enabled_mods = config.get("enabled_log_modules", []) or []
+                if str(module) not in _enabled_mods:
+                    logger.debug(
+                        f"Log auto-file skipped: module {module!r} not in "
+                        f"enabled_log_modules {_enabled_mods!r}"
+                    )
+                    continue
                 repo_name = resolve_module_repo(module, monitored_repos, config)
                 if not repo_name:
                     # Fall back to the LLM's repo hint only if it is itself a
