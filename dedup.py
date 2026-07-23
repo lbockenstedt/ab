@@ -34,6 +34,7 @@ MODULE_ALIASES = {
 # so comparisons reflect the underlying error rather than the template wrapper.
 _BOILERPLATE_RE = re.compile(
     r'\b(?:'
+    r'bug report|feature request|'
     r'log alert|automated error detection|bugfixer update|bugfixer hub analysis|'
     r'log evidence|ai fix|automated issue|automated fix|log detected|'
     r'detected a potential issue in the logs|'

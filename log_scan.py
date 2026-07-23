@@ -898,15 +898,21 @@ def scan_bugs(gh_current, config, hub_logs):
             )
             file_labels = ["enhancement"]
         else:
-            # Prefer the actual "Error: …" line for the title (auto-filed browser
-            # errors bury it after a boilerplate prefix), so the title is readable
-            # AND two reports of the SAME error share a title → dedup matches them
-            # instead of opening a fresh issue each time.
+            # Title stays a stable, generic label; the error text goes on its own
+            # (second) line at the top of the body rather than being crammed into
+            # the single title line. Dedup no longer needs the error in the title —
+            # it matches on the body error signature, and _normalize_for_dedup
+            # strips the "Bug Report" boilerplate so the constant title carries no
+            # token signal (two DISTINCT errors can't false-match on title alone).
             _err = next((ln.strip() for ln in str(explanation).splitlines()
                          if ln.strip().lower().startswith("error:") and len(ln.strip()) > 6), "")
-            title = f"🤖 Bug Report: {(_err or str(explanation).strip())[:100].strip()}"
+            _msg = _err[6:].strip() if _err.lower().startswith("error:") else \
+                (_err or str(explanation).strip()[:200].strip())
+            _err_line = f"**Error:** {_msg}\n\n" if _msg else ""
+            title = "🤖 Bug Report"
             body = (
                 f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
+                f"{_err_line}"
                 f"### What's wrong\n{explanation}\n\n"
                 f"### Context\n" + ("\n".join(ctx_lines) if ctx_lines else "_no context captured_") + "\n\n"
                 f"**Severity:** {severity}\n\n"
