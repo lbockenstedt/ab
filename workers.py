@@ -89,7 +89,7 @@ def _check_provider_online(n, config):
         if not model:
             return False
         try:
-            base = (base_url or ("https://ollama.com" if p == "ollama2" else "http://localhost:11434")).rstrip("/")
+            base = (base_url or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
             headers = {}
             if api_key:
                 clean = api_key.strip().replace("Bearer ", "").strip()
@@ -1244,7 +1244,7 @@ def _fetch_models_for_provider(provider, api_key, base_url):
         # Ollama Cloud (https://ollama.com) takes a key, sent as a Bearer header
         # when present. Default base_url: localhost for the no-key local case,
         # ollama.com only when a key is set and no URL was given (cloud default).
-        base = (base_url or ("https://ollama.com" if p == "ollama2" else "http://localhost:11434")).rstrip("/")
+        base = (base_url or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
         headers = {}
         if api_key:
             clean = api_key.strip().replace("Bearer ", "").strip()
