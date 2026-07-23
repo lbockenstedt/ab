@@ -955,7 +955,7 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
 
 def _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
     """Call an Ollama-compatible API (local or Ollama Cloud). Uses /api/chat natively."""
-    base = (base_url or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
+    base = (base_url or "http://localhost:11434").rstrip("/")
     endpoint = f"{base}/api/chat"
     headers = {}
     if api_key:
