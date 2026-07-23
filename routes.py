@@ -1064,6 +1064,12 @@ async def save_settings(request: Request):
     config_data["bug_report_enabled"] = data.get("bug_report_enabled") != "off"
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
     config_data["skip_review"] = data.get("skip_review") == "on"
+    config_data["local_ensemble"] = data.get("local_ensemble") == "on"
+    _cct = str(data.get("CPU_CROSSCHECK_TARGET") or "").strip()
+    try:
+        config_data["CPU_CROSSCHECK_TARGET"] = max(0.5, min(1.0, float(_cct))) if _cct else 0.90
+    except (TypeError, ValueError):
+        config_data["CPU_CROSSCHECK_TARGET"] = 0.90
     # Heartbeat triage files issues for modules with a missing/stale heartbeat
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.

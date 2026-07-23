@@ -364,6 +364,104 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques}
 
 
+def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, config, task_id=None):
+    """CPU ensemble cross-check: run EVERY installed local model (on `slot`) as a
+    reviewer of the working-tree diff, except the one that built it. Returns
+    {confidence, verdict, votes, n} — the CPU-side consensus (majority Approve +
+    average confidence). Speed isn't the goal here; accuracy is (we auto-commit)."""
+    try:
+        diff_text = git.Repo(repo_path).git.diff("HEAD")
+    except Exception:  # noqa: BLE001
+        diff_text = ""
+    if len(diff_text) > 20000:
+        diff_text = diff_text[:20000] + "\n… [diff truncated] …"
+    prompt = (
+        f"Issue Description: {issue_body}\n\n"
+        f"Proposed Fix (working-tree diff vs HEAD):\n{diff_text}\n\n"
+        "You are a Skeptical Senior Engineer reviewing this diff. Check: does it fix "
+        "the issue, introduce regressions, and is it complete/correct? "
+        "Return ONLY JSON: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"...\"}"
+    )
+    votes = []
+    for mdl in models:
+        if mdl and mdl == exclude_model:
+            continue
+        try:
+            res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
+                           force_provider=slot, model_override=mdl, task_id=task_id)
+            m = re.search(r"\{.*\}", res, re.DOTALL)
+            if m:
+                votes.append({**json.loads(m.group()), "model": mdl})
+        except Exception as e:  # noqa: BLE001
+            if is_llm_cooldown_error(e):
+                logger.warning(f"cross-check reviewer {mdl} deferred (cooldown): {e}")
+            else:
+                logger.warning(f"cross-check reviewer {mdl} failed: {e}")
+    if not votes:
+        return {"confidence": 0.0, "verdict": "Reject", "votes": [], "n": 0}
+    approvals = [v for v in votes if v.get("verdict") == "Approve"]
+    avg = sum(v.get("confidence", 0.0) for v in votes) / len(votes)
+    verdict = "Approve" if len(approvals) >= (len(votes) / 2 + 0.5) else "Reject"
+    logger.info(f"CPU cross-check: {len(approvals)}/{len(votes)} approve, avg confidence {avg:.0%}")
+    return {"confidence": avg, "verdict": verdict, "votes": votes, "n": len(votes)}
+
+
+def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
+                      local_models, external_slots, cpu_target, min_conf):
+    """CPU-first ensemble fixer (P1 = local CPU, anything P2+ = external).
+
+    Per external slot (ramped P2 → P3 → …, i.e. one CPU ratchet cycle each): build
+    with P1's models smallest→largest; cross-check each candidate with EVERY local
+    model; once a candidate clears ``cpu_target`` AND passes QA, confirm it with that
+    cycle's single external slot. Approve → commit. Reject → next external slot (one
+    more CPU ratchet). If every external slot rejects a CPU-confident fix → hold for
+    human review (NO auto-commit).
+
+    Returns (outcome, fixes, confidence):
+      'commit' — working tree holds a cross-checked + externally-confirmed + QA'd fix.
+      'human'  — a CPU-confident fix was externally rejected on every cycle.
+      'fail'   — the CPU ensemble never reached the target (caller may punt to build)."""
+    err = None
+    reached_target_ever = False
+    for cycle, ext_slot in enumerate(external_slots, start=1):
+        logger.info(f"CPU ensemble cycle {cycle}/{len(external_slots)} — external confirmer = P{ext_slot}.")
+        for mdl in local_models:
+            try:
+                repo_git.git.reset("--hard", "HEAD")
+                repo_git.git.clean("-fd")
+            except Exception:  # noqa: BLE001
+                pass
+            update_task_state(task_id=task_id, task_name=f"CPU build {mdl}", action="start")
+            fix_code = apply_ai_fix(path, fix_body, err, force_provider=1, model_override=mdl, task_id=task_id)
+            ok, fixes, _conf = parse_and_apply(fix_code, path)
+            if not ok:
+                err = "AI returned an invalid/empty fix"
+                continue
+            cross = _crosscheck_review(path, fix_body, 1, local_models, mdl, config, task_id)
+            if cross["verdict"] != "Approve" or cross["confidence"] < cpu_target:
+                err = (f"CPU cross-check {cross['confidence']:.0%} ({cross['n']} reviewers) "
+                       f"below target {cpu_target:.0%} — ratchet up.")
+                logger.info(err)
+                continue
+            reached_target_ever = True
+            if config.get("qa_enabled", True):
+                prepare_environment(path)
+                verified, vmsg = verify_fix(path, repo_name, config)
+                if not verified:
+                    err = f"CPU-confident fix failed tests: {vmsg}"
+                    logger.info(err)
+                    continue
+            # Single external confirmation with THIS cycle's slot.
+            ext = _crosscheck_review(path, fix_body, ext_slot, [None], None, config, task_id)
+            if ext["verdict"] == "Approve":
+                logger.info(f"External P{ext_slot} APPROVED (conf {ext['confidence']:.0%}). Auto-commit.")
+                return "commit", fixes, (cross["confidence"] + ext["confidence"]) / 2
+            logger.warning(f"External P{ext_slot} REJECTED a CPU-confident fix — one more CPU ratchet.")
+            err = f"External P{ext_slot} rejected the CPU-confident fix: {ext.get('votes')}"
+            break  # end this cycle; escalate to the next external slot
+    return ("human" if reached_target_ever else "fail"), None, 0.0
+
+
 def _safe_repo_target(repo_root, filepath):
     """Resolve *filepath* under *repo_root*, rejecting absolute paths, ``..``
     traversal, and symlinks that escape the repo. Returns the absolute path or
@@ -1007,7 +1105,58 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # the fix is informed by related log data, not just the error snippet.
             fix_body = (issue.body or "") + _bug_report_fix_context(issue.body or "") + _module_log_fix_context(issue.body or "")
 
-            for attempt in range(1, max_attempts + 1):
+            # ── CPU-first ensemble (opt-in via local_ensemble) ──────────────────
+            # P1 = local CPU: ratchet its models smallest→largest, cross-check with
+            # EVERY local model to a high bar, then confirm with one external slot
+            # (ramp P2→P3). External-reject on every cycle → human review (no commit).
+            _skip_normal_loop = False
+            if escalate and bool(config.get("local_ensemble")):
+                _p1, _k1, _m1, _u1 = _get_provider_config(1, config)
+                _local_models = []
+                if _provider_configured(_p1, _k1, _m1) and _is_ollama(_p1):
+                    _local_models = [d["name"] for d in sorted(
+                        _ollama_models_detailed(_u1 or "http://localhost:11434"),
+                        key=lambda d: d.get("size", 0))] or [_m1]
+                _external = [n for n in (2, 3, 4)
+                             if _provider_configured(*_get_provider_config(n, config)[:3])]
+                if _local_models and _external:
+                    cpu_target = float(config.get("CPU_CROSSCHECK_TARGET", 0.90) or 0.90)
+                    logger.info(f"CPU ensemble: {len(_local_models)} local model(s), external P{_external}, target {cpu_target:.0%}.")
+                    _outcome, _ens_fixes, _ens_conf = _run_cpu_ensemble(
+                        path, repo_git, repo_name, fix_body, config, issue_id,
+                        _local_models, _external, cpu_target, min_conf)
+                    if _outcome == "commit":
+                        success, fixes, confidence = True, _ens_fixes, _ens_conf
+                        final_confidence, final_verdict = _ens_conf, "Approve"
+                        state["success_count"] += 1
+                        _skip_normal_loop = True
+                    elif _outcome == "human":
+                        try:
+                            repo_git.git.reset("--hard", "HEAD"); repo_git.git.clean("-fd")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            issue.create_comment(
+                                "🧑‍⚖️ **BugFixer — held for human review**\n\nThe CPU ensemble reached "
+                                f"high confidence on a fix, but every external reviewer (P{_external}) "
+                                "rejected it, so it was NOT auto-committed. A human should review.")
+                            issue.add_to_labels("bugfixer-needs-human")
+                        except Exception as ce:  # noqa: BLE001
+                            logger.warning(f"human-review note failed for {issue_id}: {ce}")
+                        processed = load_processed()
+                        processed[issue_id] = {
+                            "status": "awaiting_human",
+                            "timestamp": datetime.now().isoformat(),
+                            "reason": "external reviewers rejected a CPU-confident fix",
+                            "original_body": issue.body or "",
+                        }
+                        save_processed(processed); state["processed"] = processed
+                        recompute_issue_counters(processed)
+                        update_task_state(task_id=issue_id, action="end")
+                        return False, "Held for human review (external reviewers rejected the fix)"
+                    # _outcome == "fail" → fall through to the normal slot loop.
+
+            for attempt in range(1, (0 if _skip_normal_loop else max_attempts) + 1):
                 try:
                     update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
                     logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
