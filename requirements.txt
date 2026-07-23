@@ -9,3 +9,4 @@ jinja2
 requests
 tenacity
 websockets
+psutil

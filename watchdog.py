@@ -16,6 +16,11 @@ STARTUP_STAMP_FILE = os.path.join(CONFIG_DIR, "startup_stamp.json")
 OLLAMA_SETUP_REQUEST = os.path.join(CONFIG_DIR, "ollama_setup_request.json")
 OLLAMA_SETUP_STATUS = os.path.join(CONFIG_DIR, "ollama_setup_status.json")
 OLLAMA_SETUP_HELPER = "/usr/local/bin/bugfixer-ollama-setup"
+# Delegated restart. bugfixer.service is cap-locked (CAP_NET_BIND_SERVICE only) so
+# it can't restart itself (sudo setgid(0) EPERM); it writes this request file and
+# the watchdog (unrestricted) runs the restart. Same privileged-arm pattern as
+# ollama-setup. Kept in sync with workers.RESTART_REQUEST_FILE.
+RESTART_REQUEST = os.path.join(CONFIG_DIR, "restart_request")
 # Derive the health probe from the same env the server binds on (unified-443:
 # HTTPS on :443 by default). Kept in lockstep with main.py's SERVER_PORT / SSL
 # settings so the watchdog never probes the wrong scheme/port.
@@ -88,6 +93,23 @@ def spawn_restart():
     subprocess.Popen(cmd, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
     logger.info("WATCHDOG: spawned detached restart.")
+
+def handle_restart_request():
+    """Consume a restart request from the cap-locked main service and restart it.
+
+    bugfixer.service can't restart itself (sudo can't setgid(0) under its locked
+    CapabilityBoundingSet), so it writes RESTART_REQUEST and we — the unrestricted
+    watchdog — perform the restart. Claim the request by deleting it first so a
+    burst of requests collapses to one restart."""
+    if not os.path.exists(RESTART_REQUEST):
+        return
+    try:
+        os.remove(RESTART_REQUEST)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("WATCHDOG: restart requested by bugfixer.service — restarting it.")
+    spawn_restart()
+
 
 def rollback():
     logger.warning("WATCHDOG: Initiating rollback to last known good commit...")
@@ -243,6 +265,9 @@ def main():
         try: handle_ollama_setup_request()
         except Exception as e:  # noqa: BLE001
             logger.error(f"ollama-setup handler error: {e}")
+        try: handle_restart_request()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"restart-request handler error: {e}")
         if os.path.exists(UPDATE_PENDING_FILE):
             pending_commit = ""
             try:
@@ -301,7 +326,10 @@ def main():
                 if os.path.exists(UPDATE_PENDING_FILE):
                     os.remove(UPDATE_PENDING_FILE)
 
-        time.sleep(30)
+        # Idle cadence. Kept short so delegated restart requests + ollama-setup
+        # requests + on-disk code changes are picked up within ~10s (idle iterations
+        # are just cheap file-existence checks). Not busy-spinning.
+        time.sleep(10)
 
 if __name__ == "__main__":
     main()

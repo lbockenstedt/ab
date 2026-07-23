@@ -505,45 +505,68 @@ def _log_restart_event(kind, message, ok=True):
     except Exception:
         pass
 
+RESTART_REQUEST_FILE = os.path.join(CONFIG_DIR, "restart_request")
+
+
+def _watchdog_active():
+    """True if bugfixer-watchdog.service is active (so a delegated restart request
+    will actually be consumed). None/False on error → caller falls back to a
+    hard exit. Mirrors ollama_setup._watchdog_active."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(["systemctl", "is-active", "--quiet", "bugfixer-watchdog"], timeout=5)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _request_watchdog_restart():
+    """Ask bugfixer-watchdog (the unrestricted privileged arm) to restart us, by
+    writing a request file it consumes. Returns True if the request was queued to
+    an ACTIVE watchdog; False otherwise (caller hard-exits instead). Mirrors the
+    ollama-setup delegation — bugfixer.service is cap-locked and can't restart
+    itself, but the watchdog can."""
+    if _watchdog_active() is False:
+        return False
+    try:
+        with open(RESTART_REQUEST_FILE, "w") as f:
+            json.dump({"requested_at": time.time()}, f)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error("restart: could not write watchdog restart request (%s)", e)
+        return False
+
+
 def _spawn_restart():
-    """Spawn a detached `systemctl restart bugfixer` that survives this process dying.
-    As root (dev/standalone) that's a direct `systemctl restart bugfixer`; as the
-    svc_bg service user, it goes through the narrow root helper
-    /usr/local/bin/bugfixer-self-restart (granted via /etc/sudoers.d/bugfixer),
-    which re-execs into a transient systemd unit OUTSIDE bugfixer.service's cgroup
-    — a bare `systemctl restart bugfixer` from inside the unit races the
-    stop/start against this process's cgroup and can strand bugfixer inactive
-    (same ~min-strand bug lm hit, see lm/install_all.sh lm-self-restart).
-    Detaching into a new session + closing fds ensures the restart proceeds
-    even after the parent receives SIGTERM."""
+    """Restart bugfixer, robust to the cap-locked service.
+
+    As root (dev/standalone): a direct detached `systemctl restart bugfixer`.
+
+    As the svc_bg service user, bugfixer.service is locked to
+    CAP_NET_BIND_SERVICE, so sudo can't setgid(0) ("unable to change to root gid:
+    Operation not permitted") and the old `sudo -n /usr/local/bin/bugfixer-self-restart`
+    path fails every time (noisy ERROR + only recovered via a hard exit). Instead we
+    DELEGATE to bugfixer-watchdog — the unrestricted privileged arm that already runs
+    ollama-setup on our behalf — via a request file it consumes to run the restart.
+    If the watchdog isn't active to pick it up, hard-exit so systemd Restart=always
+    revives us regardless (the manual Restart button can never silently no-op)."""
     import subprocess as _sp
     if os.geteuid() == 0:
-        cmd = ["systemctl", "restart", "bugfixer"]
-    else:
-        cmd = ["sudo", "-n", "/usr/local/bin/bugfixer-self-restart"]
-    try:
-        p = _sp.Popen(cmd, start_new_session=True, stdout=_sp.PIPE,
-                      stderr=_sp.PIPE, close_fds=True)
-    except Exception as e:  # noqa: BLE001
-        logger.error("restart: could not spawn %s (%s) — hard-exiting so systemd "
-                     "Restart=always revives us", cmd, e)
-        return _exit_for_systemd_restart()
-    # The detached restarter returns rc 0 quickly (root `systemctl restart` SIGTERMs
-    # us mid-wait; the svc_bg helper hands off to a transient unit and returns). A
-    # FAILED `sudo -n` (no sudoers grant) returns non-zero FAST and previously
-    # vanished into /dev/null — the Restart button silently no-op'd. Detect that and
-    # fall back to a hard exit so systemd's Restart=always brings us back regardless.
-    try:
-        _out, _err = p.communicate(timeout=8)
-    except _sp.TimeoutExpired:
-        return  # still running → restart in progress
-    except Exception:  # noqa: BLE001
+        try:
+            _sp.Popen(["systemctl", "restart", "bugfixer"], start_new_session=True,
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, close_fds=True)
+        except Exception as e:  # noqa: BLE001
+            logger.error("restart: root systemctl restart failed (%s) — hard-exiting", e)
+            _exit_for_systemd_restart()
         return
-    if p.returncode not in (0, None):
-        logger.error("restart: '%s' exited rc=%s (%s) — hard-exiting for systemd "
-                     "Restart=always", " ".join(cmd), p.returncode,
-                     (_err or b"").decode(errors="replace").strip()[:200])
-        _exit_for_systemd_restart()
+    # Non-root: delegate to the watchdog, else hard-exit.
+    if _request_watchdog_restart():
+        logger.info("restart: delegated to bugfixer-watchdog (privileged arm); "
+                    "it will `systemctl restart bugfixer` shortly.")
+        return
+    logger.warning("restart: bugfixer-watchdog not active — hard-exiting so systemd "
+                   "Restart=always revives us.")
+    _exit_for_systemd_restart()
 
 
 def _exit_for_systemd_restart():
