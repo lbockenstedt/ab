@@ -1180,6 +1180,16 @@
                                     </label>
                                 </div>
                             </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <label class="text-sm font-medium text-slate-600">Chat provider</label>
+                                <select name="chat_slot" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="" {{ 'selected' if not settings.chat_slot else '' }}>Auto (failover — P1 first)</option>
+                                    {% for n in [1, 2, 3, 4] %}
+                                    <option value="{{ n }}" {{ 'selected' if settings.chat_slot|string == n|string else '' }}>P{{ n }}{% set _eid = (settings.llm_slots or {}).get(n|string) %}{% if _eid %}{% for _e in (settings.llm_entries or []) %}{% if _e.id == _eid %} — {{ _e.label or _e.model }}{% endif %}{% endfor %}{% endif %}</option>
+                                    {% endfor %}
+                                </select>
+                                <span class="text-xs text-slate-400">Pin chat to a specific slot — e.g. a cloud provider that's always online — so a slow local builder (P1) doesn't make chat slow. Auto uses the normal failover order.</span>
+                            </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Tool Iterations per Turn</label>
                                 <input type="number" name="CHAT_TOOL_MAX_ITERATIONS" value="{{ settings.CHAT_TOOL_MAX_ITERATIONS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">

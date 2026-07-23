@@ -1089,6 +1089,8 @@ async def save_settings(request: Request):
     # turn OFF to stop BugFixer from monitoring/filing its own logs.
     config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
+    _cs = str(data.get("chat_slot") or "").strip()
+    config_data["chat_slot"] = int(_cs) if _cs in ("1", "2", "3", "4") else ""
     config_data["SCHEDULER_ENABLED"] = data.get("SCHEDULER_ENABLED") == "on"
     config_data["SCHEDULER_WEEKEND_FULL"] = data.get("SCHEDULER_WEEKEND_FULL") == "on"
     config_data["TRIAGE_ONLY_MODE"] = data.get("TRIAGE_ONLY_MODE") == "on"
