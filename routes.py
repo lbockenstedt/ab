@@ -33,6 +33,7 @@ from main import (
     _schedule_check,
     _start_hub_agent,
     _task_state_lock,
+    _trigger_spoke_updates,
     app,
     append_chat_message,
     check_for_updates,
@@ -60,7 +61,6 @@ from main import (
     set_active_chat,
     state,
     templates,
-    trigger_infrastructure_update,
     update_task_state,
     validate_llm_config_on_startup,
 )
@@ -1674,9 +1674,18 @@ async def restart_service():
 
 @router.post("/trigger_hub_update")
 async def trigger_hub_update():
-    """Triggers an update on all spokes and agents via the Hub API."""
-    result = trigger_infrastructure_update()
-    return {"status": "success" if "SUCCESS" in result else "error", "message": result}
+    """Triggers an update on the Hub + all its spokes and agents.
+
+    Uses the authenticated hub-agent WebSocket (TRIGGER_ALL_UPDATES) — the same
+    path the post-fix auto-update uses. The old trigger_infrastructure_update()
+    HTTP POST to UPDATE_API_URL is NOT used here: it hit a NetBox-sync endpoint
+    (never a hub-update trigger) and the hub never honored those static-token
+    HTTP calls, so the button silently no-op'd.
+    """
+    result = _trigger_spoke_updates(load_config())
+    msg = result if isinstance(result, str) else "Hub update triggered"
+    ok = msg.lower().startswith("hub update triggered")
+    return {"status": "success" if ok else "error", "message": msg}
 
 
 @router.get("/chat")

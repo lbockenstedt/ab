@@ -208,25 +208,32 @@ def _trigger_spoke_updates(config):
     approved agent. Fire-and-forget; actual restarts are asynchronous. A post-update
     cooldown is started so transient "service offline" errors during restarts don't
     produce spurious GitHub issues.
+
+    Returns a human-readable status string so a caller wiring this to a UI button
+    (the "Hub Update" action) can surface the outcome. Post-fix callers may ignore
+    the return value.
     """
     client = _get_hub_agent_client()
     if not client:
         logger.debug("_trigger_spoke_updates: Hub agent not configured/approved, skipping")
         _set_update_cooldown(config)
-        return
+        return "Hub agent not connected — update not triggered"
     result = client.request_sync("TRIGGER_ALL_UPDATES", {}, timeout=60)
     if not isinstance(result, dict):
         logger.warning("Hub agent not approved/connected — skipping update trigger")
         _set_update_cooldown(config)
-        return
+        return "Hub agent not approved/connected — update not triggered"
     hub = result.get("hub") or {}
     spokes = result.get("spokes") or {}
     agents = result.get("agents") or {}
-    logger.info(
-        f"Hub update triggered: hub={_upd_summary(hub)} | spokes={_upd_summary(spokes)} | agents={_upd_summary(agents)}"
+    summary = (
+        f"Hub update triggered: hub={_upd_summary(hub)} | "
+        f"spokes={_upd_summary(spokes)} | agents={_upd_summary(agents)}"
     )
+    logger.info(summary)
     # Suppress issue filing while services are restarting.
     _set_update_cooldown(config)
+    return summary
 
 
 def _upd_summary(d):
