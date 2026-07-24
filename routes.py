@@ -1420,6 +1420,14 @@ async def save_settings(request: Request):
         config_data["log_analysis_interval_min"] = max(1, int(_lai)) if _lai else 30
     except (TypeError, ValueError):
         config_data["log_analysis_interval_min"] = 30
+    # Minimum ensemble model size in billions of params (0 = use all). Set e.g. 14 to
+    # skip the 7b/8b rungs that reliably whiff, while those models stay available for
+    # the CPU slot / chat / cross-check elsewhere.
+    _emm = str(data.get("ensemble_min_model_b") or "").strip()
+    try:
+        config_data["ensemble_min_model_b"] = max(0, int(float(_emm))) if _emm else 0
+    except (TypeError, ValueError):
+        config_data["ensemble_min_model_b"] = 0
     # Heartbeat triage files issues for modules with a missing/stale heartbeat
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.

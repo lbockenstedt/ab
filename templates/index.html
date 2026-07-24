@@ -1110,6 +1110,11 @@
                                 <input type="number" name="log_analysis_interval_min" value="{{ settings.log_analysis_interval_min if settings.log_analysis_interval_min is not none else 30 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">How far back Log Analysis looks + how often the idle snapshot refreshes (default 30).</span>
                             </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Min ensemble model size (B params)</label>
+                                <input type="number" name="ensemble_min_model_b" value="{{ settings.ensemble_min_model_b if settings.ensemble_min_model_b is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <span class="text-xs text-slate-400">Skip ensemble rungs below this size (e.g. 14 drops 7b/8b). 0 = use all installed models.</span>
+                            </div>
                             <div class="space-y-2 col-span-1 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Per-Repo Test Commands (repo:cmd, repo:cmd)</label>
                                 <textarea name="repo_tests" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="my-org/repo1:npm test, my-org/repo2:pytest tests/core">{{ settings.repo_tests_str }}</textarea>

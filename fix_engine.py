@@ -644,6 +644,37 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
     return {"confidence": avg, "verdict": verdict, "votes": votes, "n": len(votes)}
 
 
+def _model_param_b(name):
+    """Parse a model's parameter count in billions from its name, e.g.
+    'qwen2.5-coder:14b' → 14.0, 'llama3.1:8b' → 8.0, 'deepseek-coder-v2:16b' → 16.0.
+    None if not determinable (then it's never filtered out)."""
+    import re
+    m = re.search(r'(\d+(?:\.\d+)?)b\b', str(name).lower())
+    return float(m.group(1)) if m else None
+
+
+def _filter_ensemble_models(detailed, config):
+    """Drop local models below the configured minimum parameter size
+    (ensemble_min_model_b, default 0 = keep all) — e.g. set 14 to skip 7b/8b that
+    reliably whiff. Models whose size can't be parsed are kept. Never returns empty:
+    if the filter would drop everything, keep the single largest model."""
+    try:
+        min_b = float(config.get("ensemble_min_model_b", 0) or 0)
+    except (TypeError, ValueError):
+        min_b = 0
+    if min_b <= 0:
+        return detailed
+    kept = [d for d in detailed
+            if (_model_param_b(d.get("name")) is None or _model_param_b(d.get("name")) >= min_b)]
+    if not kept and detailed:
+        kept = [max(detailed, key=lambda d: d.get("size", 0))]
+    dropped = len(detailed) - len(kept)
+    if dropped:
+        logger.info(f"Ensemble: skipping {dropped} local model(s) under {min_b:g}B "
+                    f"(ensemble_min_model_b); {len(kept)} remain.")
+    return kept
+
+
 def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
                       local_models, external_slots, cpu_target, min_conf):
     """CPU-first ensemble fixer (P1 = local CPU, anything P2+ = external).
@@ -1326,6 +1357,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     if _is_ollama(_p) and any(x == "*" for x in _models):
                         detailed = sorted(_ollama_models_detailed(_u or "http://localhost:11434"),
                                           key=lambda d: d.get("size", 0))
+                        detailed = _filter_ensemble_models(detailed, config)
                         _models = [d["name"] for d in detailed] or [_m]
                         logger.info(f"Slot P{_n}: ramp-by-size across {len(_models)} local model(s): {', '.join(_models)}")
                     for _mdl in _models:
@@ -1372,9 +1404,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 _p1, _k1, _m1, _u1 = _get_provider_config(1, config)
                 _local_models = []
                 if _provider_configured(_p1, _k1, _m1) and _is_ollama(_p1):
-                    _local_models = [d["name"] for d in sorted(
+                    _local_models = [d["name"] for d in _filter_ensemble_models(sorted(
                         _ollama_models_detailed(_u1 or "http://localhost:11434"),
-                        key=lambda d: d.get("size", 0))] or [_m1]
+                        key=lambda d: d.get("size", 0)), config)] or [_m1]
                 _external = [n for n in (2, 3, 4)
                              if _provider_configured(*_get_provider_config(n, config)[:3])]
                 if _local_models and _external:
