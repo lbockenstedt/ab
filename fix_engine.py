@@ -360,6 +360,29 @@ def _grep_files_for_identifiers(repo_path, all_files, identifiers):
     return [rel for rel, _ in ranked]
 
 
+def _extract_error_symbols(issue_body):
+    """The highest-signal identifiers ONLY — the exact symbol named by an error message
+    (ReferenceError / "X is not defined" / NameError / AttributeError / "can't find
+    variable: X"). These pin the fix site precisely, unlike incidental code tokens that
+    happen to appear in the report."""
+    import re
+    text = re.sub(r"<!--.*?-->", " ", issue_body or "", flags=re.DOTALL)
+    out = []
+    for pat in _IDENT_PATTERNS:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            for g in m.groups():
+                if not g:
+                    continue
+                g = g.strip()
+                low = g.lower()
+                if len(g) < 4 or low in _IDENT_STOPWORDS or g in out:
+                    continue
+                if len(low) >= 8 and all(c in "0123456789abcdef" for c in low):
+                    continue
+                out.append(g)
+    return out
+
+
 def identify_files_to_fix(repo_path, issue_body):
     logger.info("Identifying relevant files for fix...")
     all_files = []
@@ -381,6 +404,19 @@ def identify_files_to_fix(repo_path, issue_body):
         logger.info("File identification: issue identifiers %s → grep matched %d file(s)%s",
                     identifiers[:6], len(grep_hits),
                     (": " + ", ".join(grep_hits[:5])) if grep_hits else " (none)")
+
+    # Precise anchor: if the issue names an exact error symbol (ReferenceError /
+    # "X is not defined" …), the file(s) literally containing THAT symbol are the fix
+    # site. Restrict the builder to them (skip the LLM guess + the incidental-token
+    # matches) so models — especially the small CPU rungs — aren't diluted into editing
+    # unrelated files. Only kicks in when the symbol resolves to a small set of files.
+    error_symbols = _extract_error_symbols(issue_body)
+    symbol_hits = _grep_files_for_identifiers(repo_path, all_files, error_symbols) if error_symbols else []
+    if symbol_hits and len(symbol_hits) <= 4:
+        focused = symbol_hits[:3]
+        logger.info("File identification: error symbol(s) %s → focusing the fix on %s",
+                    error_symbols[:3], ", ".join(focused))
+        return focused
 
     file_list_str = "\n".join(all_files)
     prompt = (
