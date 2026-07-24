@@ -2100,8 +2100,11 @@
             try {
                 const resp = await fetch(endpoint, { method: 'POST' });
                 const result = await resp.json();
-                showToast(result.message || (result.status === 'success' ? 'Action completed successfully!' : 'Error occurred.'),
-                          result.status === 'success' ? 'success' : 'error');
+                // Green unless it's actually an error — many endpoints return non-'success'
+                // OK statuses like 'triggered'/'ok'. Red is for real failures only.
+                const isErr = !resp.ok || result.status === 'error' || result.status === 'failed';
+                showToast(result.message || (isErr ? 'Error occurred.' : 'Action completed successfully!'),
+                          isErr ? 'error' : 'success');
             } catch (e) {
                 showToast('Request failed: ' + e, 'error');
             }
