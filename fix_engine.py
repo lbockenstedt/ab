@@ -1772,6 +1772,23 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             update_task_state(task_id=issue_id, action="end")
         except Exception as cleanup_err:
             logger.error(f"Failed to clean up task state for {issue_id}: {cleanup_err}")
+        # Record the errored issue as `failed` so it stays VISIBLE in the Status table
+        # (Failed) and remains retryable. An unhandled exception (e.g. an ollama 400 /
+        # timeout mid-fix) otherwise never lands in the processed store, so the issue
+        # silently vanishes from the UI — which is exactly what happened to #103.
+        try:
+            processed = load_processed()
+            prev = processed.get(issue_id, {})
+            processed[issue_id] = {
+                **prev,
+                "status": "failed",
+                "error": str(e)[:500],
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            save_processed(processed)
+            state["processed"] = processed
+        except Exception as rec_err:  # noqa: BLE001
+            logger.error(f"Failed to record failed status for {issue_id}: {rec_err}")
         return False, str(e)
     finally:
         # Always release the claim — on success, failure, or exception — so a later
