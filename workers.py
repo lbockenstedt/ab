@@ -1223,7 +1223,8 @@ def preload_ollama_models(config):
     Loads the SAME set the ensemble uses (P1 local, min-size filtered) at the configured
     num_ctx. Best-effort. Needs OLLAMA_MAX_LOADED_MODELS>=N on the ollama server for all
     N to stay resident at once."""
-    from llm_client import _get_provider_config, _is_ollama, _ollama_models_detailed
+    from llm_client import _get_provider_config, _is_ollama
+    from ollama_setup import _ollama_models_detailed  # lives in ollama_setup, not llm_client
     from fix_engine import _filter_ensemble_models  # deferred: fix_engine imported after workers
     provider, _k, _m, url = _get_provider_config(1, config)
     if not _is_ollama(provider):
