@@ -2943,12 +2943,11 @@
             } catch (e) { if (line) line.textContent = 'Failed to start: ' + (e.message || e); }
         }
         async function pollCopilotAuth() {
+            // The SERVER polls GitHub; we just read its status — so a page reload/restart
+            // can't strand the flow.
             const line = document.getElementById('copilot-auth-line');
             try {
-                const d = await fetch('/api/copilot/device-poll', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ provider: 'copilot' })
-                }).then(r => r.json());
+                const d = await fetch('/api/copilot/status').then(r => r.json());
                 if (d.status === 'authorized') {
                     clearInterval(_copilotPollTimer); _copilotPollTimer = null;
                     if (line) line.innerHTML = '✓ Copilot connected. Add a <strong>copilot</strong> provider entry below and pick a model.';
@@ -2956,7 +2955,9 @@
                     if (typeof showToast === 'function') showToast('Copilot connected', 'success');
                 } else if (d.status === 'error') {
                     clearInterval(_copilotPollTimer); _copilotPollTimer = null;
-                    if (line) line.textContent = '⚠ ' + (d.error || 'authorization failed');
+                    if (line) line.textContent = '⚠ ' + (d.message || 'authorization failed');
+                } else if (d.message && line) {
+                    line.textContent = d.message;  // reflect server progress
                 }
                 // pending → keep polling
             } catch (e) { /* keep polling */ }
