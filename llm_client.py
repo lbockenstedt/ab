@@ -986,10 +986,19 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         headers["Authorization"] = f"Bearer {clean_key}"
 
     use_stream = False if tools else effective_stream
+    # Ollama defaults num_ctx to ~2048, which the fix prompt (windowed file + issue body
+    # + context) blows past → 400 "prompt is longer than the context length". These
+    # coder models support 32k+, so raise the window. Configurable via ollama_num_ctx
+    # (default 16384 — comfortably fits fix/log prompts; raise for very large ones).
+    try:
+        _num_ctx = int(config.get("ollama_num_ctx", 32768) or 32768)
+    except (TypeError, ValueError):
+        _num_ctx = 32768
     payload = {
         "model": model,
         "messages": messages if messages else [{"role": "user", "content": ""}],
         "stream": use_stream,
+        "options": {"num_ctx": _num_ctx},
     }
     if tools:
         payload["tools"] = tools

@@ -1438,6 +1438,13 @@ async def save_settings(request: Request):
         config_data["startup_grace_seconds"] = max(0, int(_sg)) if _sg else 180
     except (TypeError, ValueError):
         config_data["startup_grace_seconds"] = 180
+    # Ollama context window (num_ctx). Default 16384 so fix/log prompts don't 400 with
+    # "prompt is longer than the context length". Raise for very large prompts.
+    _nc = str(data.get("ollama_num_ctx") or "").strip()
+    try:
+        config_data["ollama_num_ctx"] = max(2048, int(_nc)) if _nc else 32768
+    except (TypeError, ValueError):
+        config_data["ollama_num_ctx"] = 32768
     # Heartbeat triage files issues for modules with a missing/stale heartbeat
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.
