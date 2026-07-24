@@ -100,6 +100,22 @@ def _check_provider_online(n, config):
             return resp.status_code < 300
         except Exception:
             return False
+    if p.startswith("copilot"):
+        # Copilot: the stored api_key is a GitHub OAuth token; it must be exchanged
+        # for a short-lived Copilot API token, and the models call needs editor headers.
+        if not api_key:
+            return False
+        try:
+            from llm_client import _copilot_api_token, _copilot_headers, COPILOT_API_BASE
+            tok = _copilot_api_token(api_key)
+            resp = requests.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=15)
+            if resp.status_code == 401:
+                logger.warning(f"Provider {n} (copilot) connectivity check: 401 — token exchange rejected (re-authorize).")
+                return False
+            return resp.status_code < 300
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Provider {n} (copilot) connectivity check error: {e}")
+            return False
     if not api_key or not model:
         return False
     try:
