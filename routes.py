@@ -1452,6 +1452,10 @@ async def save_settings(request: Request):
         config_data["ollama_num_thread"] = max(0, int(_nt)) if _nt else 0
     except (TypeError, ValueError):
         config_data["ollama_num_thread"] = 0
+    # Keep ollama models resident (keep_alive; -1 = forever) + preload them at startup so
+    # the ensemble doesn't reload big models from disk on every switch.
+    config_data["ollama_keep_alive"] = (str(data.get("ollama_keep_alive") or "").strip() or "-1")
+    config_data["ollama_preload_models"] = data.get("ollama_preload_models") != "off"
     # Heartbeat triage files issues for modules with a missing/stale heartbeat
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.

@@ -1217,6 +1217,55 @@ def _startup_grace_remaining():
     return int(remaining) if remaining > 0 else 0
 
 
+def preload_ollama_models(config):
+    """Load each local ensemble model into ollama memory (with keep_alive) so the first
+    fix doesn't pay the cold-load cost and mid-ensemble switches don't reload from disk.
+    Loads the SAME set the ensemble uses (P1 local, min-size filtered) at the configured
+    num_ctx. Best-effort. Needs OLLAMA_MAX_LOADED_MODELS>=N on the ollama server for all
+    N to stay resident at once."""
+    from llm_client import _get_provider_config, _is_ollama, _ollama_models_detailed
+    from fix_engine import _filter_ensemble_models  # deferred: fix_engine imported after workers
+    provider, _k, _m, url = _get_provider_config(1, config)
+    if not _is_ollama(provider):
+        return
+    base = (url or "http://localhost:11434").rstrip("/")
+    detailed = _filter_ensemble_models(
+        sorted(_ollama_models_detailed(base), key=lambda d: d.get("size", 0)), config)
+    names = [d.get("name") for d in detailed if d.get("name")]
+    if not names:
+        return
+    try:
+        num_ctx = int(config.get("ollama_num_ctx", 32768) or 32768)
+    except (TypeError, ValueError):
+        num_ctx = 32768
+    _ka = str(config.get("ollama_keep_alive", "-1") or "-1").strip()
+    ka_val = int(_ka) if _ka.lstrip("-").isdigit() else _ka
+    logger.info(f"Preloading {len(names)} ensemble model(s) into ollama memory: {names}")
+    for name in names:
+        try:
+            logger.info(f"  preloading {name}…")
+            requests.post(f"{base}/api/generate",
+                          json={"model": name, "keep_alive": ka_val, "options": {"num_ctx": num_ctx}},
+                          timeout=900)
+            logger.info(f"  ✓ {name} resident")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"  preload {name} failed: {e}")
+
+
+def model_preload_worker():
+    """One-shot: after the startup grace (so ollama is up), warm all ensemble models into
+    memory. Off via ollama_preload_models=false."""
+    while _startup_grace_remaining():
+        time.sleep(15)
+    time.sleep(5)
+    try:
+        cfg = load_config()
+        if cfg.get("ollama_preload_models", True):
+            preload_ollama_models(cfg)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"model preload worker error: {e}")
+
+
 def poller_worker():
     global state
     while True:

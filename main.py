@@ -402,6 +402,7 @@ threading.Thread(target=poller_worker, daemon=True).start()
 threading.Thread(target=updater_worker, daemon=True).start()
 threading.Thread(target=restart_worker, daemon=True).start()
 threading.Thread(target=log_health_worker, daemon=True).start()
+threading.Thread(target=model_preload_worker, daemon=True).start()
 
 # Start the Hub WebSocket agent (zero-touch onboarding → admin approval →
 # signed requests for logs + update triggers). No-op if HUB_WS_URL is unset.

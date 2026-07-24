@@ -1010,6 +1010,12 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         "stream": use_stream,
         "options": _options,
     }
+    # Keep the model resident so the ensemble's constant model-switching doesn't
+    # reload 10-20GB from disk each swap. -1 = keep loaded forever (default); a Go
+    # duration string ("2h") also works. Pair with OLLAMA_MAX_LOADED_MODELS>=3 on the
+    # ollama SERVER so all ensemble models can stay in memory at once.
+    _ka = str(config.get("ollama_keep_alive", "-1") or "-1").strip()
+    payload["keep_alive"] = int(_ka) if _ka.lstrip("-").isdigit() else _ka
     if tools:
         payload["tools"] = tools
 

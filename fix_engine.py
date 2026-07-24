@@ -616,8 +616,14 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
     prompt = (
         f"Issue Description: {issue_body}\n\n"
         f"Proposed Fix (working-tree diff vs HEAD):\n{diff_text}\n\n"
-        "You are a Skeptical Senior Engineer reviewing this diff. Check: does it fix "
-        "the issue, introduce regressions, and is it complete/correct? "
+        "You are a pragmatic senior engineer reviewing this diff. APPROVE it if it "
+        "plausibly addresses the described issue and does not introduce a regression — a "
+        "small, targeted change that directly fixes the reported error (e.g. correcting a "
+        "misspelled identifier / typo, or a clear off-by-one) is a GOOD fix and SHOULD be "
+        "approved. You are only shown the diff, not the whole file, so do NOT reject "
+        "merely because you can't see surrounding context — assume referenced symbols "
+        "exist unless the diff itself is clearly wrong. REJECT only if the change is "
+        "clearly incorrect, incomplete, or harmful. "
         "Return ONLY JSON: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"...\"}"
     )
     reviewers = [m for m in models if not (m and m == exclude_model)]
@@ -628,7 +634,7 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
         logger.info(f"  cross-check reviewer {i}/{len(reviewers)}: {mdl}…")
         _t0 = time.monotonic()
         try:
-            res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
+            res = call_llm(prompt, system_prompt="You are a pragmatic senior code reviewer. Approve correct fixes; reject only real problems. Only return JSON.",
                            force_provider=slot, model_override=mdl, task_id=task_id)
             m = re.search(r"\{.*\}", res, re.DOTALL)
             if m:
@@ -738,8 +744,10 @@ def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
             if ext["verdict"] == "Approve":
                 logger.info(f"External P{ext_slot} APPROVED (conf {ext['confidence']:.0%}). Auto-commit.")
                 return "commit", fixes, (cross["confidence"] + ext["confidence"]) / 2
-            logger.warning(f"External P{ext_slot} REJECTED a CPU-confident fix — one more CPU ratchet.")
-            err = f"External P{ext_slot} rejected the CPU-confident fix: {ext.get('votes')}"
+            _crit = "; ".join(str(v.get("critique", "")).strip() for v in ext.get("votes", []) if v.get("critique"))
+            logger.warning(f"External P{ext_slot} REJECTED (conf {ext['confidence']:.0%}) a CPU-confident fix — "
+                           f"one more CPU ratchet. Reason: {_crit or '(no critique given)'}")
+            err = f"External P{ext_slot} rejected the CPU-confident fix: {_crit}"
             break  # end this cycle; escalate to the next external slot
     return ("human" if reached_target_ever else "fail"), None, 0.0
 
