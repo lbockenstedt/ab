@@ -1198,10 +1198,34 @@ def run_scan_cycle():
             except Exception as cleanup_err:
                 logger.debug(f"Cleanup for {cleanup_id} failed: {cleanup_err}")
 
+# Captured at import (≈ process boot / post-restart). Used for the startup grace so
+# BugFixer doesn't hammer a not-yet-ready ollama (404 /api/chat) right after a reboot.
+_BOOT_TIME = time.time()
+
+
+def _startup_grace_remaining():
+    """Seconds left in the post-boot grace window (0 once elapsed / disabled). During
+    it, LLM-dependent work is deferred so ollama + services can finish coming up.
+    Configurable via startup_grace_seconds (default 180); 0 disables."""
+    try:
+        grace = int(load_config().get("startup_grace_seconds", 180))
+    except (TypeError, ValueError):
+        grace = 180
+    if grace <= 0:
+        return 0
+    remaining = grace - (time.time() - _BOOT_TIME)
+    return int(remaining) if remaining > 0 else 0
+
+
 def poller_worker():
     global state
     while True:
         cfg = load_config()
+        _grace = _startup_grace_remaining()
+        if _grace:
+            logger.info(f"Startup grace: holding scans ~{_grace}s more so ollama/services finish starting.")
+            time.sleep(min(_grace, 30))
+            continue
         if not state["paused"]:
             # Always run the scan cycle — triage, hub logs, prod verification, label discovery
             # all run regardless of scheduler state.  The schedule/blackout gates are applied

@@ -991,12 +991,15 @@ def log_health_worker():
     N minutes — N = log_analysis_interval_min (Settings, default 30). The user's Refresh
     button (runLogAnalysis) always overrides with a live run."""
     import time as _t
+    from main import _startup_grace_remaining  # re-exported from workers
     last = 0.0
     while True:
         try:
             _t.sleep(60)
             if state.get("paused") or state.get("blackout"):
                 continue
+            if _startup_grace_remaining():
+                continue  # let ollama/services finish starting before precomputing
             window_min = _log_analysis_window_min()
             if (_t.time() - last) < window_min * 60:
                 continue
@@ -1428,6 +1431,13 @@ async def save_settings(request: Request):
         config_data["ensemble_min_model_b"] = max(0, int(float(_emm))) if _emm else 0
     except (TypeError, ValueError):
         config_data["ensemble_min_model_b"] = 0
+    # Post-boot grace (seconds) before BugFixer runs LLM/scan work — lets ollama +
+    # services finish starting after a reboot so it doesn't 404 on /api/chat. 0 = off.
+    _sg = str(data.get("startup_grace_seconds") or "").strip()
+    try:
+        config_data["startup_grace_seconds"] = max(0, int(_sg)) if _sg else 180
+    except (TypeError, ValueError):
+        config_data["startup_grace_seconds"] = 180
     # Heartbeat triage files issues for modules with a missing/stale heartbeat
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.
