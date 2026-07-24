@@ -305,6 +305,11 @@ def _extract_issue_identifiers(issue_body):
         tok = tok.strip()
         if len(tok) < 4 or tok.lower() in _IDENT_STOPWORDS or tok in found:
             return
+        # Pure-hex tokens ≥8 chars are IDs (bug-report ids, commit SHAs) — the
+        # File-a-Bug body mentions its id in backticks too, past the HTML-comment strip.
+        low = tok.lower()
+        if len(low) >= 8 and all(c in "0123456789abcdef" for c in low):
+            return
         found.append(tok)
 
     for pat in _IDENT_PATTERNS:
