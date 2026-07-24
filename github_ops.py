@@ -200,10 +200,20 @@ def bump_repo_version(repo_path):
         except Exception as e:
             logger.error(f"Error reading version file: {e}")
 
+    stripped = current_version.strip()
+    m = re.match(r"^(\d+)\.(\d+)$", stripped)   # new MAJOR.MINOR scheme
     nums = list(re.finditer(r"\d+", current_version))
-    if not nums:
-        # No numeric segment yet — seed the n.nn scheme.
-        new_version = "0.01"
+    if m:
+        major, minor = int(m.group(1)), int(m.group(2))
+        width = max(2, len(m.group(2)))
+        new_minor = minor + 2
+        if new_minor > 98:
+            new_version = stripped              # hold — never auto-cross a major (X.00 by hand)
+        else:
+            new_version = f"{major}.{str(new_minor).zfill(width)}"
+    elif not nums:
+        # No numeric segment yet — seed the MAJOR.MM scheme at the production baseline.
+        new_version = "1.00"
     else:
         last = nums[-1]
         width = len(last.group())
