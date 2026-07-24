@@ -1553,6 +1553,80 @@ async def save_llm_credential(request: Request):
     return {"status": "ok", "provider": provider}
 
 
+@router.post("/api/copilot/device-start")
+async def copilot_device_start():
+    """Begin GitHub Copilot OAuth device flow: ask GitHub for a device+user code.
+    The user visits the verification URL and enters the code; we then poll."""
+    import requests as _rq
+    from main import COPILOT_CLIENT_ID, GITHUB_DEVICE_CODE_URL
+    try:
+        r = _rq.post(GITHUB_DEVICE_CODE_URL, headers={"Accept": "application/json"},
+                     data={"client_id": COPILOT_CLIENT_ID, "scope": "read:user"}, timeout=20)
+        d = r.json()
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(status_code=502, content={"error": str(e)})
+    if not d.get("device_code"):
+        return JSONResponse(status_code=502,
+                            content={"error": d.get("error_description") or "device code request failed"})
+    state["copilot_device"] = {"device_code": d["device_code"], "interval": int(d.get("interval", 5))}
+    return {"user_code": d.get("user_code"), "verification_uri": d.get("verification_uri"),
+            "expires_in": d.get("expires_in"), "interval": int(d.get("interval", 5))}
+
+
+@router.post("/api/copilot/device-poll")
+async def copilot_device_poll(request: Request):
+    """Poll GitHub for the device-flow access token; on success store it as the copilot
+    provider's credential (api_key). Returns status: pending | authorized | error."""
+    import requests as _rq
+    from main import COPILOT_CLIENT_ID, GITHUB_OAUTH_TOKEN_URL
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    provider = (body.get("provider") or "copilot").lower().strip() or "copilot"
+    dev = state.get("copilot_device") or {}
+    if not dev.get("device_code"):
+        return {"status": "error", "error": "no device flow in progress — click Sign in again"}
+    try:
+        r = _rq.post(GITHUB_OAUTH_TOKEN_URL, headers={"Accept": "application/json"},
+                     data={"client_id": COPILOT_CLIENT_ID, "device_code": dev["device_code"],
+                           "grant_type": "urn:ietf:params:oauth:grant-type:device_code"}, timeout=20)
+        d = r.json()
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "error": str(e)}
+    if d.get("access_token"):
+        config = load_config()
+        creds = config.setdefault("llm_credentials", {})
+        creds[provider] = {"api_key": d["access_token"], "base_url": ""}
+        save_config(config)
+        state.pop("copilot_device", None)
+        logger.info(f"Copilot device flow: authorized + stored credential for '{provider}'.")
+        return {"status": "authorized", "provider": provider}
+    err = d.get("error")
+    if err in ("authorization_pending", "slow_down"):
+        return {"status": "pending", "slow_down": err == "slow_down"}
+    return {"status": "error", "error": d.get("error_description") or err or "authorization failed"}
+
+
+@router.get("/api/copilot/models")
+async def copilot_models(provider: str = "copilot"):
+    """List models available to this Copilot subscription (for the model dropdown)."""
+    import requests as _rq
+    from main import _copilot_api_token, _copilot_headers, COPILOT_API_BASE
+    cred = (load_config().get("llm_credentials") or {}).get((provider or "copilot").lower()) or {}
+    gh = cred.get("api_key")
+    if not gh:
+        return {"models": [], "error": "not authenticated — sign in with GitHub first"}
+    try:
+        tok = _copilot_api_token(gh)
+        r = _rq.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=20)
+        data = r.json()
+        models = sorted({m.get("id") for m in (data.get("data") or []) if m.get("id")})
+        return {"models": models}
+    except Exception as e:  # noqa: BLE001
+        return {"models": [], "error": str(e)}
+
+
 @router.post("/api/llm/entries")
 async def create_llm_entry(request: Request):
     """Create a new named provider/model entry."""

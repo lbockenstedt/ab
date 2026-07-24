@@ -785,7 +785,7 @@
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
-                                {% for pname in ['google','anthropic','openai','groq','ollama','ollama2','lmstudio','claude_cli'] %}
+                                {% for pname in ['google','anthropic','openai','groq','ollama','ollama2','lmstudio','claude_cli','copilot'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
                                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                                     <div class="flex items-center justify-between mb-2">
@@ -797,9 +797,22 @@
                                             {% elif pname == 'claude_cli' %}text-violet-600
                                             {% else %}text-purple-500{% endif %}">{{ pname }}</span>
                                         {% if pname == 'claude_cli' %}<span class="text-[10px] text-violet-600 font-bold">● Session Auth</span>
+                                        {% elif pname == 'copilot' and cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Connected</span>
                                         {% elif cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
                                     </div>
-                                    {% if pname == 'claude_cli' %}
+                                    {% if pname == 'copilot' %}
+                                    <div class="space-y-2">
+                                        <p class="text-xs text-slate-500">Uses your <strong>GitHub Copilot</strong> subscription via OAuth device flow — no API key to paste. Requires an active Copilot plan.</p>
+                                        <button type="button" onclick="startCopilotAuth()" class="w-full py-1 text-xs btn-primary rounded font-bold">Sign in with GitHub</button>
+                                        <div id="copilot-auth-status" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 space-y-1">
+                                            <div id="copilot-auth-line" class="font-medium"></div>
+                                            <div id="copilot-auth-code" class="hidden text-center">
+                                                <span class="text-[11px] text-slate-500">Enter this code at <a id="copilot-auth-link" href="#" target="_blank" class="text-[#01A982] font-semibold hover:underline">github.com/login/device</a>:</span>
+                                                <div id="copilot-auth-usercode" class="font-mono text-lg font-bold tracking-widest text-slate-800 mt-1 select-all"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {% elif pname == 'claude_cli' %}
                                     <div class="space-y-2">
                                         <p class="text-xs text-slate-500">Uses the <strong>Claude Code</strong> session authenticated on this server — no API key needed. The <code class="bg-slate-100 px-1 rounded">claude</code> binary must be in PATH.</p>
                                         <div class="flex gap-2">
@@ -2905,6 +2918,48 @@
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to save credential.', 'error');
+        }
+
+        // ── GitHub Copilot OAuth device flow ──
+        let _copilotPollTimer = null;
+        async function startCopilotAuth() {
+            const status = document.getElementById('copilot-auth-status');
+            const line = document.getElementById('copilot-auth-line');
+            const codeBox = document.getElementById('copilot-auth-code');
+            const codeEl = document.getElementById('copilot-auth-usercode');
+            const linkEl = document.getElementById('copilot-auth-link');
+            if (status) status.classList.remove('hidden');
+            if (line) line.textContent = 'Requesting device code…';
+            if (codeBox) codeBox.classList.add('hidden');
+            if (_copilotPollTimer) { clearInterval(_copilotPollTimer); _copilotPollTimer = null; }
+            try {
+                const d = await fetch('/api/copilot/device-start', { method: 'POST' }).then(r => r.json());
+                if (d.error) { if (line) line.textContent = '⚠ ' + d.error; return; }
+                if (codeEl) codeEl.textContent = d.user_code || '';
+                if (linkEl && d.verification_uri) { linkEl.href = d.verification_uri; linkEl.textContent = d.verification_uri; }
+                if (codeBox) codeBox.classList.remove('hidden');
+                if (line) line.textContent = 'Waiting for you to authorize in GitHub…';
+                _copilotPollTimer = setInterval(pollCopilotAuth, Math.max(3, (d.interval || 5)) * 1000);
+            } catch (e) { if (line) line.textContent = 'Failed to start: ' + (e.message || e); }
+        }
+        async function pollCopilotAuth() {
+            const line = document.getElementById('copilot-auth-line');
+            try {
+                const d = await fetch('/api/copilot/device-poll', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider: 'copilot' })
+                }).then(r => r.json());
+                if (d.status === 'authorized') {
+                    clearInterval(_copilotPollTimer); _copilotPollTimer = null;
+                    if (line) line.innerHTML = '✓ Copilot connected. Add a <strong>copilot</strong> provider entry below and pick a model.';
+                    const cb = document.getElementById('copilot-auth-code'); if (cb) cb.classList.add('hidden');
+                    if (typeof showToast === 'function') showToast('Copilot connected', 'success');
+                } else if (d.status === 'error') {
+                    clearInterval(_copilotPollTimer); _copilotPollTimer = null;
+                    if (line) line.textContent = '⚠ ' + (d.error || 'authorization failed');
+                }
+                // pending → keep polling
+            } catch (e) { /* keep polling */ }
         }
 
         function showAddEntry() {
