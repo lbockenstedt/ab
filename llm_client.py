@@ -994,11 +994,21 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         _num_ctx = int(config.get("ollama_num_ctx", 32768) or 32768)
     except (TypeError, ValueError):
         _num_ctx = 32768
+    _options = {"num_ctx": _num_ctx}
+    # CPU thread count. On a CPU box the big models (e.g. 32b) are slow; give ollama more
+    # threads (up to physical cores) to speed inference. 0 = let ollama decide (its
+    # default is ~physical core count). Configurable via ollama_num_thread.
+    try:
+        _num_thread = int(config.get("ollama_num_thread", 0) or 0)
+    except (TypeError, ValueError):
+        _num_thread = 0
+    if _num_thread > 0:
+        _options["num_thread"] = _num_thread
     payload = {
         "model": model,
         "messages": messages if messages else [{"role": "user", "content": ""}],
         "stream": use_stream,
-        "options": {"num_ctx": _num_ctx},
+        "options": _options,
     }
     if tools:
         payload["tools"] = tools

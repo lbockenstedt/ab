@@ -1445,6 +1445,13 @@ async def save_settings(request: Request):
         config_data["ollama_num_ctx"] = max(2048, int(_nc)) if _nc else 32768
     except (TypeError, ValueError):
         config_data["ollama_num_ctx"] = 32768
+    # Ollama CPU threads (num_thread). 0 = ollama default (~physical cores). Raise on a
+    # CPU box to speed the big models — set to your allocated physical core count.
+    _nt = str(data.get("ollama_num_thread") or "").strip()
+    try:
+        config_data["ollama_num_thread"] = max(0, int(_nt)) if _nt else 0
+    except (TypeError, ValueError):
+        config_data["ollama_num_thread"] = 0
     # Heartbeat triage files issues for modules with a missing/stale heartbeat
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.

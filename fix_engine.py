@@ -620,21 +620,27 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
         "the issue, introduce regressions, and is it complete/correct? "
         "Return ONLY JSON: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"...\"}"
     )
+    reviewers = [m for m in models if not (m and m == exclude_model)]
+    logger.info(f"CPU cross-check: reviewing the diff with {len(reviewers)} local model(s) "
+                f"{reviewers} — each is a fresh model load, can be slow on CPU for big models.")
     votes = []
-    for mdl in models:
-        if mdl and mdl == exclude_model:
-            continue
+    for i, mdl in enumerate(reviewers, 1):
+        logger.info(f"  cross-check reviewer {i}/{len(reviewers)}: {mdl}…")
+        _t0 = time.monotonic()
         try:
             res = call_llm(prompt, system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
                            force_provider=slot, model_override=mdl, task_id=task_id)
             m = re.search(r"\{.*\}", res, re.DOTALL)
             if m:
-                votes.append({**json.loads(m.group()), "model": mdl})
+                v = {**json.loads(m.group()), "model": mdl}
+                votes.append(v)
+                logger.info(f"  ↳ {mdl}: {v.get('verdict')} @ {float(v.get('confidence', 0)):.0%} "
+                            f"({time.monotonic() - _t0:.0f}s)")
         except Exception as e:  # noqa: BLE001
             if is_llm_cooldown_error(e):
                 logger.warning(f"cross-check reviewer {mdl} deferred (cooldown): {e}")
             else:
-                logger.warning(f"cross-check reviewer {mdl} failed: {e}")
+                logger.warning(f"cross-check reviewer {mdl} failed ({time.monotonic() - _t0:.0f}s): {e}")
     if not votes:
         return {"confidence": 0.0, "verdict": "Reject", "votes": [], "n": 0}
     approvals = [v for v in votes if v.get("verdict") == "Approve"]
