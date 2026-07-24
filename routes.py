@@ -1456,6 +1456,14 @@ async def save_settings(request: Request):
     # the ensemble doesn't reload big models from disk on every switch.
     config_data["ollama_keep_alive"] = (str(data.get("ollama_keep_alive") or "").strip() or "-1")
     config_data["ollama_preload_models"] = data.get("ollama_preload_models") != "off"
+    # OLLAMA_MAX_LOADED_MODELS — how many models the ollama SERVER keeps resident at once.
+    # Written to ollama's systemd env by Local LLM Setup (set >= ensemble size to hold all
+    # models loaded). Server-side setting, not per-request.
+    _ml = str(data.get("ollama_max_loaded_models") or "").strip()
+    try:
+        config_data["ollama_max_loaded_models"] = max(1, int(_ml)) if _ml else 3
+    except (TypeError, ValueError):
+        config_data["ollama_max_loaded_models"] = 3
     # Heartbeat triage files issues for modules with a missing/stale heartbeat
     # but NO error in the logs. Off by default (error-log-only filing); opt-in
     # if you want dead-module detection independent of the error log.

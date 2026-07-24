@@ -339,8 +339,13 @@ def run_local_llm_setup(model, num_ctx, cores, slot=4):
         try: os.remove(status_path)
         except OSError: pass
         try:
+            _max_loaded = int(load_config().get("ollama_max_loaded_models", 3) or 3)
+        except (TypeError, ValueError):
+            _max_loaded = 3
+        try:
             with open(req_path, "w") as f:
-                json.dump({"cores": int(cores), "requested_at": time.time()}, f)
+                json.dump({"cores": int(cores), "max_loaded": _max_loaded,
+                           "requested_at": time.time()}, f)
         except Exception as e:
             raise RuntimeError(f"could not write ollama-setup request: {e}")
         _llm_setup_log("  queued with the watchdog — waiting for it to pick up the request…")

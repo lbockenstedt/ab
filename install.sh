@@ -315,6 +315,7 @@ cat > /usr/local/bin/bugfixer-ollama-setup <<'HELPER'
 # `sudo -n /usr/local/bin/bugfixer-ollama-setup <num_thread>`.
 set -uo pipefail
 num_thread="${1:-1}"
+max_loaded="${2:-3}"    # OLLAMA_MAX_LOADED_MODELS — how many models stay resident at once
 
 say() { echo "$1"; }
 
@@ -346,7 +347,7 @@ fi
 # CPU-tuning override.
 OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
 OVERRIDE="$OVERRIDE_DIR/override.conf"
-wanted=$(printf '[Service]\nEnvironment="OLLAMA_NUM_PARALLEL=1"\nEnvironment="OLLAMA_KEEP_ALIVE=30m"\nEnvironment="OLLAMA_NUM_THREAD=%s"\n' "$num_thread")
+wanted=$(printf '[Service]\nEnvironment="OLLAMA_NUM_PARALLEL=1"\nEnvironment="OLLAMA_KEEP_ALIVE=-1"\nEnvironment="OLLAMA_NUM_THREAD=%s"\nEnvironment="OLLAMA_MAX_LOADED_MODELS=%s"\n' "$num_thread" "$max_loaded")
 current=""
 [ -f "$OVERRIDE" ] && current=$(cat "$OVERRIDE" 2>/dev/null || true)
 if [ "$current" != "$wanted" ]; then

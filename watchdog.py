@@ -187,6 +187,7 @@ def handle_ollama_setup_request():
         with open(OLLAMA_SETUP_REQUEST, "r") as f:
             req = json.load(f)
         cores = str(int(req.get("cores", 0)))
+        max_loaded = str(int(req.get("max_loaded", 3) or 3))
     except Exception as e:  # noqa: BLE001
         logger.error(f"ollama-setup: bad request file: {e}")
         try: os.remove(OLLAMA_SETUP_REQUEST)
@@ -200,8 +201,8 @@ def handle_ollama_setup_request():
     except Exception:  # noqa: BLE001
         pass
     _write_ollama_status("running", "")
-    logger.info(f"ollama-setup: running helper (cores={cores}) on behalf of bugfixer.service")
-    cmd = ["sudo", "-n", OLLAMA_SETUP_HELPER, cores]
+    logger.info(f"ollama-setup: running helper (cores={cores}, max_loaded={max_loaded}) on behalf of bugfixer.service")
+    cmd = ["sudo", "-n", OLLAMA_SETUP_HELPER, cores, max_loaded]
     stream = []
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

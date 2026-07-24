@@ -1130,6 +1130,11 @@
                                 <input type="number" name="ollama_num_thread" value="{{ settings.ollama_num_thread if settings.ollama_num_thread is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">CPU threads for ollama inference. 0 = ollama default (~physical cores). Set to your allocated core count to speed big models.</span>
                             </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Ollama max loaded models</label>
+                                <input type="number" name="ollama_max_loaded_models" value="{{ settings.ollama_max_loaded_models if settings.ollama_max_loaded_models is not none else 3 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <span class="text-xs text-slate-400">OLLAMA_MAX_LOADED_MODELS — models kept resident at once. Set ≥ your ensemble size. Applied by running Local LLM Setup (writes ollama's systemd env).</span>
+                            </div>
                             <div class="space-y-2 col-span-1 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Per-Repo Test Commands (repo:cmd, repo:cmd)</label>
                                 <textarea name="repo_tests" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="my-org/repo1:npm test, my-org/repo2:pytest tests/core">{{ settings.repo_tests_str }}</textarea>
