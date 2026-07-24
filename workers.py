@@ -1208,9 +1208,9 @@ def _startup_grace_remaining():
     it, LLM-dependent work is deferred so ollama + services can finish coming up.
     Configurable via startup_grace_seconds (default 180); 0 disables."""
     try:
-        grace = int(load_config().get("startup_grace_seconds", 180))
+        grace = int(load_config().get("startup_grace_seconds", 300))
     except (TypeError, ValueError):
-        grace = 180
+        grace = 300
     if grace <= 0:
         return 0
     remaining = grace - (time.time() - _BOOT_TIME)

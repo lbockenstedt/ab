@@ -1435,9 +1435,9 @@ async def save_settings(request: Request):
     # services finish starting after a reboot so it doesn't 404 on /api/chat. 0 = off.
     _sg = str(data.get("startup_grace_seconds") or "").strip()
     try:
-        config_data["startup_grace_seconds"] = max(0, int(_sg)) if _sg else 180
+        config_data["startup_grace_seconds"] = max(0, int(_sg)) if _sg else 300
     except (TypeError, ValueError):
-        config_data["startup_grace_seconds"] = 180
+        config_data["startup_grace_seconds"] = 300
     # Ollama context window (num_ctx). Default 16384 so fix/log prompts don't 400 with
     # "prompt is longer than the context length". Raise for very large prompts.
     _nc = str(data.get("ollama_num_ctx") or "").strip()

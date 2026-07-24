@@ -1117,8 +1117,8 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Startup grace (seconds)</label>
-                                <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 180 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <span class="text-xs text-slate-400">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s). Default 180; 0 = off.</span>
+                                <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 300 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <span class="text-xs text-slate-400">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama context window (num_ctx)</label>
