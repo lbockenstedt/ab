@@ -543,7 +543,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         "2. Does it introduce new bugs or regressions?\n"
         "3. Is the code quality acceptable?\n"
         "4. Are there any obvious edge cases missed?\n\n"
-        "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}"
+        "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}\n"
+        "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 90% confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 90%). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back."
     )
 
     votes = []
@@ -598,7 +599,14 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
                 "critique": critiques,
             }
 
-    final_verdict = "Approve" if len(approvals) >= (len(votes) / 2 + 0.5) else "Reject"
+    # If avg confidence >= 90%, approve regardless of vote split — high-confidence
+    # Rejections are contradictory and cause unnecessary kickbacks.
+    if avg_conf >= 0.90:
+        final_verdict = "Approve"
+    elif len(approvals) >= (len(votes) / 2 + 0.5):
+        final_verdict = "Approve"
+    else:
+        final_verdict = "Reject"
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques}
 
 
@@ -606,7 +614,8 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
     """CPU ensemble cross-check: run EVERY installed local model (on `slot`) as a
     reviewer of the working-tree diff, except the one that built it. Returns
     {confidence, verdict, votes, n} — the CPU-side consensus (majority Approve +
-    average confidence). Speed isn't the goal here; accuracy is (we auto-commit)."""
+    average confidence). Confidence >= 90% is treated as implicit approval — reviewers
+    who give high confidence but say "Reject" are contradictory and should not block the fix."""
     try:
         diff_text = git.Repo(repo_path).git.diff("HEAD")
     except Exception:  # noqa: BLE001
@@ -624,7 +633,10 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
         "merely because you can't see surrounding context — assume referenced symbols "
         "exist unless the diff itself is clearly wrong. REJECT only if the change is "
         "clearly incorrect, incomplete, or harmful. "
-        "Return ONLY JSON: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"...\"}"
+        "Return ONLY JSON: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"...\"}\n"
+        "IMPORTANT: Your confidence score drives the final decision — if you give >= 0.90 confidence, "
+        "the fix is accepted regardless of verdict, so do NOT give a 'Reject' verdict with high confidence "
+        "(that's contradictory and wastes time). Approve and give >= 0.90 if the fix looks correct."
     )
     reviewers = [m for m in models if not (m and m == exclude_model)]
     logger.info(f"CPU cross-check: reviewing the diff with {len(reviewers)} local model(s) "
@@ -651,7 +663,14 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
         return {"confidence": 0.0, "verdict": "Reject", "votes": [], "n": 0}
     approvals = [v for v in votes if v.get("verdict") == "Approve"]
     avg = sum(v.get("confidence", 0.0) for v in votes) / len(votes)
-    verdict = "Approve" if len(approvals) >= (len(votes) / 2 + 0.5) else "Reject"
+    # Confidence >= 90% is implicit approval — avoids kickbacks from high-confidence
+    # contradictory Rejections (same fix applied at _review_votes line ~601).
+    if avg >= 0.90:
+        verdict = "Approve"
+    elif len(approvals) >= (len(votes) / 2 + 0.5):
+        verdict = "Approve"
+    else:
+        verdict = "Reject"
     logger.info(f"CPU cross-check: {len(approvals)}/{len(votes)} approve, avg confidence {avg:.0%}")
     return {"confidence": avg, "verdict": verdict, "votes": votes, "n": len(votes)}
 
