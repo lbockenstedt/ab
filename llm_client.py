@@ -57,6 +57,17 @@ _COPILOT_TOKEN_CACHE = {}
 _COPILOT_TOKEN_LOCK = threading.Lock()
 
 
+def _chat_defaults():
+    """Lazily resolve CHAT_CONFIG_DEFAULTS. llm_client is imported *before*
+    config_store (main import order), so a module-level import would be circular;
+    at call time config_store is fully loaded."""
+    try:
+        from config_store import CHAT_CONFIG_DEFAULTS
+        return CHAT_CONFIG_DEFAULTS
+    except Exception:  # noqa: BLE001
+        return {"FIX_MAX_OUTPUT_TOKENS": 8192}
+
+
 def _normalize_lmstudio_url(base_url):
     """Normalize an LM Studio base URL to a full ``http://<host>:<port>/v1`` form.
 
@@ -886,9 +897,9 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     # backends (ollama) truncate mid-object → "Response ended prematurely" and
     # the fix JSON then fails to parse ("unmatched '}'").
     try:
-        out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"])
+        out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]) or _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"])
     except Exception:
-        out_tok = CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"]
+        out_tok = _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]
     if out_tok > 0:
         payload["max_tokens"] = out_tok
     if tools:
@@ -1202,9 +1213,9 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
     use_stream = False if tools else effective_stream
     payload = {"model": model, "messages": msgs, "stream": use_stream}
     try:
-        out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"])
+        out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]) or _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"])
     except Exception:
-        out_tok = CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"]
+        out_tok = _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]
     if out_tok > 0:
         payload["max_tokens"] = out_tok
     if tools:
