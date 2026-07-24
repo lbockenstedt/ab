@@ -1335,6 +1335,21 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             {"name": "claude-opus-4-8",            "details": "Claude Opus 4.8"},
             {"name": "claude-haiku-4-5-20251001",  "details": "Claude Haiku 4.5"},
         ], "error": ""}
+    if (p or "").startswith("copilot"):
+        # Copilot: exchange the stored GitHub token for a Copilot token, list its models.
+        out, error = [], ""
+        try:
+            from llm_client import _copilot_api_token, _copilot_headers, COPILOT_API_BASE
+            tok = _copilot_api_token(api_key)
+            resp = requests.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=15)
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                if m.get("id"):
+                    out.append({"name": m["id"], "details": "GitHub Copilot"})
+        except Exception as e:  # noqa: BLE001
+            error = f"Copilot models — {_model_fetch_reason(e)}"
+            logger.warning(f"Copilot model fetch failed: {error} [{type(e).__name__}]")
+        return {"models": out, "error": error}
     if _is_lmstudio(p):
         # LM Studio exposes /v1/models (OpenAI-compatible); no auth key needed.
         base = _normalize_lmstudio_url(base_url).rstrip("/")
