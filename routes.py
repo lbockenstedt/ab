@@ -1568,7 +1568,17 @@ async def copilot_device_start():
     if not d.get("device_code"):
         return JSONResponse(status_code=502,
                             content={"error": d.get("error_description") or "device code request failed"})
-    state["copilot_device"] = {"device_code": d["device_code"], "interval": int(d.get("interval", 5))}
+    # Persist the device_code to CONFIG (not just in-memory state) so a self-update
+    # restart mid-flow doesn't lose it and strand the poll.
+    dev = {"device_code": d["device_code"], "interval": int(d.get("interval", 5)),
+           "provider": "copilot"}
+    state["copilot_device"] = dev
+    try:
+        cfg = load_config(); cfg["copilot_device"] = dev; save_config(cfg)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("Copilot device flow: issued user code %s (verify at %s)",
+                d.get("user_code"), d.get("verification_uri"))
     return {"user_code": d.get("user_code"), "verification_uri": d.get("verification_uri"),
             "expires_in": d.get("expires_in"), "interval": int(d.get("interval", 5))}
 
@@ -1584,20 +1594,27 @@ async def copilot_device_poll(request: Request):
     except Exception:
         body = {}
     provider = (body.get("provider") or "copilot").lower().strip() or "copilot"
-    dev = state.get("copilot_device") or {}
+    # Fall back to the persisted device_code if a restart wiped the in-memory copy.
+    dev = state.get("copilot_device") or (load_config().get("copilot_device") or {})
     if not dev.get("device_code"):
         return {"status": "error", "error": "no device flow in progress — click Sign in again"}
     try:
         r = _rq.post(GITHUB_OAUTH_TOKEN_URL, headers={"Accept": "application/json"},
                      data={"client_id": COPILOT_CLIENT_ID, "device_code": dev["device_code"],
                            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"}, timeout=20)
-        d = r.json()
+        if r.headers.get("content-type", "").startswith("application/json"):
+            d = r.json()
+        else:
+            # GitHub sometimes replies form-encoded despite Accept: application/json.
+            from urllib.parse import parse_qs
+            d = {k: v[0] for k, v in parse_qs(r.text).items()}
     except Exception as e:  # noqa: BLE001
+        logger.warning(f"Copilot device-poll request failed: {e}")
         return {"status": "error", "error": str(e)}
     if d.get("access_token"):
         config = load_config()
-        creds = config.setdefault("llm_credentials", {})
-        creds[provider] = {"api_key": d["access_token"], "base_url": ""}
+        config.setdefault("llm_credentials", {})[provider] = {"api_key": d["access_token"], "base_url": ""}
+        config.pop("copilot_device", None)
         save_config(config)
         state.pop("copilot_device", None)
         logger.info(f"Copilot device flow: authorized + stored credential for '{provider}'.")
@@ -1605,7 +1622,9 @@ async def copilot_device_poll(request: Request):
     err = d.get("error")
     if err in ("authorization_pending", "slow_down"):
         return {"status": "pending", "slow_down": err == "slow_down"}
-    return {"status": "error", "error": d.get("error_description") or err or "authorization failed"}
+    # expired_token / access_denied / device_flow_disabled / unsupported_grant_type / …
+    logger.warning(f"Copilot device-poll: GitHub returned error={err!r} desc={d.get('error_description')!r}")
+    return {"status": "error", "error": f"{err}: {d.get('error_description') or ''}".strip(": ") or "authorization failed"}
 
 
 @router.get("/api/copilot/models")
