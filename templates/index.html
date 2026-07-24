@@ -447,7 +447,7 @@
                     <tr class="hover:bg-slate-50 transition-colors" data-status="{{ info.status }}">
                         <td class="px-6 py-3 font-mono text-[#01A982] align-middle">{{ issue_id }}</td>
                         <td class="px-6 py-3 text-right align-middle">
-                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
+                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
                         <td class="px-6 py-3 align-middle">
                             <div class="flex flex-wrap gap-1.5 justify-center items-center">
@@ -469,6 +469,7 @@
                                     {% elif info.status == 'resolved' %}Resolved (human-confirmed)
                                     {% elif info.status == 'closed' %}Closed on GitHub (resolved)
                                     {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
+                                    {% elif info.status == 'processing' %}⏳ Processing — building & cross-checking the fix (see Active Tasks for live progress)
                                     {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
                                     {% elif info.status == 'non-actionable' %}Non-actionable: {{ (info.reason or '')[:80] }}
                                     {% elif info.status == 'failed' %}Failed: {{ (info.error or '')[:80] }}

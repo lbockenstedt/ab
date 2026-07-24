@@ -1296,6 +1296,22 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             logger.info(f"Resuming review for {issue_id} after 1 hour timeout.")
             # We will use the saved fixes later in the loop.
 
+        # Surface the issue in the Status table AS SOON AS work starts, so a long CPU
+        # fix isn't invisible there (it's otherwise only an Active Task until it reaches
+        # a terminal status). Terminal handlers + the exception path overwrite this.
+        try:
+            processed[issue_id] = {
+                **issue_info,
+                "status": "processing",
+                "title": getattr(issue, "title", "") or issue_info.get("title", ""),
+                "original_body": issue_info.get("original_body") or (getattr(issue, "body", "") or "")[:2000],
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            save_processed(processed)
+            state["processed"] = processed
+        except Exception:  # noqa: BLE001
+            pass
+
         update_task_state(task_id=issue_id, task_name=f"Triaging {issue_id}", action="start")
         actionable, request_msg = analyze_issue(issue)
 
