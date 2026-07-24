@@ -803,7 +803,12 @@
                                     {% if pname == 'copilot' %}
                                     <div class="space-y-2">
                                         <p class="text-xs text-slate-500">Uses your <strong>GitHub Copilot</strong> subscription via OAuth device flow — no API key to paste. Requires an active Copilot plan.</p>
+                                        {% if cred.get('api_key') %}
+                                        <button type="button" onclick="copilotSignout()" class="w-full py-1 text-xs btn-danger rounded font-bold">Sign out (clear authorization)</button>
+                                        <button type="button" onclick="startCopilotAuth()" class="w-full py-1 text-xs btn-sec rounded font-bold">Re-authorize</button>
+                                        {% else %}
                                         <button type="button" onclick="startCopilotAuth()" class="w-full py-1 text-xs btn-primary rounded font-bold">Sign in with GitHub</button>
+                                        {% endif %}
                                         <div id="copilot-auth-status" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 space-y-1">
                                             <div id="copilot-auth-line" class="font-medium"></div>
                                             <div id="copilot-auth-code" class="hidden text-center">
@@ -2924,6 +2929,20 @@
 
         // ── GitHub Copilot OAuth device flow ──
         let _copilotPollTimer = null;
+        async function copilotSignout() {
+            if (!confirm('Sign out of GitHub Copilot and clear the stored authorization? Any provider entries using Copilot will stop working until you re-authorize.')) return;
+            try {
+                await fetch('/api/copilot/signout', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider: 'copilot' })
+                });
+                if (typeof showToast === 'function') showToast('Copilot signed out — authorization cleared', 'success');
+                setTimeout(() => location.reload(), 600);
+            } catch (e) {
+                if (typeof showToast === 'function') showToast('Sign out failed: ' + (e.message || e), 'error');
+            }
+        }
         async function startCopilotAuth() {
             const status = document.getElementById('copilot-auth-status');
             const line = document.getElementById('copilot-auth-line');

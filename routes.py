@@ -1628,6 +1628,34 @@ async def copilot_status():
     return state.get("copilot_auth") or {"status": "idle", "message": ""}
 
 
+@router.post("/api/copilot/signout")
+async def copilot_signout(request: Request):
+    """Clear a stored Copilot authorization: drop the credential (GitHub token) + any
+    in-flight device code, and evict the cached Copilot API token."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    provider = (body.get("provider") or "copilot").lower().strip() or "copilot"
+    config = load_config()
+    creds = config.get("llm_credentials") or {}
+    gh = (creds.get(provider) or {}).get("api_key")
+    creds.pop(provider, None)
+    config["llm_credentials"] = creds
+    config.pop("copilot_device", None)
+    save_config(config)
+    state.pop("copilot_auth", None)
+    state.pop("copilot_device", None)
+    try:
+        from main import _COPILOT_TOKEN_CACHE
+        if gh:
+            _COPILOT_TOKEN_CACHE.pop(gh, None)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info(f"Copilot: signed out '{provider}' (cleared credential + token cache).")
+    return {"status": "ok"}
+
+
 @router.get("/api/copilot/models")
 async def copilot_models(provider: str = "copilot"):
     """List models available to this Copilot subscription (for the model dropdown)."""
