@@ -41,6 +41,21 @@ LMSTUDIO_BASE_URL = "http://localhost:1234/v1"  # LM Studio local OpenAI-compati
 LMSTUDIO_DEFAULT_PORT = 1234
 ANTHROPIC_API_VERSION = "2023-06-01"
 
+# GitHub Copilot: OAuth device-flow → a long-lived GitHub OAuth token (stored as the
+# provider's api_key) → exchanged for a short-lived Copilot API token → used against the
+# OpenAI-compatible Copilot chat endpoint. Client id is the public VS Code / Copilot one.
+COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
+GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
+GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
+COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
+COPILOT_API_BASE = "https://api.githubcopilot.com"
+COPILOT_EDITOR_VERSION = "vscode/1.95.0"
+COPILOT_PLUGIN_VERSION = "copilot-chat/0.22.0"
+# gh_token -> (copilot_api_token, expires_at_epoch). The exchanged token is short-lived
+# (~30 min) so we cache + refresh transparently.
+_COPILOT_TOKEN_CACHE = {}
+_COPILOT_TOKEN_LOCK = threading.Lock()
+
 
 def _normalize_lmstudio_url(base_url):
     """Normalize an LM Studio base URL to a full ``http://<host>:<port>/v1`` form.
@@ -107,6 +122,51 @@ def _is_ollama(provider):
     instances needs no code change here.
     """
     return (provider or "").lower().strip().startswith("ollama")
+
+
+def _is_copilot(provider):
+    """True for any GitHub Copilot provider (``copilot``, ``copilot2``, …)."""
+    return (provider or "").lower().strip().startswith("copilot")
+
+
+def _copilot_headers(bearer):
+    """Headers the Copilot API requires (it rejects requests without the editor +
+    integration identifiers)."""
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "Content-Type": "application/json",
+        "Editor-Version": COPILOT_EDITOR_VERSION,
+        "Editor-Plugin-Version": COPILOT_PLUGIN_VERSION,
+        "Copilot-Integration-Id": "vscode-chat",
+        "User-Agent": "GitHubCopilotChat/0.22.0",
+    }
+
+
+def _copilot_api_token(gh_token):
+    """Exchange the stored GitHub OAuth token for a short-lived Copilot API token,
+    cached until ~1 min before expiry. Raises on failure (e.g. no Copilot subscription)."""
+    if not gh_token:
+        raise Exception("Copilot not authenticated — sign in with GitHub (device flow) first.")
+    with _COPILOT_TOKEN_LOCK:
+        cached = _COPILOT_TOKEN_CACHE.get(gh_token)
+        if cached and cached[1] - 60 > time.time():
+            return cached[0]
+    resp = requests.get(COPILOT_TOKEN_URL, headers={
+        "Authorization": f"token {gh_token}",
+        "Editor-Version": COPILOT_EDITOR_VERSION,
+        "User-Agent": "GitHubCopilotChat/0.22.0",
+    }, timeout=20)
+    if resp.status_code != 200:
+        raise Exception(f"Copilot token exchange failed ({resp.status_code}): {resp.text[:200]} "
+                        "— is a GitHub Copilot subscription active for this account?")
+    data = resp.json()
+    token = data.get("token")
+    expires = int(data.get("expires_at") or (time.time() + 1500))
+    if not token:
+        raise Exception("Copilot token exchange returned no token.")
+    with _COPILOT_TOKEN_LOCK:
+        _COPILOT_TOKEN_CACHE[gh_token] = (token, expires)
+    return token
 
 
 def _provider_configured(provider, key, model):
@@ -1130,9 +1190,67 @@ def _request_claude_cli(model, messages, task_id, config):
         raise Exception("'claude' binary not found in PATH — install Claude Code on this server.")
 
 
+def _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+    """Call the GitHub Copilot chat API (OpenAI-compatible). api_key is the stored GitHub
+    OAuth token; we exchange it for a short-lived Copilot token and add the editor headers
+    Copilot requires. Mirrors _request_openai's response handling."""
+    bearer = _copilot_api_token(api_key)  # gh_token -> copilot token (cached)
+    base = (base_url or COPILOT_API_BASE).rstrip("/")
+    endpoint = f"{base}/chat/completions"
+    headers = _copilot_headers(bearer)
+    msgs = _to_openai_messages(messages)
+    use_stream = False if tools else effective_stream
+    payload = {"model": model, "messages": msgs, "stream": use_stream}
+    try:
+        out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"])
+    except Exception:
+        out_tok = CHAT_CONFIG_DEFAULTS["FIX_MAX_OUTPUT_TOKENS"]
+    if out_tok > 0:
+        payload["max_tokens"] = out_tok
+    if tools:
+        payload["tools"] = _tools_to_openai(tools)
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="copilot")
+    if tools:
+        data = resp.json()
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        raw_tcs = msg.get("tool_calls") or None
+        tool_calls = None
+        if raw_tcs:
+            tool_calls = [
+                {"id": tc.get("id") or f"call_{i}", "function": {
+                    "name": (tc.get("function") or {}).get("name") or "",
+                    "arguments": (tc.get("function") or {}).get("arguments") or "{}",
+                }}
+                for i, tc in enumerate(raw_tcs)
+            ]
+        return {"text": msg.get("content") or "", "tool_calls": tool_calls}
+    full_response = ""
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        line = line.decode("utf-8") if isinstance(line, bytes) else line
+        if line.startswith("data: "):
+            line = line[6:]
+        if line.strip() == "[DONE]":
+            break
+        try:
+            chunk = json.loads(line)
+            for ch in chunk.get("choices", []):
+                full_response += (ch.get("delta") or {}).get("content") or ""
+            main.state["llm_stream"] = full_response
+            if task_id and task_id in main.state.get("active_tasks", {}):
+                main.state["active_tasks"][task_id]["stream"] = full_response
+        except json.JSONDecodeError:
+            pass
+    return full_response
+
+
 def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config):
     """Dispatch to the correct provider implementation."""
     p = (provider or "openai").lower().strip()
+    if _is_copilot(p):
+        return _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if p == "anthropic":
         return _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if p == "google":
