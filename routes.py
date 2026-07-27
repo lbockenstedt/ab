@@ -205,6 +205,12 @@ async def pr_review_merge(request: Request):
             update_pr_review(repo_name, number, closed=True)
             return JSONResponse(status_code=409, content={"status": "error", "closed": True,
                 "message": f"PR #{number} is closed on GitHub (not merged) — its changes may have merged under another PR. Marked CLOSED."})
+        # Approve gates Merge: a human must Approve first. The UI only offers Merge
+        # once approved; this backstops the gate so a direct API call can't bypass it.
+        rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, number)) or {}
+        if not rec.get("approved"):
+            return JSONResponse(status_code=409, content={"status": "error", "needs_approval": True,
+                "message": f"PR #{number} must be Approved before it can be merged."})
         res = pr.merge()  # default merge commit; raises if not mergeable
         # Keep the record, flag it MERGED (stays listed with a badge).
         update_pr_review(repo_name, number, merged=True)
@@ -274,7 +280,26 @@ async def dashboard(request: Request):
             except:
                 recent_processed[issue_id] = info
 
-    return templates.TemplateResponse(request=request, name="index.html", context={"view": "status", "state": {**state, "processed": recent_processed}})
+    # Sort PR reviews by priority: Not Approved -> Approved -> Terminal (Merged/Denied)
+    # Stable two-pass sort to maintain recency within each group.
+    pr_items = list((state.get("pr_reviews") or {}).items())
+    pr_items.sort(key=lambda x: x[1].get("reviewed_at", ""), reverse=True)
+
+    def get_priority(item):
+        pr = item[1]
+        if pr.get("merged") or pr.get("denied"):
+            return 2
+        if not pr.get("approved"):
+            return 0
+        return 1
+
+    pr_items.sort(key=get_priority)
+
+    return templates.TemplateResponse(request=request, name="index.html", context={
+        "view": "status",
+        "state": {**state, "processed": recent_processed},
+        "sorted_pr_reviews": pr_items
+    })
 
 
 @router.get("/api/task-details")

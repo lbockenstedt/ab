@@ -479,7 +479,7 @@
                         </td>
                     </tr>
                     {% endfor %}
-                    {% for _k, pr in (state.pr_reviews or {}).items() %}
+                    {% for _k, pr in sorted_pr_reviews %}
                     <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" data-pr-state="{% if pr.merged %}merged{% elif pr.denied %}denied{% elif pr.closed %}closed{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
                         <td class="px-6 py-3 font-mono align-middle">
                             <a href="{{ pr.url }}" target="_blank" class="text-indigo-600 hover:underline"><i class="fas fa-code-branch mr-1"></i>{{ pr.repo }} #{{ pr.number }}</a>
@@ -502,11 +502,13 @@
                                 <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
                                 {% else %}
                                     {% if pr.approved %}
+                                    {# Approved → the human sign-off is done; Merge is now unlocked. #}
                                     <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>
+                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
                                     {% else %}
+                                    {# Not approved yet → Merge is gated; only Approve (or Deny) is offered. #}
                                     <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
                                     {% endif %}
-                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
                                     <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
                                 {% endif %}
                             </div>
@@ -2404,7 +2406,11 @@
                 });
                 const d = await resp.json();
                 if (resp.ok && d.status === 'success') {
-                    if (btn) btn.outerHTML = '<span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>';
+                    // Approve unlocks Merge — swap the Approve button for the APPROVED
+                    // badge AND the now-permitted Merge button (no refresh needed).
+                    if (btn) btn.outerHTML =
+                        '<span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>'
+                        + `<button onclick="mergePr('${repo}', ${number}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
                 } else {
                     alert('Approve failed: ' + (d.message || resp.status));
                     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
