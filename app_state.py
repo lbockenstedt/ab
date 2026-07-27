@@ -20,6 +20,8 @@ from main import (
     logger,
     load_config,
     load_processed,
+    load_pr_reviews,
+    save_pr_reviews,
     get_version,
     _llm_cb_snapshot,
     _provider_credit_cb_snapshot,
@@ -108,6 +110,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
             if extra > 0:
                 for k in list(state["pr_reviews"].keys())[:extra]:
                     state["pr_reviews"].pop(k, None)
+            save_pr_reviews(state["pr_reviews"])
     except Exception as e:
         logger.error(f"record_pr_review failed for {repo}#{number}: {e}")
 
@@ -130,6 +133,7 @@ def update_pr_review(repo, number, **fields):
             if not rec:
                 return False
             rec.update(fields)
+            save_pr_reviews(state["pr_reviews"])
             return True
     except Exception as e:
         logger.error(f"update_pr_review failed for {repo}#{number}: {e}")
@@ -172,7 +176,7 @@ state = {
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
     "version": get_version(), "llm_stream": "",
-    "active_tasks": {}, "pr_reviews": {}, "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
+    "active_tasks": {}, "pr_reviews": load_pr_reviews(), "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "pending_verification_count": pending_verification_count,
     "non_actionable_count": non_actionable_count,

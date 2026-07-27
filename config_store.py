@@ -26,6 +26,7 @@ CONFIG_DIR = "/etc/bugfixer"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ENV_FILE = os.path.join(CONFIG_DIR, ".env")
 STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
+PR_REVIEWS_FILE = os.path.join(CONFIG_DIR, "pr_reviews.json")
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
 CHAT_HISTORY_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
@@ -158,6 +159,33 @@ def save_processed(processed):
         except Exception as fe:
             logger.error(f"Critical failure saving processed history to both locations: {fe}")
 
+def load_pr_reviews():
+    """Load the persisted PR pre-review store (keyed 'repo#number').
+
+    pr_reviews used to be in-memory only, so it reset to {} on every restart.
+    Terminal PRs (merged/denied) are closed and never re-scanned, so after a
+    restart they vanished from the list entirely; approved-but-open PRs lost
+    their APPROVED badge. Persisting the store fixes that."""
+    if os.path.exists(PR_REVIEWS_FILE):
+        try:
+            with open(PR_REVIEWS_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            logger.error(f"Error loading PR reviews from {PR_REVIEWS_FILE}: {e}")
+    return {}
+
+
+def save_pr_reviews(pr_reviews):
+    """Persist the PR pre-review store so merged/denied/approved survive restarts."""
+    try:
+        with open(PR_REVIEWS_FILE, "w") as f:
+            json.dump(pr_reviews, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving PR reviews to {PR_REVIEWS_FILE}: {e}")
+
+
 def load_update_state():
     """Loads the update state for recovery."""
     if os.path.exists(UPDATE_STATE_FILE):
@@ -214,6 +242,7 @@ __all__ = [
     "CONFIG_FILE",
     "ENV_FILE",
     "STATE_FILE",
+    "PR_REVIEWS_FILE",
     "UPDATE_STATE_FILE",
     "SELF_SCAN_OFFSET_FILE",
     "CHAT_HISTORY_FILE",
@@ -224,6 +253,8 @@ __all__ = [
     "load_config",
     "load_processed",
     "save_processed",
+    "load_pr_reviews",
+    "save_pr_reviews",
     "load_update_state",
     "save_update_state",
     "get_version",
