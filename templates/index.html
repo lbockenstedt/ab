@@ -527,10 +527,10 @@
                             <div class="text-slate-600 text-xs whitespace-pre-line mb-1 not-italic"><span class="font-semibold">📝 What changed:</span>
 {{ pr.summary }}</div>
                             {% endif %}
-                            {% if pr.items %}
+                            {% if pr['items'] %}
                             <div class="mb-1 space-y-0.5">
                                 <span class="font-semibold text-slate-600 text-xs">Findings:</span>
-                                {% for it in pr.items %}
+                                {% for it in pr['items'] %}
                                 <div class="text-[11px] text-slate-600 pl-2">{% if it.level == 'error' %}🔴{% elif it.level == 'warning' %}🟠{% else %}🔵{% endif %} <span class="font-semibold">{{ it.title }}</span></div>
                                 {% endfor %}
                             </div>
