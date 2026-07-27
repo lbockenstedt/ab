@@ -1196,10 +1196,12 @@ def run_scan_cycle():
             scan_self_logs(gh_current, config)
 
         state["status"] = "Scanning"
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        from pr_review import scan_open_prs  # PR pre-review — gated by pr_review_enabled (default off)
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [
                 executor.submit(main.scan_hub_logs, Github(token), config),
-                executor.submit(scan_repo_issues, Github(token), config, processed)
+                executor.submit(scan_repo_issues, Github(token), config, processed),
+                executor.submit(scan_open_prs, Github(token), config),
             ]
             for future in futures:
                 future.result()
