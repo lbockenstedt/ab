@@ -29,8 +29,9 @@ _task_state_lock = threading.Lock()
 _chat_lock = threading.RLock()
 
 
-def update_task_state(task_id, task_name="Unknown Task", action="start"):
-    """Manages active tasks and their start times. action can be 'start' or 'end'."""
+def update_task_state(task_id, task_name="Unknown Task", action="start", kind="scan"):
+    """Manages active tasks and their start times. action can be 'start' or 'end'.
+    kind tags the work type for the UI ('scan'/'fix' vs 'pr' for PR pre-review)."""
     global state
     if not task_id:
         logger.debug("update_task_state called with no task_id; ignoring.")
@@ -49,6 +50,7 @@ def update_task_state(task_id, task_name="Unknown Task", action="start"):
                     "name": task_name,
                     "start_time": datetime.now(),
                     "stream": carried,
+                    "kind": kind,
                 }
             logger.info(f"Task started: {task_id} - {task_name}")
         elif action == "end":

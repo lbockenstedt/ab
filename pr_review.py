@@ -25,6 +25,7 @@ machine-readable pairs file) so there is a single source of truth.
 import logging
 
 from github_ops import get_monitored_repos
+from app_state import update_task_state
 
 logger = logging.getLogger(__name__)
 
@@ -212,14 +213,22 @@ def scan_open_prs(gh, config):
     except Exception as e:  # noqa: BLE001
         logger.warning("pr_review: could not resolve monitored repos: %s", e)
         return
-    for repo_name in repos:
-        try:
-            repo = gh.get_repo(repo_name)
-            for pr in repo.get_pulls(state="open"):
-                try:
-                    _review_one(repo, pr)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("pr_review: PR #%s in %s failed: %s",
-                                   getattr(pr, "number", "?"), repo_name, e)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("pr_review: repo %s failed: %s", repo_name, e)
+    if not repos:
+        return
+    # Surface PR-review as a distinct 'pr'-kind task so the UI badges it apart
+    # from bug scans/fixes (see templates/index.html Active Tasks).
+    update_task_state("PRReview", "PR pre-review — scanning open PRs", "start", kind="pr")
+    try:
+        for repo_name in repos:
+            try:
+                repo = gh.get_repo(repo_name)
+                for pr in repo.get_pulls(state="open"):
+                    try:
+                        _review_one(repo, pr)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("pr_review: PR #%s in %s failed: %s",
+                                       getattr(pr, "number", "?"), repo_name, e)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("pr_review: repo %s failed: %s", repo_name, e)
+    finally:
+        update_task_state("PRReview", action="end")

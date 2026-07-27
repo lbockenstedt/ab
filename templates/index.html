@@ -358,7 +358,14 @@
                     <div id="active-tasks-list" class="space-y-2 overflow-y-auto max-h-64">
                         {% if state.active_tasks %}
                             {% for tid, task in state.active_tasks.items() %}
-                                <div class="p-3 bg-slate-100 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-200 transition-colors" onclick="populateTaskDetails('{{ tid }}')">
+                                <div class="p-3 rounded-xl border cursor-pointer transition-colors {% if task.kind == 'pr' %}bg-indigo-50 border-indigo-300 hover:bg-indigo-100{% else %}bg-slate-100 border-slate-200 hover:bg-slate-200{% endif %}" onclick="populateTaskDetails('{{ tid }}')">
+                                    <div class="mb-1">
+                                        {% if task.kind == 'pr' %}
+                                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-300"><i class="fas fa-code-branch"></i> PR REVIEW</span>
+                                        {% else %}
+                                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#01A982]/10 text-[#01A982] border border-[#01A982]/30"><i class="fas fa-search"></i> SCAN / FIX</span>
+                                        {% endif %}
+                                    </div>
                                     <p class="text-slate-700 font-mono text-xs break-all font-bold">{{ task.name }}</p>
                                 </div>
                             {% endfor %}
