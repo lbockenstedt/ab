@@ -351,6 +351,13 @@
                             </div>
                         </div>
                     </div>
+                    {% if state.skills %}
+                    <div class="pt-3 mt-1 border-t border-slate-100 flex items-center flex-wrap gap-2 text-xs" title="Claude skills (agents) loaded from lm/.claude/skills — BugFixer injects their recipes + boundaries into its fixes so they follow the same rules a human invoking the skill would.">
+                        <i class="fas fa-book text-indigo-500"></i>
+                        <span class="text-slate-500">Project skills:</span>
+                        <span class="font-semibold text-indigo-600">{{ state.skills|join(', ') }}</span>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
 

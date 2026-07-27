@@ -1432,6 +1432,15 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # source module's surrounding logs from the local hub-log mirror so
             # the fix is informed by related log data, not just the error snippet.
             fix_body = (issue.body or "") + _bug_report_fix_context(issue.body or "") + _module_log_fix_context(issue.body or "")
+            # Inject the project skills ("agents") so the fix follows their recipes +
+            # boundaries (dual-copy rules, add-simulation touch-points, etc.).
+            try:
+                from skills_loader import skills_context as _skills_ctx
+                _sk = _skills_ctx()
+                if _sk:
+                    fix_body += "\n\n" + _sk
+            except Exception:
+                pass
             # Reopened + previously fixed → prepend "what changed since our fix" so the
             # builder triages from the regression cause, not from zero.
             if was_reopened:
