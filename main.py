@@ -403,6 +403,13 @@ threading.Thread(target=updater_worker, daemon=True).start()
 threading.Thread(target=restart_worker, daemon=True).start()
 threading.Thread(target=log_health_worker, daemon=True).start()
 threading.Thread(target=model_preload_worker, daemon=True).start()
+# Batch worker (async cloud batch processing). Gated by batch_enabled (default
+# off). Defensive import/start so a batch issue can never crash BugFixer startup.
+try:
+    from batch import batch_worker as _batch_worker
+    threading.Thread(target=_batch_worker, daemon=True).start()
+except Exception as _be:  # noqa: BLE001
+    logger.warning(f"batch worker not started: {_be}")
 
 # Start the Hub WebSocket agent (zero-touch onboarding → admin approval →
 # signed requests for logs + update triggers). No-op if HUB_WS_URL is unset.
