@@ -97,6 +97,10 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
                 "items": items[:20],
                 # Preserve a human's Approve across re-scans; reset if the head moved.
                 "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
+                # Merged/denied are terminal — keep them so the PR stays listed with
+                # its badge instead of vanishing.
+                "merged": bool(prev.get("merged")),
+                "denied": bool(prev.get("denied")),
                 "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             # Bound: drop oldest (dicts preserve insertion order) beyond the cap.
@@ -111,6 +115,13 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
 def mark_pr_approved(repo, number, approved=True):
     """Flag a reviewed PR as human-approved (set by the Approve button). Returns
     True if the record existed and was updated."""
+    return update_pr_review(repo, number, approved=bool(approved))
+
+
+def update_pr_review(repo, number, **fields):
+    """Merge fields (e.g. merged=True, denied=True) into a reviewed-PR record,
+    KEEPING it in the list (so merged/denied PRs stay visible with a badge instead
+    of vanishing). Returns True if the record existed."""
     global state
     key = "%s#%s" % (repo, number)
     try:
@@ -118,10 +129,10 @@ def mark_pr_approved(repo, number, approved=True):
             rec = state["pr_reviews"].get(key)
             if not rec:
                 return False
-            rec["approved"] = bool(approved)
+            rec.update(fields)
             return True
     except Exception as e:
-        logger.error(f"mark_pr_approved failed for {repo}#{number}: {e}")
+        logger.error(f"update_pr_review failed for {repo}#{number}: {e}")
         return False
 
 

@@ -258,7 +258,7 @@
         <!-- Brand block moved to header (Logo | BugFixer | <module>); top spacer
              keeps the nav from crowding the top, matching LM's sidebar. -->
         <div class="pt-4"></div>
-        <nav class="flex-1 overflow-y-auto py-2 px-2 space-y-1">
+        <nav class="py-2 px-2 space-y-1 flex-none">
             <a href="/" class="nav-item {{ 'active' if view == 'status' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-chart-line w-4 text-center"></i>Dashboard
             </a>
@@ -278,91 +278,53 @@
                 <i class="fas fa-comments w-4 text-center"></i>Chat
             </a>
         </nav>
-        <div class="px-4 py-3 border-t border-slate-200 text-[10px] text-slate-400 font-mono flex-none">{{ state.version }}</div>
+        <!-- page break between the nav and the System Health data -->
+        <div class="border-t-2 border-slate-200 mx-3 my-1 flex-none"></div>
+        <!-- System Health (moved here from the main grid to use the sidebar white space) -->
+        <div class="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0">
+            <div class="flex items-center justify-between">
+                <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider">System Health</h4>
+                <i class="fas fa-heartbeat text-[#01A982] text-xs"></i>
+            </div>
+            <div class="flex justify-between items-center text-xs">
+                <span class="text-slate-500">Status</span>
+                <span class="font-medium {% if 'Error' in state.status %}text-red-600{% else %}text-green-600{% endif %}">{{ state.status }}</span>
+            </div>
+            <div class="text-xs">
+                <span class="text-slate-500">Providers</span>
+                <div class="flex gap-1 flex-wrap mt-1">
+                    {% for n in [1, 2, 3, 4] %}
+                    {% set cfg_key = 'provider_' ~ n ~ '_configured' %}
+                    {% if state[cfg_key] %}
+                    {% set online_key = 'provider_' ~ n ~ '_online' %}
+                    {% if state[online_key] %}<span class="status-pill pill-online">P{{ n }}</span>{% else %}<span class="status-pill pill-offline">P{{ n }}</span>{% endif %}
+                    {% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="pt-2 border-t border-slate-100 space-y-1.5 text-xs">
+                <div class="flex justify-between"><span class="text-slate-500">Resolved</span><span class="font-bold text-green-600">{{ state.success_count }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-500">Failed</span><span class="font-bold text-red-600">{{ state.failure_count }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-500">Closed</span><span class="font-bold text-slate-600">{{ state.closed_count }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-500">Pending Verif.</span><span class="font-bold text-amber-600">{{ state.pending_verification_count }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-500">Non-Actionable</span><span class="font-bold text-orange-600">{{ state.non_actionable_count }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-500">PRs Reviewed</span><span class="font-bold text-indigo-600">{{ (state.pr_reviews or {})|length }}</span></div>
+            </div>
+            {% if state.skills %}
+            <div class="pt-2 border-t border-slate-100 text-xs" title="Claude skills loaded from lm/.claude/skills — injected into BugFixer's fixes.">
+                <span class="text-slate-500">Skills</span>
+                <div class="font-semibold text-indigo-600 mt-0.5 break-words">{{ state.skills|join(', ') }}</div>
+            </div>
+            {% endif %}
+        </div>
+        <div class="px-4 py-2 border-t border-slate-200 text-[10px] text-slate-400 font-mono flex-none">{{ state.version }}</div>
     </aside>
 
     <main class="flex-1 min-h-0 overflow-y-auto p-6">
         {% if view == 'status' %}
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <!-- System Status Card -->
-            <div class="hpe-card p-5 col-span-1 md:col-span-2">
-                <div class="flex items-center justify-between mb-6">
-                    <h3 class="text-lg font-bold text-[#263040]">System Health</h3>
-                    <i class="fas fa-heartbeat text-[#01A982]"></i>
-                </div>
-                <div class="space-y-4">
-                    <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Status</span>
-                        <span class="font-medium {% if 'Error' in state.status %}text-red-600{% else %}text-green-600{% endif %}">
-                            {{ state.status }}
-                        </span>
-                    </div>
-                    <div class="flex justify-between items-center">
-                        <span class="text-slate-500">Providers</span>
-                        <div class="flex gap-2 flex-wrap justify-end">
-                            {% for n in [1, 2, 3, 4] %}
-                            {% set cfg_key = 'provider_' ~ n ~ '_configured' %}
-                            {% if state[cfg_key] %}
-                            {% set online_key = 'provider_' ~ n ~ '_online' %}
-                            {% set cb = state.provider_credit_cb[n] if state.provider_credit_cb else {} %}
-                            <div class="flex items-center gap-1">
-                                {% if state[online_key] %}
-                                    <span class="status-pill pill-online">P{{ n }}</span>
-                                {% else %}
-                                    <span class="status-pill pill-offline">P{{ n }}</span>
-                                {% endif %}
-                                {% if cb and cb.active %}
-                                    {% if cb.cause == 'rate_limit' %}
-                                        <button onclick="clearCreditCooldown({{ n }})" title="Rate-limited: {{ cb.cooldown_remaining_min|int }} min cooldown — click to reset" class="text-[9px] px-1 py-0.5 bg-blue-100 text-blue-700 hover:bg-blue-200 rounded font-bold border border-blue-300 transition-colors">RL {{ cb.cooldown_remaining_min|int }}m</button>
-                                    {% else %}
-                                        <button onclick="clearCreditCooldown({{ n }})" title="Credit exhausted: {{ cb.cooldown_remaining_min|int }} min left — click to reset" class="text-[9px] px-1 py-0.5 bg-amber-100 text-amber-700 hover:bg-amber-200 rounded font-bold border border-amber-300 transition-colors">⏱ {{ cb.cooldown_remaining_min|int }}m</button>
-                                    {% endif %}
-                                {% endif %}
-                            </div>
-                            {% endif %}
-                            {% endfor %}
-                        </div>
-                    </div>
-                    <div class="pt-4 border-t border-slate-100">
-                        <div class="grid grid-cols-2 gap-3">
-                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-                                <span class="text-slate-500 text-xs">Issues Resolved</span>
-                                <span class="font-bold text-green-600 text-xl">{{ state.success_count }}</span>
-                            </div>
-                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-                                <span class="text-slate-500 text-xs">Issues Failed</span>
-                                <span class="font-bold text-red-600 text-xl">{{ state.failure_count }}</span>
-                            </div>
-                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-                                <span class="text-slate-500 text-xs">Issues Closed</span>
-                                <span class="font-bold text-slate-600 text-xl">{{ state.closed_count }}</span>
-                            </div>
-                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-                                <span class="text-slate-500 text-xs">Pending Verification</span>
-                                <span class="font-bold text-amber-600 text-xl">{{ state.pending_verification_count }}</span>
-                            </div>
-                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-                                <span class="text-slate-500 text-xs">Non-Actionable</span>
-                                <span class="font-bold text-orange-600 text-xl">{{ state.non_actionable_count }}</span>
-                            </div>
-                            <div class="flex flex-col rounded-lg bg-indigo-50 border border-indigo-200 px-3 py-2">
-                                <span class="text-slate-500 text-xs"><i class="fas fa-code-branch mr-1 text-indigo-500"></i>PRs Reviewed</span>
-                                <span class="font-bold text-indigo-600 text-xl">{{ (state.pr_reviews or {})|length }}</span>
-                            </div>
-                        </div>
-                    </div>
-                    {% if state.skills %}
-                    <div class="pt-3 mt-1 border-t border-slate-100 flex items-center flex-wrap gap-2 text-xs" title="Claude skills (agents) loaded from lm/.claude/skills — BugFixer injects their recipes + boundaries into its fixes so they follow the same rules a human invoking the skill would.">
-                        <i class="fas fa-book text-indigo-500"></i>
-                        <span class="text-slate-500">Project skills:</span>
-                        <span class="font-semibold text-indigo-600">{{ state.skills|join(', ') }}</span>
-                    </div>
-                    {% endif %}
-                </div>
-            </div>
-
-            <!-- Active Tasks Card -->
-            <div class="hpe-card p-5 col-span-1">
+        <div class="grid grid-cols-1 gap-6">
+            <!-- Active Tasks Card (System Health moved to the left sidebar) -->
+            <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-6">
                     <h3 class="text-lg font-bold text-[#263040]">Active Tasks</h3>
                     <i class="fas fa-tasks text-[#01A982]"></i>
@@ -519,12 +481,19 @@
                         <td class="px-6 py-3 align-middle">
                             <div class="flex flex-wrap gap-1.5 justify-center items-center">
                                 <a href="{{ pr.url }}" target="_blank" class="btn-sec text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap">View PR</a>
-                                {% if pr.approved %}
-                                <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>
+                                {% if pr.merged %}
+                                <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
+                                {% elif pr.denied %}
+                                <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-red-100 text-red-700 border border-red-300"><i class="fas fa-ban mr-1"></i>DENIED</span>
                                 {% else %}
-                                <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve PR</button>
+                                    {% if pr.approved %}
+                                    <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>
+                                    {% else %}
+                                    <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
+                                    {% endif %}
+                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
+                                    <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
                                 {% endif %}
-                                <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge to Main</button>
                             </div>
                         </td>
                     </tr>
@@ -2432,6 +2401,17 @@
             }
         }
 
+        function _setPrBadge(btn, label, cls, icon) {
+            // Replace the action buttons in this PR row with a terminal badge, keep View PR.
+            const cell = btn.closest('div');
+            if (!cell) return;
+            cell.querySelectorAll('button').forEach(b => b.remove());
+            const span = document.createElement('span');
+            span.className = 'text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap border ' + cls;
+            span.innerHTML = '<i class="fas ' + icon + ' mr-1"></i>' + label;
+            cell.appendChild(span);
+        }
+
         async function mergePr(repo, number, btn) {
             if (!confirm(`Merge ${repo} #${number} into main NOW?\n\nThis merges the PR on GitHub immediately (human action). Make sure you've reviewed it.`)) return;
             const orig = btn ? btn.innerHTML : '';
@@ -2443,14 +2423,35 @@
                 });
                 const d = await resp.json();
                 if (resp.ok && d.status === 'success') {
-                    const row = btn.closest('tr'); const detail = row ? row.nextElementSibling : null;
-                    if (row) row.remove(); if (detail) detail.remove();
+                    _setPrBadge(btn, 'MERGED', 'bg-purple-100 text-purple-700 border-purple-300', 'fa-code-merge');
                 } else {
                     alert('Merge failed: ' + (d.message || resp.status));
                     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
                 }
             } catch (e) {
                 alert('Merge failed: ' + e);
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        async function denyPr(repo, number, btn) {
+            if (!confirm(`Deny ${repo} #${number}?\n\nCloses the PR on GitHub (no merge), labels it 'bugfixer-denied', and marks it DENIED here. Only you can deny.`)) return;
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Denying…'; }
+            try {
+                const resp = await fetch('/api/pr-review/deny', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo: repo, number: number })
+                });
+                const d = await resp.json();
+                if (resp.ok && d.status === 'success') {
+                    _setPrBadge(btn, 'DENIED', 'bg-red-100 text-red-700 border-red-300', 'fa-ban');
+                } else {
+                    alert('Deny failed: ' + (d.message || resp.status));
+                    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+                }
+            } catch (e) {
+                alert('Deny failed: ' + e);
                 if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
         }
