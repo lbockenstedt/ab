@@ -285,7 +285,7 @@
         {% if view == 'status' %}
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <!-- System Status Card -->
-            <div class="hpe-card p-5 col-span-1">
+            <div class="hpe-card p-5 col-span-1 md:col-span-2">
                 <div class="flex items-center justify-between mb-6">
                     <h3 class="text-lg font-bold text-[#263040]">System Health</h3>
                     <i class="fas fa-heartbeat text-[#01A982]"></i>
@@ -323,33 +323,39 @@
                             {% endfor %}
                         </div>
                     </div>
-                    <div class="pt-4 border-t border-slate-100 space-y-2">
-                        <div class="flex justify-between items-center">
-                            <span class="text-slate-500 text-sm">Pending Verification</span>
-                            <span class="font-bold text-amber-600">{{ state.pending_verification_count }}</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-slate-500 text-sm">Issues Resolved</span>
-                            <span class="font-bold text-green-600">{{ state.success_count }}</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-slate-500 text-sm">Issues Failed</span>
-                            <span class="font-bold text-red-600">{{ state.failure_count }}</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-slate-500 text-sm">Issues Closed</span>
-                            <span class="font-bold text-slate-600">{{ state.closed_count }}</span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-slate-500 text-sm">Non-Actionable</span>
-                            <span class="font-bold text-orange-600">{{ state.non_actionable_count }}</span>
+                    <div class="pt-4 border-t border-slate-100">
+                        <div class="grid grid-cols-2 gap-3">
+                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                                <span class="text-slate-500 text-xs">Issues Resolved</span>
+                                <span class="font-bold text-green-600 text-xl">{{ state.success_count }}</span>
+                            </div>
+                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                                <span class="text-slate-500 text-xs">Issues Failed</span>
+                                <span class="font-bold text-red-600 text-xl">{{ state.failure_count }}</span>
+                            </div>
+                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                                <span class="text-slate-500 text-xs">Issues Closed</span>
+                                <span class="font-bold text-slate-600 text-xl">{{ state.closed_count }}</span>
+                            </div>
+                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                                <span class="text-slate-500 text-xs">Pending Verification</span>
+                                <span class="font-bold text-amber-600 text-xl">{{ state.pending_verification_count }}</span>
+                            </div>
+                            <div class="flex flex-col rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                                <span class="text-slate-500 text-xs">Non-Actionable</span>
+                                <span class="font-bold text-orange-600 text-xl">{{ state.non_actionable_count }}</span>
+                            </div>
+                            <div class="flex flex-col rounded-lg bg-indigo-50 border border-indigo-200 px-3 py-2">
+                                <span class="text-slate-500 text-xs"><i class="fas fa-code-branch mr-1 text-indigo-500"></i>PRs Reviewed</span>
+                                <span class="font-bold text-indigo-600 text-xl">{{ (state.pr_reviews or {})|length }}</span>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
 
             <!-- Active Tasks Card -->
-            <div class="hpe-card p-5 col-span-1 md:col-span-2">
+            <div class="hpe-card p-5 col-span-1">
                 <div class="flex items-center justify-between mb-6">
                     <h3 class="text-lg font-bold text-[#263040]">Active Tasks</h3>
                     <i class="fas fa-tasks text-[#01A982]"></i>
@@ -506,6 +512,12 @@
                         <td class="px-6 py-3 align-middle">
                             <div class="flex flex-wrap gap-1.5 justify-center items-center">
                                 <a href="{{ pr.url }}" target="_blank" class="btn-sec text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap">View PR</a>
+                                {% if pr.approved %}
+                                <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>
+                                {% else %}
+                                <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve PR</button>
+                                {% endif %}
+                                <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge to Main</button>
                             </div>
                         </td>
                     </tr>
@@ -514,6 +526,14 @@
                             {% if pr.summary %}
                             <div class="text-slate-600 text-xs whitespace-pre-line mb-1 not-italic"><span class="font-semibold">📝 What changed:</span>
 {{ pr.summary }}</div>
+                            {% endif %}
+                            {% if pr.items %}
+                            <div class="mb-1 space-y-0.5">
+                                <span class="font-semibold text-slate-600 text-xs">Findings:</span>
+                                {% for it in pr.items %}
+                                <div class="text-[11px] text-slate-600 pl-2">{% if it.level == 'error' %}🔴{% elif it.level == 'warning' %}🟠{% else %}🔵{% endif %} <span class="font-semibold">{{ it.title }}</span></div>
+                                {% endfor %}
+                            </div>
                             {% endif %}
                             <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-[10px] italic">
                                 <span class="font-semibold not-italic text-slate-600 break-all">{{ pr.title }}</span>
@@ -2371,6 +2391,51 @@
         // ("nothing in status"). sessionStorage (not localStorage) keeps a manual
         // selection only for the tab's session — surviving the 30s auto-reload but
         // resetting to Active on a new visit.
+        async function approvePr(repo, number, btn) {
+            if (!confirm(`Approve PR ${repo} #${number}?\n\nLabels it 'bugfixer-approved' and posts an approval comment on the PR. Does NOT merge — you still merge/pull.`)) return;
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Approving…'; }
+            try {
+                const resp = await fetch('/api/pr-review/approve', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo: repo, number: number })
+                });
+                const d = await resp.json();
+                if (resp.ok && d.status === 'success') {
+                    if (btn) btn.outerHTML = '<span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>';
+                } else {
+                    alert('Approve failed: ' + (d.message || resp.status));
+                    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+                }
+            } catch (e) {
+                alert('Approve failed: ' + e);
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        async function mergePr(repo, number, btn) {
+            if (!confirm(`Merge ${repo} #${number} into main NOW?\n\nThis merges the PR on GitHub immediately (human action). Make sure you've reviewed it.`)) return;
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Merging…'; }
+            try {
+                const resp = await fetch('/api/pr-review/merge', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo: repo, number: number })
+                });
+                const d = await resp.json();
+                if (resp.ok && d.status === 'success') {
+                    const row = btn.closest('tr'); const detail = row ? row.nextElementSibling : null;
+                    if (row) row.remove(); if (detail) detail.remove();
+                } else {
+                    alert('Merge failed: ' + (d.message || resp.status));
+                    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+                }
+            } catch (e) {
+                alert('Merge failed: ' + e);
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
         let _activityFilter = 'all';
         try {
             const saved = sessionStorage.getItem('bf_activity_filter');

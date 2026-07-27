@@ -70,13 +70,20 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
     Bounded to the most recent _PR_REVIEWS_MAX. findings = list of {level,...} dicts."""
     global state
     levels = {"error": 0, "warning": 0, "advisory": 0}
+    items = []
     for f in (findings or []):
-        lvl = (f or {}).get("level")
+        f = f or {}
+        lvl = f.get("level")
         if lvl in levels:
             levels[lvl] += 1
+        items.append({"level": lvl or "advisory",
+                      "title": (f.get("title") or "")[:140],
+                      "detail": (f.get("detail") or "")[:300]})
+    key = "%s#%s" % (repo, number)
     try:
         with _task_state_lock:
-            state["pr_reviews"]["%s#%s" % (repo, number)] = {
+            prev = state["pr_reviews"].get(key) or {}
+            state["pr_reviews"][key] = {
                 "repo": repo,
                 "number": number,
                 "title": (title or "")[:120],
@@ -87,6 +94,9 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
                 "errors": levels["error"],
                 "warnings": levels["warning"],
                 "advisories": levels["advisory"],
+                "items": items[:20],
+                # Preserve a human's Approve across re-scans; reset if the head moved.
+                "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
                 "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             # Bound: drop oldest (dicts preserve insertion order) beyond the cap.
@@ -96,6 +106,23 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
                     state["pr_reviews"].pop(k, None)
     except Exception as e:
         logger.error(f"record_pr_review failed for {repo}#{number}: {e}")
+
+
+def mark_pr_approved(repo, number, approved=True):
+    """Flag a reviewed PR as human-approved (set by the Approve button). Returns
+    True if the record existed and was updated."""
+    global state
+    key = "%s#%s" % (repo, number)
+    try:
+        with _task_state_lock:
+            rec = state["pr_reviews"].get(key)
+            if not rec:
+                return False
+            rec["approved"] = bool(approved)
+            return True
+    except Exception as e:
+        logger.error(f"mark_pr_approved failed for {repo}#{number}: {e}")
+        return False
 
 
 config_on_start = load_config()
