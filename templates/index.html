@@ -517,6 +517,7 @@
                                 {% else %}
                                 <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve PR</button>
                                 {% endif %}
+                                <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge to Main</button>
                             </div>
                         </td>
                     </tr>
@@ -2408,6 +2409,29 @@
                 }
             } catch (e) {
                 alert('Approve failed: ' + e);
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        async function mergePr(repo, number, btn) {
+            if (!confirm(`Merge ${repo} #${number} into main NOW?\n\nThis merges the PR on GitHub immediately (human action). Make sure you've reviewed it.`)) return;
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Merging…'; }
+            try {
+                const resp = await fetch('/api/pr-review/merge', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo: repo, number: number })
+                });
+                const d = await resp.json();
+                if (resp.ok && d.status === 'success') {
+                    const row = btn.closest('tr'); const detail = row ? row.nextElementSibling : null;
+                    if (row) row.remove(); if (detail) detail.remove();
+                } else {
+                    alert('Merge failed: ' + (d.message || resp.status));
+                    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+                }
+            } catch (e) {
+                alert('Merge failed: ' + e);
                 if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
         }

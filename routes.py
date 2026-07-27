@@ -174,6 +174,39 @@ async def pr_review_approve(request: Request):
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+@router.post("/api/pr-review/merge")
+async def pr_review_merge(request: Request):
+    """Human 'Merge to Main' for a reviewed PR — merges it on GitHub now (the
+    human's explicit action from the UI; BugFixer never auto-merges). Returns the
+    GitHub error if the PR isn't mergeable (conflicts / required checks)."""
+    try:
+        data = await request.json()
+        repo_name = (data.get("repo") or "").strip()
+        number = int(data.get("number"))
+    except Exception:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    config = load_config()
+    token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
+    try:
+        gh = Github(token)
+        repo = gh.get_repo(repo_name)
+        pr = repo.get_pull(number)
+        if pr.merged:
+            state["pr_reviews"].pop("%s#%s" % (repo_name, number), None)
+            return {"status": "success", "message": "already merged"}
+        res = pr.merge()  # default merge commit; raises if not mergeable
+        # Merged PRs leave the reviewed list.
+        state["pr_reviews"].pop("%s#%s" % (repo_name, number), None)
+        logger.info("pr_review: %s #%s MERGED via UI", repo_name, number)
+        return {"status": "success", "merged": bool(getattr(res, "merged", True)),
+                "message": getattr(res, "message", "merged")}
+    except Exception as e:  # noqa: BLE001
+        logger.error("pr_review merge failed for %s#%s: %s", repo_name, number, e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @router.get("/")
 async def dashboard(request: Request):
     recent_processed = {}
