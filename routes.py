@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from github import Github
+from app_state import mark_pr_approved
 from fastapi import APIRouter
 
 router = APIRouter()
@@ -127,6 +128,50 @@ async def toggle_blackout():
     state["blackout"] = not state.get("blackout", False)
     logger.info(f"BugFixer blackout mode {'ON (triage only)' if state['blackout'] else 'OFF (fixes resumed)'}")
     return {"status": "success", "blackout": state["blackout"]}
+
+
+@router.post("/api/pr-review/approve")
+async def pr_review_approve(request: Request):
+    """Human 'Approve' for a pre-reviewed PR (from the PRs Reviewed list). Adds a
+    'bugfixer-approved' label + an approval comment and flags it in state. Does
+    NOT merge — the human merges/pulls after. Only this endpoint (a human click)
+    approves; BugFixer never auto-approves."""
+    try:
+        data = await request.json()
+        repo_name = (data.get("repo") or "").strip()
+        number = int(data.get("number"))
+    except Exception:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    config = load_config()
+    token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
+    try:
+        gh = Github(token)
+        repo = gh.get_repo(repo_name)
+        pr = repo.get_pull(number)
+        label = "bugfixer-approved"
+        try:
+            repo.get_label(label)
+        except Exception:
+            try:
+                repo.create_label(label, "0E8A16")
+            except Exception:
+                pass
+        try:
+            pr.add_to_labels(label)
+        except Exception:
+            pass
+        try:
+            pr.create_issue_comment("✅ **Approved** via BugFixer (human review). Cleared to merge/pull.")
+        except Exception:
+            pass
+        mark_pr_approved(repo_name, number, True)
+        logger.info("pr_review: %s #%s APPROVED via UI", repo_name, number)
+        return {"status": "success", "repo": repo_name, "number": number}
+    except Exception as e:  # noqa: BLE001
+        logger.error("pr_review approve failed for %s#%s: %s", repo_name, number, e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
 @router.get("/")

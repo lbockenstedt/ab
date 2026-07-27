@@ -512,6 +512,11 @@
                         <td class="px-6 py-3 align-middle">
                             <div class="flex flex-wrap gap-1.5 justify-center items-center">
                                 <a href="{{ pr.url }}" target="_blank" class="btn-sec text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap">View PR</a>
+                                {% if pr.approved %}
+                                <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>
+                                {% else %}
+                                <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve PR</button>
+                                {% endif %}
                             </div>
                         </td>
                     </tr>
@@ -520,6 +525,14 @@
                             {% if pr.summary %}
                             <div class="text-slate-600 text-xs whitespace-pre-line mb-1 not-italic"><span class="font-semibold">📝 What changed:</span>
 {{ pr.summary }}</div>
+                            {% endif %}
+                            {% if pr.items %}
+                            <div class="mb-1 space-y-0.5">
+                                <span class="font-semibold text-slate-600 text-xs">Findings:</span>
+                                {% for it in pr.items %}
+                                <div class="text-[11px] text-slate-600 pl-2">{% if it.level == 'error' %}🔴{% elif it.level == 'warning' %}🟠{% else %}🔵{% endif %} <span class="font-semibold">{{ it.title }}</span></div>
+                                {% endfor %}
+                            </div>
                             {% endif %}
                             <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-[10px] italic">
                                 <span class="font-semibold not-italic text-slate-600 break-all">{{ pr.title }}</span>
@@ -2377,6 +2390,28 @@
         // ("nothing in status"). sessionStorage (not localStorage) keeps a manual
         // selection only for the tab's session — surviving the 30s auto-reload but
         // resetting to Active on a new visit.
+        async function approvePr(repo, number, btn) {
+            if (!confirm(`Approve PR ${repo} #${number}?\n\nLabels it 'bugfixer-approved' and posts an approval comment on the PR. Does NOT merge — you still merge/pull.`)) return;
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Approving…'; }
+            try {
+                const resp = await fetch('/api/pr-review/approve', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo: repo, number: number })
+                });
+                const d = await resp.json();
+                if (resp.ok && d.status === 'success') {
+                    if (btn) btn.outerHTML = '<span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>';
+                } else {
+                    alert('Approve failed: ' + (d.message || resp.status));
+                    if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+                }
+            } catch (e) {
+                alert('Approve failed: ' + e);
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
         let _activityFilter = 'all';
         try {
             const saved = sessionStorage.getItem('bf_activity_filter');
