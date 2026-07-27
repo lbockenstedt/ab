@@ -58,6 +58,31 @@ from main import (
     update_task_state,
 )
 
+def _ollama_model_present(resp, model):
+    """True if `model` appears in an Ollama /api/tags response.
+
+    Ollama's /api/tags answers 200 whenever the server is up, regardless of which
+    models are pulled — but /api/chat 404s ("model not found") if the requested
+    model is missing. So a plain server ping falsely reports the provider healthy.
+    This narrows the check to the configured model. Lenient (True) when the body
+    can't be parsed, so a transient/odd response never false-flags the provider."""
+    want = (model or "").strip()
+    if not want:
+        return True
+    try:
+        names = [(m.get("name") or "") for m in (resp.json().get("models") or [])]
+    except Exception:
+        return True  # unparseable — don't mark offline on a parse hiccup
+    base_want = want.split(":")[0]
+    for nm in names:
+        if nm == want or nm == f"{want}:latest":
+            return True
+        # Tolerate the implicit :latest tag: a bare "llama3" matches pulled "llama3:latest".
+        if ":" not in want and nm.split(":")[0] == base_want:
+            return True
+    return False
+
+
 def _check_provider_online(n, config):
     """Ping provider n and return True if reachable."""
     provider, api_key, model, base_url = _get_provider_config(n, config)
@@ -85,7 +110,10 @@ def _check_provider_online(n, config):
         except Exception:
             return False
     if _is_ollama(p):
-        # Ollama needs no API key — just confirm the server is reachable (/api/tags).
+        # Ollama needs no API key — confirm the server is reachable (/api/tags) AND
+        # that the configured model is actually pulled. /api/tags is 200 whenever the
+        # server is up, but /api/chat 404s if the model is missing, so a bare server
+        # ping would falsely show the provider green while every real call fails.
         if not model:
             return False
         try:
@@ -97,7 +125,15 @@ def _check_provider_online(n, config):
             resp = requests.get(f"{base}/api/tags", headers=headers, timeout=10)
             if resp.status_code == 401:
                 return False
-            return resp.status_code < 300
+            if resp.status_code >= 300:
+                return False
+            if not _ollama_model_present(resp, model):
+                logger.warning(
+                    f"Provider {n} (ollama) server is up but model '{model}' is not pulled on "
+                    f"{base} — pull it (Settings → Local LLM Setup, or `ollama pull {model}`)."
+                )
+                return False
+            return True
         except Exception:
             return False
     if p.startswith("copilot"):
