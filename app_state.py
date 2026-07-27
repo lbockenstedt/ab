@@ -201,6 +201,8 @@ state = {
     "hub_agent_status": "not_registered",  # not_registered | pending | approved | error
     "hub_agent_message": "",
     "hub_agent_last_seen": "",
+    "hub_agent_connected": False,          # LIVE socket state (≠ approval status)
+    "hub_agent_last_disconnect": "",
 }
 
 

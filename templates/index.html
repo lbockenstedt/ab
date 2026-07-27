@@ -2944,22 +2944,28 @@
         if (document.getElementById('diag-root')) { refreshDiagnostics(); setInterval(refreshDiagnostics, 10000); }
 
         // ---- Header Hub status dot (mirrors LM hub-status-dot) ----
-        // Polls /api/hub-agent/status and recolors the header dot + tooltip so
-        // the connection state is visible from every view, not just Diagnostics.
-        // green=approved, amber=pending, red=error, slate=not_registered.
+        // Polls /api/hub-agent/status and recolors the header dot + tooltip so the
+        // connection state is visible from every view. The dot reflects the LIVE
+        // socket, not just registration: green only when approved AND currently
+        // connected; amber when approved but the socket is down (reconnecting) — so
+        // a flapping agent no longer reads as steady-green while the hub sees it
+        // offline. yellow=pending approval, red=error, slate=not_registered.
         function refreshHubStatusDot() {
             const dot = document.getElementById('hub-status-dot');
             if (!dot) return;
             fetch('/api/hub-agent/status').then(r => r.json()).then(d => {
                 const s = String(d.status || 'not_registered').toLowerCase();
-                const color = s === 'approved' ? 'bg-green-500'
-                            : s === 'pending' ? 'bg-yellow-500'
-                            : s === 'error' ? 'bg-red-500'
-                            : 'bg-slate-500';
+                const connected = !!d.connected;
+                let color;
+                if (s === 'approved') color = connected ? 'bg-green-500' : 'bg-amber-500';
+                else if (s === 'pending') color = 'bg-yellow-500';
+                else if (s === 'error') color = 'bg-red-500';
+                else color = 'bg-slate-500';
                 dot.className = 'w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] ' + color;
                 const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v == null ? '' : v); };
-                set('hub-status-tip-status', d.status || '—');
-                set('hub-status-tip-msg', d.message || '');
+                // Show the live socket state alongside the registration status.
+                set('hub-status-tip-status', (d.status || '—') + (s === 'approved' ? (connected ? ' · connected' : ' · reconnecting') : ''));
+                set('hub-status-tip-msg', (!connected && d.last_disconnect) ? ('socket down since ' + d.last_disconnect) : (d.message || ''));
                 set('hub-status-tip-seen', d.last_seen || '—');
             }).catch(() => { /* leave last-known color on transient fetch failure */ });
         }

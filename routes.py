@@ -78,6 +78,8 @@ async def hub_agent_status():
     cfg = load_config()
     return JSONResponse({
         "status": state.get("hub_agent_status", "not_registered"),
+        "connected": bool(state.get("hub_agent_connected", False)),
+        "last_disconnect": state.get("hub_agent_last_disconnect", ""),
         "message": state.get("hub_agent_message", ""),
         "last_seen": state.get("hub_agent_last_seen", ""),
         "hub_ws_url": (cfg.get("HUB_WS_URL") or "").strip(),

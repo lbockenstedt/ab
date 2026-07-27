@@ -190,6 +190,7 @@ class HubAgentClient:
         on_status: Optional[Callable[[str, str], None]] = None,
         on_secret: Optional[Callable[[str], None]] = None,
         on_hub_secret: Optional[Callable[[str], None]] = None,
+        on_connection: Optional[Callable[[bool], None]] = None,
     ):
         self.hub_ws_url = _normalize_hub_ws_url(hub_ws_url)
         self.spoke_id = spoke_id
@@ -197,6 +198,11 @@ class HubAgentClient:
         self.hub_secrets = [hub_secret] if hub_secret else []
         self.on_status = on_status or (lambda _s, _m: None)
         self.on_secret = on_secret or (lambda _s: None)
+        # Fired with the LIVE socket state (True on a completed handshake, False when
+        # the connection drops) so the UI can show whether bugfixer is ACTUALLY
+        # connected right now — distinct from on_status, which reports the
+        # registration state (approved/pending) that persists across brief drops.
+        self.on_connection = on_connection or (lambda _c: None)
         self.on_hub_secret = on_hub_secret or (lambda _s: None)
 
         # wss:// TLS to the unified :443 hub. Default: encrypt WITHOUT authenticating
@@ -635,6 +641,10 @@ class HubAgentClient:
                         "access can work; re-deploy it from the LE module (tagged "
                         "BugFixer) or restart bugfixer to retry.")
 
+            # _connect_and_serve returned/raised → the socket is down. Mark the live
+            # connection false so the UI reflects the drop immediately (the
+            # registration status set above is intentionally left as-is).
+            self.on_connection(False)
             if self._stop.is_set():
                 break
             await asyncio.sleep(_RECONNECT_DELAY)
@@ -848,7 +858,13 @@ class HubAgentClient:
         # For wss:// pass an explicit SSL context (unverified by default) so the
         # self-signed hub cert doesn't fail the handshake; ws:// passes ssl=None.
         _ssl = self._client_ssl_ctx() if str(self.hub_ws_url or "").startswith("wss://") else None
-        async with websockets.connect(self.hub_ws_url, max_size=16 * 1024 * 1024, ssl=_ssl) as websocket:
+        # ping_interval/ping_timeout: without these, websockets uses ~20s defaults —
+        # so if bugfixer's event loop stalls during heavy work (a scan/fix/LLM call),
+        # the keepalive pong is late and the hub connection is dropped, causing the
+        # "keeps going offline" flap. Generous values tolerate transient stalls while
+        # still detecting a truly dead socket within ~2 min.
+        async with websockets.connect(self.hub_ws_url, max_size=16 * 1024 * 1024,
+                                      ping_interval=30, ping_timeout=90, ssl=_ssl) as websocket:
             self._ws = websocket
             # The wss handshake completed. If we presented the client cert, the hub
             # ACCEPTED it — remember that, so a later transient network drop doesn't
@@ -857,6 +873,7 @@ class HubAgentClient:
                 self._cert_ever_worked = True
                 self._cert_rejected = False
             self._last_conn_error = ""   # handshake succeeded — clear the last error
+            self.on_connection(True)     # socket is LIVE now (distinct from approval)
 
             # 1. Spoke authentication handshake.
             # module_type "bugfixer" (NOT "agent"): bugfixer is a STANDALONE
@@ -1158,7 +1175,7 @@ class HubAgentClient:
 hub_agent_client: Optional[HubAgentClient] = None
 
 
-def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub_secret=None) -> Optional[HubAgentClient]:
+def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub_secret=None, on_connection=None) -> Optional[HubAgentClient]:
     """Build and start the Hub agent from a BugFixer config dict.
 
     Returns the client (also stored as the module singleton), or None if
@@ -1179,6 +1196,7 @@ def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub
         on_status=on_status,
         on_secret=on_secret,
         on_hub_secret=on_hub_secret,
+        on_connection=on_connection,
     )
     hub_agent_client = client
     client.start()
