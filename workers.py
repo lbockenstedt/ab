@@ -1004,7 +1004,13 @@ def scan_self_logs(gh_current, config):
 
         formatted_logs = []
         for line in new_text.splitlines():
-            if "[ERROR]" in line or "[CRITICAL]" in line:
+            # Match BugFixer's actual log format ("<ts> - BugFixer - ERROR - ...")
+            # AND the legacy "[ERROR]" bracket form. The bracket-only check missed
+            # every real error (the format uses " - ERROR - "), so BugFixer never
+            # surfaced its own errors as bugs — including 500s logged as
+            # "UNCAUGHT EXCEPTION". Now it does (→ self-diagnosis repo).
+            if (" - ERROR - " in line or " - CRITICAL - " in line
+                    or "[ERROR]" in line or "[CRITICAL]" in line):
                 if any(skip in line for skip in _SELF_SCAN_SKIP):
                     continue
                 ts = line[:23] if len(line) > 23 else "Unknown"
