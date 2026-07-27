@@ -196,6 +196,13 @@ async def pr_review_merge(request: Request):
         if pr.merged:
             update_pr_review(repo_name, number, merged=True)
             return {"status": "success", "message": "already merged"}
+        # Closed without a merge (e.g. superseded by another PR). Don't attempt the
+        # merge — GitHub would 405 "not mergeable". Reconcile the record to CLOSED so
+        # the row stops offering Merge, and tell the user plainly.
+        if (pr.state or "").lower() == "closed":
+            update_pr_review(repo_name, number, closed=True)
+            return JSONResponse(status_code=409, content={"status": "error", "closed": True,
+                "message": f"PR #{number} is closed on GitHub (not merged) — its changes may have merged under another PR. Marked CLOSED."})
         res = pr.merge()  # default merge commit; raises if not mergeable
         # Keep the record, flag it MERGED (stays listed with a badge).
         update_pr_review(repo_name, number, merged=True)

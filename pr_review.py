@@ -26,7 +26,7 @@ import logging
 import re
 
 from github_ops import get_monitored_repos
-from app_state import update_task_state, record_pr_review
+from app_state import update_task_state, record_pr_review, update_pr_review, state
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +312,7 @@ def scan_open_prs(gh, config):
     # Surface PR-review as a distinct 'pr'-kind task so the UI badges it apart
     # from bug scans/fixes (see templates/index.html Active Tasks).
     update_task_state("PRReview", "PR pre-review — scanning open PRs", "start", kind="pr")
+    seen_open = set()
     try:
         for repo_name in repos:
             try:
@@ -319,10 +320,50 @@ def scan_open_prs(gh, config):
                 for pr in repo.get_pulls(state="open"):
                     try:
                         _review_one(repo, pr, config)
+                        seen_open.add("%s#%s" % (repo.full_name, pr.number))
                     except Exception as e:  # noqa: BLE001
                         logger.warning("pr_review: PR #%s in %s failed: %s",
                                        getattr(pr, "number", "?"), repo_name, e)
             except Exception as e:  # noqa: BLE001
                 logger.warning("pr_review: repo %s failed: %s", repo_name, e)
+        # Self-heal listed PRs that are no longer open (merged elsewhere or closed).
+        _reconcile_closed_prs(gh, seen_open)
     finally:
         update_task_state("PRReview", action="end")
+
+
+def _reconcile_closed_prs(gh, seen_open):
+    """Refresh the PRs-Reviewed list against GitHub so it never shows stale
+    Approve/Merge buttons on a PR that is no longer open.
+
+    Only non-terminal records that were NOT seen open in this scan are checked
+    (so it costs one extra GET per genuinely-closed listed PR, not per open PR).
+    A PR merged since we last saw it → MERGED; closed without a merge (e.g. we
+    superseded it with another PR) → CLOSED. Reopened PRs get picked up as open
+    again on the normal review pass, which rebuilds a fresh (non-terminal) record."""
+    try:
+        reviews = dict(state.get("pr_reviews") or {})
+    except Exception:
+        return
+    for key, rec in reviews.items():
+        if not rec or key in seen_open:
+            continue
+        if rec.get("merged") or rec.get("denied") or rec.get("closed"):
+            continue  # already terminal in the UI
+        repo_name, number = rec.get("repo"), rec.get("number")
+        if not repo_name or not number:
+            continue
+        try:
+            pr = gh.get_repo(repo_name).get_pull(int(number))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("pr_review reconcile: %s#%s fetch failed: %s", repo_name, number, e)
+            continue
+        try:
+            if pr.merged:
+                update_pr_review(repo_name, number, merged=True)
+                logger.info("pr_review reconcile: %s #%s is merged → MERGED", repo_name, number)
+            elif (pr.state or "").lower() == "closed":
+                update_pr_review(repo_name, number, closed=True)
+                logger.info("pr_review reconcile: %s #%s is closed (unmerged) → CLOSED", repo_name, number)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("pr_review reconcile: %s#%s update failed: %s", repo_name, number, e)
