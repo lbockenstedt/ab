@@ -329,7 +329,6 @@
             </div>
             {% endif %}
         </div>
-        <div class="px-4 py-2 border-t border-slate-200 text-[10px] text-slate-400 font-mono flex-none">{{ state.version }}</div>
     </aside>
 
     <main class="flex-1 min-h-0 overflow-y-auto p-6">
@@ -2392,7 +2391,6 @@
         // selection only for the tab's session — surviving the 30s auto-reload but
         // resetting to Active on a new visit.
         async function approvePr(repo, number, btn) {
-            if (!confirm(`Approve PR ${repo} #${number}?\n\nLabels it 'bugfixer-approved' and posts an approval comment on the PR. Does NOT merge — you still merge/pull.`)) return;
             const orig = btn ? btn.innerHTML : '';
             if (btn) { btn.disabled = true; btn.innerHTML = 'Approving…'; }
             try {
@@ -2425,7 +2423,6 @@
         }
 
         async function mergePr(repo, number, btn) {
-            if (!confirm(`Merge ${repo} #${number} into main NOW?\n\nThis merges the PR on GitHub immediately (human action). Make sure you've reviewed it.`)) return;
             const orig = btn ? btn.innerHTML : '';
             if (btn) { btn.disabled = true; btn.innerHTML = 'Merging…'; }
             try {
