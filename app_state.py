@@ -99,10 +99,14 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
                 "items": items[:20],
                 # Preserve a human's Approve across re-scans; reset if the head moved.
                 "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
-                # Merged/denied are terminal — keep them so the PR stays listed with
-                # its badge instead of vanishing.
+                # Merged is terminal — keep it so the PR stays listed with its badge.
                 "merged": bool(prev.get("merged")),
-                "denied": bool(prev.get("denied")),
+                # Denied does NOT persist here: record_pr_review only runs for OPEN
+                # PRs, and Deny CLOSES the PR — so a still-denied PR is never re-scanned
+                # (its badge persists via the stored record). Reaching this line means
+                # the PR is OPEN again (reopened), which CLEARS the deny so it's
+                # reviewable/approvable again — "reopen clears the deny".
+                "denied": False,
                 "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             # Bound: drop oldest (dicts preserve insertion order) beyond the cap.
