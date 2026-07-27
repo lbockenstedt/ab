@@ -740,6 +740,12 @@
                                         Self-monitor BugFixer logs (file issues for BugFixer's own errors)
                                     </label>
                                 </div>
+                                <div class="flex items-center gap-3 mt-2">
+                                    <input type="checkbox" name="pr_review_enabled" id="pr_review_enabled" {{ 'checked' if settings.pr_review_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_review_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, BugFixer PRE-REVIEWS open PRs on monitored repos: it posts parity/dual-copy findings as a COMMENT (never approves/denies, never edits the branch) + a non-blocking bugfixer/review status. A human is still the sole approver.">
+                                        Pre-review open PRs (comment parity/drift findings — never approves/denies)
+                                    </label>
+                                </div>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-400 font-normal">(routes Hub log errors to the right repo)</span></label>
