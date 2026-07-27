@@ -65,7 +65,7 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
 _PR_REVIEWS_MAX = 100
 
 
-def record_pr_review(repo, number, title, url, findings, head_sha):
+def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
     """Persist a PR pre-review result so the UI can list/filter 'PRs Reviewed'.
     Bounded to the most recent _PR_REVIEWS_MAX. findings = list of {level,...} dicts."""
     global state
@@ -82,6 +82,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha):
                 "title": (title or "")[:120],
                 "url": url,
                 "head": head_sha,
+                "summary": (summary or "")[:600],
                 "findings": len(findings or []),
                 "errors": levels["error"],
                 "warnings": levels["warning"],

@@ -23,6 +23,7 @@ proven, load them from `.claude/skills/dual-copy-guard/reference.md` (or a share
 machine-readable pairs file) so there is a single source of truth.
 """
 import logging
+import re
 
 from github_ops import get_monitored_repos
 from app_state import update_task_state, record_pr_review
@@ -139,7 +140,71 @@ def check_parity(repo_full_name, changed):
     return findings
 
 
-def _render(findings, head_sha):
+_SUMMARY_HEADER = "### \U0001F4DD What changed"      # NB: kept in sync with _extract_summary's regex
+_SUMMARY_MAX_FILES = 30
+_SUMMARY_PATCH_CHARS = 1500
+_SUMMARY_PROMPT_CHARS = 14000
+
+
+def _summarize_changes(pr, files, config):
+    """Plain-language 'what changed' summary of the PR diff, via the LLM.
+
+    Caller-gated to run only on a head change (not every scan), so the LLM cost is
+    per-PR-update, not per-cycle. Best-effort: returns '' if disabled, the LLM is
+    unavailable, or it yields nothing — the parity findings still post either way.
+    """
+    if not config.get("pr_review_summary_enabled", True):
+        return ""
+    try:
+        from llm_client import call_llm
+    except Exception:  # noqa: BLE001
+        return ""
+    parts = []
+    for f in list(files)[:_SUMMARY_MAX_FILES]:
+        fn = getattr(f, "filename", "?")
+        stt = getattr(f, "status", "?")
+        add = getattr(f, "additions", 0)
+        dele = getattr(f, "deletions", 0)
+        patch = getattr(f, "patch", None) or ""
+        if len(patch) > _SUMMARY_PATCH_CHARS:
+            patch = patch[:_SUMMARY_PATCH_CHARS] + "\n… (patch truncated)"
+        parts.append("--- %s (%s, +%s/-%s)\n%s" % (fn, stt, add, dele, patch))
+    digest = "\n\n".join(parts)
+    n_files = len(list(files))
+    if n_files > _SUMMARY_MAX_FILES:
+        digest += "\n\n… (+%d more file(s))" % (n_files - _SUMMARY_MAX_FILES)
+    digest = digest[:_SUMMARY_PROMPT_CHARS]
+    if not digest.strip():
+        return ""
+    system = ("You are a senior engineer writing a concise, factual summary of a pull "
+              "request's changes for a human reviewer. Output 2-6 short markdown bullets "
+              "grouped by area/feature (e.g. 'DNS server list expanded to add more "
+              "options', 'DNS latency updated to support app XYZ', 'New simulation module "
+              "<name> added: <features>'). State ONLY what the diff shows; do not "
+              "speculate, do not just list file names, no preamble or sign-off.")
+    prompt = ("Summarize what this pull request changes, for the reviewer.\n\n"
+              "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest))
+    try:
+        out = call_llm(prompt, system_prompt=system)
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: change-summary skipped (%s)", e)
+        return ""
+    if not isinstance(out, str):
+        out = str(out or "")
+    return out.strip()
+
+
+def _extract_summary(body):
+    """Recover a previously-generated 'What changed' summary from an existing
+    review comment (so a cached re-scan / post-restart keeps it without a new LLM
+    call). Returns '' if absent."""
+    if not body:
+        return ""
+    m = re.search(re.escape(_SUMMARY_HEADER) + r"\s*(.*?)(?:\n#{2,3} |\Z)", body, re.S)
+    return m.group(1).strip() if m else ""
+
+
+def _render(findings, head_sha, summary=""):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
@@ -149,13 +214,17 @@ def _render(findings, head_sha):
         "this bot never approves, denies, or edits the branch._",
         "",
     ]
+    if summary:
+        lines += [_SUMMARY_HEADER, "", summary, ""]
     if not findings:
         lines += [
-            "✅ **Parity checks passed** — no dual-copy / cross-platform drift detected in the changed files.",
+            "### Parity check",
             "",
-            "_(Correctness panel + QA layers are not enabled in this first cut.)_",
+            "✅ **Passed** — no dual-copy / cross-platform drift detected in the changed files.",
+            "",
         ]
     else:
+        lines += ["### Parity findings", ""]
         for f in sorted(findings, key=lambda x: _LEVEL_ORDER.get(x["level"], 9)):
             icon = _LEVEL_ICON.get(f["level"], "•")
             lines += ["%s **%s — %s**" % (icon, f["level"].upper(), f["title"]), "", f["detail"], ""]
@@ -169,7 +238,7 @@ def _find_marker_comment(pr):
     return None
 
 
-def _review_one(repo, pr):
+def _review_one(repo, pr, config):
     if getattr(pr, "draft", False):
         return  # skip WIP drafts
     # Skip BugFixer's OWN AI-fix PRs — they were already vetted by the fix panel
@@ -187,14 +256,21 @@ def _review_one(repo, pr):
     # 'PRs Reviewed' list stays populated even after a restart. The COMMENT +
     # status are only (re)posted when the head SHA changed — dedup keeps us from
     # spamming, but we still RECORD the review below regardless.
-    changed = [f.filename for f in pr.get_files()]
+    files = list(pr.get_files())
+    changed = [f.filename for f in files]
     findings = check_parity(repo.full_name, changed)
     existing = _find_marker_comment(pr)
     already_current = bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
     if already_current:
+        # Recover the previously-generated summary from the comment — no LLM call
+        # on a cached re-scan / post-restart.
+        summary = _extract_summary(existing.body if existing else "")
         action = "cached"
     else:
-        body = _render(findings, head_sha)
+        # New/changed head: generate the plain-language change summary (LLM,
+        # best-effort) and (re)post the comment + status.
+        summary = _summarize_changes(pr, files, config)
+        body = _render(findings, head_sha, summary)
         if existing:
             existing.edit(body)
             action = "updated"
@@ -212,7 +288,7 @@ def _review_one(repo, pr):
         except Exception as e:  # noqa: BLE001
             logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
     # Always persist for the UI 'PRs Reviewed' filter (survives restarts).
-    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha)
+    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha, summary=summary)
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                     repo.full_name, pr.number, len(findings), action)
@@ -242,7 +318,7 @@ def scan_open_prs(gh, config):
                 repo = gh.get_repo(repo_name)
                 for pr in repo.get_pulls(state="open"):
                     try:
-                        _review_one(repo, pr)
+                        _review_one(repo, pr, config)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("pr_review: PR #%s in %s failed: %s",
                                        getattr(pr, "number", "?"), repo_name, e)
