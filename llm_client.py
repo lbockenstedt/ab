@@ -1444,6 +1444,20 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                                          duration_s=_RATELIMIT_COOLDOWN_SECONDS, cause="rate_limit")
                 main.state["provider_credit_cb"] = _provider_credit_cb_snapshot()
                 return None, "rate_limited"
+            # Ollama returns 404 from /api/chat when the requested model isn't pulled.
+            # Replace the opaque "404 Not Found for .../api/chat" with the actual fix.
+            if _is_ollama(provider) and "404" in err_str:
+                body = ""
+                _r = getattr(e, "response", None)
+                if _r is not None:
+                    try:
+                        body = (_r.text or "")[:200]
+                    except Exception:
+                        body = ""
+                if "/api/chat" in err_str or ("model" in body.lower() and "not found" in body.lower()):
+                    msg = (f"Ollama model '{model}' not pulled on {url or 'http://localhost:11434'} "
+                           f"— pull it (Settings → Local LLM Setup, or `ollama pull {model}`).")
+                    return None, msg
             return None, e
 
     try:
