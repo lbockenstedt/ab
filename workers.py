@@ -1195,6 +1195,14 @@ def run_scan_cycle():
         if config.get("self_log_scan_enabled", True):
             scan_self_logs(gh_current, config)
 
+        # Load project skills ("agents") from the LM repo (.claude/skills) so fixes
+        # follow their recipes + boundaries. Best-effort, cached with a TTL.
+        try:
+            from skills_loader import load_skills
+            state["skills"] = sorted(load_skills(Github(token), config).keys())
+        except Exception as _se:  # noqa: BLE001
+            logger.debug(f"skills load skipped: {_se}")
+
         state["status"] = "Scanning"
         from pr_review import scan_open_prs  # PR pre-review — gated by pr_review_enabled (default off)
         with ThreadPoolExecutor(max_workers=3) as executor:

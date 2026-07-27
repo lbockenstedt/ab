@@ -161,7 +161,7 @@ state = {
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
     "version": get_version(), "llm_stream": "",
-    "active_tasks": {}, "pr_reviews": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
+    "active_tasks": {}, "pr_reviews": {}, "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "pending_verification_count": pending_verification_count,
     "non_actionable_count": non_actionable_count,
