@@ -238,15 +238,38 @@
              (w-2 h-2 rounded-full, green/amber/red/slate by agent state) with a
              hover tooltip that drops DOWN from the header. Clickable → Diagnostics
              (Hub & Heartbeat Triage card). Polled by refreshHubStatusDot(). -->
-        {% set _hs = (state.hub_agent_status or 'not_registered') %}
-        <div id="hub-status-group" class="flex items-center gap-2 group relative cursor-pointer" onclick="location.href='/diagnostics'" title="Hub agent connection status">
-            <div id="hub-status-dot" class="w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] {{ {'approved':'bg-green-500','pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') }}"></div>
-            <span class="text-[10px] uppercase tracking-widest opacity-60">Hub</span>
-            <div id="hub-status-tooltip" class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[200px] text-left normal-case tracking-normal">
-                <div class="opacity-60 uppercase mb-1">Hub Agent</div>
-                <div id="hub-status-tip-status" class="font-bold">{{ state.hub_agent_status }}</div>
-                <div id="hub-status-tip-msg" class="opacity-80 mt-0.5">{{ state.hub_agent_message }}</div>
-                <div class="opacity-50 mt-1">last seen: <span id="hub-status-tip-seen">{{ state.hub_agent_last_seen }}</span></div>
+        <!-- Right cluster: run status + provider pills (moved here from the System
+             Health sidebar) + hub agent dot. Wrapped so justify-between keeps the
+             logo hard-left and this whole group hard-right. -->
+        <div class="flex items-center gap-5">
+            <!-- Status (moved from System Health) -->
+            <div class="hidden sm:flex items-center gap-1.5" title="BugFixer run status">
+                <span class="text-[10px] uppercase tracking-widest text-white/50">Status</span>
+                <span id="hdr-status" class="text-xs font-semibold {% if 'Error' in state.status %}text-red-300{% else %}text-emerald-300{% endif %}">{{ state.status }}</span>
+            </div>
+            <!-- Providers (moved from System Health) -->
+            <div class="hidden sm:flex items-center gap-1.5" title="LLM providers — online (green) / offline (red)">
+                <span class="text-[10px] uppercase tracking-widest text-white/50">Providers</span>
+                <div class="flex gap-1">
+                    {% for n in [1, 2, 3, 4] %}
+                    {% set cfg_key = 'provider_' ~ n ~ '_configured' %}
+                    {% if state[cfg_key] %}
+                    {% set online_key = 'provider_' ~ n ~ '_online' %}
+                    {% if state[online_key] %}<span class="status-pill pill-online">P{{ n }}</span>{% else %}<span class="status-pill pill-offline">P{{ n }}</span>{% endif %}
+                    {% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+            {% set _hs = (state.hub_agent_status or 'not_registered') %}
+            <div id="hub-status-group" class="flex items-center gap-2 group relative cursor-pointer" onclick="location.href='/diagnostics'" title="Hub agent connection status">
+                <div id="hub-status-dot" class="w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] {{ {'approved':'bg-green-500','pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') }}"></div>
+                <span class="text-[10px] uppercase tracking-widest opacity-60">Hub</span>
+                <div id="hub-status-tooltip" class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[200px] text-left normal-case tracking-normal">
+                    <div class="opacity-60 uppercase mb-1">Hub Agent</div>
+                    <div id="hub-status-tip-status" class="font-bold">{{ state.hub_agent_status }}</div>
+                    <div id="hub-status-tip-msg" class="opacity-80 mt-0.5">{{ state.hub_agent_message }}</div>
+                    <div class="opacity-50 mt-1">last seen: <span id="hub-status-tip-seen">{{ state.hub_agent_last_seen }}</span></div>
+                </div>
             </div>
         </div>
     </header>
@@ -286,29 +309,20 @@
                 <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider">System Health</h4>
                 <i class="fas fa-heartbeat text-[#01A982] text-xs"></i>
             </div>
-            <div class="flex justify-between items-center text-xs">
-                <span class="text-slate-500">Status</span>
-                <span class="font-medium {% if 'Error' in state.status %}text-red-600{% else %}text-green-600{% endif %}">{{ state.status }}</span>
-            </div>
-            <div class="text-xs">
-                <span class="text-slate-500">Providers</span>
-                <div class="flex gap-1 flex-wrap mt-1">
-                    {% for n in [1, 2, 3, 4] %}
-                    {% set cfg_key = 'provider_' ~ n ~ '_configured' %}
-                    {% if state[cfg_key] %}
-                    {% set online_key = 'provider_' ~ n ~ '_online' %}
-                    {% if state[online_key] %}<span class="status-pill pill-online">P{{ n }}</span>{% else %}<span class="status-pill pill-offline">P{{ n }}</span>{% endif %}
-                    {% endif %}
-                    {% endfor %}
-                </div>
-            </div>
-            <div class="pt-2 border-t border-slate-100 space-y-1.5 text-xs">
+            <div class="space-y-1.5 text-xs">
                 <div class="flex justify-between"><span class="text-slate-500">Resolved</span><span class="font-bold text-green-600">{{ state.success_count }}</span></div>
                 <div class="flex justify-between"><span class="text-slate-500">Failed</span><span class="font-bold text-red-600">{{ state.failure_count }}</span></div>
                 <div class="flex justify-between"><span class="text-slate-500">Closed</span><span class="font-bold text-slate-600">{{ state.closed_count }}</span></div>
                 <div class="flex justify-between"><span class="text-slate-500">Pending Verif.</span><span class="font-bold text-amber-600">{{ state.pending_verification_count }}</span></div>
                 <div class="flex justify-between"><span class="text-slate-500">Non-Actionable</span><span class="font-bold text-orange-600">{{ state.non_actionable_count }}</span></div>
+                {% set _pr_ns = namespace(approved=0, merged=0, denied=0) %}
+                {% for _pk, _pr in (state.pr_reviews or {}).items() %}{% if _pr.merged %}{% set _pr_ns.merged = _pr_ns.merged + 1 %}{% elif _pr.denied %}{% set _pr_ns.denied = _pr_ns.denied + 1 %}{% elif _pr.approved %}{% set _pr_ns.approved = _pr_ns.approved + 1 %}{% endif %}{% endfor %}
                 <div class="flex justify-between"><span class="text-slate-500">PRs Reviewed</span><span class="font-bold text-indigo-600">{{ (state.pr_reviews or {})|length }}</span></div>
+                {% if state.pr_reviews %}
+                <div class="flex justify-between"><span class="text-slate-400 pl-3">↳ Approved</span><span class="font-semibold text-green-600">{{ _pr_ns.approved }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400 pl-3">↳ Merged</span><span class="font-semibold text-purple-600">{{ _pr_ns.merged }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400 pl-3">↳ Denied</span><span class="font-semibold text-red-600">{{ _pr_ns.denied }}</span></div>
+                {% endif %}
             </div>
             {% if state.skills %}
             <div class="pt-2 border-t border-slate-100 text-xs" title="Claude skills loaded from lm/.claude/skills — injected into BugFixer's fixes.">
@@ -2904,13 +2918,13 @@
         if (document.getElementById('diag-root')) { refreshDiagnostics(); setInterval(refreshDiagnostics, 10000); }
 
         // ---- Header Hub status dot (mirrors LM hub-status-dot) ----
-        // Polls /api/hub_agent_status and recolors the header dot + tooltip so
+        // Polls /api/hub-agent/status and recolors the header dot + tooltip so
         // the connection state is visible from every view, not just Diagnostics.
         // green=approved, amber=pending, red=error, slate=not_registered.
         function refreshHubStatusDot() {
             const dot = document.getElementById('hub-status-dot');
             if (!dot) return;
-            fetch('/api/hub_agent_status').then(r => r.json()).then(d => {
+            fetch('/api/hub-agent/status').then(r => r.json()).then(d => {
                 const s = String(d.status || 'not_registered').toLowerCase();
                 const color = s === 'approved' ? 'bg-green-500'
                             : s === 'pending' ? 'bg-yellow-500'
