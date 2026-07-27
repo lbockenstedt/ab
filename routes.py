@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from github import Github
-from app_state import mark_pr_approved
+from app_state import mark_pr_approved, update_pr_review
 from fastapi import APIRouter
 
 router = APIRouter()
@@ -194,16 +194,61 @@ async def pr_review_merge(request: Request):
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(number)
         if pr.merged:
-            state["pr_reviews"].pop("%s#%s" % (repo_name, number), None)
+            update_pr_review(repo_name, number, merged=True)
             return {"status": "success", "message": "already merged"}
         res = pr.merge()  # default merge commit; raises if not mergeable
-        # Merged PRs leave the reviewed list.
-        state["pr_reviews"].pop("%s#%s" % (repo_name, number), None)
+        # Keep the record, flag it MERGED (stays listed with a badge).
+        update_pr_review(repo_name, number, merged=True)
         logger.info("pr_review: %s #%s MERGED via UI", repo_name, number)
         return {"status": "success", "merged": bool(getattr(res, "merged", True)),
                 "message": getattr(res, "message", "merged")}
     except Exception as e:  # noqa: BLE001
         logger.error("pr_review merge failed for %s#%s: %s", repo_name, number, e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@router.post("/api/pr-review/deny")
+async def pr_review_deny(request: Request):
+    """Human 'Deny' for a reviewed PR — closes it on GitHub (no merge) + labels it
+    'bugfixer-denied' + a comment, and flags it DENIED in the list (kept, badged).
+    Only a human denies; BugFixer never does."""
+    try:
+        data = await request.json()
+        repo_name = (data.get("repo") or "").strip()
+        number = int(data.get("number"))
+    except Exception:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    config = load_config()
+    token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
+    try:
+        gh = Github(token)
+        repo = gh.get_repo(repo_name)
+        pr = repo.get_pull(number)
+        label = "bugfixer-denied"
+        try:
+            repo.get_label(label)
+        except Exception:
+            try:
+                repo.create_label(label, "B60205")
+            except Exception:
+                pass
+        try:
+            pr.add_to_labels(label)
+        except Exception:
+            pass
+        try:
+            pr.create_issue_comment("⛔ **Denied** via BugFixer (human review) — closing without merge.")
+        except Exception:
+            pass
+        if not pr.merged and pr.state == "open":
+            pr.edit(state="closed")
+        update_pr_review(repo_name, number, denied=True)
+        logger.info("pr_review: %s #%s DENIED via UI", repo_name, number)
+        return {"status": "success", "repo": repo_name, "number": number}
+    except Exception as e:  # noqa: BLE001
+        logger.error("pr_review deny failed for %s#%s: %s", repo_name, number, e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
