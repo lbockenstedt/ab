@@ -438,6 +438,7 @@
                     <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
                     <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
                     <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
+                    <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs BugFixer has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PRs Reviewed</button>
                     <i class="fas fa-history text-slate-400 ml-2"></i>
                 </div>
             </div>
@@ -516,6 +517,39 @@
                                     </div>
                                 </div>
                                 {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% for _k, pr in (state.pr_reviews or {}).items() %}
+                    <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" style="display:none">
+                        <td class="px-6 py-3 font-mono align-middle">
+                            <a href="{{ pr.url }}" target="_blank" class="text-indigo-600 hover:underline"><i class="fas fa-code-branch mr-1"></i>{{ pr.repo }} #{{ pr.number }}</a>
+                        </td>
+                        <td class="px-6 py-3 text-right align-middle">
+                            {% if pr.findings and pr.findings > 0 %}
+                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap text-indigo-700 bg-indigo-100">REVIEWED · {{ pr.findings }} FINDING{{ 'S' if pr.findings != 1 else '' }}</span>
+                            {% else %}
+                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap text-green-700 bg-green-100">REVIEWED · CLEAN</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-6 py-3 align-middle">
+                            <div class="flex flex-wrap gap-1.5 justify-center items-center">
+                                <a href="{{ pr.url }}" target="_blank" class="btn-sec text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap">View PR</a>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr class="bg-slate-50/50" style="display:none">
+                        <td colspan="3" class="px-6 py-2 border-b border-slate-100">
+                            <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-[10px] italic">
+                                <span class="font-semibold not-italic text-slate-600 break-all">{{ pr.title }}</span>
+                                <span class="mx-2 text-slate-300">|</span>
+                                {% if pr.errors %}<span class="text-red-600 font-semibold">🔴 {{ pr.errors }} error</span>{% endif %}
+                                {% if pr.warnings %}<span class="text-amber-600 font-semibold">🟠 {{ pr.warnings }} warning</span>{% endif %}
+                                {% if pr.advisories %}<span class="text-blue-600 font-semibold">🔵 {{ pr.advisories }} advisory</span>{% endif %}
+                                {% if not pr.findings %}<span class="text-green-600">no parity drift</span>{% endif %}
+                                <span class="mx-2 text-slate-300">|</span>
+                                <span>reviewed {{ pr.reviewed_at }}</span>
                             </div>
                         </td>
                     </tr>
@@ -2382,9 +2416,11 @@
             document.querySelectorAll('tbody tr[data-status]').forEach(row => {
                 const s = (row.dataset.status || '').toLowerCase();
                 let show;
-                if (status === 'all')         show = s !== 'closed' && s !== 'resolved';  // active: closed + resolved hidden
-                else if (status === 'closed') show = s === 'closed';
-                else                          show = s === status;
+                if (s === 'pr_review')           show = status === 'pr_review';           // PR-review rows only in the PRs-Reviewed view
+                else if (status === 'pr_review') show = false;                             // hide issue rows in the PR view
+                else if (status === 'all')       show = s !== 'closed' && s !== 'resolved';  // active: closed + resolved hidden
+                else if (status === 'closed')    show = s === 'closed';
+                else                             show = s === status;
                 row.style.display = show ? '' : 'none';
                 const detail = row.nextElementSibling;
                 if (detail) detail.style.display = show ? '' : 'none';

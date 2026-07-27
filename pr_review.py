@@ -25,7 +25,7 @@ machine-readable pairs file) so there is a single source of truth.
 import logging
 
 from github_ops import get_monitored_repos
-from app_state import update_task_state
+from app_state import update_task_state, record_pr_review
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +172,16 @@ def _find_marker_comment(pr):
 def _review_one(repo, pr):
     if getattr(pr, "draft", False):
         return  # skip WIP drafts
+    # Skip BugFixer's OWN AI-fix PRs — they were already vetted by the fix panel
+    # when it opened them; pre-reviewing them is redundant and clutters the bot's
+    # own fix backlog. Signals: title "AI Fix #N" and head branch "ai-fix-issue-N"
+    # (fix_engine.create_pull). BugFixer commits under the operator's token, so
+    # author can't distinguish it — use the title/branch signal.
+    _title = pr.title or ""
+    _head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
+    if _title.startswith("AI Fix #") or _head_ref.startswith("ai-fix-issue-"):
+        logger.info("pr_review: skipping BugFixer's own fix PR %s #%s", repo.full_name, pr.number)
+        return
     head_sha = pr.head.sha
     existing = _find_marker_comment(pr)
     # Dedup: already reviewed THIS exact head -> nothing to do (never spam).
@@ -196,6 +206,8 @@ def _review_one(repo, pr):
             state="success", context=STATUS_CONTEXT, description=desc[:140])
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
+    # Persist for the UI 'PRs Reviewed' filter.
+    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha)
     logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                 repo.full_name, pr.number, len(findings), action)
 

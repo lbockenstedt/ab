@@ -62,6 +62,41 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
         logger.error(f"update_task_state failed for task_id={task_id!r} action={action!r}: {e}")
 
 
+_PR_REVIEWS_MAX = 100
+
+
+def record_pr_review(repo, number, title, url, findings, head_sha):
+    """Persist a PR pre-review result so the UI can list/filter 'PRs Reviewed'.
+    Bounded to the most recent _PR_REVIEWS_MAX. findings = list of {level,...} dicts."""
+    global state
+    levels = {"error": 0, "warning": 0, "advisory": 0}
+    for f in (findings or []):
+        lvl = (f or {}).get("level")
+        if lvl in levels:
+            levels[lvl] += 1
+    try:
+        with _task_state_lock:
+            state["pr_reviews"]["%s#%s" % (repo, number)] = {
+                "repo": repo,
+                "number": number,
+                "title": (title or "")[:120],
+                "url": url,
+                "head": head_sha,
+                "findings": len(findings or []),
+                "errors": levels["error"],
+                "warnings": levels["warning"],
+                "advisories": levels["advisory"],
+                "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            # Bound: drop oldest (dicts preserve insertion order) beyond the cap.
+            extra = len(state["pr_reviews"]) - _PR_REVIEWS_MAX
+            if extra > 0:
+                for k in list(state["pr_reviews"].keys())[:extra]:
+                    state["pr_reviews"].pop(k, None)
+    except Exception as e:
+        logger.error(f"record_pr_review failed for {repo}#{number}: {e}")
+
+
 config_on_start = load_config()
 processed_init = load_processed()
 
@@ -98,7 +133,7 @@ state = {
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
     "version": get_version(), "llm_stream": "",
-    "active_tasks": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
+    "active_tasks": {}, "pr_reviews": {}, "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "pending_verification_count": pending_verification_count,
     "non_actionable_count": non_actionable_count,
