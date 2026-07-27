@@ -957,9 +957,35 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
 
     system, msgs = _to_anthropic_messages(messages)
     use_stream = False if tools else effective_stream
-    payload = {"model": model, "messages": msgs, "max_tokens": 8192, "stream": use_stream}
-    if system:
-        payload["system"] = system
+    payload = {"model": model, "max_tokens": 8192, "stream": use_stream}
+    # ── Prompt caching ────────────────────────────────────────────────────────
+    # Mark the stable prefix (system instruction + the leading user context) with
+    # cache_control so repeat calls — retries, same-model re-reviews, a reused big
+    # fix/diff/log context — bill those cached tokens at ~10%. GA feature (no beta
+    # header). SAFE: a breakpoint on a prefix below the model's min cacheable size
+    # is silently ignored. Toggle: prompt_caching_enabled (default on).
+    if config.get("prompt_caching_enabled", True):
+        if system:
+            payload["system"] = [{"type": "text", "text": system,
+                                  "cache_control": {"type": "ephemeral"}}]
+        cached_msgs = [dict(m) for m in msgs]
+        for _m in cached_msgs:
+            if _m.get("role") == "user":
+                _c = _m.get("content")
+                if isinstance(_c, str) and _c:
+                    _m["content"] = [{"type": "text", "text": _c,
+                                      "cache_control": {"type": "ephemeral"}}]
+                elif isinstance(_c, list):
+                    for _blk in reversed(_c):
+                        if isinstance(_blk, dict) and _blk.get("type") == "text":
+                            _blk["cache_control"] = {"type": "ephemeral"}
+                            break
+                break  # cache through the FIRST user message (the stable context)
+        payload["messages"] = cached_msgs
+    else:
+        payload["messages"] = msgs
+        if system:
+            payload["system"] = system
     if tools:
         payload["tools"] = _tools_to_anthropic(tools)
 
