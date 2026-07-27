@@ -349,7 +349,7 @@
             </div>
 
             <!-- Active Tasks Card -->
-            <div class="hpe-card p-5 col-span-1">
+            <div class="hpe-card p-5 col-span-1 md:col-span-2">
                 <div class="flex items-center justify-between mb-6">
                     <h3 class="text-lg font-bold text-[#263040]">Active Tasks</h3>
                     <i class="fas fa-tasks text-[#01A982]"></i>
@@ -358,7 +358,7 @@
                     <div id="active-tasks-list" class="space-y-2 overflow-y-auto max-h-64">
                         {% if state.active_tasks %}
                             {% for tid, task in state.active_tasks.items() %}
-                                <div class="p-3 rounded-xl border cursor-pointer transition-colors {% if task.kind == 'pr' %}bg-indigo-50 border-indigo-300 hover:bg-indigo-100{% else %}bg-slate-100 border-slate-200 hover:bg-slate-200{% endif %}" onclick="populateTaskDetails('{{ tid }}')">
+                                <div class="p-3 rounded-xl border {% if task.kind == 'pr' %}bg-indigo-50 border-indigo-300{% else %}bg-slate-100 border-slate-200{% endif %}">
                                     <div class="mb-1">
                                         {% if task.kind == 'pr' %}
                                             <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-300"><i class="fas fa-code-branch"></i> PR REVIEW</span>
@@ -378,36 +378,6 @@
                 </div>
             </div>
 
-            <!-- Task Details Card -->
-            <div class="hpe-card p-5 col-span-1">
-                <div class="flex items-center justify-between mb-6">
-                    <h3 class="text-lg font-bold text-[#263040]">Task Details</h3>
-                    <i class="fas fa-info-circle text-[#01A982]"></i>
-                </div>
-                <div id="task-details-content" class="space-y-4 text-sm">
-                    {% if state.llm_stream %}
-                    <div class="p-3 bg-slate-900 rounded-lg border border-slate-700 mb-4">
-                        <div class="flex items-center gap-2 mb-2 text-xs font-bold text-slate-400 uppercase tracking-wider">
-                            <span class="relative flex h-2 w-2">
-                              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                              <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                            </span>
-                            Global Thought Stream
-                        </div>
-                        <div class="text-green-400 font-mono text-[10px] leading-relaxed whitespace-pre-wrap overflow-hidden max-h-48 italic">
-                            {{ state.llm_stream }}
-                        </div>
-                    </div>
-                    <div class="text-center text-slate-400 italic text-xs">
-                        Click on an Active Task to see specific details.
-                    </div>
-                    {% else %}
-                    <div class="flex flex-col items-center justify-center h-full text-slate-400 italic">
-                        Click on the Current Task to see live details.
-                    </div>
-                    {% endif %}
-                </div>
-            </div>
         </div>
 
         <!-- Processed Table -->
@@ -2068,6 +2038,9 @@
 
         async function populateTaskDetails(taskId) {
             if (!taskId) return;
+            // Task Details panel was removed — no-op if its container is gone so
+            // remaining callers don't error or start a pointless polling loop.
+            if (!document.getElementById('task-details-content')) return;
 
             console.log("Switching to task details:", taskId);
             currentTaskId = taskId;
