@@ -766,6 +766,12 @@
                                     </label>
                                 </div>
                                 <div class="flex items-center gap-3 mt-2">
+                                    <input type="checkbox" name="pr_review_llm_enabled" id="pr_review_llm_enabled" {{ 'checked' if settings.pr_review_llm_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_review_llm_enabled" class="text-xs font-medium text-slate-700" title="Requires 'Pre-review open PRs'. Adds an LLM safety pass on each PR diff: a merge-safety confidence score + flags runtime/render defects — especially Jinja dict-method render crashes (x.items), template/JS syntax errors, and conflict markers. Costs one LLM call per PR head; findings ride the same comment. Still informational — a human is the sole approver.">
+                                        LLM safety review + confidence score (flags render crashes / bugs the parity check can't)
+                                    </label>
+                                </div>
+                                <div class="flex items-center gap-3 mt-2">
                                     <input type="checkbox" name="batch_enabled" id="batch_enabled" {{ 'checked' if settings.batch_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
                                     <label for="batch_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, CLOUD LLM calls (non-streaming, non-tool) route through the Anthropic/Gemini Batch API — ~50% cheaper but SLOWER (block-and-wait, minutes-to-hours). Needs a direct anthropic/google provider slot + API key; falls back to a normal call if batch fails. Local (ollama) calls are unaffected.">
                                         Batch cloud LLM calls (~50% cheaper, slower — needs an anthropic/google API key)

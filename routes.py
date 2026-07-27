@@ -1306,6 +1306,9 @@ async def settings_page(request: Request):
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
+    # LLM safety-review layer on the pre-review (opt-in): scores merge-safety +
+    # flags runtime/render defects (e.g. Jinja `.items` render crashes).
+    config.setdefault("pr_review_llm_enabled", False)
     config.setdefault("batch_enabled", False)
     config.setdefault("prompt_caching_enabled", True)
     # Source knobs (default ON keeps the LM bug-fix pipeline working; the per-
@@ -1543,6 +1546,7 @@ async def save_settings(request: Request):
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     # PR pre-review toggle (default OFF): comment parity/drift findings on open PRs.
     config_data["pr_review_enabled"] = data.get("pr_review_enabled") == "on"
+    config_data["pr_review_llm_enabled"] = data.get("pr_review_llm_enabled") == "on"
     config_data["batch_enabled"] = data.get("batch_enabled") == "on"
     config_data["prompt_caching_enabled"] = data.get("prompt_caching_enabled") == "on"
     # File-a-Bug toggle (defaults on so the footer button works out of the box).

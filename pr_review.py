@@ -211,7 +211,78 @@ def _extract_summary(body):
     return m.group(1).strip() if m else ""
 
 
-def _render(findings, head_sha, summary=""):
+_SAFETY_CONF_RE = re.compile(r"CONFIDENCE:\s*([01](?:\.\d+)?)", re.I)
+_SAFETY_RISK_RE = re.compile(r"RISK:\s*(none|low|medium|high)", re.I)
+_SAFETY_ITEM_RE = re.compile(r"^\s*[-*]\s*\[?(error|warning|advisory)\]?[:\s]\s*(.+)$", re.I | re.M)
+
+
+def _llm_safety_review(pr, files, config):
+    """LLM pre-merge SAFETY review of the PR diff — the 'skeptical reviewer' layer on
+    top of the deterministic parity checks. Opt-in via ``pr_review_llm_enabled`` and
+    gated per-head like the summary (cost is per-PR-update, not per-cycle).
+
+    Returns ``{"confidence": float|None, "risk": str|None, "findings": [...]}`` or
+    None if disabled/unavailable. ``confidence`` = the reviewer's confidence the PR
+    is SAFE to merge (1.0 = safe). Best-effort: never raises."""
+    if not config.get("pr_review_llm_enabled", False):
+        return None
+    try:
+        from llm_client import call_llm
+    except Exception:  # noqa: BLE001
+        return None
+    parts = []
+    for f in list(files)[:_SUMMARY_MAX_FILES]:
+        fn = getattr(f, "filename", "?")
+        patch = getattr(f, "patch", None) or ""
+        if len(patch) > _SUMMARY_PATCH_CHARS:
+            patch = patch[:_SUMMARY_PATCH_CHARS] + "\n… (patch truncated)"
+        parts.append("--- %s\n%s" % (fn, patch))
+    digest = ("\n\n".join(parts))[:_SUMMARY_PROMPT_CHARS]
+    if not digest.strip():
+        return None
+    system = (
+        "You are a STRICT pre-merge safety reviewer. Find defects in this PR diff that "
+        "would break at RUNTIME or on RENDER — not style nits. Prioritize, in order:\n"
+        "1) TEMPLATE RENDER CRASHES, especially Jinja dot-access of a dict method — "
+        "`x.items`, `x.keys`, `x.values` in `{{ }}` or `{% for %}`. Dot-notation returns "
+        "the bound METHOD, not the key, so `{% for a in x.items %}` throws "
+        "'builtin_function_or_method object is not iterable' and 500s the whole page; the "
+        "fix is bracket access `x['items']`. Flag EVERY such occurrence.\n"
+        "2) Template/JS SYNTAX errors: unbalanced Jinja `{% %}` blocks, duplicate "
+        "`const`/`let` in a <script> (kills the whole script block), leftover merge "
+        "conflict markers (<<<<<<< ======= >>>>>>>).\n"
+        "3) Obvious logic errors, undefined names, security issues.\n"
+        "Respond EXACTLY in this format, nothing else:\n"
+        "CONFIDENCE: <0.00-1.00 that this PR is SAFE to merge>\n"
+        "RISK: <none|low|medium|high>\n"
+        "FINDINGS:\n"
+        "- [error|warning|advisory] <file>: <one-line issue + fix>\n"
+        "(one bullet per issue; write exactly '- none' if you find nothing).")
+    prompt = "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest)
+    try:
+        out = call_llm(prompt, system_prompt=system, task_kind="pr_confidence")
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: LLM safety review skipped (%s)", e)
+        return None
+    out = out if isinstance(out, str) else str(out or "")
+    if not out.strip():
+        return None
+    mconf = _SAFETY_CONF_RE.search(out)
+    mrisk = _SAFETY_RISK_RE.search(out)
+    findings = []
+    for m in _SAFETY_ITEM_RE.finditer(out):
+        text = (m.group(2) or "").strip()
+        if not text or text.lower() in ("none", "n/a"):
+            continue
+        findings.append({"level": m.group(1).lower(), "title": text[:120], "detail": text})
+    return {
+        "confidence": float(mconf.group(1)) if mconf else None,
+        "risk": mrisk.group(1).lower() if mrisk else None,
+        "findings": findings,
+    }
+
+
+def _render(findings, head_sha, summary="", safety=None):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
@@ -235,6 +306,19 @@ def _render(findings, head_sha, summary=""):
         for f in sorted(findings, key=lambda x: _LEVEL_ORDER.get(x["level"], 9)):
             icon = _LEVEL_ICON.get(f["level"], "•")
             lines += ["%s **%s — %s**" % (icon, f["level"].upper(), f["title"]), "", f["detail"], ""]
+    if safety:
+        conf = safety.get("confidence")
+        conf_str = ("%d%%" % round(conf * 100)) if isinstance(conf, (int, float)) else "—"
+        risk = (safety.get("risk") or "—").upper()
+        sfind = safety.get("findings") or []
+        lines += ["### \U0001F9E0 Safety review (LLM)", "",
+                  "**Merge-safety confidence: %s** · risk: **%s**" % (conf_str, risk), ""]
+        if not sfind:
+            lines += ["✅ No runtime/render risks flagged.", ""]
+        else:
+            for f in sorted(sfind, key=lambda x: _LEVEL_ORDER.get(x["level"], 9)):
+                icon = _LEVEL_ICON.get(f["level"], "•")
+                lines += ["%s **%s** — %s" % (icon, f["level"].upper(), f["detail"]), ""]
     return "\n".join(lines)
 
 
@@ -323,6 +407,7 @@ def _review_one(gh, repo, pr, config):
     findings = _resolve_cross_repo_twins(gh, findings)
     existing = _find_marker_comment(pr)
     already_current = bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
+    safety = None
     if already_current:
         # Recover the previously-generated summary from the comment — no LLM call
         # on a cached re-scan / post-restart.
@@ -332,7 +417,8 @@ def _review_one(gh, repo, pr, config):
         # New/changed head: generate the plain-language change summary (LLM,
         # best-effort) and (re)post the comment + status.
         summary = _summarize_changes(pr, files, config)
-        body = _render(findings, head_sha, summary)
+        safety = _llm_safety_review(pr, files, config)
+        body = _render(findings, head_sha, summary, safety=safety)
         if existing:
             existing.edit(body)
             action = "updated"
@@ -343,14 +429,19 @@ def _review_one(gh, repo, pr, config):
         # a merge (the human is the gate); the count rides the description.
         # Best-effort: needs statuses:write — if absent, the comment still posts.
         try:
-            n = len(findings)
-            desc = "no parity issues" if n == 0 else "%d parity finding(s) — see review comment" % n
+            _sf = (safety or {}).get("findings") or []
+            _conf = (safety or {}).get("confidence")
+            n = len(findings) + len(_sf)
+            _cp = (" · safety %d%%" % round(_conf * 100)) if isinstance(_conf, (int, float)) else ""
+            desc = ("no issues" if n == 0 else "%d finding(s) — see review comment" % n) + _cp
             repo.get_commit(head_sha).create_status(
                 state="success", context=STATUS_CONTEXT, description=desc[:140])
         except Exception as e:  # noqa: BLE001
             logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
-    # Always persist for the UI 'PRs Reviewed' filter (survives restarts).
-    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha, summary=summary)
+    # Always persist for the UI list (survives restarts). Combine parity + LLM
+    # safety findings so the count reflects both.
+    _rec_findings = list(findings) + list((safety or {}).get("findings") or [])
+    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, _rec_findings, head_sha, summary=summary)
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                     repo.full_name, pr.number, len(findings), action)
