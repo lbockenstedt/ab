@@ -1252,6 +1252,8 @@ async def settings_page(request: Request):
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
+    config.setdefault("batch_enabled", False)
+    config.setdefault("prompt_caching_enabled", True)
     # Source knobs (default ON keeps the LM bug-fix pipeline working; the per-
     # module log grid + fix-log-detected are opt-in, default OFF, so the operator
     # enables noisy sources one at a time).
@@ -1487,6 +1489,8 @@ async def save_settings(request: Request):
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     # PR pre-review toggle (default OFF): comment parity/drift findings on open PRs.
     config_data["pr_review_enabled"] = data.get("pr_review_enabled") == "on"
+    config_data["batch_enabled"] = data.get("batch_enabled") == "on"
+    config_data["prompt_caching_enabled"] = data.get("prompt_caching_enabled") == "on"
     # File-a-Bug toggle (defaults on so the footer button works out of the box).
     config_data["bug_report_enabled"] = data.get("bug_report_enabled") != "off"
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"

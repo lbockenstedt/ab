@@ -774,6 +774,18 @@
                                         Pre-review open PRs (comment parity/drift findings — never approves/denies)
                                     </label>
                                 </div>
+                                <div class="flex items-center gap-3 mt-2">
+                                    <input type="checkbox" name="batch_enabled" id="batch_enabled" {{ 'checked' if settings.batch_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="batch_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, CLOUD LLM calls (non-streaming, non-tool) route through the Anthropic/Gemini Batch API — ~50% cheaper but SLOWER (block-and-wait, minutes-to-hours). Needs a direct anthropic/google provider slot + API key; falls back to a normal call if batch fails. Local (ollama) calls are unaffected.">
+                                        Batch cloud LLM calls (~50% cheaper, slower — needs an anthropic/google API key)
+                                    </label>
+                                </div>
+                                <div class="flex items-center gap-3 mt-2">
+                                    <input type="checkbox" name="prompt_caching_enabled" id="prompt_caching_enabled" {{ 'checked' if settings.prompt_caching_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="prompt_caching_enabled" class="text-xs font-medium text-slate-700" title="On by default. Marks the stable prefix (system + leading context) of Anthropic requests with cache_control so repeat calls bill cached tokens at ~10%. Harmless if unused.">
+                                        Anthropic prompt caching (cache the stable prefix — ~10% on cached tokens)
+                                    </label>
+                                </div>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-400 font-normal">(routes Hub log errors to the right repo)</span></label>

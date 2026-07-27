@@ -1385,7 +1385,25 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             # Honour per-provider RPM cap (0 = unlimited).
             _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
             main.state["active_llm"] = model
-            result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config)
+            # Batch routing: for a CLOUD, non-streaming, non-tool call, route through
+            # the batch API when batch_enabled (async, ~50% off; slower — acceptable
+            # for this side-project). Falls back to the sync call if batch returns
+            # None (submit/poll failed, timed out, or no API key).
+            _bp = (provider or "").lower().strip()
+            result = None
+            if (config.get("batch_enabled", False) and _bp in ("anthropic", "google", "gemini")
+                    and not tools and not effective_stream):
+                try:
+                    from batch import run_batched as _run_batched
+                    _sys = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
+                    _usr = "\n".join(m.get("content", "") for m in messages
+                                     if m.get("role") == "user" and isinstance(m.get("content"), str))
+                    result = _run_batched(_bp, model, _sys, _usr, config)
+                except Exception as _bex:  # noqa: BLE001
+                    logger.debug(f"batch route skipped: {_bex}")
+                    result = None
+            if result is None:
+                result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config)
             # Successful call: clear any rate-limit cooldown for this provider.
             with _PROVIDER_CREDIT_CB_LOCK:
                 if _PROVIDER_CREDIT_CB[n].get("cause") == "rate_limit":

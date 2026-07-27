@@ -272,6 +272,48 @@ def poll_and_dispatch(config):
             _save_state(st)
 
 
+# ── synchronous batch (block-and-wait) ───────────────────────────────────────
+def run_batched(provider, model, system, prompt, config, max_wait=None):
+    """Submit a single-request batch and BLOCK-poll until it returns (or times out).
+
+    Returns the text, or None on failure/timeout so the caller can fall back to a
+    normal synchronous call. ~50% cheaper than sync — and slow (that's the trade).
+    Used by call_llm when batch_enabled for cloud, non-streaming, non-tool calls.
+    """
+    provider = (provider or "").lower().strip()
+    key = _provider_key(provider, config)
+    if not key or not model:
+        return None
+    cid = "sync_" + uuid.uuid4().hex[:12]
+    item = {"custom_id": cid, "model": model, "system": system or "", "prompt": prompt or ""}
+    try:
+        if provider == "anthropic":
+            bid = _submit_anthropic([item], key)
+        elif provider in ("google", "gemini"):
+            bid = _submit_gemini([item], key, model)
+        else:
+            return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"batch run_batched submit failed ({provider}): {e}")
+        return None
+    if not bid:
+        return None
+    deadline = time.time() + int(max_wait or config.get("batch_sync_max_wait_s", 3600) or 3600)
+    poll = max(15, int(config.get("batch_poll_s", 60) or 60))
+    logger.info(f"batch: block-waiting on {provider} batch {bid} (up to {int(deadline-time.time())}s)")
+    while time.time() < deadline:
+        time.sleep(poll)
+        try:
+            res = _poll_anthropic(bid, key) if provider == "anthropic" else _poll_gemini(bid, key)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"batch run_batched poll failed: {e}")
+            continue
+        if res is not None:
+            return res.get(cid, "") or ""
+    logger.warning(f"batch run_batched timed out for {provider} batch {bid}")
+    return None
+
+
 # ── worker ───────────────────────────────────────────────────────────────────
 def batch_worker():
     """Periodic flush + poll. Off unless batch_enabled. Best-effort; never dies."""
