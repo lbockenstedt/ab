@@ -183,33 +183,39 @@ def _review_one(repo, pr):
         logger.info("pr_review: skipping BugFixer's own fix PR %s #%s", repo.full_name, pr.number)
         return
     head_sha = pr.head.sha
-    existing = _find_marker_comment(pr)
-    # Dedup: already reviewed THIS exact head -> nothing to do (never spam).
-    if existing and ("<!-- head: %s -->" % head_sha) in (existing.body or ""):
-        return
+    # Compute findings every scan (cheap, deterministic, no LLM) so the UI
+    # 'PRs Reviewed' list stays populated even after a restart. The COMMENT +
+    # status are only (re)posted when the head SHA changed — dedup keeps us from
+    # spamming, but we still RECORD the review below regardless.
     changed = [f.filename for f in pr.get_files()]
     findings = check_parity(repo.full_name, changed)
-    body = _render(findings, head_sha)
-    if existing:
-        existing.edit(body)
-        action = "updated"
+    existing = _find_marker_comment(pr)
+    already_current = bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
+    if already_current:
+        action = "cached"
     else:
-        pr.create_issue_comment(body)
-        action = "created"
-    # Informational, NON-blocking status. Always 'success' so it can never block a
-    # merge (the human is the gate); the count rides the description. Best-effort:
-    # needs statuses:write on the token/app — if absent, the comment still posts.
-    try:
-        n = len(findings)
-        desc = "no parity issues" if n == 0 else "%d parity finding(s) — see review comment" % n
-        repo.get_commit(head_sha).create_status(
-            state="success", context=STATUS_CONTEXT, description=desc[:140])
-    except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
-    # Persist for the UI 'PRs Reviewed' filter.
+        body = _render(findings, head_sha)
+        if existing:
+            existing.edit(body)
+            action = "updated"
+        else:
+            pr.create_issue_comment(body)
+            action = "created"
+        # Informational, NON-blocking status. Always 'success' so it can never block
+        # a merge (the human is the gate); the count rides the description.
+        # Best-effort: needs statuses:write — if absent, the comment still posts.
+        try:
+            n = len(findings)
+            desc = "no parity issues" if n == 0 else "%d parity finding(s) — see review comment" % n
+            repo.get_commit(head_sha).create_status(
+                state="success", context=STATUS_CONTEXT, description=desc[:140])
+        except Exception as e:  # noqa: BLE001
+            logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
+    # Always persist for the UI 'PRs Reviewed' filter (survives restarts).
     record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha)
-    logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
-                repo.full_name, pr.number, len(findings), action)
+    if action != "cached":
+        logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
+                    repo.full_name, pr.number, len(findings), action)
 
 
 def scan_open_prs(gh, config):
