@@ -280,7 +280,7 @@ def analyze_logs_for_errors(logs):
         "The 'module' MUST be copied verbatim from the source log entry's module field."
     )
     try:
-        res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.")
+        res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.", task_kind="log_review")
         import re
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:

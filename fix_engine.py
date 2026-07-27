@@ -229,7 +229,7 @@ def analyze_issue(issue):
         "Return ONLY a JSON object: {\"actionable\": boolean, \"request\": \"message if not actionable\"}"
     )
     try:
-        res = call_llm(prompt, system_prompt="You are a triage bot. Only return a JSON object.")
+        res = call_llm(prompt, system_prompt="You are a triage bot. Only return a JSON object.", task_kind="triage")
         import re
         match = re.search(r'\{.*\}', res, re.DOTALL)
         if match:
@@ -427,7 +427,7 @@ def identify_files_to_fix(repo_path, issue_body):
     )
     llm_files = []
     try:
-        res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.")
+        res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.", task_kind="identify_files")
         import re
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:
@@ -543,6 +543,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         "2. Does it introduce new bugs or regressions?\n"
         "3. Is the code quality acceptable?\n"
         "4. Are there any obvious edge cases missed?\n\n"
+        "NOTE: Small, targeted changes that correct obvious typos or naming mismatches are considered high-signal; "
+        "if they correctly address the issue without regressions, they SHOULD be approved.\n\n"
         "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}\n"
         "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 90% confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 90%). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back."
     )
@@ -964,7 +966,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
             f"{fix_format}"
         )
     try:
-        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider, model_override=model_override)
+        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider, model_override=model_override, task_kind="fix")
     except Exception as e:
         raise Exception(f"Fix generation failed: {e}")
 
@@ -1527,6 +1529,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         verified = False
                         failure_msg = "AI generated invalid JSON format"
                     else:
+                        critique = ""
                         if config.get("skip_review", False):
                             logger.info("Skeptical Reviewer bypassed by configuration.")
                             review_conf = confidence
@@ -1552,6 +1555,16 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
                             review_conf = review.get("confidence", 0.0)
                             review_verdict = review.get("verdict", "Reject")
+                            critique = review.get("critique", "")
+
+                            if review_verdict == "Reject":
+                                logger.warning(f"Reviewer REJECTED fix for {issue_id}: {critique}")
+                                error_context = f"Reviewer rejected the fix: {critique}"
+                                try:
+                                    repo_git.git.reset("--hard", "HEAD")
+                                    repo_git.git.clean("-fd")
+                                except Exception: pass
+                                continue
 
                         if config.get("qa_enabled", True):
                             prepare_environment(path)
@@ -1572,7 +1585,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                     f"{min_conf:.0%} — escalating to the next provider.")
                                 error_context = (
                                     f"The previous provider's fix passed tests but only reached "
-                                    f"{final_confidence:.0%} confidence. Produce a more robust fix.")
+                                    f"{final_confidence:.0%} confidence. Review critique: {critique}. "
+                                    f"Produce a more robust fix.")
                                 try:
                                     repo_git.git.reset("--hard", "HEAD")
                                     repo_git.git.clean("-fd")

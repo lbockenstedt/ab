@@ -185,7 +185,7 @@ def _summarize_changes(pr, files, config):
     prompt = ("Summarize what this pull request changes, for the reviewer.\n\n"
               "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest))
     try:
-        out = call_llm(prompt, system_prompt=system)
+        out = call_llm(prompt, system_prompt=system, task_kind="pr_summary")
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: change-summary skipped (%s)", e)
         return ""

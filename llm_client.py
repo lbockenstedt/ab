@@ -1281,7 +1281,7 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
 
 
 # Shared LLM Utility
-def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None):
+def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None, task_kind=None):
     """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
 
     Routing priority:
@@ -1318,6 +1318,20 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         (3, p3_provider, p3_model, p3_key, p3_url),
         (4, p4_provider, p4_model, p4_key, p4_url),
     ]
+
+    # Smart router: for a given task_kind, swap each CLOUD slot's model for the
+    # task-appropriate tier (small/medium/large) so we don't burn a large model on
+    # a summary. Local slots (ollama/lmstudio/claude_cli) keep their configured
+    # model. An explicit model_override still wins (routing skipped).
+    if task_kind and not model_override:
+        try:
+            from model_router import pick_model as _router_pick
+            all_providers = [
+                (n, prov, _router_pick(task_kind, prov, config, default=mdl), k, u)
+                for (n, prov, mdl, k, u) in all_providers
+            ]
+        except Exception as _re:
+            logger.debug(f"model_router skipped for task_kind={task_kind!r}: {_re}")
 
     def _try_provider(n, provider, model, key, url):
         # claude_cli (Claude Code session), LM Studio and Ollama (local/remote
