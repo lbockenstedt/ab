@@ -310,17 +310,17 @@
                 <i class="fas fa-heartbeat text-[#01A982] text-xs"></i>
             </div>
             <div class="space-y-1.5 text-xs">
-                <div class="flex justify-between"><span class="text-slate-500">Resolved</span><span class="font-bold text-green-600">{{ state.success_count }}</span></div>
-                <div class="flex justify-between"><span class="text-slate-500">Failed</span><span class="font-bold text-red-600">{{ state.failure_count }}</span></div>
-                <div class="flex justify-between"><span class="text-slate-500">Closed</span><span class="font-bold text-slate-600">{{ state.closed_count }}</span></div>
-                <div class="flex justify-between"><span class="text-slate-500">Pending Verif.</span><span class="font-bold text-amber-600">{{ state.pending_verification_count }}</span></div>
-                <div class="flex justify-between"><span class="text-slate-500">Non-Actionable</span><span class="font-bold text-orange-600">{{ state.non_actionable_count }}</span></div>
+                <div onclick="goFilter('resolved')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Resolved"><span class="text-slate-500">Resolved</span><span class="font-bold text-green-600">{{ state.success_count }}</span></div>
+                <div onclick="goFilter('failed')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Failed"><span class="text-slate-500">Failed</span><span class="font-bold text-red-600">{{ state.failure_count }}</span></div>
+                <div onclick="goFilter('closed')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Closed"><span class="text-slate-500">Closed</span><span class="font-bold text-slate-600">{{ state.closed_count }}</span></div>
+                <div onclick="goFilter('pending_verification')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Pending Verification"><span class="text-slate-500">Pending Verif.</span><span class="font-bold text-amber-600">{{ state.pending_verification_count }}</span></div>
+                <div onclick="goFilter('non-actionable')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Non-Actionable"><span class="text-slate-500">Non-Actionable</span><span class="font-bold text-orange-600">{{ state.non_actionable_count }}</span></div>
                 {% set _pr_ns = namespace(approved=0, merged=0, denied=0) %}
                 {% for _pk, _pr in (state.pr_reviews or {}).items() %}{% if _pr.merged %}{% set _pr_ns.merged = _pr_ns.merged + 1 %}{% elif _pr.denied %}{% set _pr_ns.denied = _pr_ns.denied + 1 %}{% elif _pr.approved %}{% set _pr_ns.approved = _pr_ns.approved + 1 %}{% endif %}{% endfor %}
-                <div class="flex justify-between"><span class="text-slate-500">PRs Reviewed</span><span class="font-bold text-indigo-600">{{ (state.pr_reviews or {})|length }}</span></div>
-                <div class="flex justify-between"><span class="text-slate-500">PRs Approved</span><span class="font-bold text-green-600">{{ _pr_ns.approved }}</span></div>
-                <div class="flex justify-between"><span class="text-slate-500">PRs Merged</span><span class="font-bold text-purple-600">{{ _pr_ns.merged }}</span></div>
-                <div class="flex justify-between"><span class="text-slate-500">PRs Denied</span><span class="font-bold text-red-600">{{ _pr_ns.denied }}</span></div>
+                <div onclick="goFilter('pr_review')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Reviewed"><span class="text-slate-500">PRs Reviewed</span><span class="font-bold text-indigo-600">{{ (state.pr_reviews or {})|length }}</span></div>
+                <div onclick="goFilter('pr_approved')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Approved"><span class="text-slate-500">PRs Approved</span><span class="font-bold text-green-600">{{ _pr_ns.approved }}</span></div>
+                <div onclick="goFilter('pr_merged')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Merged"><span class="text-slate-500">PRs Merged</span><span class="font-bold text-purple-600">{{ _pr_ns.merged }}</span></div>
+                <div onclick="goFilter('pr_denied')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Denied"><span class="text-slate-500">PRs Denied</span><span class="font-bold text-red-600">{{ _pr_ns.denied }}</span></div>
             </div>
             {% if state.skills %}
             <div class="pt-2 border-t border-slate-100 text-xs" title="Claude skills loaded from lm/.claude/skills — injected into BugFixer's fixes.">
@@ -387,14 +387,17 @@
                 <!-- Row 2: filters (pinned right) -->
                 <div class="flex items-center flex-wrap gap-2 justify-end">
                     <span class="text-xs font-bold text-slate-500 uppercase mr-1">Filter:</span>
-                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border-[#01A982]" title="Active issues (closed hidden)">Active</button>
-                    <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
-                    <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
-                    <button data-filter="resolved" onclick="filterActivity('resolved')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Resolved</button>
-                    <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
-                    <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
-                    <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
-                    <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-3 py-1 rounded-md text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs BugFixer has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PRs Reviewed</button>
+                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border-[#01A982]" title="Active issues (closed hidden)">Active</button>
+                    <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
+                    <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
+                    <button data-filter="resolved" onclick="filterActivity('resolved')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Resolved</button>
+                    <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
+                    <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
+                    <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
+                    <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs BugFixer has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PRs Reviewed</button>
+                    <button data-filter="pr_approved" onclick="filterActivity('pr_approved')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Approved"><i class="fas fa-code-branch mr-1"></i>Approved</button>
+                    <button data-filter="pr_merged" onclick="filterActivity('pr_merged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs that were Merged"><i class="fas fa-code-branch mr-1"></i>Merged</button>
+                    <button data-filter="pr_denied" onclick="filterActivity('pr_denied')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Denied"><i class="fas fa-code-branch mr-1"></i>Denied</button>
                     <i class="fas fa-history text-slate-400 ml-2"></i>
                 </div>
             </div>
@@ -478,7 +481,7 @@
                     </tr>
                     {% endfor %}
                     {% for _k, pr in (state.pr_reviews or {}).items() %}
-                    <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" style="display:none">
+                    <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" data-pr-state="{% if pr.merged %}merged{% elif pr.denied %}denied{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
                         <td class="px-6 py-3 font-mono align-middle">
                             <a href="{{ pr.url }}" target="_blank" class="text-indigo-600 hover:underline"><i class="fas fa-code-branch mr-1"></i>{{ pr.repo }} #{{ pr.number }}</a>
                         </td>
@@ -2488,11 +2491,19 @@
             // Only the Activity Feed table has data-status rows. Each main row is
             // followed by its expandable detail row (no data-status) — toggle both
             // together so a filtered-out issue hides its detail too.
+            // PR-review filters: pr_review = all reviewed PRs; the others narrow to a
+            // single lifecycle state via the row's data-pr-state (merged/denied/approved).
+            const PR_FILTERS = { pr_review: null, pr_approved: 'approved', pr_merged: 'merged', pr_denied: 'denied' };
+            const isPrFilter = Object.prototype.hasOwnProperty.call(PR_FILTERS, status);
             document.querySelectorAll('tbody tr[data-status]').forEach(row => {
                 const s = (row.dataset.status || '').toLowerCase();
                 let show;
-                if (s === 'pr_review')           show = status === 'pr_review';           // PR-review rows only in the PRs-Reviewed view
-                else if (status === 'pr_review') show = false;                             // hide issue rows in the PR view
+                if (s === 'pr_review') {                                                   // a reviewed-PR row
+                    if (!isPrFilter)                 show = false;                          // hidden under any issue filter
+                    else if (status === 'pr_review') show = true;                           // all PR rows
+                    else                             show = (row.dataset.prState || '') === PR_FILTERS[status];
+                }
+                else if (isPrFilter)             show = false;                             // hide issue rows under any PR filter
                 else if (status === 'all')       show = s !== 'closed' && s !== 'resolved';  // active: closed + resolved hidden
                 else if (status === 'closed')    show = s === 'closed';
                 else                             show = s === status;
@@ -2500,6 +2511,22 @@
                 const detail = row.nextElementSibling;
                 if (detail) detail.style.display = show ? '' : 'none';
             });
+        }
+
+        // Clicking a System Health count (left sidebar) jumps to the Dashboard's
+        // Activity Feed with that filter applied. On the status view we filter in
+        // place + scroll to the feed; elsewhere we persist the choice and navigate
+        // to '/', where the on-load applier picks it up from sessionStorage.
+        function goFilter(status) {
+            try { sessionStorage.setItem('bf_activity_filter', status); } catch (e) {}
+            const onStatus = window.BF_REFRESH && window.BF_REFRESH.view === 'status';
+            if (onStatus && document.querySelector('tbody tr[data-status]')) {
+                filterActivity(status);
+                const tbl = document.querySelector('main table');
+                if (tbl) tbl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } else {
+                window.location.href = '/';
+            }
         }
 
         // Apply the default/persisted filter once the Activity Feed is present.
