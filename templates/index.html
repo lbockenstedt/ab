@@ -308,7 +308,14 @@
                 <div class="flex justify-between"><span class="text-slate-500">Closed</span><span class="font-bold text-slate-600">{{ state.closed_count }}</span></div>
                 <div class="flex justify-between"><span class="text-slate-500">Pending Verif.</span><span class="font-bold text-amber-600">{{ state.pending_verification_count }}</span></div>
                 <div class="flex justify-between"><span class="text-slate-500">Non-Actionable</span><span class="font-bold text-orange-600">{{ state.non_actionable_count }}</span></div>
+                {% set _pr_ns = namespace(approved=0, merged=0, denied=0) %}
+                {% for _pk, _pr in (state.pr_reviews or {}).items() %}{% if _pr.merged %}{% set _pr_ns.merged = _pr_ns.merged + 1 %}{% elif _pr.denied %}{% set _pr_ns.denied = _pr_ns.denied + 1 %}{% elif _pr.approved %}{% set _pr_ns.approved = _pr_ns.approved + 1 %}{% endif %}{% endfor %}
                 <div class="flex justify-between"><span class="text-slate-500">PRs Reviewed</span><span class="font-bold text-indigo-600">{{ (state.pr_reviews or {})|length }}</span></div>
+                {% if state.pr_reviews %}
+                <div class="flex justify-between"><span class="text-slate-400 pl-3">↳ Approved</span><span class="font-semibold text-green-600">{{ _pr_ns.approved }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400 pl-3">↳ Merged</span><span class="font-semibold text-purple-600">{{ _pr_ns.merged }}</span></div>
+                <div class="flex justify-between"><span class="text-slate-400 pl-3">↳ Denied</span><span class="font-semibold text-red-600">{{ _pr_ns.denied }}</span></div>
+                {% endif %}
             </div>
             {% if state.skills %}
             <div class="pt-2 border-t border-slate-100 text-xs" title="Claude skills loaded from lm/.claude/skills — injected into BugFixer's fixes.">
