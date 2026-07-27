@@ -349,6 +349,15 @@ def _hub_agent_on_status(status, message):
         state["hub_agent_approved_at"] = state["hub_agent_last_seen"]
 
 
+def _hub_agent_on_connection(connected):
+    """Callback: the LIVE hub socket came up (True) or dropped (False). Distinct
+    from approval status — lets the header dot show green only while actually
+    connected, so a flapping agent no longer reads as steady-green."""
+    state["hub_agent_connected"] = bool(connected)
+    if not connected:
+        state["hub_agent_last_disconnect"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _persist_config_key(key, value):
     """Callback helper: upsert a single key into config.json (agent-managed secrets)."""
     try:
@@ -405,6 +414,7 @@ def _start_hub_agent():
             on_status=_hub_agent_on_status,
             on_secret=_hub_agent_on_secret,
             on_hub_secret=_hub_agent_on_hub_secret,
+            on_connection=_hub_agent_on_connection,
         )
     except Exception as e:
         logger.warning(f"Could not start Hub agent: {e}")
