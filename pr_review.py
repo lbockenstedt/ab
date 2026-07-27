@@ -49,6 +49,7 @@ def check_parity(repo_full_name, changed):
     findings = []
     changed = set(changed)
     repo = (repo_full_name or "").lower()
+    owner = (repo_full_name or "").split("/")[0] or "lbockenstedt"
     is_cs = repo.endswith("/cs") or repo == "cs"
     is_lm = repo.endswith("/lm") or repo == "lm"
 
@@ -103,13 +104,16 @@ def check_parity(repo_full_name, changed):
                           + ", ".join("`%s`" % p for p in present) + " but not "
                           + ", ".join("`%s`" % p for p in missing) + ".",
             })
-        # cross-repo advisories (twins live in the lm repo)
+        # cross-repo advisories (twins live in the lm repo). The `twin` field lets
+        # _review_one verify the other repo and DROP the advisory when a matching PR
+        # already updates it (only warn when the twin is genuinely NOT updated).
         if "lm-spoke/static/sim-views.js" in changed:
             findings.append({
                 "level": "advisory",
                 "title": "sim-views.js twin lives in the lm repo",
                 "detail": "This PR changes `lm-spoke/static/sim-views.js`; its twin `WebUI/sim-views.js` is in "
                           "the **lm** repo (separate PR). Ensure a matching lm PR keeps the two in lockstep.",
+                "twin": {"repo": "%s/lm" % owner, "path": "WebUI/sim-views.js"},
             })
         if "lm-spoke/src/sim_quota.py" in changed:
             findings.append({
@@ -118,6 +122,7 @@ def check_parity(repo_full_name, changed):
                 "detail": "This PR changes `lm-spoke/src/sim_quota.py`; its hub twin "
                           "`core/src/simulations/sim_quota.py` is in the **lm** repo. Keep SIM_QUOTA_KEYS/logic "
                           "matched via a corresponding lm PR.",
+                "twin": {"repo": "%s/lm" % owner, "path": "core/src/simulations/sim_quota.py"},
             })
 
     # ---- lm cross-repo advisories ----------------------------------------
@@ -128,6 +133,7 @@ def check_parity(repo_full_name, changed):
                 "title": "sim-views.js twin lives in the cs repo",
                 "detail": "This PR changes `WebUI/sim-views.js`; its twin `lm-spoke/static/sim-views.js` is in "
                           "the **cs** repo. Ensure a matching cs PR.",
+                "twin": {"repo": "%s/cs" % owner, "path": "lm-spoke/static/sim-views.js"},
             })
         if "core/src/simulations/sim_quota.py" in changed:
             findings.append({
@@ -135,6 +141,7 @@ def check_parity(repo_full_name, changed):
                 "title": "sim_quota.py spoke twin lives in the cs repo",
                 "detail": "This PR changes the hub `core/src/simulations/sim_quota.py`; its spoke twin "
                           "`lm-spoke/src/sim_quota.py` is in the **cs** repo.",
+                "twin": {"repo": "%s/cs" % owner, "path": "lm-spoke/src/sim_quota.py"},
             })
 
     return findings
@@ -238,7 +245,61 @@ def _find_marker_comment(pr):
     return None
 
 
-def _review_one(repo, pr, config):
+def _twin_open_pr_touches(gh, twin_repo, twin_path):
+    """Does an OPEN PR in `twin_repo` modify `twin_path`? Returns True/False, or
+    None if the twin repo can't be reached (so the caller keeps the advisory rather
+    than falsely clearing OR falsely warning)."""
+    try:
+        r = gh.get_repo(twin_repo)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("pr_review twin-check: repo %s unreachable: %s", twin_repo, e)
+        return None
+    try:
+        for tpr in r.get_pulls(state="open"):
+            try:
+                for f in tpr.get_files():
+                    if f.filename == twin_path:
+                        return True
+            except Exception:
+                continue
+    except Exception as e:  # noqa: BLE001
+        logger.debug("pr_review twin-check: listing PRs for %s failed: %s", twin_repo, e)
+        return None
+    return False
+
+
+def _resolve_cross_repo_twins(gh, findings):
+    """Verify each cross-repo twin advisory against the OTHER repo.
+
+    If a matching PR there already updates the twin file → DROP the advisory (the
+    pair IS in lockstep, no reminder needed). If NOT → escalate to a WARNING naming
+    the file to update. If the twin repo can't be checked → leave the advisory as-is.
+    Findings without a `twin` key pass through untouched; the key is stripped so the
+    render/record layers never see it."""
+    out = []
+    for f in (findings or []):
+        twin = (f or {}).get("twin")
+        if not twin:
+            out.append(f)
+            continue
+        f = dict(f)
+        f.pop("twin", None)
+        verdict = _twin_open_pr_touches(gh, twin.get("repo", ""), twin.get("path", ""))
+        if verdict is True:
+            # Twin is being updated in a matching PR — no warning needed.
+            continue
+        if verdict is False:
+            f["level"] = "warning"
+            f["title"] = "twin NOT updated — " + f.get("title", "")
+            f["detail"] = ("No open PR in `%s` touches `%s`. Update the twin in lockstep "
+                           "(dual-copy INVARIANT), or open the matching PR.\n\n"
+                           % (twin.get("repo", "?"), twin.get("path", "?"))) + f.get("detail", "")
+        # verdict is None → unreachable: keep the original advisory unchanged.
+        out.append(f)
+    return out
+
+
+def _review_one(gh, repo, pr, config):
     if getattr(pr, "draft", False):
         return  # skip WIP drafts
     # Skip BugFixer's OWN AI-fix PRs — they were already vetted by the fix panel
@@ -259,6 +320,7 @@ def _review_one(repo, pr, config):
     files = list(pr.get_files())
     changed = [f.filename for f in files]
     findings = check_parity(repo.full_name, changed)
+    findings = _resolve_cross_repo_twins(gh, findings)
     existing = _find_marker_comment(pr)
     already_current = bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
     if already_current:
@@ -319,7 +381,7 @@ def scan_open_prs(gh, config):
                 repo = gh.get_repo(repo_name)
                 for pr in repo.get_pulls(state="open"):
                     try:
-                        _review_one(repo, pr, config)
+                        _review_one(gh, repo, pr, config)
                         seen_open.add("%s#%s" % (repo.full_name, pr.number))
                     except Exception as e:  # noqa: BLE001
                         logger.warning("pr_review: PR #%s in %s failed: %s",
