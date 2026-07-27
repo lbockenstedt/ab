@@ -1222,10 +1222,6 @@
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Poll Interval (Seconds)</label>
-                                <input type="number" name="POLL_INTERVAL_SECONDS" value="{{ settings.POLL_INTERVAL_SECONDS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                            </div>
-                            <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub WebUI URL (approvals + status fallback)</label>
                                 <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="http://your-hub:8000">
                             </div>
@@ -1528,12 +1524,20 @@
                                 </div>
                             </div>
 
+                            <!-- Off-hours poll interval -->
+                            <div class="space-y-2">
+                                <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Off-Hours Poll Interval</p>
+                                <label class="text-xs text-slate-500">Seconds between scans outside work hours</label>
+                                <input type="number" name="POLL_INTERVAL_SECONDS" min="60" value="{{ settings.get('POLL_INTERVAL_SECONDS', 3600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <p class="text-[10px] text-slate-400">Default 3600s (1 hour).</p>
+                            </div>
+
                             <!-- Work-hours poll interval -->
                             <div class="space-y-2">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Work-Hours Poll Interval</p>
                                 <label class="text-xs text-slate-500">Seconds between scans during work hours</label>
-                                <input type="number" name="SCHEDULER_WORK_POLL_INTERVAL" min="60" value="{{ settings.get('SCHEDULER_WORK_POLL_INTERVAL', 600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
-                                <p class="text-[10px] text-slate-400">Default 600s (10 min). After hours uses the main Poll Interval setting.</p>
+                                <input type="number" name="SCHEDULER_WORK_POLL_INTERVAL" min="60" value="{{ settings.get('SCHEDULER_WORK_POLL_INTERVAL', 3600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <p class="text-[10px] text-slate-400">Default 3600s (1 hour). Used only during the configured work hours; otherwise the Off-Hours interval above applies.</p>
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">

@@ -1304,12 +1304,12 @@ def poller_worker():
             # process even while busy or paused.
             sched = _schedule_check(cfg)
             if sched.get("is_work_hours") and cfg.get("SCHEDULER_WORK_POLL_INTERVAL"):
-                interval = int(cfg.get("SCHEDULER_WORK_POLL_INTERVAL") or 600)
+                interval = int(cfg.get("SCHEDULER_WORK_POLL_INTERVAL") or 3600)
             else:
-                interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 300))
+                interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 3600))
         else:
             logger.debug("Poller worker is paused. Skipping scan cycle.")
-            interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 300))
+            interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 3600))
         time.sleep(interval)
 
 
