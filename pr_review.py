@@ -11,8 +11,13 @@ INVARIANTS (see memory pr-gate-bugfixer-prereview):
     as a comment; only a human approves/denies.
   * The status check is informational only (always `success`, count in the
     description). It must stay a NON-required check so it can never block a merge.
-  * This is the cheap, deterministic Tier-1 (zero LLM). The skeptical-review
-    panel + skill-completeness + QA layers get added on top later.
+  * Tier-1 is the cheap, deterministic parity check (zero LLM, always on). On a
+    head change it also runs the LLM change-summary and — when
+    ``pr_review_llm_enabled`` is set — the SAME cross-provider skeptical
+    reviewer panel the bug/feature fix pipeline uses (``fix_engine.review_fix``,
+    ≥0.80 confidence gate), unified so a human PR and a bot fix are judged by one
+    mechanism. Its verdict is rendered ADVISORY-only; it never approves/denies.
+    (skill-completeness + QA layers still get added on top later.)
 
 Cross-repo caveat: several mirror pairs span SEPARATE GitHub repos (lm <-> cs).
 A PR lives in ONE repo, so those can only be flagged ADVISORY ("ensure the twin
@@ -211,78 +216,101 @@ def _extract_summary(body):
     return m.group(1).strip() if m else ""
 
 
-_SAFETY_CONF_RE = re.compile(r"CONFIDENCE:\s*([01](?:\.\d+)?)", re.I)
-_SAFETY_RISK_RE = re.compile(r"RISK:\s*(none|low|medium|high)", re.I)
-_SAFETY_ITEM_RE = re.compile(r"^\s*[-*]\s*\[?(error|warning|advisory)\]?[:\s]\s*(.+)$", re.I | re.M)
+_PANEL_HEADER = "### \U0001F9E0 Skeptical review (panel)"   # 🧠 — kept in sync w/ _render
+_PANEL_MAX_FILES = 40
+_PANEL_PATCH_CHARS = 4000
+_PANEL_DIFF_CHARS = 24000
 
 
-def _llm_safety_review(pr, files, config):
-    """LLM pre-merge SAFETY review of the PR diff — the 'skeptical reviewer' layer on
-    top of the deterministic parity checks. Opt-in via ``pr_review_llm_enabled`` and
-    gated per-head like the summary (cost is per-PR-update, not per-cycle).
-
-    Returns ``{"confidence": float|None, "risk": str|None, "findings": [...]}`` or
-    None if disabled/unavailable. ``confidence`` = the reviewer's confidence the PR
-    is SAFE to merge (1.0 = safe). Best-effort: never raises."""
-    if not config.get("pr_review_llm_enabled", False):
-        return None
-    try:
-        from llm_client import call_llm
-    except Exception:  # noqa: BLE001
-        return None
+def _pr_diff_text(files):
+    """Assemble a unified-diff-ish text from a PR's changed files for the review
+    panel — a `--- <filename>` header + patch per file, capped so a huge PR can't
+    blow the provider limit (review_fix caps again at 20k internally)."""
     parts = []
-    for f in list(files)[:_SUMMARY_MAX_FILES]:
+    for f in list(files)[:_PANEL_MAX_FILES]:
         fn = getattr(f, "filename", "?")
         patch = getattr(f, "patch", None) or ""
-        if len(patch) > _SUMMARY_PATCH_CHARS:
-            patch = patch[:_SUMMARY_PATCH_CHARS] + "\n… (patch truncated)"
+        if len(patch) > _PANEL_PATCH_CHARS:
+            patch = patch[:_PANEL_PATCH_CHARS] + "\n… (patch truncated)"
         parts.append("--- %s\n%s" % (fn, patch))
-    digest = ("\n\n".join(parts))[:_SUMMARY_PROMPT_CHARS]
-    if not digest.strip():
+    return "\n\n".join(parts)[:_PANEL_DIFF_CHARS]
+
+
+def _skeptical_review(pr, files, config):
+    """Run the cross-provider skeptical reviewer panel on the PR diff — the SAME
+    panel (``fix_engine.review_fix``, ≥0.80 confidence gate) the bug/feature fix
+    pipeline uses, now unified so a human PR and a bot fix are judged by one
+    mechanism. Returns its ``{confidence, verdict, critique}`` (or a ``status``
+    dict when reviewers are offline).
+
+    ADVISORY ONLY: the caller renders this into the review COMMENT; it is never
+    turned into a real PR approval/denial or a blocking status — a human remains
+    the sole gate (pr-gate INVARIANT). Gated behind ``pr_review_llm_enabled``
+    (default False). Best-effort: None when disabled, no diff, or on any error."""
+    if not config.get("pr_review_llm_enabled", False):
         return None
-    system = (
-        "You are a STRICT pre-merge safety reviewer. Find defects in this PR diff that "
-        "would break at RUNTIME or on RENDER — not style nits. Prioritize, in order:\n"
-        "1) TEMPLATE RENDER CRASHES, especially Jinja dot-access of a dict method — "
-        "`x.items`, `x.keys`, `x.values` in `{{ }}` or `{% for %}`. Dot-notation returns "
-        "the bound METHOD, not the key, so `{% for a in x.items %}` throws "
-        "'builtin_function_or_method object is not iterable' and 500s the whole page; the "
-        "fix is bracket access `x['items']`. Flag EVERY such occurrence.\n"
-        "2) Template/JS SYNTAX errors: unbalanced Jinja `{% %}` blocks, duplicate "
-        "`const`/`let` in a <script> (kills the whole script block), leftover merge "
-        "conflict markers (<<<<<<< ======= >>>>>>>).\n"
-        "3) Obvious logic errors, undefined names, security issues.\n"
-        "Respond EXACTLY in this format, nothing else:\n"
-        "CONFIDENCE: <0.00-1.00 that this PR is SAFE to merge>\n"
-        "RISK: <none|low|medium|high>\n"
-        "FINDINGS:\n"
-        "- [error|warning|advisory] <file>: <one-line issue + fix>\n"
-        "(one bullet per issue; write exactly '- none' if you find nothing).")
-    prompt = "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest)
+    diff = _pr_diff_text(files)
+    if not diff.strip():
+        return None
     try:
-        out = call_llm(prompt, system_prompt=system, task_kind="pr_confidence")
+        from fix_engine import review_fix
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: LLM safety review skipped (%s)", e)
+        logger.info("pr_review: panel skipped (fix_engine import failed: %s)", e)
         return None
-    out = out if isinstance(out, str) else str(out or "")
-    if not out.strip():
+    issue_body = (
+        "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
+        "NOTE: This is a HUMAN-authored pull request under pre-review — not a bot "
+        "fix. Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
+        "correctness/regressions, weight these merge-safety defects heavily (they "
+        "have broken prod before):\n"
+        "1) TEMPLATE RENDER CRASHES — Jinja dot-access of a dict method (`x.items`, "
+        "`x.keys`, `x.values`) inside `{{ }}` or `{% for %}`: dot-notation returns the "
+        "bound METHOD, not the key, so it 500s the whole page; the fix is bracket "
+        "access `x['items']`.\n"
+        "2) Template/JS SYNTAX errors: unbalanced Jinja blocks, duplicate `const`/`let` "
+        "in a <script>, leftover merge-conflict markers.\n"
+        "3) Undefined names, obvious logic errors, security issues.\n"
+        "Reject (lower confidence) if any such defect is present."
+        % (pr.title or "", (pr.body or "").strip()[:4000]))
+    try:
+        # builder_n=0 → no builder to exclude, so EVERY configured provider reviews
+        # the human's diff (there is no bot author to leave out).
+        review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff)
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: panel skipped (review_fix error: %s)", e)
         return None
-    mconf = _SAFETY_CONF_RE.search(out)
-    mrisk = _SAFETY_RISK_RE.search(out)
-    findings = []
-    for m in _SAFETY_ITEM_RE.finditer(out):
-        text = (m.group(2) or "").strip()
-        if not text or text.lower() in ("none", "n/a"):
-            continue
-        findings.append({"level": m.group(1).lower(), "title": text[:120], "detail": text})
-    return {
-        "confidence": float(mconf.group(1)) if mconf else None,
-        "risk": mrisk.group(1).lower() if mrisk else None,
-        "findings": findings,
-    }
+    return review if isinstance(review, dict) else None
 
 
-def _render(findings, head_sha, summary="", safety=None):
+def _render_panel(review):
+    """Render the advisory skeptical-panel section (empty list when no review)."""
+    if not review:
+        return []
+    if review.get("status"):
+        return [_PANEL_HEADER, "",
+                "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
+                ""]
+    verdict = str(review.get("verdict") or "—")
+    crit = str(review.get("critique") or "").strip()
+    try:
+        conf_str = "%.0f%%" % (float(review.get("confidence")) * 100)
+    except (TypeError, ValueError):
+        conf_str = "n/a"
+    vicon = "\U0001F7E2" if verdict == "Approve" else "\U0001F534"  # 🟢 / 🔴
+    out = [
+        _PANEL_HEADER, "",
+        "_Cross-provider skeptical panel (same engine as the bot-fix reviewer) — "
+        "an **advisory** confidence signal. A human still approves/denies; this bot never does._",
+        "",
+        "%s **Advisory verdict: %s** · confidence **%s**" % (vicon, verdict, conf_str),
+        "",
+    ]
+    if crit:
+        out += [crit, ""]
+    return out
+
+
+def _render(findings, head_sha, summary="", review=None):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
@@ -306,19 +334,7 @@ def _render(findings, head_sha, summary="", safety=None):
         for f in sorted(findings, key=lambda x: _LEVEL_ORDER.get(x["level"], 9)):
             icon = _LEVEL_ICON.get(f["level"], "•")
             lines += ["%s **%s — %s**" % (icon, f["level"].upper(), f["title"]), "", f["detail"], ""]
-    if safety:
-        conf = safety.get("confidence")
-        conf_str = ("%d%%" % round(conf * 100)) if isinstance(conf, (int, float)) else "—"
-        risk = (safety.get("risk") or "—").upper()
-        sfind = safety.get("findings") or []
-        lines += ["### \U0001F9E0 Safety review (LLM)", "",
-                  "**Merge-safety confidence: %s** · risk: **%s**" % (conf_str, risk), ""]
-        if not sfind:
-            lines += ["✅ No runtime/render risks flagged.", ""]
-        else:
-            for f in sorted(sfind, key=lambda x: _LEVEL_ORDER.get(x["level"], 9)):
-                icon = _LEVEL_ICON.get(f["level"], "•")
-                lines += ["%s **%s** — %s" % (icon, f["level"].upper(), f["detail"]), ""]
+    lines += _render_panel(review)
     return "\n".join(lines)
 
 
@@ -407,7 +423,6 @@ def _review_one(gh, repo, pr, config):
     findings = _resolve_cross_repo_twins(gh, findings)
     existing = _find_marker_comment(pr)
     already_current = bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
-    safety = None
     if already_current:
         # Recover the previously-generated summary from the comment — no LLM call
         # on a cached re-scan / post-restart.
@@ -415,10 +430,12 @@ def _review_one(gh, repo, pr, config):
         action = "cached"
     else:
         # New/changed head: generate the plain-language change summary (LLM,
-        # best-effort) and (re)post the comment + status.
+        # best-effort) and run the skeptical reviewer panel (the unified
+        # bug/feature confidence engine, advisory-only) — then (re)post the
+        # comment + status. Both are per-head, not per-cycle, to bound LLM cost.
         summary = _summarize_changes(pr, files, config)
-        safety = _llm_safety_review(pr, files, config)
-        body = _render(findings, head_sha, summary, safety=safety)
+        review = _skeptical_review(pr, files, config)
+        body = _render(findings, head_sha, summary, review=review)
         if existing:
             existing.edit(body)
             action = "updated"
@@ -429,19 +446,14 @@ def _review_one(gh, repo, pr, config):
         # a merge (the human is the gate); the count rides the description.
         # Best-effort: needs statuses:write — if absent, the comment still posts.
         try:
-            _sf = (safety or {}).get("findings") or []
-            _conf = (safety or {}).get("confidence")
-            n = len(findings) + len(_sf)
-            _cp = (" · safety %d%%" % round(_conf * 100)) if isinstance(_conf, (int, float)) else ""
-            desc = ("no issues" if n == 0 else "%d finding(s) — see review comment" % n) + _cp
+            n = len(findings)
+            desc = "no parity issues" if n == 0 else "%d parity finding(s) — see review comment" % n
             repo.get_commit(head_sha).create_status(
                 state="success", context=STATUS_CONTEXT, description=desc[:140])
         except Exception as e:  # noqa: BLE001
             logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
-    # Always persist for the UI list (survives restarts). Combine parity + LLM
-    # safety findings so the count reflects both.
-    _rec_findings = list(findings) + list((safety or {}).get("findings") or [])
-    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, _rec_findings, head_sha, summary=summary)
+    # Always persist for the UI 'PRs Reviewed' filter (survives restarts).
+    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha, summary=summary)
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                     repo.full_name, pr.number, len(findings), action)

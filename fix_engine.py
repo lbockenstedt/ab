@@ -471,12 +471,20 @@ def prepare_environment(repo_path):
         logger.info("No known dependency file detected. Skipping installation.")
 
 
-def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None, builder_n=None):
+def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
+               builder_n=None, diff_override=None):
     """Run a cross-provider reviewer panel on a proposed fix.
 
     builder_n: which provider slot (1/2/3) generated the fix being reviewed.
     Reviewers are all OTHER configured providers — the builder is never asked
     to review its own work.  If builder_n is None, it's inferred from force_cloud.
+    Pass builder_n=0 when there is no builder to exclude (e.g. a human-authored
+    PR pre-review) so EVERY configured provider reviews.
+
+    diff_override: a pre-computed diff string to review INSTEAD of computing one
+    from ``repo_path``'s working tree. This lets a caller review a diff that is
+    not checked out — e.g. pr_review feeding a GitHub PR's diff into the same
+    panel. When given, ``repo_path`` may be None and ``proposed_fixes`` empty.
 
     If a reviewer provider is unavailable (offline, credit-exhausted, or errored):
       - If surviving reviewers reach confidence >= 0.80 with Approve: skip missing reviewer, proceed.
@@ -520,11 +528,16 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     # file would otherwise flood the review prompt with ~1MB of unchanged code and
     # blow the provider limit. Fall back to (capped) file bodies if no diff.
     fix_details = ""
-    try:
-        diff_text = git.Repo(repo_path).git.diff("HEAD")
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"review_fix: git diff unavailable ({e}); using file bodies")
-        diff_text = ""
+    if diff_override is not None:
+        # Caller supplied the diff (e.g. a PR diff not checked out locally) —
+        # review it directly, skip the working-tree git diff.
+        diff_text = str(diff_override or "")
+    else:
+        try:
+            diff_text = git.Repo(repo_path).git.diff("HEAD")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"review_fix: git diff unavailable ({e}); using file bodies")
+            diff_text = ""
     if diff_text.strip():
         if len(diff_text) > 20000:
             diff_text = diff_text[:20000] + "\n… [diff truncated for review] …"

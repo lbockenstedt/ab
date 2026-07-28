@@ -767,10 +767,10 @@
                                         Pre-review open PRs (comment parity/drift findings — never approves/denies)
                                     </label>
                                 </div>
-                                <div class="flex items-center gap-3 mt-2">
+                                <div class="flex items-center gap-3 mt-2 ml-6">
                                     <input type="checkbox" name="pr_review_llm_enabled" id="pr_review_llm_enabled" {{ 'checked' if settings.pr_review_llm_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
-                                    <label for="pr_review_llm_enabled" class="text-xs font-medium text-slate-700" title="Requires 'Pre-review open PRs'. Adds an LLM safety pass on each PR diff: a merge-safety confidence score + flags runtime/render defects — especially Jinja dict-method render crashes (x.items), template/JS syntax errors, and conflict markers. Costs one LLM call per PR head; findings ride the same comment. Still informational — a human is the sole approver.">
-                                        LLM safety review + confidence score (flags render crashes / bugs the parity check can't)
+                                    <label for="pr_review_llm_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review on). Runs the SAME cross-provider skeptical reviewer panel the AI-fix pipeline uses (≥0.80 confidence gate) on the PR diff and adds an advisory verdict + confidence + critique to the review comment. The prompt also weights merge-safety defects — Jinja dict-method render crashes (x.items), template/JS syntax errors, conflict markers. Advisory only — a human still approves/denies. Uses your configured LLM provider slots.">
+                                        └ LLM reviewer panel + confidence score (same engine as AI fixes; flags render crashes / bugs parity can't)
                                     </label>
                                 </div>
                                 <div class="flex items-center gap-3 mt-2">

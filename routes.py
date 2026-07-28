@@ -1331,8 +1331,7 @@ async def settings_page(request: Request):
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
-    # LLM safety-review layer on the pre-review (opt-in): scores merge-safety +
-    # flags runtime/render defects (e.g. Jinja `.items` render crashes).
+    # Skeptical reviewer panel on PR pre-review (advisory) — OFF (opt-in sub-option).
     config.setdefault("pr_review_llm_enabled", False)
     config.setdefault("batch_enabled", False)
     config.setdefault("prompt_caching_enabled", True)
@@ -1571,6 +1570,7 @@ async def save_settings(request: Request):
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     # PR pre-review toggle (default OFF): comment parity/drift findings on open PRs.
     config_data["pr_review_enabled"] = data.get("pr_review_enabled") == "on"
+    # Advisory skeptical-panel sub-option (unifies PR review with the AI-fix reviewer).
     config_data["pr_review_llm_enabled"] = data.get("pr_review_llm_enabled") == "on"
     config_data["batch_enabled"] = data.get("batch_enabled") == "on"
     config_data["prompt_caching_enabled"] = data.get("prompt_caching_enabled") == "on"
