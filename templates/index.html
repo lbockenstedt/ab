@@ -2411,12 +2411,13 @@
                     if (btn) btn.outerHTML =
                         '<span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>'
                         + `<button onclick="mergePr('${repo}', ${number}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
+                    showToast('Approved ' + repo + ' #' + number, 'success');
                 } else {
-                    alert('Approve failed: ' + (d.message || resp.status));
+                    showToast('Approve failed: ' + (d.message || resp.status), 'error');
                     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
                 }
             } catch (e) {
-                alert('Approve failed: ' + e);
+                showToast('Approve failed: ' + e, 'error');
                 if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
         }
@@ -2443,21 +2444,22 @@
                 const d = await resp.json();
                 if (resp.ok && d.status === 'success') {
                     _setPrBadge(btn, 'MERGED', 'bg-purple-100 text-purple-700 border-purple-300', 'fa-code-merge');
+                    showToast('Merged ' + repo + ' #' + number, 'success');
                 } else if (d.closed) {
                     // PR is already closed on GitHub (e.g. superseded) — not an error to retry.
                     _setPrBadge(btn, 'CLOSED', 'bg-slate-200 text-slate-600 border-slate-300', 'fa-circle-xmark');
+                    showToast(repo + ' #' + number + ' is already closed on GitHub', 'warn');
                 } else {
-                    alert('Merge failed: ' + (d.message || resp.status));
+                    showToast('Merge failed: ' + (d.message || resp.status), 'error');
                     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
                 }
             } catch (e) {
-                alert('Merge failed: ' + e);
+                showToast('Merge failed: ' + e, 'error');
                 if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
         }
 
         async function denyPr(repo, number, btn) {
-            if (!confirm(`Deny ${repo} #${number}?\n\nCloses the PR on GitHub (no merge), labels it 'bugfixer-denied', and marks it DENIED here. Only you can deny.`)) return;
             const orig = btn ? btn.innerHTML : '';
             if (btn) { btn.disabled = true; btn.innerHTML = 'Denying…'; }
             try {
@@ -2468,12 +2470,13 @@
                 const d = await resp.json();
                 if (resp.ok && d.status === 'success') {
                     _setPrBadge(btn, 'DENIED', 'bg-red-100 text-red-700 border-red-300', 'fa-ban');
+                    showToast('Denied ' + repo + ' #' + number + ' (closed on GitHub)', 'warn');
                 } else {
-                    alert('Deny failed: ' + (d.message || resp.status));
+                    showToast('Deny failed: ' + (d.message || resp.status), 'error');
                     if (btn) { btn.disabled = false; btn.innerHTML = orig; }
                 }
             } catch (e) {
-                alert('Deny failed: ' + e);
+                showToast('Deny failed: ' + e, 'error');
                 if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
         }
