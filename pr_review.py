@@ -257,8 +257,13 @@ def _skeptical_review(pr, files, config):
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: panel skipped (fix_engine import failed: %s)", e)
         return None
+    # NOTE: the instruction block below contains literal Jinja examples (`{% for %}`,
+    # `{{ }}`) whose `%` signs would be mis-parsed as %-format conversions. So only the
+    # title/body header is %-formatted; the instructions are plain concatenation.
     issue_body = (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
+        % (pr.title or "", (pr.body or "").strip()[:4000])
+    ) + (
         "NOTE: This is a HUMAN-authored pull request under pre-review — not a bot "
         "fix. Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
         "correctness/regressions, weight these merge-safety defects heavily (they "
@@ -270,8 +275,7 @@ def _skeptical_review(pr, files, config):
         "2) Template/JS SYNTAX errors: unbalanced Jinja blocks, duplicate `const`/`let` "
         "in a <script>, leftover merge-conflict markers.\n"
         "3) Undefined names, obvious logic errors, security issues.\n"
-        "Reject (lower confidence) if any such defect is present."
-        % (pr.title or "", (pr.body or "").strip()[:4000]))
+        "Reject (lower confidence) if any such defect is present.")
     try:
         # builder_n=0 → no builder to exclude, so EVERY configured provider reviews
         # the human's diff (there is no bot author to leave out).
