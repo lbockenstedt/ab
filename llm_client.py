@@ -710,12 +710,26 @@ def _any_provider_available(config):
 
 
 _LLM_CB_LOCK = threading.Lock()
+# Trips are counted in TWO classes, because they mean opposite things and want
+# opposite responses:
+#   rate_limit — the provider answered 429/5xx. Backing off genuinely helps.
+#   transient  — a timeout / connection drop. NOTHING was rate-limited; on a local
+#                Ollama it means the model is too slow for LLM_TIMEOUT (too big a
+#                num_ctx, CPU inference, swapping). Backing off does not help; the
+#                fix is tuning or a smaller model.
+# Folding both into consecutive_429s/total_429s reported "429" against a local
+# server that never rate-limits anything, which sends you looking for a quota
+# problem that does not exist. The 429 keys are RETAINED (same meaning, now
+# rate-limit-only) so existing snapshot consumers keep working.
 _LLM_CB = {
     "cooldown_until": 0.0,
     "consecutive_429s": 0,
     "total_429s": 0,
+    "consecutive_transient": 0,
+    "total_transient": 0,
     "last_trip_reason": None,
     "last_trip_time": None,
+    "last_trip_kind": None,
 }
 
 def _llm_cb_wait():
@@ -733,32 +747,45 @@ def _llm_cb_wait():
         )
         time.sleep(sleep_chunk)
 
-def _llm_cb_trip(wait_time, reason="429"):
+def _llm_cb_trip(wait_time, reason="429", kind="rate_limit"):
+    """Trip the global breaker. ``kind`` is 'rate_limit' (provider said 429/5xx) or
+    'transient' (timeout / connection drop — nothing was rate-limited)."""
     wait_time = max(0.5, min(wait_time, 3600.0))
+    kind = "transient" if kind == "transient" else "rate_limit"
+    _c_key = "consecutive_transient" if kind == "transient" else "consecutive_429s"
+    _t_key = "total_transient" if kind == "transient" else "total_429s"
     with _LLM_CB_LOCK:
         new_cd = max(_LLM_CB["cooldown_until"], time.time() + wait_time)
         _LLM_CB["cooldown_until"] = new_cd
-        _LLM_CB["consecutive_429s"] += 1
-        _LLM_CB["total_429s"] += 1
+        _LLM_CB[_c_key] += 1
+        _LLM_CB[_t_key] += 1
         _LLM_CB["last_trip_reason"] = reason
+        _LLM_CB["last_trip_kind"] = kind
         _LLM_CB["last_trip_time"] = datetime.now().isoformat()
-        consecutive = _LLM_CB["consecutive_429s"]
-        total = _LLM_CB["total_429s"]
+        consecutive = _LLM_CB[_c_key]
+        total = _LLM_CB[_t_key]
+    _label = "consecutive_timeouts" if kind == "transient" else "consecutive_429s"
+    _tlabel = "total_timeouts" if kind == "transient" else "total_429s"
+    _hint = (" — the endpoint did not answer in time; nothing was rate-limited "
+             "(check LLM_TIMEOUT / ollama_num_ctx / model size)" if kind == "transient" else "")
     logger.warning(
-        f"LLM circuit breaker TRIPPED for {wait_time:.1f}s (reason={reason}). "
-        f"consecutive_429s={consecutive}, total_429s={total}. "
+        f"LLM circuit breaker TRIPPED for {wait_time:.1f}s (reason={reason}){_hint}. "
+        f"{_label}={consecutive}, {_tlabel}={total}. "
         f"All LLM threads will pause."
     )
 
 def _llm_cb_reset():
     with _LLM_CB_LOCK:
-        if _LLM_CB["consecutive_429s"] > 0:
+        if _LLM_CB["consecutive_429s"] > 0 or _LLM_CB["consecutive_transient"] > 0:
             logger.info(
                 f"LLM circuit breaker reset after successful request "
                 f"(was consecutive_429s={_LLM_CB['consecutive_429s']}, "
-                f"total_429s={_LLM_CB['total_429s']})."
+                f"total_429s={_LLM_CB['total_429s']}, "
+                f"consecutive_timeouts={_LLM_CB['consecutive_transient']}, "
+                f"total_timeouts={_LLM_CB['total_transient']})."
             )
             _LLM_CB["consecutive_429s"] = 0
+            _LLM_CB["consecutive_transient"] = 0
 
 def _llm_cb_snapshot():
     with _LLM_CB_LOCK:
@@ -768,7 +795,11 @@ def _llm_cb_snapshot():
             "cooldown_remaining_s": max(0, cd - time.time()),
             "consecutive_429s": _LLM_CB["consecutive_429s"],
             "total_429s": _LLM_CB["total_429s"],
+            # Timeouts/connection drops, counted apart from real rate limits.
+            "consecutive_timeouts": _LLM_CB["consecutive_transient"],
+            "total_timeouts": _LLM_CB["total_transient"],
             "last_trip_reason": _LLM_CB["last_trip_reason"],
+            "last_trip_kind": _LLM_CB["last_trip_kind"],
             "last_trip_time": _LLM_CB["last_trip_time"],
         }
 
@@ -904,7 +935,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
             last_exception = e
             if not is_last:
                 wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
-                _llm_cb_trip(wait_time, f"transient {type(e).__name__}")
+                _llm_cb_trip(wait_time, f"transient {type(e).__name__}", kind="transient")
                 logger.warning(f"LLM transient error at {endpoint} (attempt {attempt+1}): {e}. Retrying in {wait_time:.1f}s...")
                 time.sleep(wait_time)
                 continue
