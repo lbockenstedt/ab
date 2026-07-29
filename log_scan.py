@@ -788,9 +788,15 @@ def scan_bugs(gh_current, config, hub_logs):
         seen_set.add(rid)
         seen_ids.append(rid)
     _bi["markers_seen"] = len(seen_ids)
-    if not seen_ids:
-        _bi["note"] = "no [bug-report] markers in hub logs (nothing filed in LM, or logs rotated)"
-        return
+    # NO early return when there are no markers. The marker is a NOTIFICATION, not
+    # the source of truth: it is one logger.info line in the hub's 500-entry ring
+    # (lm core/src/main.py `self.logs = deque(maxlen=500)`), while this scan runs on
+    # the ~30-minute HubScan cycle. The chatty hub routinely emits 500 lines in that
+    # gap, so a report filed just after a scan has its marker rotated away before the
+    # next one and was orphaned FOREVER — the hub still listed it unfiled, but
+    # nothing ever looked. Discovery now also enumerates the hub's own report index
+    # (GET_BUG_REPORTS below), which is durable and was already being fetched purely
+    # for dedup. Markers stay as a fast path for same-cycle pickup.
 
     client = _get_hub_agent_client()
     if not client:
@@ -813,6 +819,8 @@ def scan_bugs(gh_current, config, hub_logs):
     # Ids of feature requests still awaiting admin approval — the hub annotates
     # each report gated_pending_approval; we must NOT file these until approved.
     gated_ids = set()
+    # Unfiled, ungated reports the hub itself lists — the durable discovery set.
+    listed_unfiled = []
     try:
         reports = client.request_sync("GET_BUG_REPORTS", {}, timeout=10)
         _rlist = (reports.get("reports") if isinstance(reports, dict) else []) or []
@@ -826,6 +834,12 @@ def scan_bugs(gh_current, config, hub_logs):
                 filed_on_hub.add(r.get("id"))
             if r.get("gated_pending_approval"):
                 gated_ids.add(r.get("id"))
+            elif r.get("id") and not r.get("filed"):
+                # Durable discovery: anything the hub still holds as unfiled and
+                # ungated is a candidate, marker or no marker. The per-report gates
+                # below (already-filed, gated, evicted body, per-type toggles) are
+                # unchanged and still decide whether it is actually filed.
+                listed_unfiled.append(r["id"])
         _fi["awaiting_approval"] = len(gated_ids)
         _fi["approved"] = sum(1 for r in _feat
                               if not r.get("gated_pending_approval") and not r.get("filed"))
@@ -834,6 +848,23 @@ def scan_bugs(gh_current, config, hub_logs):
         _fi["error"] = f"GET_BUG_REPORTS failed: {e}"
         logger.warning(f"scan_bugs: GET_BUG_REPORTS failed: {e}")
     scan_bugs._filed |= filed_on_hub
+
+    # Candidates = markers (fast path, newest-first) ∪ the hub's unfiled index
+    # (durable). Markers lead so same-cycle reports keep their current ordering.
+    _recovered = [rid for rid in listed_unfiled if rid not in seen_set]
+    candidate_ids = seen_ids + _recovered
+    _bi["listed_unfiled"] = len(listed_unfiled)
+    _bi["recovered_no_marker"] = len(_recovered)
+    if _recovered:
+        # Visible proof the rotation gap is being closed — these are reports that
+        # the marker-only scan would have dropped on the floor.
+        logger.info("scan_bugs: %d unfiled report(s) found via the hub index with no "
+                    "surviving log marker: %s", len(_recovered), ", ".join(_recovered[:10]))
+    if not candidate_ids:
+        _bi["note"] = ("no unfiled bug reports on the hub"
+                       if _bi.get("reports_total") is not None
+                       else "no [bug-report] markers and the hub report list was unavailable")
+        return
 
     monitored_repos = get_monitored_repos(config)
     repo_name = (config.get("bug_report_repo") or "").strip()
@@ -847,7 +878,7 @@ def scan_bugs(gh_current, config, hub_logs):
     _bi["repo"] = repo_name
     filed_this_cycle = 0
     feat_filed_this_cycle = 0
-    for rid in seen_ids:
+    for rid in candidate_ids:
         if rid in scan_bugs._filed:
             continue
         # A feature awaiting admin approval is off-limits until approved. The hub
