@@ -16,6 +16,12 @@ STARTUP_STAMP_FILE = os.path.join(CONFIG_DIR, "startup_stamp.json")
 OLLAMA_SETUP_REQUEST = os.path.join(CONFIG_DIR, "ollama_setup_request.json")
 OLLAMA_SETUP_STATUS = os.path.join(CONFIG_DIR, "ollama_setup_status.json")
 OLLAMA_SETUP_HELPER = "/usr/local/bin/bugfixer-ollama-setup"
+# Same delegation for the Claude Code CLI install: the main service is
+# cap-locked and cannot escalate, so it drops a request file and we run the
+# root helper. Installed AS the service user (per-user session auth).
+CLAUDE_INSTALL_REQUEST = os.path.join(CONFIG_DIR, "claude_install_request.json")
+CLAUDE_INSTALL_STATUS = os.path.join(CONFIG_DIR, "claude_install_status.json")
+CLAUDE_INSTALL_HELPER = "/usr/local/bin/bugfixer-claude-install"
 # Delegated restart. bugfixer.service is cap-locked (CAP_NET_BIND_SERVICE only) so
 # it can't restart itself (sudo setgid(0) EPERM); it writes this request file and
 # the watchdog (unrestricted) runs the restart. Same privileged-arm pattern as
@@ -228,6 +234,67 @@ def handle_ollama_setup_request():
         logger.error(f"ollama-setup: watchdog error: {e}")
 
 
+def _write_claude_status(state, stream, returncode=None):
+    try:
+        with open(CLAUDE_INSTALL_STATUS, "w") as f:
+            json.dump({"state": state, "stream": stream, "returncode": returncode,
+                       "at": time.time()}, f)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"claude-install: could not write status: {e}")
+
+
+def handle_claude_install_request():
+    """Install the Claude Code CLI on behalf of bugfixer.service.
+
+    Mirrors handle_ollama_setup_request: the main service writes a request file
+    (it is locked to CAP_NET_BIND_SERVICE and cannot escalate), we claim it and
+    run the root helper via sudo. The helper installs AS the service user, since
+    `claude` authenticates per-user — a root-owned install would resolve but
+    never authenticate for the account that actually runs it.
+    """
+    if not os.path.exists(CLAUDE_INSTALL_REQUEST):
+        return
+    try:
+        with open(CLAUDE_INSTALL_REQUEST, "r") as f:
+            req = json.load(f)
+        svc_user = str(req.get("svc_user") or "svc_bg")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"claude-install: bad request file: {e}")
+        try: os.remove(CLAUDE_INSTALL_REQUEST)
+        except Exception:  # noqa: BLE001
+            pass
+        _write_claude_status("failed", f"bad request: {e}", -1)
+        return
+    # Claim it so a second click can't double-run.
+    try: os.remove(CLAUDE_INSTALL_REQUEST)
+    except Exception:  # noqa: BLE001
+        pass
+    _write_claude_status("running", "")
+    logger.info(f"claude-install: running helper for user {svc_user}")
+    stream = []
+    try:
+        proc = subprocess.Popen(["sudo", "-n", CLAUDE_INSTALL_HELPER, svc_user],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1)
+        for line in proc.stdout:
+            stream.append(line.rstrip("\n"))
+            if len(stream) > 2000:
+                stream = stream[-2000:]
+            _write_claude_status("running", "\n".join(stream))
+        proc.wait(timeout=600)
+        state = "done" if proc.returncode == 0 else "failed"
+        _write_claude_status(state, "\n".join(stream), proc.returncode)
+        logger.info(f"claude-install: helper exited rc={proc.returncode} ({state})")
+    except subprocess.TimeoutExpired:
+        try: proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        _write_claude_status("failed", "\n".join(stream) + "\n[timed out after 600s]", -1)
+    except Exception as e:  # noqa: BLE001
+        _write_claude_status("failed", "\n".join(stream) + f"\n[watchdog error: {e}]", -1)
+        logger.error(f"claude-install: watchdog error: {e}")
+
+
 _WATCHDOG_SRC = os.path.abspath(__file__)
 
 
@@ -263,6 +330,9 @@ def main():
     while True:
         if _src_mtime is not None:
             _maybe_reload_on_code_change(_src_mtime)
+        try: handle_claude_install_request()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"claude-install dispatch failed: {e}")
         try: handle_ollama_setup_request()
         except Exception as e:  # noqa: BLE001
             logger.error(f"ollama-setup handler error: {e}")

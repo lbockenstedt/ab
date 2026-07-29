@@ -900,6 +900,9 @@
                                             <button type="button" onclick="checkClaudeStatus()" class="flex-1 py-1 text-xs btn-sec rounded font-bold">Check Status</button>
                                             <button type="button" onclick="startClaudeAuth()" class="flex-1 py-1 text-xs btn-primary rounded font-bold">Start Login Flow</button>
                                         </div>
+                                        <div class="flex gap-2">
+                                            <button type="button" onclick="installClaudeCli()" class="flex-1 py-1 text-xs btn-sec rounded font-bold" title="Install the Claude Code CLI for the service user (delegated to the privileged watchdog). Start Login Flow does this automatically if the binary is missing.">Install CLI</button>
+                                        </div>
                                         <div id="claude-cli-status" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 space-y-1">
                                             <div id="claude-cli-status-line" class="font-medium"></div>
                                             <pre id="claude-cli-output" class="whitespace-pre-wrap break-all text-[10px] text-slate-500 max-h-48 overflow-y-auto hidden"></pre>
@@ -3156,6 +3159,48 @@
             }
         }
 
+        // Watch a delegated Claude Code install (the watchdog streams progress to a
+        // status file; the cap-locked main service cannot install anything itself).
+        let _claudeInstallTimer = null;
+        function _pollClaudeInstall() {
+            clearInterval(_claudeInstallTimer);
+            _claudeInstallTimer = setInterval(async () => {
+                try {
+                    const d = await fetch('/api/claude-cli/install-status').then(r => r.json());
+                    const tail = String(d.stream || '').split('\n').slice(-6).join('\n');
+                    if (d.state === 'running') {
+                        _showClaudeCliResult('⏳ Installing Claude Code…', 'text-violet-600', tail, [], false);
+                    } else if (d.state === 'done') {
+                        clearInterval(_claudeInstallTimer);
+                        _showClaudeCliResult('✓ Claude Code installed — click Start Login Flow to authenticate.',
+                                             'text-green-700', tail, [], false);
+                    } else if (d.state === 'failed') {
+                        clearInterval(_claudeInstallTimer);
+                        _showClaudeCliResult('✗ Claude Code install failed', 'text-red-600', tail, [], false);
+                    }
+                } catch (e) { /* transient — keep polling */ }
+            }, 2000);
+        }
+
+        async function installClaudeCli() {
+            _showClaudeCliResult('Requesting install…', 'text-violet-600', '', [], false);
+            try {
+                const d = await fetch('/api/claude-cli/install', {method: 'POST'}).then(r => r.json());
+                if (d.status === 'already_installed') {
+                    _showClaudeCliResult('✓ Already installed.', 'text-green-700', d.detail || '', [], false);
+                    return;
+                }
+                if (d.status !== 'queued') {
+                    _showClaudeCliResult('✗ Could not start install', 'text-red-600', d.detail || '', [], false);
+                    return;
+                }
+                _showClaudeCliResult('⏳ Installing Claude Code…', 'text-violet-600', d.detail || '', [], false);
+                _pollClaudeInstall();
+            } catch (e) {
+                _showClaudeCliResult('✗ Install request failed', 'text-red-600', String(e && e.message || e), [], false);
+            }
+        }
+
         async function startClaudeAuth() {
             _showClaudeCliResult('Starting login flow — waiting up to 25s for auth URL…', 'text-violet-600', '', [], false);
             clearInterval(_claudeAuthPollTimer);
@@ -3163,6 +3208,12 @@
                 const data = await fetch('/api/claude-cli/auth/start', {method: 'POST'}).then(r => r.json());
                 if (data.status === 'authenticated') {
                     _showClaudeCliResult('✓ Already authenticated — Claude CLI is ready.', 'text-green-700', '', [], false);
+                    return;
+                }
+                if (data.status === 'installing') {
+                    // Pre-flight queued an install with the privileged watchdog.
+                    _showClaudeCliResult('⏳ Installing Claude Code…', 'text-violet-600', data.detail || '', [], false);
+                    _pollClaudeInstall();
                     return;
                 }
                 if (data.status === 'not_found') {

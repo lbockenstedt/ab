@@ -365,18 +365,57 @@ fi
 say "done"
 HELPER
 
-chown root:root /usr/local/bin/bugfixer-self-restart /usr/local/bin/bugfixer-sandbox /usr/local/bin/bugfixer-ollama-setup
-chmod 0755 /usr/local/bin/bugfixer-self-restart /usr/local/bin/bugfixer-sandbox /usr/local/bin/bugfixer-ollama-setup
+cat > /usr/local/bin/bugfixer-claude-install <<'HELPER'
+#!/bin/bash
+# Root helper: install the Claude Code CLI FOR THE BUGFIXER SERVICE USER.
+#
+# Invoked as `sudo -n /usr/local/bin/bugfixer-claude-install <svc_user>` by
+# bugfixer-watchdog on behalf of the cap-locked main service (which cannot
+# escalate). Also run directly at install time.
+#
+# Installed as the SERVICE USER, not root, on purpose: `claude` authenticates
+# with a per-user session, so a root-owned install leaves the service able to
+# find the binary but not to use it ("needs_auth" forever). Installing under the
+# service user's HOME means "Start Login Flow" authenticates the account that
+# will actually run it.
+set -uo pipefail
+SVC="${1:-svc_bg}"
+HOME_DIR="$(getent passwd "$SVC" | cut -d: -f6)"
+if [ -z "$HOME_DIR" ]; then echo "no home dir for user '$SVC'"; exit 2; fi
+mkdir -p "$HOME_DIR/.local/bin"
+chown -R "$SVC" "$HOME_DIR/.local" 2>/dev/null || true
+if [ -x "$HOME_DIR/.local/bin/claude" ]; then
+    echo "claude already installed at $HOME_DIR/.local/bin/claude"
+    sudo -u "$SVC" "$HOME_DIR/.local/bin/claude" --version 2>&1 || true
+    exit 0
+fi
+echo ">> Installing Claude Code for $SVC (HOME=$HOME_DIR)..."
+# Official installer, run AS the service user so it lands in their HOME.
+if ! sudo -u "$SVC" HOME="$HOME_DIR" bash -c 'curl -fsSL https://claude.ai/install.sh | bash' 2>&1; then
+    echo "installer failed (no network, or the install URL changed)"; exit 1
+fi
+if [ -x "$HOME_DIR/.local/bin/claude" ]; then
+    # Symlink so the binary resolves even on systemd's minimal PATH.
+    ln -sf "$HOME_DIR/.local/bin/claude" /usr/local/bin/claude
+    echo "installed: $HOME_DIR/.local/bin/claude (symlinked into /usr/local/bin)"
+    exit 0
+fi
+echo "installer completed but no binary at $HOME_DIR/.local/bin/claude"; exit 1
+HELPER
 
-# Sudoers: svc_bg may invoke ONLY these three exact paths, passwordless.
+chown root:root /usr/local/bin/bugfixer-self-restart /usr/local/bin/bugfixer-sandbox /usr/local/bin/bugfixer-ollama-setup /usr/local/bin/bugfixer-claude-install
+chmod 0755 /usr/local/bin/bugfixer-self-restart /usr/local/bin/bugfixer-sandbox /usr/local/bin/bugfixer-ollama-setup /usr/local/bin/bugfixer-claude-install
+
+# Sudoers: svc_bg may invoke ONLY these four exact paths, passwordless.
 # No direct systemctl, no docker, no apt — least privilege.
 mkdir -p /etc/sudoers.d   # belt-and-suspenders: exists once `sudo` is installed
 cat > /etc/sudoers.d/bugfixer <<SUDOERS
-# Grants the bugfixer service user (svc_bg) passwordless access to its three
+# Grants the bugfixer service user (svc_bg) passwordless access to its four
 # narrow root helpers ONLY. Mirrors lm/install_all.sh's /etc/sudoers.d/lm.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/bugfixer-self-restart
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/bugfixer-sandbox *
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/bugfixer-ollama-setup *
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/bugfixer-claude-install *
 SUDOERS
 chmod 440 /etc/sudoers.d/bugfixer
 # Validate the sudoers syntax before leaving it in place (visudo -c would
@@ -384,6 +423,13 @@ chmod 440 /etc/sudoers.d/bugfixer
 if command -v visudo >/dev/null 2>&1; then
     visudo -cf /etc/sudoers.d/bugfixer >/dev/null 2>&1 || echo "   ⚠️  sudoers syntax check failed — review /etc/sudoers.d/bugfixer"
 fi
+
+# 7c. Claude Code CLI for the service user (best-effort; the claude_cli provider
+# slot needs the binary AND a session owned by the user that runs it). Never
+# fatal — bugfixer works fine on the API-key providers without it.
+echo ">> Installing Claude Code CLI for $SVC_USER (optional provider)..."
+/usr/local/bin/bugfixer-claude-install "$SVC_USER" || \
+    echo "   ⚠️  Claude Code CLI not installed — the claude_cli slot stays unavailable until it is."
 
 chmod +x "$INSTALL_DIR/update.sh" 2>/dev/null || true
 

@@ -1,5 +1,5 @@
 """FastAPI HTTP routes exposed via an APIRouter, included by main.app (extracted from main.py)."""
-import asyncio, git, json, os, re, threading, time, traceback, uuid
+import asyncio, git, json, os, re, shutil, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
@@ -669,6 +669,51 @@ async def diagnostics():
     }
 
 
+CLAUDE_INSTALL_REQUEST = os.path.join(CONFIG_DIR, "claude_install_request.json")
+CLAUDE_INSTALL_STATUS = os.path.join(CONFIG_DIR, "claude_install_status.json")
+
+
+def _request_claude_install():
+    """Ask bugfixer-watchdog to install the Claude Code CLI for the service user.
+
+    This service is cap-locked and cannot escalate, so installation is delegated
+    the same way ollama-setup is: drop a request file, the watchdog runs the root
+    helper. The helper installs AS the service user because `claude` uses per-user
+    session auth — a root-owned install would resolve on PATH and still never
+    authenticate for the account that runs it.
+    """
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CLAUDE_INSTALL_REQUEST, "w") as f:
+            json.dump({"svc_user": os.environ.get("USER") or os.environ.get("LOGNAME") or "svc_bg",
+                       "at": time.time()}, f)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"claude-install: could not write request: {e}")
+        return False
+
+
+@router.post("/api/claude-cli/install")
+def claude_cli_install():
+    """Trigger the Claude Code CLI install (delegated to the privileged watchdog)."""
+    if _claude_bin_rt() != "claude":
+        return {"status": "already_installed", "detail": f"claude is already at {_claude_bin_rt()}"}
+    if not _request_claude_install():
+        return {"status": "error", "detail": "could not queue the install request"}
+    return {"status": "queued",
+            "detail": "Installing Claude Code for the service user — this takes up to a minute."}
+
+
+@router.get("/api/claude-cli/install-status")
+def claude_cli_install_status():
+    """Progress of a delegated Claude Code install (written by the watchdog)."""
+    try:
+        with open(CLAUDE_INSTALL_STATUS, "r") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001 — absent until the first install runs
+        return {"state": "idle", "stream": "", "returncode": None}
+
+
 def _claude_bin_rt():
     """Resolved absolute path to the ``claude`` CLI for the subprocess calls below.
 
@@ -732,6 +777,20 @@ def claude_cli_auth_start():
     stays alive (stdin=PIPE) so the approval code can be piped back later.
     """
     import subprocess, select as _select, tempfile, stat
+
+    # Pre-flight: there is nothing to log into if the CLI isn't installed. Queue
+    # the install (delegated to the privileged watchdog) and tell the operator to
+    # retry, instead of failing with a bare FileNotFoundError they then have to
+    # decode. Installing here — rather than only at install time — is what makes
+    # "Start Login Flow" work on a box where Claude Code was never installed.
+    if _claude_bin_rt() == "claude" and not shutil.which("claude"):
+        queued = _request_claude_install()
+        return {"status": "installing" if queued else "error",
+                "detail": ("Claude Code isn't installed. Installing it for the service user now "
+                           "(up to a minute) — then click Start Login Flow again."
+                           if queued else
+                           "Claude Code isn't installed and the install request could not be "
+                           "queued. Check that bugfixer-watchdog is running.")}
 
     # Kill any existing auth process first.
     old = state.get("claude_auth_proc")
