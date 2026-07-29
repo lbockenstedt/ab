@@ -669,6 +669,26 @@ async def diagnostics():
     }
 
 
+def _claude_bin_rt():
+    """Resolved absolute path to the ``claude`` CLI for the subprocess calls below.
+
+    Falls back to the bare name when unresolved so subprocess still raises
+    FileNotFoundError and the existing not_found handlers report it — the UI
+    message then names the override rather than just saying "not in PATH".
+    """
+    try:
+        from main import claude_bin  # re-exported from llm_client
+        return claude_bin() or "claude"
+    except Exception:  # noqa: BLE001 — resolution must never break the endpoint
+        return "claude"
+
+
+_CLAUDE_NOT_FOUND = ("'claude' binary not found. The service runs as its own user with "
+                     "systemd's minimal PATH, so a binary that works in your shell can still "
+                     "be invisible here. Set 'claude_binary' in Settings to the absolute path "
+                     "(e.g. /root/.local/bin/claude), or symlink it into /usr/local/bin.")
+
+
 @router.get("/api/claude-cli/status")
 def claude_cli_status():
     """Check whether the local claude CLI is installed and authenticated.
@@ -677,7 +697,7 @@ def claude_cli_status():
     import subprocess
     try:
         probe = subprocess.run(
-            ["claude", "--output-format", "json"],
+            [_claude_bin_rt(), "--output-format", "json"],
             input="ping", capture_output=True, text=True, timeout=15,
         )
         output = probe.stdout.strip()
@@ -691,12 +711,12 @@ def claude_cli_status():
                 return {"status": "error", "detail": result_text[:300]}
             return {"status": "authenticated", "detail": "Claude CLI authenticated and ready."}
         except (json.JSONDecodeError, KeyError):
-            r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5)
+            r = subprocess.run([_claude_bin_rt(), "--version"], capture_output=True, text=True, timeout=5)
             if r.returncode == 0:
                 return {"status": "ok", "version": r.stdout.strip() or r.stderr.strip()}
             return {"status": "error", "detail": (r.stderr or r.stdout).strip()[:300]}
     except FileNotFoundError:
-        return {"status": "not_found", "detail": "'claude' binary not found in PATH"}
+        return {"status": "not_found", "detail": _CLAUDE_NOT_FOUND}
     except subprocess.TimeoutExpired:
         return {"status": "timeout", "detail": "CLI probe timed out — may be authenticating"}
     except Exception as e:
@@ -748,7 +768,7 @@ def claude_cli_auth_start():
         env.pop("WAYLAND_DISPLAY", None)
 
         proc = subprocess.Popen(
-            ["claude", "auth", "login"],
+            [_claude_bin_rt(), "auth", "login"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -827,7 +847,7 @@ def claude_cli_auth_start():
         }
 
     except FileNotFoundError:
-        return {"status": "not_found", "detail": "'claude' binary not found in PATH"}
+        return {"status": "not_found", "detail": _CLAUDE_NOT_FOUND}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -845,7 +865,7 @@ def claude_cli_auth_poll():
         # No process — check live whether CLI is authenticated.
         try:
             r = subprocess.run(
-                ["claude", "--output-format", "json"],
+                [_claude_bin_rt(), "--output-format", "json"],
                 input="ping", capture_output=True, text=True, timeout=10,
             )
             try:

@@ -21,6 +21,7 @@ import json
 import os
 import random
 import re
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -163,6 +164,62 @@ def _ollama_base_url(provider, base_url):
         return base_url
     return (OLLAMA_CLOUD_BASE_URL if _is_ollama_cloud(provider)
             else "http://localhost:11434")
+
+
+#: Where Claude Code lands when it is NOT on the service PATH. bugfixer.service
+#: sets User= but no Environment=PATH=, so it inherits systemd's minimal default
+#: (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin). Claude Code's
+#: native installer puts the binary under ~/.local/bin and npm/nvm installs land
+#: in a user prefix — all invisible to the service even though `which claude`
+#: succeeds in an interactive root shell. Probing these turns a confusing "not
+#: found in PATH" into a working slot without hand-editing the unit file.
+_CLAUDE_FALLBACK_PATHS = (
+    "/usr/local/bin/claude",
+    "/usr/bin/claude",
+    "/opt/claude/bin/claude",
+    "~/.local/bin/claude",
+    "~/.npm-global/bin/claude",
+    "~/.local/share/claude/bin/claude",
+    "/root/.local/bin/claude",
+)
+
+
+def claude_bin(config=None):
+    """Resolve the ``claude`` executable, or None when it genuinely isn't installed.
+
+    Order: an explicit ``claude_binary`` config override (Settings) → PATH →
+    the well-known install locations above. Returning an ABSOLUTE path means the
+    subprocess no longer depends on the service's PATH matching an operator's
+    interactive shell, which is the usual reason this slot reports "not found"
+    on a box where Claude Code is plainly installed.
+    """
+    cfg = config if config is not None else load_config()
+    override = str((cfg or {}).get("claude_binary") or "").strip()
+    if override:
+        p = os.path.expanduser(override)
+        # Honour the override even if not executable so the UI can report WHY.
+        return p if os.path.exists(p) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    for cand in _CLAUDE_FALLBACK_PATHS:
+        p = os.path.expanduser(cand)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def claude_bin_or_raise(config=None):
+    """``claude_bin`` but raising the operator-facing error when unresolved."""
+    p = claude_bin(config)
+    if not p:
+        raise Exception(
+            "'claude' binary not found. Looked on PATH (%s) and in: %s. Note the service "
+            "runs as its own user with systemd's minimal PATH, so a binary that works in "
+            "your shell may still be invisible here — set 'claude_binary' in Settings to "
+            "the absolute path, or symlink it into /usr/local/bin."
+            % (os.environ.get("PATH", "") or "unset", ", ".join(_CLAUDE_FALLBACK_PATHS)))
+    return p
 
 
 def _is_copilot(provider):
@@ -1251,7 +1308,7 @@ def _request_claude_cli(model, messages, task_id, config):
         prompt = system_parts[0] + "\n\n" + prompt
 
     # Pass the prompt via stdin to avoid OS ARG_MAX limits on large conversations.
-    cmd = ["claude", "--output-format", "json"]
+    cmd = [claude_bin_or_raise(config), "--output-format", "json"]
     if model:
         cmd += ["--model", model]
 
@@ -1302,7 +1359,9 @@ def _request_claude_cli(model, messages, task_id, config):
     except subprocess.TimeoutExpired:
         raise Exception(f"claude CLI timed out after {timeout_val}s")
     except FileNotFoundError:
-        raise Exception("'claude' binary not found in PATH — install Claude Code on this server.")
+        # Reached only if the resolved path vanished between resolve and exec.
+        raise Exception("'claude' binary disappeared after resolution — reinstall Claude Code "
+                        "on this server, or set 'claude_binary' in Settings.")
 
 
 def _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
