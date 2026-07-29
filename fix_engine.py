@@ -560,7 +560,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         "NOTE: Small, targeted changes that correct obvious typos or naming mismatches are considered high-signal; "
         "if they correctly address the issue without regressions, they SHOULD be approved.\n\n"
         "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}\n"
-        "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 90% confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 90%). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back."
+        "\"confidence\" MUST be a fraction between 0.0 and 1.0 — e.g. 0.95 for 95% confidence. Do NOT return a 0-100 percentage.\n"
+        "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 0.90 confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 0.90). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back."
     )
 
     votes = []
@@ -577,7 +578,9 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             )
             match = re.search(r'\{.*\}', res, re.DOTALL)
             if match:
-                votes.append({**json.loads(match.group()), "reviewer": r["name"]})
+                _v = json.loads(match.group())
+                _v["confidence"] = _norm_confidence(_v.get("confidence"))
+                votes.append({**_v, "reviewer": r["name"]})
         except Exception as e:
             if is_llm_cooldown_error(e):
                 logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
@@ -650,6 +653,7 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
         "exist unless the diff itself is clearly wrong. REJECT only if the change is "
         "clearly incorrect, incomplete, or harmful. "
         "Return ONLY JSON: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"...\"}\n"
+        "\"confidence\" MUST be a fraction between 0.0 and 1.0 — e.g. 0.95 for 95% confidence. Do NOT return a 0-100 percentage.\n"
         "IMPORTANT: Your confidence score drives the final decision — if you give >= 0.90 confidence, "
         "the fix is accepted regardless of verdict, so do NOT give a 'Reject' verdict with high confidence "
         "(that's contradictory and wastes time). Approve and give >= 0.90 if the fix looks correct."
@@ -666,7 +670,9 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
                            force_provider=slot, model_override=mdl, task_id=task_id)
             m = re.search(r"\{.*\}", res, re.DOTALL)
             if m:
-                v = {**json.loads(m.group()), "model": mdl}
+                v = json.loads(m.group())
+                v["confidence"] = _norm_confidence(v.get("confidence"))
+                v["model"] = mdl
                 votes.append(v)
                 logger.info(f"  ↳ {mdl}: {v.get('verdict')} @ {float(v.get('confidence', 0)):.0%} "
                             f"({time.monotonic() - _t0:.0f}s)")
@@ -689,6 +695,28 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
         verdict = "Reject"
     logger.info(f"CPU cross-check: {len(approvals)}/{len(votes)} approve, avg confidence {avg:.0%}")
     return {"confidence": avg, "verdict": verdict, "votes": votes, "n": len(votes)}
+
+
+def _norm_confidence(value):
+    """Coerce a reviewer's ``confidence`` to the 0.0–1.0 scale every consumer assumes.
+
+    Models answer this prompt on BOTH scales — 0.95 and 95 alike — because "95%
+    confidence" reads naturally either way. Left raw, a 0–100 answer sails past
+    every gate keyed to a fraction (SKIP_CONFIDENCE_THRESHOLD 0.80, the
+    ``avg >= 0.90`` implicit approval in both panels, the ``>= 0.999`` auto-commit
+    gate) and renders as "confidence 9500%" in the PR comment. Anything above 1 is
+    therefore read as a percentage; the result is clamped so a nonsense value can
+    never exceed certainty. Non-numeric/missing → 0.0 (no confidence, not a crash).
+    """
+    try:
+        c = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if c != c or c in (float("inf"), float("-inf")):   # NaN / inf
+        return 0.0
+    if c > 1.0:
+        c /= 100.0
+    return max(0.0, min(1.0, c))
 
 
 def _model_param_b(name):

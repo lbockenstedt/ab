@@ -296,8 +296,19 @@ def _render_panel(review):
                 ""]
     verdict = str(review.get("verdict") or "—")
     crit = str(review.get("critique") or "").strip()
+    # Normalize defensively: review_fix already clamps to 0.0-1.0, but this value
+    # crosses a module boundary and rendering "confidence 9500%" on a public PR
+    # comment is the most visible way the scale bug can surface. Imported lazily —
+    # fix_engine imports late (see the review_fix call below), so a module-level
+    # import here would cycle.
     try:
-        conf_str = "%.0f%%" % (float(review.get("confidence")) * 100)
+        from fix_engine import _norm_confidence
+    except Exception:  # noqa: BLE001 — never let the comment render fail on this
+        def _norm_confidence(v):
+            c = float(v)
+            return max(0.0, min(1.0, c / 100.0 if c > 1.0 else c))
+    try:
+        conf_str = "%.0f%%" % (_norm_confidence(review.get("confidence")) * 100)
     except (TypeError, ValueError):
         conf_str = "n/a"
     vicon = "\U0001F7E2" if verdict == "Approve" else "\U0001F534"  # 🟢 / 🔴
