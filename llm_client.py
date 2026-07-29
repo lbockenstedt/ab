@@ -1475,7 +1475,15 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         try:
             # Honour per-provider RPM cap (0 = unlimited).
             _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
+            # Which model is running RIGHT NOW. The bare model name alone is
+            # ambiguous once several slots can serve the same family (and once the
+            # router substitutes a model the operator never configured), so record
+            # the slot + provider with it — the header renders "P1 · ollama · <model>"
+            # so "which AI is actually answering" needs no log-reading.
             main.state["active_llm"] = model
+            main.state["active_llm_slot"] = n
+            main.state["active_llm_provider"] = provider
+            main.state["active_llm_at"] = time.time()
             # Batch routing: for a CLOUD, non-streaming, non-tool call, route through
             # the batch API when batch_enabled (async, ~50% off; slower — acceptable
             # for this side-project). Falls back to the sync call if batch returns
@@ -1545,6 +1553,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 try:
                     _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
                     main.state["active_llm"] = _cfg_model
+                    main.state["active_llm_slot"] = n
+                    main.state["active_llm_provider"] = provider
+                    main.state["active_llm_at"] = time.time()
                     result = _call_provider(provider, _cfg_model, key, url, messages, tools,
                                             effective_stream, task_id, config)
                     return result, None
@@ -1730,6 +1741,91 @@ def parse_log_verdict(text):
     cleaned = _LOG_VERDICT_RE.sub("", s, count=1).strip() if m else s.strip()
     return verdict, cleaned
 
+
+
+def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
+    """Prove each provider slot can actually COMPLETE a chat call, end to end.
+
+    The existing connectivity_worker probes a cheap reachability endpoint
+    (``/api/tags``, ``/models``). That is not the same question: an Ollama Cloud
+    slot answers ``/api/tags`` happily while ``/api/chat`` returns 403, so the
+    dashboard reports the provider online and every real request fails. Likewise
+    a slot whose ROUTED model does not exist on the account 404s on every
+    small-tier task while its configured model is fine. Both were only visible by
+    reading logs.
+
+    So this sends a real (tiny) prompt and reports what came back. Notes:
+
+    * ``_call_provider`` is called DIRECTLY — no failover, no provider circuit
+      breaker — so each slot is judged on its own behaviour rather than masked by
+      the next one in the chain.
+    * A short per-call timeout and zero retries are forced. The deployed
+      ``LLM_TIMEOUT`` can be 1800s; a wedged local model must not hang the page.
+    * ``task_kind`` reports what model_router would SUBSTITUTE for that task, and
+      tests that model. Passing the task kind is how you catch a routed-model 404
+      that the configured model would not show.
+
+    Returns ``[{slot, provider, model, configured, ok, latency_ms, error, reply}]``,
+    one entry per slot, ordered by slot. Never raises: a slot that blows up is
+    reported as ``ok: False`` with the error text.
+    """
+    config = config or load_config()
+    slots = [int(slot)] if slot else [1, 2, 3, 4]
+    # Small but not empty: some providers reject a zero-token turn, and a fixed
+    # expected answer makes a garbled/echoing model obvious at a glance.
+    messages = [{"role": "user", "content": "Reply with the single word: OK"}]
+    # Force a bounded call: deployed LLM_TIMEOUT is often 1800s and retries would
+    # multiply it. A diagnostic must fail fast and say so.
+    probe_cfg = dict(config)
+    probe_cfg["LLM_TIMEOUT"] = max(5, int(timeout_s or 30))
+    probe_cfg["LLM_MAX_RETRIES"] = 0
+    probe_cfg["LLM_5XX_MAX_RETRIES"] = 0
+    probe_cfg["batch_enabled"] = False          # never route a probe through the batch API
+
+    out = []
+    for n in slots:
+        entry = {"slot": n, "provider": None, "model": None, "routed_from": None,
+                 "configured": False, "ok": False, "latency_ms": None,
+                 "error": None, "reply": None}
+        try:
+            provider, key, model, url = _get_provider_config(n, config)
+            entry["provider"] = provider
+            entry["model"] = model
+            entry["configured"] = _provider_configured(provider, key, model)
+            if not entry["configured"]:
+                entry["error"] = ("no model configured" if not model
+                                  else "no API key (this provider requires one)")
+                out.append(entry)
+                continue
+            # Report + probe the model the ROUTER would actually use for this task.
+            if task_kind:
+                try:
+                    from model_router import pick_model as _rp
+                    picked = _rp(task_kind, provider, config, default=model)
+                    if picked and picked != model:
+                        entry["routed_from"], entry["model"] = model, picked
+                        model = picked
+                except Exception as e:  # noqa: BLE001 — routing is advisory here
+                    logger.debug("llm_diag: router lookup failed for slot %s: %s", n, e)
+            t0 = time.time()
+            try:
+                res = _call_provider(provider, model, key, url, messages,
+                                     None, False, None, probe_cfg)
+                entry["latency_ms"] = int((time.time() - t0) * 1000)
+                text = res.get("text") if isinstance(res, dict) else res
+                entry["reply"] = (str(text or "").strip()[:200]) or None
+                # An empty body is a failure: the call "succeeded" but the model
+                # returned nothing usable, which downstream code treats as an error.
+                entry["ok"] = bool(entry["reply"])
+                if not entry["ok"]:
+                    entry["error"] = "provider returned an empty response"
+            except Exception as e:  # noqa: BLE001 — the error IS the result here
+                entry["latency_ms"] = int((time.time() - t0) * 1000)
+                entry["error"] = str(e)[:400]
+        except Exception as e:  # noqa: BLE001 — one bad slot never sinks the report
+            entry["error"] = f"diag failed for slot {n}: {str(e)[:300]}"
+        out.append(entry)
+    return out
 
 
 # Re-export every name this module defines (public + underscore) so

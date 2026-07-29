@@ -247,6 +247,16 @@
                 <span class="text-[10px] uppercase tracking-widest text-white/50">Status</span>
                 <span id="hdr-status" class="text-xs font-semibold {% if 'Error' in state.status %}text-red-300{% else %}text-emerald-300{% endif %}">{{ state.status }}</span>
             </div>
+            <!-- Which AI is answering right now: slot + provider + model. The bare
+                 model name is ambiguous once several slots serve the same family and
+                 the router can substitute a model that was never configured, so all
+                 three are shown ("P1 · ollama · qwen2.5-coder:14b"). Filled by
+                 refreshActiveLlm() from /api/status. -->
+            <div class="hidden md:flex items-center gap-1.5" id="hdr-ai-wrap"
+                 title="The provider slot and model serving LLM calls right now (dimmed = last used, currently idle)">
+                <span class="text-[10px] uppercase tracking-widest text-white/50">AI</span>
+                <span id="hdr-active-llm" class="text-xs font-semibold text-white/40">—</span>
+            </div>
             <!-- Providers (moved from System Health) -->
             <div class="hidden sm:flex items-center gap-1.5" title="LLM providers — online (green) / offline (red)">
                 <span class="text-[10px] uppercase tracking-widest text-white/50">Providers</span>
@@ -1652,6 +1662,35 @@
                     <i class="fas fa-copy"></i> <span id="diag-copy-label">Copy raw data</span>
                 </button>
             </div>
+            <!-- LLM Reachability — a REAL call per slot, not a reachability probe.
+                 The connectivity worker pings a cheap endpoint (/api/tags, /models),
+                 which answers a different question: an Ollama Cloud slot serves
+                 /api/tags while /api/chat 403s, so the provider shows online and
+                 every real request fails. This asks each slot to actually answer. -->
+            <div class="hpe-card p-5">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-lg font-bold text-[#263040]">LLM Reachability</h3>
+                    <i class="fas fa-plug text-[#01A982]"></i>
+                </div>
+                <p class="text-xs text-slate-500 mb-3">Sends a real one-word prompt to every configured slot and reports what came back — latency, reply, or the provider's own error text. Costs a few tokens per cloud slot. Pick a task kind to also test the model the <b>router substitutes</b> for that task (how a routed-model 404 shows up).</p>
+                <div class="flex flex-wrap items-end gap-2 mb-3">
+                    <label class="text-xs text-slate-500">Task kind
+                        <select id="llmdiag-task" class="mt-1 block p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                            <option value="">— configured model (no routing) —</option>
+                            <option value="log_analysis">log_analysis (small)</option>
+                            <option value="triage">triage (small)</option>
+                            <option value="pr_summary">pr_summary (small)</option>
+                            <option value="review">review (medium)</option>
+                            <option value="fix">fix (large)</option>
+                        </select></label>
+                    <label class="text-xs text-slate-500">Timeout (s)
+                        <input type="number" id="llmdiag-timeout" value="30" min="5" max="120" class="mt-1 block w-24 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]"></label>
+                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded font-bold text-xs">Test all slots</button>
+                    <span id="llmdiag-summary" class="text-xs text-slate-500"></span>
+                </div>
+                <div id="llmdiag-body" class="text-sm text-slate-500 italic">Not run yet — nothing is called until you click Test.</div>
+            </div>
+
             <!-- Code Version / Stale Code card -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
@@ -3007,6 +3046,88 @@
             }).catch(() => { /* leave last-known color on transient fetch failure */ });
         }
         if (document.getElementById('hub-status-dot')) { refreshHubStatusDot(); setInterval(refreshHubStatusDot, 10000); }
+
+        // Header "AI" indicator: which slot/provider/model is serving calls right
+        // now. Bright while a call is in flight (state stamped within ~90s), dimmed
+        // when idle so it reads as "last used" rather than "currently running".
+        function refreshActiveLlm() {
+            const el = document.getElementById('hdr-active-llm');
+            if (!el) return;
+            fetch('/api/status').then(r => r.json()).then(d => {
+                const llm = (d && d.llm) || {};
+                const model = llm.active_llm;
+                if (!model || model === 'Unknown') { el.textContent = '—'; el.className = 'text-xs font-semibold text-white/40'; return; }
+                const slot = llm.active_llm_slot ? ('P' + llm.active_llm_slot) : null;
+                const prov = llm.active_llm_provider || null;
+                el.textContent = [slot, prov, model].filter(Boolean).join(' · ');
+                const at = Number(llm.active_llm_at || 0);
+                const live = at && ((Date.now() / 1000) - at) < 90;
+                el.className = 'text-xs font-semibold ' + (live ? 'text-emerald-300' : 'text-white/40');
+                el.title = (live ? 'Serving LLM calls now' : 'Last provider used (idle)') +
+                           (at ? ' — ' + new Date(at * 1000).toLocaleTimeString() : '');
+            }).catch(() => { /* leave last-known text on a transient fetch failure */ });
+        }
+        if (document.getElementById('hdr-active-llm')) { refreshActiveLlm(); setInterval(refreshActiveLlm, 5000); }
+
+        // Local HTML escaper — this template has no global one (the only other
+        // escaper is function-scoped at the Diagnostics raw-copy helper). Provider
+        // error text is interpolated below and can contain markup/URLs.
+        const _bfEsc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                                          .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+        // LLM Reachability card — POST /api/llm/diag makes one real call per slot.
+        async function runLlmDiag() {
+            const body = document.getElementById('llmdiag-body');
+            const btn = document.getElementById('llmdiag-btn');
+            const summary = document.getElementById('llmdiag-summary');
+            if (!body) return;
+            const taskKind = (document.getElementById('llmdiag-task') || {}).value || null;
+            const timeoutS = Number((document.getElementById('llmdiag-timeout') || {}).value) || 30;
+            if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+            body.innerHTML = '<span class="text-slate-400 italic">Calling each configured slot…</span>';
+            if (summary) summary.textContent = '';
+            try {
+                const r = await fetch('/api/llm/diag', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({task_kind: taskKind, timeout_s: timeoutS}),
+                });
+                const d = await r.json();
+                if (d.error) { body.innerHTML = '<span class="text-red-600">' + _bfEsc(d.error) + '</span>'; return; }
+                const rows = (d.results || []).map(x => {
+                    const pill = !x.configured
+                        ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">NOT CONFIGURED</span>'
+                        : (x.ok ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">OK</span>'
+                                : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">FAILED</span>');
+                    // A substituted model is called out explicitly — that swap is
+                    // invisible in the vault UI and is exactly what 404s.
+                    const routed = x.routed_from
+                        ? '<div class="text-[11px] text-amber-700">router substituted <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> → <span class="font-mono">' + _bfEsc(x.model || '') + '</span></div>'
+                        : '';
+                    const detail = x.ok
+                        ? '<span class="text-slate-500">replied “' + _bfEsc(String(x.reply || '').slice(0, 60)) + '”</span>'
+                        : '<span class="text-red-600">' + _bfEsc(x.error || 'no response') + '</span>';
+                    return '<tr class="border-b border-slate-100 align-top">' +
+                        '<td class="px-3 py-2 font-bold text-slate-700">P' + x.slot + '</td>' +
+                        '<td class="px-3 py-2 text-slate-600">' + _bfEsc(x.provider || '—') +
+                            '<div class="font-mono text-[11px] text-slate-500">' + _bfEsc(x.model || '—') + '</div>' + routed + '</td>' +
+                        '<td class="px-3 py-2">' + pill + '</td>' +
+                        '<td class="px-3 py-2 text-center text-slate-600">' + (x.latency_ms != null ? x.latency_ms + ' ms' : '—') + '</td>' +
+                        '<td class="px-3 py-2 text-xs break-words">' + detail + '</td></tr>';
+                }).join('');
+                body.innerHTML = '<div class="overflow-x-auto border border-slate-200 rounded-lg"><table class="w-full text-sm">' +
+                    '<thead class="bg-slate-50 text-slate-500 uppercase text-xs"><tr>' +
+                    '<th class="px-3 py-2 text-left">Slot</th><th class="px-3 py-2 text-left">Provider / model</th>' +
+                    '<th class="px-3 py-2 text-left">Result</th><th class="px-3 py-2 text-center">Latency</th>' +
+                    '<th class="px-3 py-2 text-left">Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+                const s = d.summary || {};
+                if (summary) summary.textContent = s.ok + '/' + s.configured + ' configured slot(s) answered' +
+                    (s.elapsed_ms != null ? ' · ' + (s.elapsed_ms / 1000).toFixed(1) + 's' : '');
+            } catch (e) {
+                body.innerHTML = '<span class="text-red-600">Diag request failed: ' + _bfEsc(String(e && e.message || e)) + '</span>';
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = 'Test all slots'; }
+            }
+        }
 
         let _claudeAuthPollTimer = null;
 

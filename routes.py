@@ -118,6 +118,56 @@ async def health_check():
     return {"status": "ok"}
 
 
+@router.post("/api/llm/diag")
+async def llm_diag_run(request: Request):
+    """Ask every provider slot to actually answer a prompt, and report what came back.
+
+    Distinct from the connectivity worker, which probes a cheap reachability
+    endpoint. That answers "is the host up", not "can this slot complete a chat" —
+    and the two disagree in practice (an Ollama Cloud slot serving /api/tags while
+    /api/chat 403s reports online and fails every real request). This runs the real
+    thing.
+
+    Body (all optional): ``slot`` (1-4, default all), ``task_kind`` (report + probe
+    the model the router substitutes for that task — how a routed-model 404 is
+    caught), ``timeout_s`` (default 30; the deployed LLM_TIMEOUT can be 1800 and a
+    diagnostic must fail fast).
+
+    Makes REAL calls, so it costs real tokens on cloud slots — the prompt is a few
+    tokens by design. Runs off-thread: call_llm's stack is synchronous and would
+    otherwise block the event loop for the whole probe.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — body is optional
+        body = {}
+    body = body or {}
+    slot = body.get("slot") or None
+    task_kind = body.get("task_kind") or None
+    try:
+        timeout_s = max(5, min(120, int(body.get("timeout_s") or 30)))
+    except (TypeError, ValueError):
+        timeout_s = 30
+    try:
+        from main import llm_diag  # re-exported from llm_client
+        started = time.time()
+        results = await asyncio.to_thread(
+            llm_diag, slot=slot, task_kind=task_kind, timeout_s=timeout_s)
+        ok = sum(1 for r in results if r.get("ok"))
+        configured = sum(1 for r in results if r.get("configured"))
+        return {
+            "results": results,
+            "summary": {"ok": ok, "configured": configured, "total": len(results),
+                        "elapsed_ms": int((time.time() - started) * 1000)},
+            "task_kind": task_kind,
+            "timeout_s": timeout_s,
+        }
+    except Exception as e:  # noqa: BLE001 — a diag must report, never 500
+        logger.error(f"llm_diag failed: {e}")
+        return JSONResponse(status_code=200,
+                            content={"results": [], "summary": None, "error": str(e)[:400]})
+
+
 @router.post("/api/toggle-pause")
 async def toggle_pause():
     state["paused"] = not state["paused"]
@@ -493,6 +543,11 @@ def _system_stats():
             "slots": slots,
             "circuit_breaker": state.get("llm_circuit_breaker"),
             "active_llm": state.get("active_llm"),
+            # Slot + provider alongside the model so the header can say
+            # "P1 · ollama · qwen2.5-coder:14b" instead of a bare model name.
+            "active_llm_slot": state.get("active_llm_slot"),
+            "active_llm_provider": state.get("active_llm_provider"),
+            "active_llm_at": state.get("active_llm_at"),
             "daily_fixes_count": state.get("daily_fixes_count"),
             "local_ensemble": bool(cfg.get("local_ensemble")),
             "crosscheck_target": cfg.get("CPU_CROSSCHECK_TARGET"),
