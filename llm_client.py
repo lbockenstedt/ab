@@ -1397,13 +1397,23 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     # task-appropriate tier (small/medium/large) so we don't burn a large model on
     # a summary. Local slots (ollama/lmstudio/claude_cli) keep their configured
     # model. An explicit model_override still wins (routing skipped).
+    # Slots whose model the router REPLACED: {slot_n: configured_model}. The router's
+    # tier defaults are best-effort model IDs that "depend on your API access"
+    # (model_router docstring) — an ID the account cannot reach 404s on EVERY
+    # small-tier task, silently disabling an otherwise working cloud slot for most
+    # of BugFixer's work. Keeping the configured model lets a 404 fall back to it
+    # instead of abandoning the provider.
+    _routed_from = {}
     if task_kind and not model_override:
         try:
             from model_router import pick_model as _router_pick
-            all_providers = [
-                (n, prov, _router_pick(task_kind, prov, config, default=mdl), k, u)
-                for (n, prov, mdl, k, u) in all_providers
-            ]
+            _routed = []
+            for (n, prov, mdl, k, u) in all_providers:
+                picked = _router_pick(task_kind, prov, config, default=mdl)
+                if picked and mdl and picked != mdl:
+                    _routed_from[n] = mdl
+                _routed.append((n, prov, picked, k, u))
+            all_providers = _routed
         except Exception as _re:
             logger.debug(f"model_router skipped for task_kind={task_kind!r}: {_re}")
 
@@ -1487,6 +1497,29 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 except Exception as retry_e:
                     err_str = str(retry_e)
                     e = retry_e
+            # A ROUTED model that 404s = the router's tier default is not reachable
+            # on this account (e.g. google/small defaulting to a gemini id the key
+            # cannot use). The slot itself is fine, so retry once on its CONFIGURED
+            # model rather than burning the provider and failing over. Logged at
+            # warning with the fix, since the durable answer is a router_models
+            # override in config.
+            if ("404" in err_str and n in _routed_from
+                    and _routed_from[n] and _routed_from[n] != model):
+                _cfg_model = _routed_from[n]
+                logger.warning(
+                    "Provider %s (%s) routed model %r is unavailable (404) — retrying on the "
+                    "configured model %r. Set config[\"router_models\"][%r][<tier>] to a model "
+                    "this account can reach to avoid the wasted call.",
+                    n, provider, model, _cfg_model, (provider or "").lower().strip())
+                try:
+                    _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
+                    main.state["active_llm"] = _cfg_model
+                    result = _call_provider(provider, _cfg_model, key, url, messages, tools,
+                                            effective_stream, task_id, config)
+                    return result, None
+                except Exception as retry_e:  # noqa: BLE001 — fall through to normal handling
+                    err_str = str(retry_e)
+                    e = retry_e
             # If the provider exhausted all retries with 429s, apply a short
             # rate-limit cooldown so it stops poisoning the global circuit breaker.
             if "429" in err_str:
@@ -1508,6 +1541,27 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     msg = (f"Ollama model '{model}' not pulled on {_ollama_base_url(provider, url)} "
                            f"— pull it (Settings → Local LLM Setup, or `ollama pull {model}`).")
                     return None, msg
+            # 401/403 from an Ollama endpoint: the server answered and REFUSED. The
+            # bare status line ("403 Client Error: Forbidden for url: .../api/chat")
+            # says nothing actionable, while the body carries Ollama's actual reason.
+            # Matters most for Ollama Cloud, where /api/tags can answer happily (so
+            # the connectivity probe reports the slot online) while /api/chat is
+            # forbidden — key not entitled, model not on the plan, and so on.
+            if _is_ollama(provider) and ("403" in err_str or "401" in err_str):
+                body = ""
+                _r = getattr(e, "response", None)
+                if _r is not None:
+                    try:
+                        body = " ".join((_r.text or "").split())[:300]
+                    except Exception:  # noqa: BLE001
+                        body = ""
+                _code = "403" if "403" in err_str else "401"
+                msg = (f"Ollama endpoint {_ollama_base_url(provider, url)} refused the request "
+                       f"({_code}) for model '{model}'"
+                       + (f": {body}" if body else " (no reason in the response body)")
+                       + ". The API key is being sent but is not accepted for this model/endpoint "
+                         "— check the key and that the account can reach this model.")
+                return None, msg
             return None, e
 
     try:
