@@ -87,6 +87,23 @@ _HUB_DOWN_ERRNOS = {errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH,
                     errno.ENETDOWN, errno.ETIMEDOUT, errno.EHOSTDOWN}
 
 
+# Hub commands whose handlers do minutes of work (an LLM turn, a cross-repo
+# GitHub dedup search). These MUST NOT be awaited inline in the receive loop:
+# while the consumer is suspended nothing drains the socket, the library's
+# receive queue (default max_queue=32) fills, it stops reading the transport,
+# and a hub that restarts has its close frame left unread — the socket parks in
+# CLOSE-WAIT and the agent never notices it was disconnected. Running the work
+# off-thread (run_in_executor/to_thread) frees the EVENT LOOP but not the
+# CONSUMER, so it does not help; the dispatch itself has to be concurrent.
+# Everything not listed here stays inline, because ordering matters for the
+# onboarding/approval frames (APPROVED, SPOKE_UPDATE_SESSION_KEY, ...).
+_SLOW_CMDS = frozenset({"ANALYZE_LOGS", "ESCALATE_LOG_ISSUE", "HELP_ASK", "help_ask"})
+# Backstop against a flood of slow commands spawning unbounded tasks. Real
+# traffic runs 1-2 concurrently; at the cap we drop and let the hub's durable
+# mailbox redeliver, rather than stall the reader (the bug we're fixing).
+_MAX_INFLIGHT_HANDLERS = 8
+
+
 def _hub_unreachable(exc: BaseException) -> bool:
     """True when the connection failed because the hub never answered.
 
@@ -268,6 +285,10 @@ class HubAgentClient:
         self.signer = MessageSigner(self.secret) if self.secret else None
         # Pending request Futures keyed by the request header.message_id.
         self._pending: Dict[str, asyncio.Future] = {}
+        # Long-running handlers dispatched off the receive loop (see _SLOW_CMDS).
+        # Held so they aren't garbage-collected mid-flight, and so the in-flight
+        # count can be capped.
+        self._inflight: set = set()
         self._ws = None
         self._approved = bool(self.secret)  # optimistic; corrected by Hub messages
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -978,7 +999,23 @@ class HubAgentClient:
                             "payload": {"type": "HEARTBEAT", "data": {}},
                         }
                         await websocket.send(encode_frame(self.signer, msg))
-                    except Exception:
+                    except Exception as e:  # noqa: BLE001
+                        # A heartbeat that can't be sent means the socket is gone.
+                        # Returning SILENTLY (the old behaviour) was the "bugfixer
+                        # is offline after every LM upgrade" hang: the task simply
+                        # stopped, so the hub's last_seen froze and aged forever
+                        # while bugfixer kept scanning repos, believing it was
+                        # connected — and nothing logged a thing. Say so, and close
+                        # the socket so the receive loop raises, _connect_and_serve
+                        # returns, and the reconnect loop actually runs.
+                        logger.warning(
+                            "Heartbeat send failed (%s) — hub connection is dead; "
+                            "closing it to force a reconnect.", e)
+                        self._last_conn_error = "heartbeat send failed: %s" % e
+                        try:
+                            await websocket.close()
+                        except Exception:  # noqa: BLE001 — already tearing down
+                            pass
                         return
                     await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
@@ -1000,7 +1037,12 @@ class HubAgentClient:
                     if self.secret and self.signer and sig and not self.signer.verify_bytes(body.encode(), sig):
                         logger.warning("Invalid signature — dropping")
                         continue
-                    await self._handle_message(msg)
+                    # Slow handlers run as their own task so this loop keeps
+                    # draining the socket; everything else stays inline (ordering).
+                    if (msg.get("payload") or {}).get("type") in _SLOW_CMDS:
+                        self._dispatch_slow(msg)
+                    else:
+                        await self._handle_message(msg)
             finally:
                 hb_task.cancel()
                 lr_task.cancel()
@@ -1025,6 +1067,34 @@ class HubAgentClient:
                 return f.read().strip() or "unknown"
         except Exception:
             return "unknown"
+
+    def _dispatch_slow(self, msg: dict) -> None:
+        """Run a long-running handler off the receive loop.
+
+        Fire-and-forget swallows exceptions and lets the task be garbage-collected
+        mid-flight, so the task is held in ``_inflight`` and its result inspected in
+        a done-callback. Over the cap we DROP: stalling the reader is the failure
+        mode being fixed, and the hub's durable mailbox redelivers.
+        """
+        cmd = (msg.get("payload") or {}).get("type")
+        if len(self._inflight) >= _MAX_INFLIGHT_HANDLERS:
+            logger.error(
+                "Dropping %s — %d handlers already in flight (cap %d). The hub will "
+                "redeliver from its mailbox; the receive loop stays responsive.",
+                cmd, len(self._inflight), _MAX_INFLIGHT_HANDLERS)
+            return
+        task = asyncio.create_task(self._handle_message(msg))
+        self._inflight.add(task)
+
+        def _done(t: "asyncio.Task") -> None:
+            self._inflight.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.warning("Handler for %s failed: %s", cmd, exc)
+
+        task.add_done_callback(_done)
 
     async def _handle_message(self, msg: dict) -> None:
         if not self._verify(msg):
