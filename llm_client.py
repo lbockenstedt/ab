@@ -645,17 +645,36 @@ def _is_credit_exhaustion(status_code, body_text, provider):
 
 # Per-provider 1-hour credit-exhaustion cooldown (independent of the global rate-limit CB)
 _PROVIDER_CREDIT_CB_LOCK = threading.Lock()
+# Keyed by SLOT, but each entry records the PROVIDER that earned it. A slot is a
+# position an operator can reassign at any time, so a cooldown that outlives the
+# provider which caused it is simply wrong: swapping slot 1 from google (429ed,
+# 60-min credit cooldown) to a local ollama left the local model — which has no
+# credits and cannot be rate-limited — sitting out the remainder of Google's
+# penalty, logged as "Provider 1 (ollama) skipped ... (tripped by: Provider
+# 'google' credit exhausted)". _provider_credit_cb_remaining voids the cooldown
+# when the occupant changes.
 _PROVIDER_CREDIT_CB = {
-    1: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None},
-    2: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None},
-    3: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None},
-    4: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None},
+    n: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None,
+        "provider": None}
+    for n in (1, 2, 3, 4)
 }
 _CREDIT_COOLDOWN_SECONDS = 3600   # 1 hour for credit exhaustion
 _RATELIMIT_COOLDOWN_SECONDS = 600  # 10 minutes for sustained 429 storms
 
 
-def _provider_credit_cb_trip(n, reason, duration_s=None, cause="credit"):
+def _provider_credit_cb_trip(n, reason, duration_s=None, cause="credit", provider=None):
+    # A self-hosted server has no billing to exhaust and no quota to exceed, so a
+    # CREDIT cooldown on one is always a mistake — either mis-attributed from
+    # another provider or a misread error body. Parking a local model for an hour
+    # over "credit" removes the one provider that is always available, exactly
+    # when the paid ones are rate-limited and it is needed most. Rate-limit trips
+    # are still honoured: a local server under load can legitimately push back.
+    if cause == "credit" and provider and _provider_is_nokey(provider):
+        logger.warning(
+            "Ignoring CREDIT cooldown for provider %s (%s): it is a local/no-key "
+            "provider with no billing to exhaust. Reason was: %s",
+            n, provider, str(reason)[:160])
+        return
     secs = duration_s if duration_s is not None else _CREDIT_COOLDOWN_SECONDS
     cd = time.time() + secs
     with _PROVIDER_CREDIT_CB_LOCK:
@@ -663,6 +682,8 @@ def _provider_credit_cb_trip(n, reason, duration_s=None, cause="credit"):
         _PROVIDER_CREDIT_CB[n]["tripped_at"] = datetime.now().isoformat()
         _PROVIDER_CREDIT_CB[n]["reason"] = reason
         _PROVIDER_CREDIT_CB[n]["cause"] = cause
+        # Bind the penalty to its owner so reassigning the slot clears it.
+        _PROVIDER_CREDIT_CB[n]["provider"] = provider
     until_str = datetime.fromtimestamp(cd).strftime("%H:%M:%S")
     if cause == "rate_limit":
         logger.warning(
@@ -676,10 +697,27 @@ def _provider_credit_cb_trip(n, reason, duration_s=None, cause="credit"):
         )
 
 
-def _provider_credit_cb_remaining(n):
-    """Seconds remaining on credit/rate-limit cooldown for provider n (0 if clear)."""
+def _provider_credit_cb_remaining(n, provider=None):
+    """Seconds remaining on credit/rate-limit cooldown for provider n (0 if clear).
+
+    ``provider`` is the slot's CURRENT occupant. If it differs from the one that
+    tripped the cooldown, the slot was reassigned and the penalty no longer
+    applies — clear it and report 0 rather than punishing the new provider for
+    the old one's quota.
+    """
     with _PROVIDER_CREDIT_CB_LOCK:
-        return max(0.0, _PROVIDER_CREDIT_CB[n]["cooldown_until"] - time.time())
+        entry = _PROVIDER_CREDIT_CB[n]
+        owner = entry.get("provider")
+        if (provider and owner and provider != owner
+                and entry["cooldown_until"] > time.time()):
+            logger.info(
+                "Provider %s reassigned %s -> %s; clearing the %s cooldown it "
+                "inherited (cooldowns follow the provider, not the slot).",
+                n, owner, provider, entry.get("cause") or "credit")
+            entry.update({"cooldown_until": 0.0, "tripped_at": None,
+                          "reason": None, "cause": None, "provider": None})
+            return 0.0
+        return max(0.0, entry["cooldown_until"] - time.time())
 
 
 def _provider_credit_cb_snapshot():
@@ -755,7 +793,7 @@ def _any_provider_available(config):
         configured = _provider_configured(provider, key, model)
         if not configured:
             continue  # not configured
-        rem = _provider_credit_cb_remaining(n)
+        rem = _provider_credit_cb_remaining(n, provider)
         if rem <= 0:
             any_free = True
             soonest = 0.0
@@ -1519,7 +1557,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 return None, "not_configured"
         elif not (key and model):
             return None, "not_configured"
-        rem = _provider_credit_cb_remaining(n)
+        rem = _provider_credit_cb_remaining(n, provider)
         if rem > 0:
             with _PROVIDER_CREDIT_CB_LOCK:
                 cause = _PROVIDER_CREDIT_CB[n].get("cause", "credit")
@@ -1568,7 +1606,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     _PROVIDER_CREDIT_CB[n].update({"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None})
             return result, None
         except LLMCreditExhausted as ce:
-            _provider_credit_cb_trip(n, str(ce), cause="credit")
+            _provider_credit_cb_trip(n, str(ce), cause="credit", provider=provider)
             main.state["provider_credit_cb"] = _provider_credit_cb_snapshot()
             return None, "credit_exhausted"
         except Exception as e:
@@ -1579,7 +1617,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             if err_str.startswith("claude_cli_rate_limit:"):
                 reason = err_str[len("claude_cli_rate_limit:"):]
                 logger.warning(f"Provider {n} ({provider}) session limit — applying 15-min cooldown. ({reason})")
-                _provider_credit_cb_trip(n, reason, duration_s=900, cause="rate_limit")
+                _provider_credit_cb_trip(n, reason, duration_s=900, cause="rate_limit", provider=provider)
                 main.state["provider_credit_cb"] = _provider_credit_cb_snapshot()
                 return None, "rate_limited"
             # Some models (e.g. certain Groq models) reject tool-calling with a 400.
@@ -1625,7 +1663,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             # rate-limit cooldown so it stops poisoning the global circuit breaker.
             if "429" in err_str:
                 _provider_credit_cb_trip(n, f"Rate-limited: {err_str[:120]}",
-                                         duration_s=_RATELIMIT_COOLDOWN_SECONDS, cause="rate_limit")
+                                         duration_s=_RATELIMIT_COOLDOWN_SECONDS,
+                                         cause="rate_limit", provider=provider)
                 main.state["provider_credit_cb"] = _provider_credit_cb_snapshot()
                 return None, "rate_limited"
             # Ollama returns 404 from /api/chat when the requested model isn't pulled.
