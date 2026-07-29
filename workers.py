@@ -41,6 +41,7 @@ from main import (
     _is_lmstudio,
     _is_ollama,
     _llm_cb_snapshot,
+    _ollama_base_url,
     _local_health_url,
     _normalize_lmstudio_url,
     _provider_configured,
@@ -110,14 +111,15 @@ def _check_provider_online(n, config):
         except Exception:
             return False
     if _is_ollama(p):
-        # Ollama needs no API key — confirm the server is reachable (/api/tags) AND
-        # that the configured model is actually pulled. /api/tags is 200 whenever the
-        # server is up, but /api/chat 404s if the model is missing, so a bare server
-        # ping would falsely show the provider green while every real call fails.
+        # Ollama needs no API key (self-hosted; Ollama Cloud sends a Bearer key) —
+        # confirm the server is reachable (/api/tags) AND that the configured model
+        # is actually pulled. /api/tags is 200 whenever the server is up, but
+        # /api/chat 404s if the model is missing, so a bare server ping would
+        # falsely show the provider green while every real call fails.
         if not model:
             return False
         try:
-            base = (base_url or "http://localhost:11434").rstrip("/")
+            base = _ollama_base_url(p, base_url).rstrip("/")
             headers = {}
             if api_key:
                 clean = api_key.strip().replace("Bearer ", "").strip()
@@ -1307,7 +1309,7 @@ def preload_ollama_models(config):
     provider, _k, _m, url = _get_provider_config(1, config)
     if not _is_ollama(provider):
         return
-    base = (url or "http://localhost:11434").rstrip("/")
+    base = _ollama_base_url(provider, url).rstrip("/")
     detailed = _filter_ensemble_models(
         sorted(_ollama_models_detailed(base), key=lambda d: d.get("size", 0)), config)
     names = [d.get("name") for d in detailed if d.get("name")]
@@ -1449,9 +1451,9 @@ def _fetch_models_for_provider(provider, api_key, base_url):
         # models as a selectable option — without this, a no-key ollama fell
         # through to the "api_key required" empty-list branch and never appeared.
         # Ollama Cloud (https://ollama.com) takes a key, sent as a Bearer header
-        # when present. Default base_url: localhost for the no-key local case,
-        # ollama.com only when a key is set and no URL was given (cloud default).
-        base = (base_url or "http://localhost:11434").rstrip("/")
+        # when present. Default base_url: ollama.com for the `ollama_cloud` slot,
+        # localhost for every self-hosted slot (_ollama_base_url).
+        base = _ollama_base_url(p, base_url).rstrip("/")
         headers = {}
         if api_key:
             clean = api_key.strip().replace("Bearer ", "").strip()

@@ -135,6 +135,36 @@ def _is_ollama(provider):
     return (provider or "").lower().strip().startswith("ollama")
 
 
+#: Ollama Cloud (https://ollama.com) — the hosted Ollama service. Same wire API
+#: as a self-hosted instance, so every ``_is_ollama`` prefix check already covers
+#: it; what differs is that it REQUIRES an API key and defaults to a remote base
+#: URL instead of localhost.
+OLLAMA_CLOUD_PROVIDER = "ollama_cloud"
+OLLAMA_CLOUD_BASE_URL = "https://ollama.com"
+
+
+def _is_ollama_cloud(provider):
+    """True for the hosted Ollama Cloud provider slot.
+
+    Distinct from the no-key local/LAN instances that ``_is_ollama`` also matches:
+    ollama.com authenticates with a Bearer key, so a key-less cloud slot is NOT
+    usable and must be reported unconfigured rather than being tried and 401ing on
+    every call. Kept as an exact-name check (not a prefix) so a self-hosted slot
+    can never be accidentally forced to carry a key.
+    """
+    return (provider or "").lower().strip() == OLLAMA_CLOUD_PROVIDER
+
+
+def _ollama_base_url(provider, base_url):
+    """Resolve the endpoint for an Ollama slot: an explicit per-entry ``base_url``
+    always wins; otherwise Ollama Cloud defaults to ollama.com and a self-hosted
+    slot to localhost."""
+    if base_url:
+        return base_url
+    return (OLLAMA_CLOUD_BASE_URL if _is_ollama_cloud(provider)
+            else "http://localhost:11434")
+
+
 def _is_copilot(provider):
     """True for any GitHub Copilot provider (``copilot``, ``copilot2``, …)."""
     return (provider or "").lower().strip().startswith("copilot")
@@ -180,12 +210,23 @@ def _copilot_api_token(gh_token):
     return token
 
 
+def _provider_is_nokey(provider):
+    """True when ``provider`` authenticates without an API key: claude_cli (session
+    auth), LM Studio and self-hosted Ollama (local/LAN servers). Ollama Cloud is
+    explicitly excluded — it is the one ``ollama*`` slot that DOES need a key, and
+    treating it as no-key would mark a key-less cloud slot 'configured' only for
+    every call to 401."""
+    return (provider == "claude_cli"
+            or _is_lmstudio(provider)
+            or (_is_ollama(provider) and not _is_ollama_cloud(provider)))
+
+
 def _provider_configured(provider, key, model):
     """A provider is usable when it has a model, and either an API key or is a no-key
-    provider (claude_cli session auth, LM Studio / Ollama local servers). Centralizes
+    provider (claude_cli session auth, LM Studio / self-hosted Ollama). Centralizes
     the no-key exception so every configured-check site agrees on what "configured"
     means."""
-    return bool(model and (key or provider == "claude_cli" or _is_lmstudio(provider) or _is_ollama(provider)))
+    return bool(model and (key or _provider_is_nokey(provider)))
 
 
 def _record_provider_result(n, status, reason=""):
@@ -453,8 +494,9 @@ def validate_llm_config_on_startup():
     ok = False
     for n in (1, 2):
         provider, api_key, model, _ = _get_provider_config(n, config)
-        # claude_cli, lmstudio and ollama don't need an API key (session auth / local server).
-        if model and (api_key or provider == "claude_cli" or _is_lmstudio(provider) or _is_ollama(provider)):
+        # claude_cli, lmstudio and SELF-HOSTED ollama don't need an API key
+        # (session auth / local server); Ollama Cloud does — see _provider_is_nokey.
+        if _provider_configured(provider, api_key, model):
             logger.info(f"LLM Provider {n}: provider={provider!r} model={model!r} — configured.")
             ok = True
         else:
@@ -653,7 +695,7 @@ def _any_provider_available(config):
     any_free = False
     for n in (1, 2, 3, 4):
         provider, key, model, _ = _get_provider_config(n, config)
-        configured = model and (key or provider == "claude_cli" or _is_lmstudio(provider) or _is_ollama(provider))
+        configured = _provider_configured(provider, key, model)
         if not configured:
             continue  # not configured
         rem = _provider_credit_cb_remaining(n)
@@ -1073,9 +1115,14 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
     return text
 
 
-def _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
-    """Call an Ollama-compatible API (local or Ollama Cloud). Uses /api/chat natively."""
-    base = (base_url or "http://localhost:11434").rstrip("/")
+def _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                    provider="ollama"):
+    """Call an Ollama-compatible API (local or Ollama Cloud). Uses /api/chat natively.
+
+    ``provider`` only selects the DEFAULT endpoint when no per-entry base_url is
+    set (ollama.com for the cloud slot, localhost otherwise); the wire protocol is
+    identical either way."""
+    base = _ollama_base_url(provider, base_url).rstrip("/")
     endpoint = f"{base}/api/chat"
     headers = {}
     if api_key:
@@ -1293,7 +1340,8 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     if p == "google":
         return _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
     if _is_ollama(p):
-        return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+        return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id,
+                               config, provider=p)
     if p == "groq":
         effective_url = base_url or "https://api.groq.com/openai/v1"
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
@@ -1360,11 +1408,13 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             logger.debug(f"model_router skipped for task_kind={task_kind!r}: {_re}")
 
     def _try_provider(n, provider, model, key, url):
-        # claude_cli (Claude Code session), LM Studio and Ollama (local/remote
-        # self-hosted servers) need no API key — only a model must be configured
-        # for them to be usable. (Ollama Cloud takes a key, but it's optional at
-        # this gate so a no-key local ollama is actually tried in failover.)
-        if provider == "claude_cli" or _is_lmstudio(provider) or _is_ollama(provider):
+        # claude_cli (Claude Code session), LM Studio and SELF-HOSTED Ollama
+        # (local/remote servers) need no API key — only a model must be configured
+        # for them to be usable, so a no-key local ollama is genuinely tried in
+        # failover. Ollama Cloud is the exception: it authenticates with a Bearer
+        # key, so a key-less cloud slot is skipped as not_configured here instead
+        # of being tried and 401ing every call.
+        if _provider_is_nokey(provider):
             if not model:
                 return None, "not_configured"
         elif not (key and model):
@@ -1455,7 +1505,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     except Exception:
                         body = ""
                 if "/api/chat" in err_str or ("model" in body.lower() and "not found" in body.lower()):
-                    msg = (f"Ollama model '{model}' not pulled on {url or 'http://localhost:11434'} "
+                    msg = (f"Ollama model '{model}' not pulled on {_ollama_base_url(provider, url)} "
                            f"— pull it (Settings → Local LLM Setup, or `ollama pull {model}`).")
                     return None, msg
             return None, e

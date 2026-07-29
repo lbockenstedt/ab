@@ -837,7 +837,7 @@
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
-                                {% for pname in ['google','anthropic','openai','groq','ollama','ollama2','lmstudio','claude_cli','copilot'] %}
+                                {% for pname in ['google','anthropic','openai','groq','ollama','ollama2','ollama_cloud','lmstudio','claude_cli','copilot'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
                                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                                     <div class="flex items-center justify-between mb-2">
@@ -893,8 +893,11 @@
                                     </div>
                                     {% else %}
                                     <div class="space-y-2">
+                                        {% if pname == 'ollama_cloud' %}
+                                        <p class="text-xs text-slate-500">Hosted <strong>Ollama Cloud</strong> — unlike the self-hosted <code class="bg-slate-100 px-1 rounded">ollama</code> slots this one <strong>requires an API key</strong> (from <span class="font-mono">ollama.com</span>); without one the slot is skipped in failover instead of failing every call. Base URL defaults to <span class="font-mono">https://ollama.com</span>.</p>
+                                        {% endif %}
                                         <input type="password" id="vault-key-{{ pname }}" placeholder="API Key" value="{{ cred.get('api_key','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
-                                        <input type="text" id="vault-url-{{ pname }}" placeholder="Base URL (optional)" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                        <input type="text" id="vault-url-{{ pname }}" placeholder="{% if pname == 'ollama_cloud' %}Base URL (optional — defaults to https://ollama.com){% else %}Base URL (optional){% endif %}" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs btn-primary rounded font-bold">Save {{ pname }} Credential</button>
                                     </div>
                                     {% endif %}
@@ -922,6 +925,7 @@
                                         <option value="groq">Groq</option>
                                         <option value="ollama">Ollama</option>
                                         <option value="ollama2">Ollama 2 (remote)</option>
+                                        <option value="ollama_cloud">Ollama Cloud (ollama.com — needs key)</option>
                                         <option value="lmstudio">LM Studio (local)</option>
                                         <option value="claude_cli">Claude CLI (local)</option>
                                         <option value="copilot">GitHub Copilot</option>
@@ -966,6 +970,7 @@
                                                 <option value="groq" {{ 'selected' if entry.provider == 'groq' else '' }}>Groq</option>
                                                 <option value="ollama" {{ 'selected' if entry.provider == 'ollama' else '' }}>Ollama</option>
                                                 <option value="ollama2" {{ 'selected' if entry.provider == 'ollama2' else '' }}>Ollama 2 (remote)</option>
+                                                <option value="ollama_cloud" {{ 'selected' if entry.provider == 'ollama_cloud' else '' }}>Ollama Cloud (ollama.com — needs key)</option>
                                                 <option value="lmstudio" {{ 'selected' if entry.provider == 'lmstudio' else '' }}>LM Studio (local)</option>
                                                 <option value="claude_cli" {{ 'selected' if entry.provider == 'claude_cli' else '' }}>Claude CLI (local)</option>
                                                 <option value="copilot" {{ 'selected' if entry.provider == 'copilot' else '' }}>GitHub Copilot</option>
@@ -3201,7 +3206,14 @@
             ['gemma2-9b',              30],
             ['qwen-qwq',               30],
         ];
-        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, ollama2: 10, groq: 30, lmstudio: 0, claude_cli: 10};
+        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, ollama2: 10, ollama_cloud: 30, groq: 30, lmstudio: 0, claude_cli: 10};
+
+        // Ollama slots are no-key EXCEPT the hosted cloud one — mirrors
+        // llm_client._provider_is_nokey so the UI and the failover gate agree on
+        // which slots are usable without a credential.
+        const _isNokeyProvider = (p) => (p || '').startsWith('lmstudio')
+            || p === 'claude_cli'
+            || ((p || '').startsWith('ollama') && p !== 'ollama_cloud');
 
         function getDefaultRpm(provider, model) {
             if (model) {
@@ -3238,11 +3250,13 @@
                 // ⚠ error below instead, not this branch. (If the deployed service
                 // predates the no-key fix, update it — it returned empty here for a
                 // missing key.)
-                o.textContent = (provider.startsWith('lmstudio') || provider.startsWith('ollama'))
+                o.textContent = _isNokeyProvider(provider)
                     ? (provider.startsWith('lmstudio')
                         ? '— no models found — load a model in LM Studio, then re-query —'
                         : '— no models found — start Ollama / pull a model, then re-query —')
-                    : '— save credential first —';
+                    : (provider === 'ollama_cloud'
+                        ? '— save your ollama.com API key first —'
+                        : '— save credential first —');
                 sel.appendChild(o);
                 return;
             }

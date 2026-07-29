@@ -13,6 +13,7 @@ from main import (
     _get_reviewer_model,
     _get_escalation_models,
     _is_ollama,
+    _ollama_base_url,
     _ollama_models_detailed,
     _is_triage_only,
     _provider_configured,
@@ -1419,7 +1420,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         continue
                     _models = _get_escalation_models(_n, config)
                     if _is_ollama(_p) and any(x == "*" for x in _models):
-                        detailed = sorted(_ollama_models_detailed(_u or "http://localhost:11434"),
+                        detailed = sorted(_ollama_models_detailed(_ollama_base_url(_p, _u)),
                                           key=lambda d: d.get("size", 0))
                         detailed = _filter_ensemble_models(detailed, config)
                         _models = [d["name"] for d in detailed] or [_m]
@@ -1478,7 +1479,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 _local_models = []
                 if _provider_configured(_p1, _k1, _m1) and _is_ollama(_p1):
                     _local_models = [d["name"] for d in _filter_ensemble_models(sorted(
-                        _ollama_models_detailed(_u1 or "http://localhost:11434"),
+                        _ollama_models_detailed(_ollama_base_url(_p1, _u1)),
                         key=lambda d: d.get("size", 0)), config)] or [_m1]
                 _external = [n for n in (2, 3, 4)
                              if _provider_configured(*_get_provider_config(n, config)[:3])]
