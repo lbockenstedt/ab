@@ -1403,6 +1403,9 @@ async def settings_page(request: Request):
     # Self-log scan defaults ON (self-diagnosis) until explicitly turned off
     # via the Settings toggle; display-only default so the checkbox renders
     # checked on a never-saved install.
+    # claude_binary lives in config (not DEFAULT_ENV), so expose it on `settings`
+    # for the Settings form field to round-trip its saved value.
+    settings["claude_binary"] = config.get("claude_binary", "")
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
@@ -1682,6 +1685,11 @@ async def save_settings(request: Request):
         config_data["startup_grace_seconds"] = max(0, int(_sg)) if _sg else 300
     except (TypeError, ValueError):
         config_data["startup_grace_seconds"] = 300
+    # Absolute path to the `claude` CLI. The service runs as its own user with
+    # systemd's minimal PATH, so a binary that resolves in an operator's shell can
+    # be invisible here; claude_bin() probes the usual install dirs, and this is
+    # the escape hatch when it lives somewhere else. Blank = auto-detect.
+    config_data["claude_binary"] = str(data.get("claude_binary") or "").strip()
     # Ollama context window (num_ctx). Default 16384 so fix/log prompts don't 400 with
     # "prompt is longer than the context length". Raise for very large prompts.
     _nc = str(data.get("ollama_num_ctx") or "").strip()

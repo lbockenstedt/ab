@@ -1223,6 +1223,11 @@
                                 <span class="text-xs text-slate-400">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
                             </div>
                             <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Claude CLI binary path</label>
+                                <input type="text" name="claude_binary" value="{{ settings.claude_binary or '' }}" placeholder="auto-detect (leave blank)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <span class="text-xs text-slate-400">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
+                            </div>
+                            <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama context window (num_ctx)</label>
                                 <input type="number" name="ollama_num_ctx" value="{{ settings.ollama_num_ctx if settings.ollama_num_ctx is not none else 32768 }}" min="2048" step="1024" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">Ollama prompt context size — prevents "prompt longer than context length" 400s. Default 32768; raise for very large fixes.</span>
@@ -3140,7 +3145,7 @@
                 } else if (data.status === 'needs_auth') {
                     _showClaudeCliResult('⚠ Not logged in — click "Start Login Flow" to authenticate.', 'text-orange-600', data.detail || '', []);
                 } else if (data.status === 'not_found') {
-                    _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', []);
+                    _showClaudeCliResult('✗ claude binary not found', 'text-red-600', data.detail || '', []);
                 } else if (data.status === 'ok') {
                     _showClaudeCliResult('✓ Claude CLI installed — ' + (data.version || ''), 'text-green-700', '', []);
                 } else {
@@ -3161,7 +3166,7 @@
                     return;
                 }
                 if (data.status === 'not_found') {
-                    _showClaudeCliResult('✗ claude binary not found in PATH', 'text-red-600', data.detail || '', [], false);
+                    _showClaudeCliResult('✗ claude binary not found', 'text-red-600', data.detail || '', [], false);
                     return;
                 }
                 const urls = data.url ? [data.url] : [];
