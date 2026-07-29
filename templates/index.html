@@ -496,6 +496,14 @@
                             {% else %}
                             <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap text-green-700 bg-green-100">REVIEWED · CLEAN</span>
                             {% endif %}
+                            {# Advisory skeptical-panel verdict — the same signal the GitHub
+                               comment carries, surfaced here so it isn't github.com-only.
+                               Advisory ONLY: a human is still the sole approver. #}
+                            {% if pr.panel_status %}
+                            <span class="ml-1 px-2 py-1 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The skeptical panel could not run for this pass: {{ pr.panel_status }}">PANEL N/A</span>
+                            {% elif pr.panel_verdict %}
+                            <span class="ml-1 px-2 py-1 rounded text-xs font-bold whitespace-nowrap {{ 'text-green-700 bg-green-100' if pr.panel_verdict == 'Approve' else 'text-red-700 bg-red-100' }}" title="Advisory cross-provider panel verdict — a human is still the sole approver. Confidence is a fraction rendered as a percentage.">ADVISORY {{ pr.panel_verdict|upper }}{% if pr.panel_confidence is not none %} · {{ (pr.panel_confidence * 100)|round|int }}%{% endif %}</span>
+                            {% endif %}
                         </td>
                         <td class="px-6 py-3 align-middle">
                             <div class="flex flex-wrap gap-1.5 justify-center items-center">

@@ -467,8 +467,11 @@ def _review_one(gh, repo, pr, config):
                 state="success", context=STATUS_CONTEXT, description=desc[:140])
         except Exception as e:  # noqa: BLE001
             logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
-    # Always persist for the UI 'PRs Reviewed' filter (survives restarts).
-    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha, summary=summary)
+    # Always persist for the UI 'PRs Reviewed' filter (survives restarts). The
+    # panel result rides along so the advisory verdict/confidence shows in
+    # BugFixer's own PR list, not only in the GitHub comment.
+    record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha,
+                     summary=summary, review=review)
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                     repo.full_name, pr.number, len(findings), action)

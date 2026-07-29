@@ -67,9 +67,16 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
 _PR_REVIEWS_MAX = 100
 
 
-def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
+def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None):
     """Persist a PR pre-review result so the UI can list/filter 'PRs Reviewed'.
-    Bounded to the most recent _PR_REVIEWS_MAX. findings = list of {level,...} dicts."""
+    Bounded to the most recent _PR_REVIEWS_MAX. findings = list of {level,...} dicts.
+
+    ``review`` is the skeptical panel's ``{confidence, verdict, critique}`` (or a
+    ``{status, reason}`` when the panel was unavailable). It used to be rendered
+    into the GitHub PR comment and then thrown away, so the advisory verdict was
+    visible on github.com but nowhere in BugFixer's own UI. Stored flat as
+    panel_verdict / panel_confidence / panel_status so the PR list can show it
+    without re-reading the comment."""
     global state
     levels = {"error": 0, "warning": 0, "advisory": 0}
     items = []
@@ -81,6 +88,21 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
         items.append({"level": lvl or "advisory",
                       "title": (f.get("title") or "")[:140],
                       "detail": (f.get("detail") or "")[:300]})
+
+    # Panel result → flat fields for the UI. Confidence is clamped to 0.0-1.0 here
+    # too: review_fix already normalizes each vote, but this value is persisted and
+    # then rendered, and a 0-100 answer leaking through would show as "9500%".
+    _r = review or {}
+    panel_status = _r.get("status") or ""          # set only when the panel could not run
+    panel_verdict = "" if panel_status else str(_r.get("verdict") or "")
+    panel_confidence = None
+    if not panel_status and _r.get("confidence") is not None:
+        try:
+            _c = float(_r["confidence"])
+            panel_confidence = max(0.0, min(1.0, _c / 100.0 if _c > 1.0 else _c))
+        except (TypeError, ValueError):
+            panel_confidence = None
+
     key = "%s#%s" % (repo, number)
     try:
         with _task_state_lock:
@@ -97,6 +119,12 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary=""):
                 "warnings": levels["warning"],
                 "advisories": levels["advisory"],
                 "items": items[:20],
+                # Advisory skeptical-panel result (see the docstring). Rebuilt on
+                # every re-scan alongside findings, so it always describes the head
+                # this record was reviewed at.
+                "panel_verdict": panel_verdict,
+                "panel_confidence": panel_confidence,
+                "panel_status": panel_status,
                 # Preserve a human's Approve across re-scans; reset if the head moved.
                 "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
                 # Merged is terminal — keep it so the PR stays listed with its badge.
