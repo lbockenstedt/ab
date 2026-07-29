@@ -14,11 +14,13 @@ package, so BugFixer can run on hosts that don't have the lm source tree.
 
 import asyncio
 import collections
+import errno
 import hashlib
 import hmac
 import json
 import logging
 import os
+import socket
 import ssl
 import sys
 import threading
@@ -78,6 +80,34 @@ _HANDSHAKE_TIMEOUT = 5.0
 # rejection, so bugfixer auto-recovers mTLS once the hub is taught to trust the
 # cert — no manual restart needed.
 _CERT_RETRY_INTERVAL = 300
+
+# Errnos that mean "nothing is listening / no route" — the hub is DOWN, not
+# refusing us. An LM upgrade restarts the hub, so this is the ordinary case.
+_HUB_DOWN_ERRNOS = {errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH,
+                    errno.ENETDOWN, errno.ETIMEDOUT, errno.EHOSTDOWN}
+
+
+def _hub_unreachable(exc: BaseException) -> bool:
+    """True when the connection failed because the hub never answered.
+
+    The cert-rejection heuristic below must fire ONLY when the hub answered and
+    refused our client certificate. Without this split, a hub that is simply
+    restarting (every LM upgrade → connection refused) is misread as "our cert
+    was rejected": bugfixer disengages mTLS and then won't retry the cert for
+    _CERT_RETRY_INTERVAL (5 min), turning a routine restart into a five-minute
+    mTLS outage.
+
+    An ssl.SSLError is deliberately NOT unreachable — the TLS layer only speaks
+    when something IS listening, so it stays a rejection candidate (as does a
+    reset mid-handshake, which is how a server commonly refuses a client cert).
+    """
+    if isinstance(exc, (asyncio.TimeoutError, socket.gaierror, socket.timeout)):
+        return True                      # timed out / DNS — hub never answered
+    if isinstance(exc, ssl.SSLError):
+        return False                     # TLS spoke → the hub is up
+    if isinstance(exc, OSError) and exc.errno in _HUB_DOWN_ERRNOS:
+        return True
+    return False
 
 
 class MessageSigner:
@@ -630,7 +660,11 @@ class HubAgentClient:
                 # rejected cert stranded it. A restart or a fresh INSTALL_CERT
                 # re-arms _present_cert to try again (e.g. after the hub is taught to
                 # trust the BugFixer cert's CA).
-                if self._presented_cert and not self._cert_ever_worked:
+                # ...but ONLY when the hub actually answered. A hub that is down or
+                # restarting (every LM upgrade) refuses the connection outright,
+                # which is not a verdict on our certificate — treating it as one
+                # disengaged mTLS and then blocked the retry for _CERT_RETRY_INTERVAL.
+                if self._presented_cert and not self._cert_ever_worked and not _hub_unreachable(e):
                     self._present_cert = False
                     self._cert_rejected = True
                     self._cert_rejected_at = time.time()
