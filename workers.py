@@ -1321,16 +1321,30 @@ def preload_ollama_models(config):
         num_ctx = 32768
     _ka = str(config.get("ollama_keep_alive", "-1") or "-1").strip()
     ka_val = int(_ka) if _ka.lstrip("-").isdigit() else _ka
-    logger.info(f"Preloading {len(names)} ensemble model(s) into ollama memory: {names}")
+    # Load timeout, separate from LLM_TIMEOUT (which bounds INFERENCE). A cold load
+    # is disk -> RAM plus a num_ctx-sized KV allocation, and on a CPU-only box a
+    # 14B at 32k context legitimately exceeds the old hardcoded 900s — so the
+    # preload "failed" on a model that would have finished, then every later call
+    # paid the cold-load cost anyway. Configurable via ollama_preload_timeout_s.
+    try:
+        load_timeout = max(60, int(config.get("ollama_preload_timeout_s", 3600) or 3600))
+    except (TypeError, ValueError):
+        load_timeout = 3600
+    logger.info(f"Preloading {len(names)} ensemble model(s) into ollama memory "
+                f"(load timeout {load_timeout}s each): {names}")
     for name in names:
+        _t0 = time.time()
         try:
             logger.info(f"  preloading {name}…")
             requests.post(f"{base}/api/generate",
                           json={"model": name, "keep_alive": ka_val, "options": {"num_ctx": num_ctx}},
-                          timeout=900)
-            logger.info(f"  ✓ {name} resident")
+                          timeout=load_timeout)
+            logger.info(f"  ✓ {name} resident ({time.time() - _t0:.0f}s)")
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"  preload {name} failed: {e}")
+            # Report how long it actually took: distinguishes "needs a bigger
+            # timeout" from "will never load on this hardware".
+            logger.warning(f"  preload {name} failed after {time.time() - _t0:.0f}s "
+                           f"(timeout {load_timeout}s): {e}")
 
 
 def model_preload_worker():

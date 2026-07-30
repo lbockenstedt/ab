@@ -1465,6 +1465,7 @@ async def settings_page(request: Request):
     # claude_binary lives in config (not DEFAULT_ENV), so expose it on `settings`
     # for the Settings form field to round-trip its saved value.
     settings["claude_binary"] = config.get("claude_binary", "")
+    settings["ollama_preload_timeout_s"] = config.get("ollama_preload_timeout_s", 3600)
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
@@ -1744,6 +1745,15 @@ async def save_settings(request: Request):
         config_data["startup_grace_seconds"] = max(0, int(_sg)) if _sg else 300
     except (TypeError, ValueError):
         config_data["startup_grace_seconds"] = 300
+    # How long to allow a MODEL LOAD (preload) before giving up. Separate from
+    # LLM_TIMEOUT, which bounds inference: a cold load is disk -> RAM plus a
+    # num_ctx-sized KV allocation, and on a CPU-only box a 14B at 32k context can
+    # exceed the old hardcoded 900s. Default 3600.
+    _pt = str(data.get("ollama_preload_timeout_s") or "").strip()
+    try:
+        config_data["ollama_preload_timeout_s"] = max(60, int(_pt)) if _pt else 3600
+    except (TypeError, ValueError):
+        config_data["ollama_preload_timeout_s"] = 3600
     # Absolute path to the `claude` CLI. The service runs as its own user with
     # systemd's minimal PATH, so a binary that resolves in an operator's shell can
     # be invisible here; claude_bin() probes the usual install dirs, and this is

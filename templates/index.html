@@ -1231,6 +1231,11 @@
                                 <span class="text-xs text-slate-400">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
                             </div>
                             <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Ollama model-load timeout (s)</label>
+                                <input type="number" name="ollama_preload_timeout_s" value="{{ settings.ollama_preload_timeout_s if settings.ollama_preload_timeout_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <span class="text-xs text-slate-400">How long a model may take to become <b>resident</b> (preload), separate from inference timeout. A cold load is disk&nbsp;→&nbsp;RAM plus a num_ctx-sized KV allocation, so on a CPU-only box a 14B at 32k can take well over 15&nbsp;min. Default 3600. Raise this rather than lowering num_ctx.</span>
+                            </div>
+                            <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama context window (num_ctx)</label>
                                 <input type="number" name="ollama_num_ctx" value="{{ settings.ollama_num_ctx if settings.ollama_num_ctx is not none else 32768 }}" min="2048" step="1024" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">Ollama prompt context size — prevents "prompt longer than context length" 400s. Default 32768; raise for very large fixes.</span>
