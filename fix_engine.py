@@ -779,9 +779,19 @@ def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
             fix_code = apply_ai_fix(path, fix_body, err, force_provider=1, model_override=mdl, task_id=task_id)
             ok, fixes, _conf = parse_and_apply(fix_code, path)
             if not ok:
-                err = ("Your previous attempt returned an invalid or empty fix. Return ONLY "
-                       "a JSON object in the required format, with real file paths inside "
-                       "the repository.")
+                _why = "; ".join(getattr(parse_and_apply, "last_failures", []) or [])
+                if _why:
+                    err = (f"Your previous edits could NOT be applied: {_why}. The \"search\" "
+                           f"value must be copied VERBATIM from the code shown to you. Note the "
+                           f"code is shown as SEPARATE, NON-CONTIGUOUS regions — never build a "
+                           f"snippet that spans two regions or includes a '... (showing lines ...)' "
+                           f"marker, because that text does not exist in the file. Pick a shorter "
+                           f"anchor from INSIDE one region.")
+                else:
+                    err = ("Your previous attempt returned an invalid or empty fix. Return ONLY "
+                           "a JSON object in the required format, with real file paths inside "
+                           "the repository.")
+                logger.info("Build rejected — feeding apply-failure back: %s", (_why or "(no detail)")[:300])
                 continue
             cross = _crosscheck_review(path, fix_body, 1, local_models, mdl, config, task_id)
             if cross["verdict"] != "Approve" or cross["confidence"] < cpu_target:
@@ -1043,6 +1053,12 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
         "- \"search\" MUST be an EXACT substring of the current file content shown "
         "above — copy it character-for-character INCLUDING indentation, and include "
         "enough surrounding lines that it appears exactly once.\n"
+        "- The code above is shown as SEPARATE, NON-CONTIGUOUS regions, each preceded "
+        "by a '... (showing lines N-M) ...' marker. Those marker lines are NOT part of "
+        "the file, and two regions shown next to each other are NOT adjacent in the "
+        "file. A \"search\" must come from INSIDE a single region and must never span "
+        "a marker or a region boundary — such a snippet cannot exist in the file and "
+        "the edit will be discarded.\n"
         "- Make the SMALLEST change that fixes the issue. Do NOT return the whole "
         "file; return only the snippet(s) that change.\n"
         "- Multiple edits are allowed and may target different files.\n"
@@ -1068,8 +1084,37 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
         raise Exception(f"Fix generation failed: {e}")
 
 
+def _relaxed_edit_span(haystack, needle):
+    """Locate *needle* in *haystack* tolerating whitespace-only differences.
+
+    Exact `str.count` matching drops an edit for a single trailing space, a
+    tab-vs-spaces indent, or CRLF — differences a model reproducing a snippet by
+    eye gets wrong constantly, and which have no semantic meaning here.
+
+    Each line is matched by its stripped content with flexible surrounding
+    whitespace. Returns the ORIGINAL (start, end) span so the real file text is
+    what gets replaced. Returns None unless the relaxed match is UNIQUE — an
+    ambiguous match must never be applied blind, which is the safety property the
+    exact matcher gave for free.
+    """
+    import re as _re
+    lines = (needle or "").replace("\r\n", "\n").split("\n")
+    if not any(l.strip() for l in lines):
+        return None
+    parts = []
+    for ln in lines:
+        stripped = ln.strip()
+        parts.append(r"[ \t]*" + _re.escape(stripped) + r"[ \t]*" if stripped else r"[ \t]*")
+    try:
+        matches = list(_re.finditer(r"\r?\n".join(parts), haystack))
+    except _re.error:
+        return None
+    return matches[0].span() if len(matches) == 1 else None
+
+
 def parse_and_apply(content, repo_path):
     import re as _re, ast as _ast
+    parse_and_apply.last_failures = []   # reset per call; read by the retry loop
     # --- Locate a JSON / Python-dict object in the LLM response ---
     if not content or not content.strip():
         logger.debug("parse_and_apply: empty content — expected retry case.")
@@ -1113,6 +1158,11 @@ def parse_and_apply(content, repo_path):
         # applied) files whose content actually changed.
         if isinstance(edits, list) and edits:
             orig_contents, file_contents = {}, {}
+            # Reasons an edit could not be applied, published on the function
+            # attribute below so the retry loop can tell the model exactly which
+            # anchor missed. Kept off the return value to preserve the existing
+            # (ok, fixes, confidence) contract used by three call sites.
+            _miss = parse_and_apply.last_failures = []
             for ed in edits:
                 if not isinstance(ed, dict):
                     continue
@@ -1142,6 +1192,20 @@ def parse_and_apply(content, repo_path):
                 current = file_contents[full_path]
                 count = current.count(search)
                 if count == 0:
+                    # Exact match failed — try the whitespace-tolerant matcher before
+                    # discarding the edit.
+                    _span = _relaxed_edit_span(current, search)
+                    if _span:
+                        logger.info(f"Edit matched {filepath!r} only after whitespace "
+                                    f"normalisation — applying (unique match).")
+                        file_contents[full_path] = (current[:_span[0]] + str(replace)
+                                                    + current[_span[1]:])
+                        continue
+                    # Record WHAT failed so the retry can be told. parse_and_apply
+                    # returns only (ok, fixes, conf), so the detail was previously
+                    # logged and lost — leaving the next attempt to guess.
+                    _first = (search.strip().splitlines() or [""])[0][:160]
+                    _miss.append(f"{filepath}: search snippet not found (starts with: {_first!r})")
                     logger.error(f"Edit search snippet not found in {filepath!r}; skipping this edit")
                     continue
                 if count > 1:
@@ -1208,7 +1272,9 @@ def parse_and_apply(content, repo_path):
             applied[filepath] = code
             logger.info(f"Applied fix to file: {filepath}")
         if not applied:
-            logger.error("No fixes could be applied (all rejected as unsafe or out-of-repo).")
+            _detail = "; ".join(parse_and_apply.last_failures or []) or \
+                      "all edits rejected as unsafe or out-of-repo"
+            logger.error(f"No fixes could be applied ({_detail}).")
             return False, {}, 0.0
         return True, applied, confidence
     except Exception as e:
