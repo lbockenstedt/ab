@@ -247,6 +247,9 @@
                 <span class="text-[10px] uppercase tracking-widest text-white/50">Status</span>
                 <span id="hdr-status" class="text-xs font-semibold {% if 'Error' in state.status %}text-red-300{% else %}text-emerald-300{% endif %}">{{ state.status }}</span>
             </div>
+            <a href="/logout" class="hidden sm:flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-white/50 hover:text-white/90 transition-colors" title="Sign out">
+                <i class="fas fa-right-from-bracket"></i> Sign out
+            </a>
             <!-- Which AI is answering right now: slot + provider + model. The bare
                  model name is ambiguous once several slots serve the same family and
                  the router can substitute a model that was never configured, so all
@@ -1259,7 +1262,24 @@
                                 <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 300 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
                             </div>
-                            <div class="space-y-2">
+                            <div class="space-y-2 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
+                                <div class="flex items-center justify-between">
+                                    <label class="text-sm font-medium text-slate-600">User Accounts <span class="text-slate-400 font-normal">(every account has full admin access)</span></label>
+                                    <button type="button" onclick="loadAuthUsers()" class="btn-sec px-3 py-1 rounded font-bold text-xs">Refresh</button>
+                                </div>
+                                <div id="auth-users-list" class="text-xs text-slate-500 italic">Not loaded.</div>
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-2 pt-2">
+                                    <input type="text" id="auth-new-user" placeholder="new username" autocomplete="off" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="password" id="auth-new-pass" placeholder="password (min 8 chars)" autocomplete="new-password" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <div class="flex gap-2">
+                                        <button type="button" onclick="authCreateUser()" class="btn-primary flex-1 py-2 rounded font-bold text-xs">Add user</button>
+                                        <button type="button" onclick="authSetPassword()" class="btn-sec flex-1 py-2 rounded font-bold text-xs" title="Set the password for an EXISTING user with the name above">Set password</button>
+                                    </div>
+                                </div>
+                                <span id="auth-users-msg" class="text-xs"></span>
+                                <span class="text-xs text-slate-400 block">These act immediately — they are not part of the Save below. Locked out? From a shell on this host: <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/bugfixer'); import auth; auth.set_password('user','newpass')"</code></span>
+                            </div>
+                                                        <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Claude CLI binary path</label>
                                 <input type="text" name="claude_binary" value="{{ settings.claude_binary or '' }}" placeholder="auto-detect (leave blank)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
@@ -3183,6 +3203,52 @@
             }
         }
 
+        // ── User accounts (all admins) ───────────────────────────────────────
+        async function loadAuthUsers() {
+            const el = document.getElementById('auth-users-list');
+            if (!el) return;
+            try {
+                const d = await fetch('/api/auth/users').then(r => r.json());
+                const rows = (d.users || []);
+                el.innerHTML = rows.length ? rows.map(u =>
+                    '<div class="flex items-center justify-between py-1 border-b border-slate-100">' +
+                    '<span class="font-mono text-slate-700">' + _bfEsc(u.username) + '</span>' +
+                    '<span class="text-slate-400">last login: ' + _bfEsc(u.last_login || 'never') + '</span>' +
+                    '<button type="button" class="text-red-600 hover:text-red-700 font-bold" ' +
+                    'onclick="authDeleteUser(\'' + _bfEsc(u.username) + '\')">Remove</button></div>'
+                ).join('') : '<span class="italic">No accounts.</span>';
+            } catch (e) {
+                el.innerHTML = '<span class="text-red-600">Could not load users: ' + _bfEsc(String(e && e.message || e)) + '</span>';
+            }
+        }
+        function _authMsg(d) {
+            const m = document.getElementById('auth-users-msg');
+            if (!m) return;
+            m.textContent = d.message || '';
+            m.className = 'text-xs ' + (d.status === 'ok' ? 'text-green-700' : 'text-red-600');
+        }
+        async function _authPost(url, body) {
+            const d = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                        body: JSON.stringify(body)}).then(r => r.json());
+            _authMsg(d); loadAuthUsers(); return d;
+        }
+        async function authCreateUser() {
+            const u = (document.getElementById('auth-new-user') || {}).value || '';
+            const p = (document.getElementById('auth-new-pass') || {}).value || '';
+            await _authPost('/api/auth/users', {username: u, password: p});
+        }
+        async function authSetPassword() {
+            const u = (document.getElementById('auth-new-user') || {}).value || '';
+            const p = (document.getElementById('auth-new-pass') || {}).value || '';
+            await _authPost('/api/auth/password', {username: u, password: p});
+        }
+        async function authDeleteUser(username) {
+            if (!confirm('Remove account "' + username + '"? Their sessions stop working immediately.')) return;
+            await _authPost('/api/auth/users/delete', {username: username});
+        }
+        if (document.getElementById('auth-users-list')) loadAuthUsers();
+
+        // ── User accounts end ────────────────────────────────────────────────
         async function runLlmDiag() {
             const body = document.getElementById('llmdiag-body');
             const btn = document.getElementById('llmdiag-btn');

@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, re, uuid, collections
 import sys
+from urllib.parse import quote as _urlquote
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 # Pure, stdlib-only duplicate-detection helpers. Importable standalone for tests
@@ -188,6 +189,57 @@ def _in_update_cooldown():
     return False, 0.0
 
 
+
+
+# ── Authentication ────────────────────────────────────────────────────────────
+# Everyone who can log in is an admin; the point is that an unauthenticated
+# browser on the LAN must not be able to drive a service that holds a GitHub
+# token, pushes commits, and can restart itself.
+import auth as _auth  # noqa: E402 — after logger/app so its logging is configured
+
+#: Paths reachable WITHOUT a session.
+#:  /api/health is load-bearing: bugfixer-watchdog polls it at 127.0.0.1 to verify
+#:  a restart succeeded, and restart_worker does the same. Gate it and every
+#:  restart looks like a failed start, which triggers the watchdog's ROLLBACK.
+_AUTH_EXEMPT_EXACT = {"/api/health", "/login", "/logout", "/setup-admin",
+                      "/favicon.ico", "/apple-touch-icon.png",
+                      "/apple-touch-icon-precomposed.png"}
+_AUTH_EXEMPT_PREFIX = ("/static/", "/assets/")
+
+
+def _auth_exempt(path: str) -> bool:
+    return path in _AUTH_EXEMPT_EXACT or path.startswith(_AUTH_EXEMPT_PREFIX)
+
+
+def _wants_json(request: Request) -> bool:
+    """API callers get 401 JSON; browsers get a redirect to the login page."""
+    if request.url.path.startswith("/api/"):
+        return True
+    return "application/json" in (request.headers.get("accept") or "")
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path = request.url.path
+    if _auth_exempt(path):
+        return await call_next(request)
+    # First run: no accounts yet — funnel everything to one-shot setup so the
+    # service is never left silently open while an operator finds the page.
+    if not _auth.any_users():
+        if _wants_json(request):
+            return JSONResponse(status_code=401,
+                                content={"error": "setup_required",
+                                         "message": "No accounts exist. Open /setup-admin."})
+        return RedirectResponse("/setup-admin", status_code=303)
+    user = _auth.verify_session(request.cookies.get(_auth.SESSION_COOKIE) or "")
+    if not user:
+        if _wants_json(request):
+            return JSONResponse(status_code=401,
+                                content={"error": "unauthenticated", "message": "Log in first."})
+        nxt = request.url.path + (("?" + request.url.query) if request.url.query else "")
+        return RedirectResponse(f"/login?next={_urlquote(nxt, safe='')}", status_code=303)
+    request.state.user = user
+    return await call_next(request)
 
 
 @app.middleware("http")

@@ -3,7 +3,7 @@ import asyncio, git, json, os, re, shutil, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import Request
+from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from github import Github
 from app_state import mark_pr_approved, update_pr_review
@@ -110,6 +110,136 @@ async def hub_agent_reregister():
         return JSONResponse({"status": "restarted", "message": "Hub agent re-registering (approve bugfixer in the Hub WebUI)"})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+# ── Auth: login / logout / first-run setup ───────────────────────────────────
+# These paths are in main.py's middleware exempt list; everything else requires a
+# session. Note /api/health is exempt too — the watchdog polls it to verify a
+# restart, and gating it would make every restart look like a failure.
+
+@router.get("/login")
+async def login_page(request: Request, next: str = "", error: str = ""):
+    import auth as _a
+    if not _a.any_users():
+        return RedirectResponse("/setup-admin", status_code=303)
+    if _a.verify_session(request.cookies.get(_a.SESSION_COOKIE) or ""):
+        return RedirectResponse(next or "/", status_code=303)
+    return templates.TemplateResponse(request=request, name="login.html", context={
+        "setup_mode": False, "error": error, "next_url": next,
+        "min_len": _a.MIN_PASSWORD_LEN})
+
+
+@router.post("/login")
+async def login_submit(request: Request):
+    import auth as _a
+    form = await request.form()
+    username = (form.get("username") or "").strip()
+    password = form.get("password") or ""
+    nxt = (form.get("next") or "/").strip() or "/"
+    # Only ever redirect to a path on THIS host — a user-supplied absolute URL
+    # would turn the login form into an open redirect.
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/"
+    src = (request.client.host if request.client else "?")
+    if not _a.verify_credentials(username, password):
+        logger.warning("auth: failed login for %r from %s", username, src)
+        return templates.TemplateResponse(
+            request=request, name="login.html", status_code=401,
+            context={"setup_mode": False, "error": "Invalid username or password.",
+                     "next_url": nxt, "min_len": _a.MIN_PASSWORD_LEN})
+    logger.info("auth: %r signed in from %s", username, src)
+    resp = RedirectResponse(nxt, status_code=303)
+    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+                    max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
+                    secure=request.url.scheme == "https", path="/")
+    return resp
+
+
+@router.get("/logout")
+async def logout(request: Request):
+    resp = RedirectResponse("/login", status_code=303)
+    import auth as _a
+    resp.delete_cookie(_a.SESSION_COOKIE, path="/")
+    return resp
+
+
+@router.get("/setup-admin")
+async def setup_admin_page(request: Request, error: str = ""):
+    """First-run account creation. 404s once ANY account exists, so it is a
+    one-shot bootstrap rather than a permanent unauthenticated endpoint."""
+    import auth as _a
+    if _a.any_users():
+        raise HTTPException(status_code=404, detail="Setup already completed")
+    return templates.TemplateResponse(request=request, name="login.html", context={
+        "setup_mode": True, "error": error, "next_url": "",
+        "min_len": _a.MIN_PASSWORD_LEN})
+
+
+@router.post("/setup-admin")
+async def setup_admin_submit(request: Request):
+    import auth as _a
+    if _a.any_users():
+        raise HTTPException(status_code=404, detail="Setup already completed")
+    form = await request.form()
+    username = (form.get("username") or "").strip()
+    p1, p2 = form.get("password") or "", form.get("password2") or ""
+
+    def _again(msg):
+        return templates.TemplateResponse(
+            request=request, name="login.html", status_code=400,
+            context={"setup_mode": True, "error": msg, "next_url": "",
+                     "min_len": _a.MIN_PASSWORD_LEN})
+
+    if p1 != p2:
+        return _again("Passwords do not match.")
+    ok, msg = _a.create_user(username, p1)
+    if not ok:
+        return _again(msg)
+    logger.warning("auth: FIRST ACCOUNT %r created from %s — setup is now closed.",
+                   username, request.client.host if request.client else "?")
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+                    max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
+                    secure=request.url.scheme == "https", path="/")
+    return resp
+
+
+# ── Auth: account management (every account is an admin) ─────────────────────
+
+@router.get("/api/auth/users")
+async def auth_list_users():
+    import auth as _a
+    return {"users": _a.list_users()}
+
+
+@router.post("/api/auth/users")
+async def auth_create_user(request: Request):
+    import auth as _a
+    data = await request.json()
+    ok, msg = _a.create_user((data.get("username") or "").strip(), data.get("password") or "")
+    return {"status": "ok" if ok else "error", "message": msg}
+
+
+@router.post("/api/auth/password")
+async def auth_set_password(request: Request):
+    import auth as _a
+    data = await request.json()
+    ok, msg = _a.set_password((data.get("username") or "").strip(), data.get("password") or "")
+    return {"status": "ok" if ok else "error", "message": msg}
+
+
+@router.post("/api/auth/users/delete")
+async def auth_delete_user(request: Request):
+    import auth as _a
+    data = await request.json()
+    username = (data.get("username") or "").strip()
+    me = getattr(request.state, "user", None)
+    if username and username == me:
+        # Deleting the account you are signed in as would log you out mid-action
+        # and is almost never what was meant.
+        return {"status": "error", "message": "You cannot delete the account you are signed in as."}
+    ok, msg = _a.delete_user(username)
+    return {"status": "ok" if ok else "error", "message": msg}
 
 
 @router.get("/api/health")

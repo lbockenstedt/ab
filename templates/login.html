@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ 'Set up BugFixer' if setup_mode else 'Sign in — BugFixer' }}</title>
+    <link rel="icon" href="/favicon.ico">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: #0f172a; }
+        .card { background: #fff; border-radius: 0.75rem; box-shadow: 0 20px 45px rgba(0,0,0,.35); }
+        .btn { background: #01A982; }
+        .btn:hover { background: #018f6f; }
+        .btn:disabled { opacity: .6; cursor: not-allowed; }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-6">
+    <div class="card w-full max-w-sm p-8">
+        <div class="mb-6">
+            <h1 class="text-xl font-bold text-[#263040]">BugFixer</h1>
+            {% if setup_mode %}
+            <p class="text-sm text-slate-500 mt-1">First run — create the initial admin account.</p>
+            {% else %}
+            <p class="text-sm text-slate-500 mt-1">Sign in to continue.</p>
+            {% endif %}
+        </div>
+
+        {% if setup_mode %}
+        <!-- One-shot bootstrap. This page stops existing the moment an account
+             exists, so the open window is only ever "installed but not yet set up". -->
+        <div class="mb-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+            No accounts exist yet, so this page is reachable by anyone who can
+            reach this host. Create the first account now — it closes immediately
+            afterwards.
+        </div>
+        {% endif %}
+
+        {% if error %}
+        <div class="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">{{ error }}</div>
+        {% endif %}
+
+        <form method="POST" action="{{ '/setup-admin' if setup_mode else '/login' }}" class="space-y-4">
+            {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
+            <div>
+                <label class="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-1">Username</label>
+                <input name="username" autocomplete="username" autofocus required
+                       class="w-full p-2 rounded-lg border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-1">Password</label>
+                <input name="password" type="password" required
+                       autocomplete="{{ 'new-password' if setup_mode else 'current-password' }}"
+                       class="w-full p-2 rounded-lg border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                {% if setup_mode %}
+                <p class="text-xs text-slate-400 mt-1">At least {{ min_len }} characters.</p>
+                {% endif %}
+            </div>
+            {% if setup_mode %}
+            <div>
+                <label class="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-1">Confirm password</label>
+                <input name="password2" type="password" required autocomplete="new-password"
+                       class="w-full p-2 rounded-lg border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+            </div>
+            {% endif %}
+            <button type="submit" class="btn w-full py-2 rounded-lg text-white font-bold text-sm">
+                {{ 'Create account' if setup_mode else 'Sign in' }}
+            </button>
+        </form>
+
+        <p class="text-[11px] text-slate-400 mt-6 leading-relaxed">
+            Every account has full admin access. Locked out? From a shell on this host:
+            <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/bugfixer'); import auth; auth.set_password('user','newpass')"</code>
+        </p>
+    </div>
+</body>
+</html>
