@@ -2,15 +2,46 @@
 
 An automated GitHub issue fixer that polls repositories for the `automated-fix` label, generates code fixes using local or cloud LLMs, and synchronizes changes with an infrastructure API.
 
-## 🚀 Quick Installation
+<!-- INSTALLERS:START -->
+## Installation
 
-For a fresh Debian installation, use this one-liner:
+Every installer in this repo, with every flag and environment variable it accepts.
+Installers are idempotent — re-running one updates code and preserves credentials.
+
+### BugFixer — `install.sh`
 
 ```bash
-git clone <your-repo-url> /opt/bugfixer && cd /opt/bugfixer && sudo ./setup.sh
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | bash
 ```
 
-*Replace `<your-repo-url>` with the actual repository URL.*
+Connect it to an LM hub at install time — first positional argument, or `HUB_WS_URL`:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | bash -s -- wss://lm-hub.lrbtechnologies.com
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | HUB_WS_URL=wss://lm-hub.lrbtechnologies.com bash
+```
+
+| Argument | Purpose |
+| :--- | :--- |
+| *(positional 1)* | Hub WebSocket URL. A bare host is fine — the agent normalizes it to `wss://<host>:443/ws/spoke`. |
+
+**Environment overrides:**
+
+| Variable | Purpose |
+| :--- | :--- |
+| `HUB_WS_URL` | Same as the positional argument. |
+| `HUB_QUERY_URL` | Hub WebUI URL, used for approvals and as the log fallback. Derived as `https://<host>` when unset. |
+| `IP_FOR_CERT` | SAN baked into the self-signed WebUI certificate. Default `127.0.0.1`. |
+
+Installs to `/opt/bugfixer`, config in `/etc/bugfixer`, log at `/var/log/bugfixer.log`.
+
+**The WebUI requires a login.** On first visit you are sent to `/setup-admin` to
+create the initial account; every account is a full admin. Locked out:
+
+```bash
+python3 -c "import sys; sys.path.insert(0,'/opt/bugfixer'); import auth; auth.set_password('user','newpass')"
+```
+<!-- INSTALLERS:END -->
 
 ## 🌟 Features
 - **Hybrid LLM**: Local-first (MacBook/Proxmox) with automatic failover to Cloud Ollama.
