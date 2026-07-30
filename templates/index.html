@@ -1232,7 +1232,7 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="flex items-center gap-2 text-sm font-medium text-slate-600">
-                                    <input type="checkbox" name="gate_scans_on_model_preload" value="1" {{ 'checked' if config.gate_scans_on_model_preload else '' }} class="w-4 h-4 accent-[#01A982]">
+                                    <input type="checkbox" name="gate_scans_on_model_preload" value="1" {{ 'checked' if settings.gate_scans_on_model_preload else '' }} class="w-4 h-4 accent-[#01A982]">
                                     Hold scans until models are loaded
                                 </label>
                                 <span class="text-xs text-slate-400">Ollama serialises requests, so a scan that starts first puts a multi-minute CPU build in the single slot and the preload queues <b>behind</b> it — models go resident long after the work that needed them. On by default.</span>

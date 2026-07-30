@@ -1466,7 +1466,7 @@ async def settings_page(request: Request):
     # for the Settings form field to round-trip its saved value.
     settings["claude_binary"] = config.get("claude_binary", "")
     settings["ollama_preload_timeout_s"] = config.get("ollama_preload_timeout_s", 3600)
-    config.setdefault("gate_scans_on_model_preload", True)
+    settings["gate_scans_on_model_preload"] = config.get("gate_scans_on_model_preload", True)
     settings["model_gate_max_wait_s"] = config.get("model_gate_max_wait_s", 3600)
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
