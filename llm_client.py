@@ -836,9 +836,16 @@ def _llm_cb_wait():
             time.sleep(random.uniform(0, 1.5))
             return
         sleep_chunk = min(remaining, 5.0)
+        # Name the ACTUAL cause. This said "rate-limit cooldown" unconditionally,
+        # so a local endpoint that was simply down reported a rate limit that no
+        # one had imposed — the same conflation the split counters fixed on the
+        # trip side.
+        with _LLM_CB_LOCK:
+            _kind = _LLM_CB.get("last_trip_kind") or "rate_limit"
+        _why = "endpoint-unreachable" if _kind == "transient" else "rate-limit"
         logger.warning(
             f"LLM circuit breaker active — pausing {sleep_chunk:.1f}s "
-            f"({remaining:.1f}s remaining) to respect rate-limit cooldown."
+            f"({remaining:.1f}s remaining) to respect the {_why} cooldown."
         )
         time.sleep(sleep_chunk)
 
@@ -861,8 +868,19 @@ def _llm_cb_trip(wait_time, reason="429", kind="rate_limit"):
         total = _LLM_CB[_t_key]
     _label = "consecutive_timeouts" if kind == "transient" else "consecutive_429s"
     _tlabel = "total_timeouts" if kind == "transient" else "total_429s"
-    _hint = (" — the endpoint did not answer in time; nothing was rate-limited "
-             "(check LLM_TIMEOUT / ollama_num_ctx / model size)" if kind == "transient" else "")
+    if kind != "transient":
+        _hint = ""
+    elif any(t in str(reason) for t in ("ConnectionError", "NewConnectionError",
+                                       "Connection refused", "RemoteDisconnected")):
+        # Refused/closed means nothing is listening — model size and timeouts are
+        # irrelevant, and pointing at them sends the operator tuning a server that
+        # is not running.
+        _hint = (" — nothing is LISTENING on that endpoint (is the server running? "
+                 "e.g. `systemctl status ollama`); not a rate limit and not a "
+                 "model-size problem")
+    else:
+        _hint = (" — the endpoint did not answer in time; nothing was rate-limited "
+                 "(check LLM_TIMEOUT / ollama_num_ctx / model size)")
     logger.warning(
         f"LLM circuit breaker TRIPPED for {wait_time:.1f}s (reason={reason}){_hint}. "
         f"{_label}={consecutive}, {_tlabel}={total}. "
