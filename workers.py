@@ -1286,7 +1286,7 @@ _BOOT_TIME = time.time()
 def _startup_grace_remaining():
     """Seconds left in the post-boot grace window (0 once elapsed / disabled). During
     it, LLM-dependent work is deferred so ollama + services can finish coming up.
-    Configurable via startup_grace_seconds (default 180); 0 disables."""
+    Configurable via startup_grace_seconds (default 300); 0 disables."""
     try:
         grace = int(load_config().get("startup_grace_seconds", 300))
     except (TypeError, ValueError):
@@ -1295,6 +1295,14 @@ def _startup_grace_remaining():
         return 0
     remaining = grace - (time.time() - _BOOT_TIME)
     return int(remaining) if remaining > 0 else 0
+
+
+def _ollama_answers(base, timeout=4):
+    """True if the ollama server responds on /api/tags right now."""
+    try:
+        return requests.get(f"{base}/api/tags", timeout=timeout).status_code < 300
+    except Exception:  # noqa: BLE001 — not up yet
+        return False
 
 
 def preload_ollama_models(config):
@@ -1350,8 +1358,30 @@ def preload_ollama_models(config):
 def model_preload_worker():
     """One-shot: after the startup grace (so ollama is up), warm all ensemble models into
     memory. Off via ollama_preload_models=false."""
-    while _startup_grace_remaining():
-        time.sleep(15)
+    # Start as soon as ollama ANSWERS, rather than waiting out the whole grace.
+    # The grace exists so LLM work doesn't hit a server that is still starting —
+    # but ollama does not preload anything on boot (it loads on first request), so
+    # sitting out the full startup_grace_seconds (default 300) before even asking
+    # just delays residency by however long the grace exceeds ollama's actual boot.
+    # With scans now gated on residency, that delay is paid by every scan. The
+    # grace remains the ceiling: if ollama never answers we fall through to the old
+    # behaviour rather than blocking here.
+    try:
+        _cfg0 = load_config()
+        _p0, _k0, _m0, _u0 = _get_provider_config(1, _cfg0)
+        _probe_base = _ollama_base_url(_p0, _u0).rstrip("/") if _is_ollama(_p0) else None
+    except Exception:  # noqa: BLE001
+        _probe_base = None
+    if _probe_base:
+        while _startup_grace_remaining():
+            if _ollama_answers(_probe_base):
+                logger.info("ollama is answering — starting model preload without waiting "
+                            "out the remaining ~%ds of startup grace.", _startup_grace_remaining())
+                break
+            time.sleep(5)
+    else:
+        while _startup_grace_remaining():
+            time.sleep(15)
     # No extra sleep here: this used to wait 5s after the grace expired, which
     # handed the Ollama queue to poller_worker (it resumes the instant the grace
     # ends). The first CPU build then occupied the single OLLAMA_NUM_PARALLEL slot
