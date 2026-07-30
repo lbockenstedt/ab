@@ -3066,7 +3066,9 @@
         function refreshActiveLlm() {
             const el = document.getElementById('hdr-active-llm');
             if (!el) return;
-            fetch('/api/status').then(r => r.json()).then(d => {
+            // /api/scheduler/status is what carries the llm block (routes.py
+            // scheduler_status) — NOT /api/status, which does not exist.
+            fetch('/api/scheduler/status').then(r => r.json()).then(d => {
                 const llm = (d && d.llm) || {};
                 const model = llm.active_llm;
                 if (!model || model === 'Unknown') { el.textContent = '—'; el.className = 'text-xs font-semibold text-white/40'; return; }

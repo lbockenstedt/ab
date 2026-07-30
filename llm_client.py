@@ -825,12 +825,28 @@ _LLM_CB = {
     "last_trip_reason": None,
     "last_trip_time": None,
     "last_trip_kind": None,
+    "last_trip_provider": None,
 }
 
-def _llm_cb_wait():
+def _llm_cb_wait(provider=None):
+    """Honour the global cooldown — but ONLY for the provider that caused it.
+
+    This breaker paused every LLM thread regardless of which provider tripped it,
+    so one unreachable endpoint stalled calls to all the others and defeated the
+    failover it sits in front of: a local ollama that is simply down would delay
+    the paid cloud slots that were about to serve the request. A provider's
+    trouble is evidence about that provider, not about the others.
+
+    Passing no provider preserves the old fleet-wide behaviour for callers that
+    genuinely want it.
+    """
     while True:
         with _LLM_CB_LOCK:
             cd = _LLM_CB["cooldown_until"]
+            owner = _LLM_CB.get("last_trip_provider")
+        # Different provider than the one being penalised → not our cooldown.
+        if provider and owner and provider != owner:
+            return
         remaining = cd - time.time()
         if remaining <= 0:
             time.sleep(random.uniform(0, 1.5))
@@ -849,7 +865,7 @@ def _llm_cb_wait():
         )
         time.sleep(sleep_chunk)
 
-def _llm_cb_trip(wait_time, reason="429", kind="rate_limit"):
+def _llm_cb_trip(wait_time, reason="429", kind="rate_limit", provider=None):
     """Trip the global breaker. ``kind`` is 'rate_limit' (provider said 429/5xx) or
     'transient' (timeout / connection drop — nothing was rate-limited)."""
     wait_time = max(0.5, min(wait_time, 3600.0))
@@ -863,6 +879,7 @@ def _llm_cb_trip(wait_time, reason="429", kind="rate_limit"):
         _LLM_CB[_t_key] += 1
         _LLM_CB["last_trip_reason"] = reason
         _LLM_CB["last_trip_kind"] = kind
+        _LLM_CB["last_trip_provider"] = provider
         _LLM_CB["last_trip_time"] = datetime.now().isoformat()
         consecutive = _LLM_CB[_c_key]
         total = _LLM_CB[_t_key]
@@ -913,6 +930,7 @@ def _llm_cb_snapshot():
             "total_timeouts": _LLM_CB["total_transient"],
             "last_trip_reason": _LLM_CB["last_trip_reason"],
             "last_trip_kind": _LLM_CB["last_trip_kind"],
+            "last_trip_provider": _LLM_CB["last_trip_provider"],
             "last_trip_time": _LLM_CB["last_trip_time"],
         }
 
@@ -960,7 +978,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
     last_exception = None
     for attempt in range(max_retries + 1):
         is_last = attempt == max_retries
-        _llm_cb_wait()
+        _llm_cb_wait(provider)
         try:
             sem = _get_llm_semaphore()
             sem.acquire()
@@ -1012,7 +1030,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                 # not more retries against the overloaded one).
                 give_up = is_last or attempt >= max_5xx
                 wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
-                _llm_cb_trip(wait_time, f"{resp.status_code} attempt {attempt+1}/{max_retries+1}")
+                _llm_cb_trip(wait_time, f"{resp.status_code} attempt {attempt+1}/{max_retries+1}", provider=provider)
                 err_body = ""
                 try:
                     err_body = resp.text[:1000]
@@ -1036,7 +1054,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
             _5xx_retry_ok = 500 <= (status or 0) < 600 and attempt < max_5xx
             if not is_last and status and (status == 429 or _5xx_retry_ok):
                 wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
-                _llm_cb_trip(wait_time, f"HTTPError {status}")
+                _llm_cb_trip(wait_time, f"HTTPError {status}", provider=provider)
                 logger.warning(f"LLM HTTPError {status} at {endpoint}. Backing off {wait_time:.1f}s.")
                 last_exception = e
                 time.sleep(wait_time)
@@ -1048,7 +1066,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
             last_exception = e
             if not is_last:
                 wait_time = min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.5)
-                _llm_cb_trip(wait_time, f"transient {type(e).__name__}", kind="transient")
+                _llm_cb_trip(wait_time, f"transient {type(e).__name__}", kind="transient", provider=provider)
                 logger.warning(f"LLM transient error at {endpoint} (attempt {attempt+1}): {e}. Retrying in {wait_time:.1f}s...")
                 time.sleep(wait_time)
                 continue
