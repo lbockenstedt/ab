@@ -779,13 +779,33 @@ def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
             fix_code = apply_ai_fix(path, fix_body, err, force_provider=1, model_override=mdl, task_id=task_id)
             ok, fixes, _conf = parse_and_apply(fix_code, path)
             if not ok:
-                err = "AI returned an invalid/empty fix"
+                err = ("Your previous attempt returned an invalid or empty fix. Return ONLY "
+                       "a JSON object in the required format, with real file paths inside "
+                       "the repository.")
                 continue
             cross = _crosscheck_review(path, fix_body, 1, local_models, mdl, config, task_id)
             if cross["verdict"] != "Approve" or cross["confidence"] < cpu_target:
-                err = (f"CPU cross-check {cross['confidence']:.0%} ({cross['n']} reviewers) "
-                       f"below target {cpu_target:.0%} — ratchet up.")
-                logger.info(err)
+                # Carry the reviewers' ACTUAL critiques into err, which is passed to
+                # the next apply_ai_fix as error_context ("Previous attempt failed
+                # with error: ..."). This used to be the bare percentage, so each
+                # retry re-solved the same problem blind — six build+review cycles
+                # with no new information, which is why the score sat at an
+                # identical value instead of converging. The external-rejection path
+                # below already threaded its critique; this one dropped it.
+                _crit = "; ".join(
+                    f"[{v.get('model') or 'reviewer'}] {str(v.get('critique', '')).strip()}"
+                    for v in (cross.get("votes") or [])
+                    if str(v.get("critique", "")).strip()
+                )
+                err = (f"Your previous attempt was REJECTED by the local reviewer panel "
+                       f"(confidence {cross['confidence']:.0%} from {cross['n']} reviewer(s), "
+                       f"below the required {cpu_target:.0%}). Reviewer feedback: "
+                       f"{_crit or '(no critique returned)'}. "
+                       f"Address these specific points; do not repeat the same change.")
+                logger.info("CPU cross-check %.0f%% (%d reviewers) below target %.0f%% — "
+                            "ratchet up. Feeding critique forward: %s",
+                            cross['confidence'] * 100, cross['n'], cpu_target * 100,
+                            (_crit or '(none)')[:300])
                 continue
             reached_target_ever = True
             if config.get("qa_enabled", True):
