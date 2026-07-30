@@ -396,20 +396,76 @@ from fix_engine import *  # noqa: E402,F401,F403
 from routes import *  # noqa: E402,F401,F403
 app.include_router(router)
 
-threading.Thread(target=connectivity_worker, daemon=True).start()
-threading.Thread(target=heartbeat_worker, daemon=True).start()
-threading.Thread(target=poller_worker, daemon=True).start()
-threading.Thread(target=updater_worker, daemon=True).start()
-threading.Thread(target=restart_worker, daemon=True).start()
-threading.Thread(target=log_health_worker, daemon=True).start()
-threading.Thread(target=model_preload_worker, daemon=True).start()
-# Batch worker (async cloud batch processing). Gated by batch_enabled (default
-# off). Defensive import/start so a batch issue can never crash BugFixer startup.
-try:
-    from batch import batch_worker as _batch_worker
-    threading.Thread(target=_batch_worker, daemon=True).start()
-except Exception as _be:  # noqa: BLE001
-    logger.warning(f"batch worker not started: {_be}")
+# ── Single-instance guard for the scan workers ────────────────────────────────
+# These threads start at IMPORT time, before uvicorn binds the port. So a second
+# bugfixer process that loses the race for :443 has already started all seven
+# workers — every scan, LLM call and GitHub request runs twice while only one web
+# server exists. Observed live: two PIDs 3s apart, duplicate SelfScan/Discovery/
+# RepoScan cycles, doubled API and LLM load, and a max_concurrent=1 limiter that
+# bounds each process separately and so bounds nothing.
+#
+# An flock is deliberately cause-agnostic: whatever spawns the extra process (a
+# racing restart, a manual launch, a supervisor overlap), only the lock holder
+# scans. The fd is kept open for the process lifetime — the kernel releases it on
+# exit, so a crashed holder frees the lock with no stale-PID cleanup.
+#
+# The loser is NOT killed: it still serves whatever it can and, more importantly,
+# exiting here would fight systemd's Restart=always and produce a restart loop.
+# It just stays silent instead of doubling the work.
+_WORKER_LOCK_PATH = os.path.join(CONFIG_DIR, "bugfixer.workers.lock")
+_worker_lock_fh = None   # module-global: holds the flock for the process lifetime
+
+
+def _acquire_worker_singleton():
+    """True if this process may run the scan workers (i.e. it won the flock)."""
+    global _worker_lock_fh
+    try:
+        import fcntl
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        fh = open(_WORKER_LOCK_PATH, "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, IOError):
+            try:
+                fh.seek(0)
+                holder = (fh.read() or "").strip() or "unknown"
+            except Exception:  # noqa: BLE001
+                holder = "unknown"
+            fh.close()
+            logger.error(
+                "Scan workers NOT started: another bugfixer process (pid %s) already holds "
+                "%s. Running two sets would double every scan, LLM call and GitHub request. "
+                "This process will serve requests only.", holder, _WORKER_LOCK_PATH)
+            return False
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+        _worker_lock_fh = fh          # keep the fd open or the lock is released
+        return True
+    except Exception as e:  # noqa: BLE001
+        # Fail OPEN: if locking itself is unavailable, preserve the previous
+        # behaviour rather than silently running with no workers at all.
+        logger.warning("Worker single-instance lock unavailable (%s) — starting workers "
+                       "without it.", e)
+        return True
+
+
+if _acquire_worker_singleton():
+    threading.Thread(target=connectivity_worker, daemon=True).start()
+    threading.Thread(target=heartbeat_worker, daemon=True).start()
+    threading.Thread(target=poller_worker, daemon=True).start()
+    threading.Thread(target=updater_worker, daemon=True).start()
+    threading.Thread(target=restart_worker, daemon=True).start()
+    threading.Thread(target=log_health_worker, daemon=True).start()
+    threading.Thread(target=model_preload_worker, daemon=True).start()
+    # Batch worker (async cloud batch processing). Gated by batch_enabled (default
+    # off). Defensive import/start so a batch issue can never crash BugFixer startup.
+    try:
+        from batch import batch_worker as _batch_worker
+        threading.Thread(target=_batch_worker, daemon=True).start()
+    except Exception as _be:  # noqa: BLE001
+        logger.warning(f"batch worker not started: {_be}")
 
 # Start the Hub WebSocket agent (zero-touch onboarding → admin approval →
 # signed requests for logs + update triggers). No-op if HUB_WS_URL is unset.
