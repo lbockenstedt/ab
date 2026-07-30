@@ -936,6 +936,31 @@
                                 {% endfor %}
                             </div>
                         </div>
+                        <!-- Step C2: dedicated LOG pool. Reading noisy operational text is a
+                             different job from writing a patch, so these slots are used ONLY
+                             for log analysis and are never pulled into code work. -->
+                        <div class="mb-6">
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3b — Log Slots (P5 → P6 — log analysis only)</p>
+                            <p class="text-xs text-slate-400 mb-3">Used <b>only</b> for log analysis and hub log review, so you can pick a model suited to reading operational text rather than writing patches. These are never used for fixes or code review. Leave both unset to fall back to the code slots (previous behaviour).</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {% for slot_n, slot_label, slot_color in [
+                                    (5, 'P5 — Log Primary', 'text-sky-500'),
+                                    (6, 'P6 — Log Failover', 'text-teal-500')
+                                ] %}
+                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
+                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="">— Not configured —</option>
+                                        {% for entry in settings.llm_entries or [] %}
+                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
+                                            {{ entry.label or entry.model }} ({{ entry.provider }})
+                                        </option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
 
                         <!-- Step B: LLM Entries -->
                         <div class="mb-6">
@@ -1031,7 +1056,7 @@
 
                         <!-- Step C: Slot Assignment -->
                         <div class="mb-6">
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 3 — Assign Slots (P1 → P2 → P3 → P4 failover order)</p>
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 3 — Code Slots (P1 → P2 → P3 → P4 failover order — fixes, reviews, triage)</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                                 {% for slot_n, slot_label, slot_color in [
                                     (1, 'P1 — Primary', 'text-[#01A982]'),
@@ -3731,7 +3756,7 @@
 
         async function saveSlots() {
             const slots = {};
-            [1,2,3,4].forEach(n => {
+            [1,2,3,4,5,6].forEach(n => {
                 const sel = document.getElementById(`slot-${n}`);
                 if (sel) slots[n] = sel.value || null;
             });

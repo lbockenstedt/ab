@@ -312,6 +312,37 @@ def _find_claude_cli_slot(config):
     return None
 
 
+#: Task kinds that are LOG analysis rather than code work. Log review wants a
+#: different model from code repair — summarising noisy operational text is not
+#: the same job as writing a patch — so it gets its own provider pool instead of
+#: competing for the code slots.
+_LOG_TASK_KINDS = frozenset({"log_review", "log_analysis"})
+#: Slots 1-4 serve code work (build / review / triage). Slots 5-6 are reserved
+#: for log analysis and are NEVER used for code, so a model chosen for reading
+#: logs can't be dragged into writing a fix.
+_CODE_SLOTS = (1, 2, 3, 4)
+_LOG_SLOTS = (5, 6)
+#: Every slot the app knows about — circuit breakers and rate limiters are keyed
+#: over this, not over a hardcoded 1-4.
+_ALL_SLOTS = _CODE_SLOTS + _LOG_SLOTS
+
+
+def _slots_for_task(task_kind, config):
+    """Ordered provider slots that should serve *task_kind*.
+
+    Log tasks use the log pool (5-6) when at least one of those slots is
+    configured; otherwise they fall back to the code pool, so an install that has
+    not set up log providers behaves exactly as before. Code tasks always use 1-4
+    and can never be routed to the log pool.
+    """
+    if task_kind in _LOG_TASK_KINDS:
+        pool = tuple(n for n in _LOG_SLOTS
+                     if _provider_configured(*_get_provider_config(n, config)[:3]))
+        if pool:
+            return pool
+    return _CODE_SLOTS
+
+
 def _get_provider_config(n, config):
     """Return (provider, api_key, model, base_url) for slot n.
 
@@ -656,7 +687,7 @@ _PROVIDER_CREDIT_CB_LOCK = threading.Lock()
 _PROVIDER_CREDIT_CB = {
     n: {"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None,
         "provider": None}
-    for n in (1, 2, 3, 4)
+    for n in _ALL_SLOTS
 }
 _CREDIT_COOLDOWN_SECONDS = 3600   # 1 hour for credit exhaustion
 _RATELIMIT_COOLDOWN_SECONDS = 600  # 10 minutes for sustained 429 storms
@@ -737,7 +768,7 @@ def _provider_credit_cb_snapshot():
 
 
 _PROVIDER_RL_LOCK = threading.Lock()
-_PROVIDER_REQUEST_TIMES = {n: collections.deque() for n in (1, 2, 3, 4)}
+_PROVIDER_REQUEST_TIMES = {n: collections.deque() for n in _ALL_SLOTS}
 # Tracks when each provider slot last emitted an RPM-throttle log line.
 # Prevents duplicate log pairs when two threads throttle on the same provider.
 _PROVIDER_RPM_LAST_LOG: dict = {}
@@ -1531,15 +1562,17 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     Providers in a 1-hour credit-exhaustion cooldown are skipped automatically.
     """
     config = load_config()
-    p1_provider, p1_key, p1_model, p1_url = _get_provider_config(1, config)
-    p2_provider, p2_key, p2_model, p2_url = _get_provider_config(2, config)
-    p3_provider, p3_key, p3_model, p3_url = _get_provider_config(3, config)
-    p4_provider, p4_key, p4_model, p4_url = _get_provider_config(4, config)
-
+    # Which pool serves this call: code slots (1-4) or the dedicated log slots
+    # (5-6). A log task only reaches the log pool when one of those slots is
+    # actually configured, so existing installs are unaffected.
+    _pool = _slots_for_task(task_kind, config)
+    _cfg_rows = {n: _get_provider_config(n, config) for n in _pool}
     if model_override:
-        p1_model = p2_model = p3_model = p4_model = model_override
+        _cfg_rows = {n: (pv, k, model_override, u) for n, (pv, k, _m, u) in _cfg_rows.items()}
     if url_override:
-        p1_url = p2_url = p3_url = p4_url = url_override
+        _cfg_rows = {n: (pv, k, m, url_override) for n, (pv, k, m, _u) in _cfg_rows.items()}
+    if task_kind in _LOG_TASK_KINDS and _pool is not _CODE_SLOTS:
+        logger.debug("task_kind=%s routed to the LOG provider pool %s", task_kind, list(_pool))
 
     effective_stream = True if stream is None else bool(stream)
 
@@ -1551,10 +1584,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
     # Build an ordered list of providers to try.
     all_providers = [
-        (1, p1_provider, p1_model, p1_key, p1_url),
-        (2, p2_provider, p2_model, p2_key, p2_url),
-        (3, p3_provider, p3_model, p3_key, p3_url),
-        (4, p4_provider, p4_model, p4_key, p4_url),
+        (n, _cfg_rows[n][0], _cfg_rows[n][2], _cfg_rows[n][1], _cfg_rows[n][3])
+        for n in _pool
     ]
 
     # Smart router: for a given task_kind, swap each CLOUD slot's model for the
@@ -1748,9 +1779,18 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         # real provider error.
         last_err = None
         # force_provider=N: use that slot only, no failover.
-        if force_provider in (1, 2, 3, 4):
-            row = all_providers[force_provider - 1]
-            result, err = _try_provider(*row)
+        if force_provider in _ALL_SLOTS:
+            # Look up by SLOT NUMBER. This indexed all_providers[n-1], which is only
+            # correct while the pool is exactly (1,2,3,4) — with the log pool (5,6)
+            # that arithmetic runs off the end or picks the wrong provider.
+            _row = next((r for r in all_providers if r[0] == force_provider), None)
+            if _row is None:
+                # Pinned a slot outside the pool serving this task (e.g. a code slot
+                # for a log call). Honour the pin explicitly rather than silently
+                # using someone else.
+                _p, _k, _m, _u = _get_provider_config(force_provider, config)
+                _row = (force_provider, _p, _m, _k, _u)
+            result, err = _try_provider(*_row)
             if result is not None:
                 _record_provider_result(force_provider, "ok")
                 return result
@@ -1759,16 +1799,25 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
 
         # force_cloud=False: Provider 1 only, no fallover.
         if force_cloud is False:
-            result, err = _try_provider(1, p1_provider, p1_model, p1_key, p1_url)
+            _first = order[0] if order else 1
+            _r0 = next((r for r in all_providers if r[0] == _first), None)
+            if _r0 is None:
+                _p, _k, _m, _u = _get_provider_config(_first, config)
+                _r0 = (_first, _p, _m, _k, _u)
+            result, err = _try_provider(*_r0)
             if result is not None:
-                _record_provider_result(1, "ok")
+                _record_provider_result(_first, "ok")
                 return result
-            _record_provider_result(1, err if isinstance(err, str) else "failed", err)
-            raise Exception(f"Provider 1 (force-only) unavailable: {err}")
+            _record_provider_result(_first, err if isinstance(err, str) else "failed", err)
+            raise Exception(f"Provider {_first} (force-only) unavailable: {err}")
 
         # Determine starting provider.
-        use_p2_first = force_cloud is True
-        order = [2, 1, 3, 4] if use_p2_first else [1, 2, 3, 4]
+        # Order follows the ACTIVE pool. force_cloud's "second slot first" swap is a
+        # code-pool convention (P1 local, P2 cloud) and is meaningless for the log
+        # pool, so it only applies there.
+        order = list(_pool)
+        if force_cloud is True and _pool is _CODE_SLOTS and len(order) > 1:
+            order[0], order[1] = order[1], order[0]
         pmap = {n: row for n, *row in [(r[0], *r[1:]) for r in all_providers]}
 
         last_err = None
@@ -1858,7 +1907,8 @@ def analyze_logs(log_text, title="logs", task_id=None):
         "not routine warnings. Keep it under ~250 words.\n\n"
         f"----- LOGS -----\n{text}\n----- END LOGS -----"
     )
-    result = call_llm(prompt, system_prompt=LOG_ANALYSIS_SYSTEM_PROMPT, task_id=task_id)
+    result = call_llm(prompt, system_prompt=LOG_ANALYSIS_SYSTEM_PROMPT, task_id=task_id,
+                      task_kind="log_analysis")
     return (result or "").strip() or "VERDICT: none\n(the LLM returned an empty analysis)"
 
 

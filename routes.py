@@ -524,7 +524,9 @@ def _system_stats():
     try:
         cfg = load_config()
         slots = []
-        for n in (1, 2, 3, 4):
+        # Includes the log-only slots (5-6) so their health is visible alongside the
+        # code slots — a log pool that is silently failing should not be invisible.
+        for n in (1, 2, 3, 4, 5, 6):
             provider, key, model, base_url = _get_provider_config(n, cfg)
             cb = (state.get("provider_credit_cb") or {}).get(n) or {}
             slots.append({
@@ -678,7 +680,7 @@ async def diagnostics():
             lkg_version = None
 
     providers = []
-    for n in (1, 2, 3, 4):
+    for n in (1, 2, 3, 4, 5, 6):
         provider, key, model, _ = _get_provider_config(n, config)
         cb = (state.get("provider_credit_cb") or {}).get(n) or {}
         providers.append({
