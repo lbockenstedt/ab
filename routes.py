@@ -1529,6 +1529,7 @@ async def settings_page(request: Request):
     settings["ollama_preload_timeout_s"] = config.get("ollama_preload_timeout_s", 3600)
     settings["gate_scans_on_model_preload"] = config.get("gate_scans_on_model_preload", True)
     settings["model_gate_max_wait_s"] = config.get("model_gate_max_wait_s", 3600)
+    settings["EXTERNAL_MIN_CONFIDENCE"] = config.get("EXTERNAL_MIN_CONFIDENCE", 0.90)
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
@@ -1781,6 +1782,14 @@ async def save_settings(request: Request):
     config_data["skip_review"] = data.get("skip_review") == "on"
     config_data["local_ensemble"] = data.get("local_ensemble") == "on"
     config_data["ensemble_skip_external_at_full"] = data.get("ensemble_skip_external_at_full") == "on"
+    # Confidence floor on the EXTERNAL confirmer — the authority that decides
+    # commit. Previously the external stage checked only the verdict word, so an
+    # Approve at any confidence committed. Default 0.90.
+    _emc = str(data.get("EXTERNAL_MIN_CONFIDENCE") or "").strip()
+    try:
+        config_data["EXTERNAL_MIN_CONFIDENCE"] = max(0.0, min(1.0, float(_emc))) if _emc else 0.90
+    except (TypeError, ValueError):
+        config_data["EXTERNAL_MIN_CONFIDENCE"] = 0.90
     _cct = str(data.get("CPU_CROSSCHECK_TARGET") or "").strip()
     try:
         config_data["CPU_CROSSCHECK_TARGET"] = max(0.5, min(1.0, float(_cct))) if _cct else 0.90

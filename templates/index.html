@@ -1210,6 +1210,11 @@
                                 </div>
                             </div>
                             <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">External reviewer min confidence</label>
+                                <input type="number" name="EXTERNAL_MIN_CONFIDENCE" value="{{ settings.EXTERNAL_MIN_CONFIDENCE if settings.EXTERNAL_MIN_CONFIDENCE is not none else 0.90 }}" min="0" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <span class="text-xs text-slate-400">The external (cloud/GPU) confirmer is the <b>authority</b> that decides commit. It must Approve <b>and</b> reach this confidence. An Approve below it is not a rejection — its critique is fed back and the local pool rebuilds against it, same reviewer judging. Default 0.90. Floored on the reviewer's own confidence, not the blended average.</span>
+                            </div>
+                            <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">CPU cross-check target (0–1)</label>
                                 <input type="number" name="CPU_CROSSCHECK_TARGET" value="{{ settings.CPU_CROSSCHECK_TARGET if settings.CPU_CROSSCHECK_TARGET is not none else 0.90 }}" min="0.5" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">CPU consensus needed before an external confirmation is spent (default 0.90).</span>

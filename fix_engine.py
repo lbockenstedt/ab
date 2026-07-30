@@ -822,12 +822,47 @@ def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
                 logger.info(f"CPU cross-check unanimous ~100% ({cross['n']} reviewers) — "
                             "skipping external confirmation, auto-commit.")
                 return "commit", fixes, cross["confidence"]
-            # Single external confirmation with THIS cycle's slot.
+            # Single external confirmation with THIS cycle's slot. The external slot
+            # is the AUTHORITY: the local pool generates candidates cheaply (a build
+            # sees ~38k chars of windowed source and emits full file edits), while a
+            # review sees only the capped diff and emits a short verdict — so the
+            # paid/GPU provider spends a small fraction of the tokens while holding
+            # the commit decision.
             ext = _crosscheck_review(path, fix_body, ext_slot, [None], None, config, task_id)
-            if ext["verdict"] == "Approve":
-                logger.info(f"External P{ext_slot} APPROVED (conf {ext['confidence']:.0%}). Auto-commit.")
+            _crit = "; ".join(str(v.get("critique", "")).strip()
+                              for v in ext.get("votes", []) if v.get("critique"))
+            # Confidence floor on the AUTHORITY. Until now the external stage checked
+            # only the verdict word: an Approve at 55% committed exactly like one at
+            # 99%, so the local models were held to a strict tunable bar while the
+            # provider that actually decides was trusted unconditionally. Floored on
+            # the external's OWN confidence, deliberately NOT on the blended mean —
+            # blending would make the bar for the paid reviewer depend on how poorly
+            # the local model scored, penalising the wrong side.
+            try:
+                _ext_floor = float(config.get("EXTERNAL_MIN_CONFIDENCE", 0.90) or 0.90)
+            except (TypeError, ValueError):
+                _ext_floor = 0.90
+            _ext_floor = max(0.0, min(1.0, _ext_floor))
+            if ext["verdict"] == "Approve" and ext["confidence"] >= _ext_floor:
+                logger.info(f"External P{ext_slot} APPROVED (conf {ext['confidence']:.0%} "
+                            f">= floor {_ext_floor:.0%}). Auto-commit.")
                 return "commit", fixes, (cross["confidence"] + ext["confidence"]) / 2
-            _crit = "; ".join(str(v.get("critique", "")).strip() for v in ext.get("votes", []) if v.get("critique"))
+            if ext["verdict"] == "Approve":
+                # Approved, but not confident ENOUGH. Not a rejection — so iterate
+                # with this reviewer's feedback and let the CPU rebuild against it,
+                # keeping the SAME external slot as the judge. This is the loop that
+                # lets the authority raise a candidate to standard instead of the
+                # choice being a bare commit-or-abandon.
+                err = (f"The reviewing model APPROVED your previous attempt but only at "
+                       f"{ext['confidence']:.0%} confidence, below the required "
+                       f"{_ext_floor:.0%}. Its feedback: {_crit or '(none given)'}. "
+                       f"Revise to resolve those concerns so the reviewer can be "
+                       f"confident; do not resubmit the same change.")
+                logger.info("External P%s approved at %.0f%% but below floor %.0f%% — "
+                            "ratcheting with its feedback: %s", ext_slot,
+                            ext["confidence"] * 100, _ext_floor * 100,
+                            (_crit or '(none)')[:300])
+                continue  # next local builder, SAME external judge
             logger.warning(f"External P{ext_slot} REJECTED (conf {ext['confidence']:.0%}) a CPU-confident fix — "
                            f"one more CPU ratchet. Reason: {_crit or '(no critique given)'}")
             err = f"External P{ext_slot} rejected the CPU-confident fix: {_crit}"
