@@ -1352,17 +1352,30 @@ def model_preload_worker():
     memory. Off via ollama_preload_models=false."""
     while _startup_grace_remaining():
         time.sleep(15)
-    time.sleep(5)
+    # No extra sleep here: this used to wait 5s after the grace expired, which
+    # handed the Ollama queue to poller_worker (it resumes the instant the grace
+    # ends). The first CPU build then occupied the single OLLAMA_NUM_PARALLEL slot
+    # and the preload sat behind it for the whole build — so models became
+    # resident long AFTER work started, defeating the point of preloading.
     try:
         cfg = load_config()
         if cfg.get("ollama_preload_models", True):
             preload_ollama_models(cfg)
+        else:
+            logger.info("model preload disabled (ollama_preload_models=false).")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"model preload worker error: {e}")
+    finally:
+        # ALWAYS publish completion, including on failure or when disabled: the
+        # scan gate below waits on this flag, and a preload that cannot succeed
+        # must never hold work forever.
+        state["models_preloaded"] = True
+        logger.info("Model preload phase complete — scans may proceed.")
 
 
 def poller_worker():
     global state
+    _gate_t0 = [None]   # first time we started waiting on model residency
     while True:
         cfg = load_config()
         _grace = _startup_grace_remaining()
@@ -1370,6 +1383,29 @@ def poller_worker():
             logger.info(f"Startup grace: holding scans ~{_grace}s more so ollama/services finish starting.")
             time.sleep(min(_grace, 30))
             continue
+        # Gate work on models actually being RESIDENT, not merely on the grace
+        # clock expiring. Ollama serialises requests (OLLAMA_NUM_PARALLEL=1), so a
+        # scan that starts first puts a multi-minute CPU build in the single slot
+        # and the preload queues behind it — models finish loading long after the
+        # work that needed them. Bounded so a preload that can never succeed does
+        # not wedge the poller; on timeout we proceed and say so.
+        if cfg.get("gate_scans_on_model_preload", True) and not state.get("models_preloaded"):
+            try:
+                _cap = max(60, int(cfg.get("model_gate_max_wait_s",
+                                           cfg.get("ollama_preload_timeout_s", 3600)) or 3600))
+            except (TypeError, ValueError):
+                _cap = 3600
+            if _gate_t0[0] is None:
+                _gate_t0[0] = time.time()
+            _waited = time.time() - _gate_t0[0]
+            if _waited < _cap:
+                logger.info("Holding scans: waiting for ensemble model(s) to become resident "
+                            "(%.0fs elapsed, cap %ds).", _waited, _cap)
+                time.sleep(10)
+                continue
+            logger.warning("Proceeding WITHOUT confirmed model residency after %.0fs (cap %ds) — "
+                           "the first LLM call may pay a cold-load cost.", _waited, _cap)
+            state["models_preloaded"] = True   # stop re-warning every cycle
         if not state["paused"]:
             # Always run the scan cycle — triage, hub logs, prod verification, label discovery
             # all run regardless of scheduler state.  The schedule/blackout gates are applied

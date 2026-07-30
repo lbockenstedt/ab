@@ -1466,6 +1466,8 @@ async def settings_page(request: Request):
     # for the Settings form field to round-trip its saved value.
     settings["claude_binary"] = config.get("claude_binary", "")
     settings["ollama_preload_timeout_s"] = config.get("ollama_preload_timeout_s", 3600)
+    config.setdefault("gate_scans_on_model_preload", True)
+    settings["model_gate_max_wait_s"] = config.get("model_gate_max_wait_s", 3600)
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
@@ -1745,6 +1747,16 @@ async def save_settings(request: Request):
         config_data["startup_grace_seconds"] = max(0, int(_sg)) if _sg else 300
     except (TypeError, ValueError):
         config_data["startup_grace_seconds"] = 300
+    # Hold scans until the ensemble models are resident (default on). Ollama
+    # serialises requests, so a scan that starts first queues the preload behind a
+    # multi-minute CPU build.
+    config_data["gate_scans_on_model_preload"] = bool(data.get("gate_scans_on_model_preload"))
+    # Cap on that wait, so a preload that can never succeed cannot wedge scanning.
+    _mg = str(data.get("model_gate_max_wait_s") or "").strip()
+    try:
+        config_data["model_gate_max_wait_s"] = max(60, int(_mg)) if _mg else 3600
+    except (TypeError, ValueError):
+        config_data["model_gate_max_wait_s"] = 3600
     # How long to allow a MODEL LOAD (preload) before giving up. Separate from
     # LLM_TIMEOUT, which bounds inference: a cold load is disk -> RAM plus a
     # num_ctx-sized KV allocation, and on a CPU-only box a 14B at 32k context can

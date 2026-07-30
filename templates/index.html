@@ -1231,6 +1231,18 @@
                                 <span class="text-xs text-slate-400">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
                             </div>
                             <div class="space-y-2">
+                                <label class="flex items-center gap-2 text-sm font-medium text-slate-600">
+                                    <input type="checkbox" name="gate_scans_on_model_preload" value="1" {{ 'checked' if config.gate_scans_on_model_preload else '' }} class="w-4 h-4 accent-[#01A982]">
+                                    Hold scans until models are loaded
+                                </label>
+                                <span class="text-xs text-slate-400">Ollama serialises requests, so a scan that starts first puts a multi-minute CPU build in the single slot and the preload queues <b>behind</b> it — models go resident long after the work that needed them. On by default.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max wait for model residency (s)</label>
+                                <input type="number" name="model_gate_max_wait_s" value="{{ settings.model_gate_max_wait_s if settings.model_gate_max_wait_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <span class="text-xs text-slate-400">Cap on the above, so a preload that can never succeed cannot wedge scanning. On timeout BugFixer proceeds and logs a warning. Default 3600.</span>
+                            </div>
+                            <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama model-load timeout (s)</label>
                                 <input type="number" name="ollama_preload_timeout_s" value="{{ settings.ollama_preload_timeout_s if settings.ollama_preload_timeout_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">How long a model may take to become <b>resident</b> (preload), separate from inference timeout. A cold load is disk&nbsp;→&nbsp;RAM plus a num_ctx-sized KV allocation, so on a CPU-only box a 14B at 32k can take well over 15&nbsp;min. Default 3600. Raise this rather than lowering num_ctx.</span>
