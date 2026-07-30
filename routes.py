@@ -566,6 +566,67 @@ def _system_stats():
     return out
 
 
+@router.get("/api/settings/module-repo-map/suggest")
+def module_repo_map_suggest():
+    """Suggest module_repo_map entries from the repos already being monitored.
+
+    Only ALIASES are suggested. resolve_module_repo already auto-matches a module
+    whose name equals a monitored repo's basename ("pxmx" -> "owner/pxmx"), so an
+    entry for those is redundant clutter. The map earns its keep where the Hub's
+    module_type differs from the repo name — firewall/opnsense, nac/cppm, hub/lm,
+    ipam/netbox, directory/ldap, simulation/cs, certificates/le, storage/truenas.
+
+    Repos are never invented: a type is only suggested when a MONITORED repo shares
+    the basename of its known repo, and the owner is taken from that monitored repo
+    rather than the hardcoded default — so a fork or a different org maps correctly.
+    Existing entries are reported separately and never overwritten; the operator's
+    own mapping always wins.
+    """
+    try:
+        from main import MODULE_TYPE_REPO  # re-exported from log_scan
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"module type map unavailable: {e}", "suggested": {}}
+    cfg = load_config()
+    monitored = [clean_repo_name(r) for r in (get_monitored_repos(cfg) or []) if r]
+    by_base = {}
+    for r in monitored:
+        by_base.setdefault(str(r).split("/")[-1].lower(), r)
+
+    existing = cfg.get("module_repo_map") or {}
+    if not isinstance(existing, dict):
+        existing = {}
+    existing_keys = {str(k).strip().lower() for k in existing}
+
+    suggested, kept, redundant, unmapped = {}, {}, [], []
+    for mtype, default_repo in sorted(MODULE_TYPE_REPO.items()):
+        base = str(default_repo).split("/")[-1].lower()
+        mkey = str(mtype).strip().lower()
+        if mkey in existing_keys:
+            kept[mtype] = existing.get(mtype, existing.get(mkey))
+            continue
+        if mkey == base:
+            # Auto-match already resolves this one; an entry would add nothing.
+            redundant.append(mtype)
+            continue
+        target = by_base.get(base)
+        if target:
+            suggested[mtype] = target
+        else:
+            unmapped.append({"module_type": mtype, "needs_repo": default_repo})
+
+    merged = dict(existing)
+    merged.update(suggested)
+    as_text = ", ".join(f"{k}={v}" for k, v in sorted(merged.items()))
+    return {
+        "suggested": suggested,
+        "kept_existing": kept,
+        "redundant_auto_matched": sorted(redundant),
+        "unmapped": unmapped,
+        "monitored_count": len(monitored),
+        "merged_text": as_text,
+    }
+
+
 @router.get("/api/system-stats")
 async def system_stats():
     """Host/process/LLM telemetry for the Diagnostics → System panel."""

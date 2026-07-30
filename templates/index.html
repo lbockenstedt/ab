@@ -811,8 +811,12 @@
                                 </div>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
-                                <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-400 font-normal">(routes Hub log errors to the right repo)</span></label>
-                                <textarea name="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
+                                <div class="flex items-center justify-between gap-3">
+                                    <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-400 font-normal">(routes Hub log errors to the right repo)</span></label>
+                                    <button type="button" onclick="autofillModuleRepoMap()" id="mrm-autofill-btn" class="btn-sec px-3 py-1 rounded font-bold text-xs whitespace-nowrap" title="Suggest entries from the repos you already monitor. Only fills ALIASES (module type differs from repo name) — names that already auto-match are left out. Never overwrites entries you have set.">Auto-fill</button>
+                                </div>
+                                <div id="mrm-autofill-note" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 text-slate-600"></div>
+                                <textarea name="module_repo_map" id="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
                                 <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
                             </div>
                             <div class="space-y-3 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
@@ -3105,6 +3109,50 @@
                                           .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
         // LLM Reachability card — POST /api/llm/diag makes one real call per slot.
+
+        // Auto-fill Module -> Repo Map from the monitored repos. Suggests only the
+        // ALIASES the map is actually needed for: resolve_module_repo already
+        // auto-matches a module whose name equals a monitored repo's basename, so
+        // entries for those would be redundant. Never clobbers existing entries —
+        // the endpoint merges and the operator's own mapping wins.
+        async function autofillModuleRepoMap() {
+            const ta = document.getElementById('module_repo_map');
+            const note = document.getElementById('mrm-autofill-note');
+            const btn = document.getElementById('mrm-autofill-btn');
+            if (!ta) return;
+            if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+            try {
+                const d = await fetch('/api/settings/module-repo-map/suggest').then(r => r.json());
+                if (d.error) { throw new Error(d.error); }
+                ta.value = d.merged_text || ta.value;
+                const nSug = Object.keys(d.suggested || {}).length;
+                const nKept = Object.keys(d.kept_existing || {}).length;
+                const parts = [];
+                parts.push(nSug ? ('<b>Added ' + nSug + '</b> alias mapping(s): ' +
+                    _bfEsc(Object.keys(d.suggested).join(', '))) : 'No new mappings needed.');
+                if (nKept) parts.push('Kept your ' + nKept + ' existing entry(ies) unchanged.');
+                if ((d.redundant_auto_matched || []).length) {
+                    parts.push('Skipped as already auto-matched by repo name: ' +
+                        _bfEsc(d.redundant_auto_matched.join(', ')) + '.');
+                }
+                if ((d.unmapped || []).length) {
+                    parts.push('<span class="text-amber-700">No monitored repo for: ' +
+                        _bfEsc(d.unmapped.map(u => u.module_type + ' (expects ' + u.needs_repo + ')').join(', ')) +
+                        ' — add the repo to Monitored Repos first.</span>');
+                }
+                parts.push('<i>Review, then Save to apply.</i>');
+                if (note) { note.innerHTML = parts.join('<br>'); note.classList.remove('hidden'); }
+            } catch (e) {
+                if (note) {
+                    note.innerHTML = '<span class="text-red-600">Auto-fill failed: ' +
+                        _bfEsc(String(e && e.message || e)) + '</span>';
+                    note.classList.remove('hidden');
+                }
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = 'Auto-fill'; }
+            }
+        }
+
         async function runLlmDiag() {
             const body = document.getElementById('llmdiag-body');
             const btn = document.getElementById('llmdiag-btn');
