@@ -4113,17 +4113,6 @@
             } catch (e) { showToast('Request failed: ' + e, 'error'); }
         }
 
-        async function clearCreditCooldown(n) {
-            try {
-                const resp = await fetch(`/api/clear-credit-cooldown/${n}`, { method: 'POST' });
-                const data = await resp.json();
-                if (data.status === 'cleared') { reloadWithToast('Credit cooldown cleared.', 'success'); }
-                else showToast('Failed to clear cooldown: ' + JSON.stringify(data), 'error');
-            } catch (e) { showToast('Request failed: ' + e, 'error'); }
-        }
-
-        async function fetchModels() { /* kept for compat — delegates to loadProviderModels */ }
-
         async function loadProviderModels(n, providerChanged = false) {
             const providerEl = document.getElementById(`llm-provider-${n}`);
             const keyEl      = document.getElementById(`llm-key-${n}`);
