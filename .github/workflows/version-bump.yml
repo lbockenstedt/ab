@@ -54,8 +54,18 @@ jobs:
               major, minor = int(m.group(1)), int(m.group(2))
               width = max(2, len(m.group(2)))
               new_minor = minor + 2
-              if new_minor > 98:               # never auto-cross a major; X.00 is set by hand
-                  sys.exit(0)
+              # Hold at .98 awaiting a deliberate major (X.00 is set by hand via
+              # scripts/set-version.sh). CLAMP rather than refuse: +2 preserves
+              # parity, so a repo on an ODD minor jumps .97 -> .99, overshoots
+              # this guard and freezes ONE STEP EARLY, forever. lm/cs/bugfixer
+              # all sat at 0.97 for days doing exactly that -- every workflow run
+              # green, every run a no-op, and the WebUI cache-bust token
+              # (index.html ?v=<WebUI/VERSION>) frozen with it, so no browser
+              # ever picked up new JS.
+              if new_minor > 98:
+                  if minor >= 98:              # already at the terminal -> genuinely hold
+                      sys.exit(0)
+                  new_minor = 98               # odd track: land ON .98 as intended
               news = f"{major}.{str(new_minor).zfill(width)}"
           else:                                 # legacy ".NN" (or other) -> last-segment + 1
               nums = list(re.finditer(r'\d+', s))
