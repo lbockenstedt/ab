@@ -182,6 +182,16 @@ if [ ! -d venv ]; then
 fi
 ./venv/bin/pip install --upgrade pip -q
 ./venv/bin/pip install -r requirements.txt -q
+# Re-chown the venv: the tree-wide chown above runs BEFORE this step, and the
+# venv is created and populated HERE as root, so every site-packages file would
+# otherwise be left root-owned. The service runs as $SVC_USER, and CPython writes
+# bytecode next to the source on first import -- so the first import after a
+# restart fails with
+#   [Errno 13] Permission denied: .../site-packages/__pycache__/<mod>.pyc.<pid>
+# which surfaces as "Update check failed" rather than anything mentioning
+# permissions or the venv. Cheap, idempotent, and repairs an existing install on
+# re-run.
+chown -R "$SVC_USER:$SVC_USER" "$INSTALL_DIR/venv"
 echo "   Python dependencies installed."
 
 # 5b. Self-signed TLS cert (unified-443: the UI serves HTTPS on :443)
