@@ -259,6 +259,12 @@
                  title="The provider slot and model serving LLM calls right now (dimmed = last used, currently idle)">
                 <span class="text-[10px] uppercase tracking-widest text-white/50">AI</span>
                 <span id="hdr-active-llm" class="text-xs font-semibold text-white/40">—</span>
+                <!-- Generation throughput while BUSY: averaged over completed
+                     generations only, so idle time between calls never dilutes it.
+                     Hidden until there is a measurement — a 0 would read as a
+                     stalled box rather than "nothing has run yet". -->
+                <span id="hdr-tps" class="hidden text-[10px] font-semibold text-white/50 tabular-nums"
+                      title="Average generation speed over recent runs (busy time only)"></span>
             </div>
             <!-- Providers (moved from System Health) -->
             <div class="hidden sm:flex items-center gap-1.5" title="LLM providers — online (green) / offline (red)">
@@ -3143,7 +3149,13 @@
             fetch('/api/system-stats').then(r => r.json()).then(d => {
                 const llm = (d && d.llm) || {};
                 const model = llm.active_llm;
-                if (!model || model === 'Unknown') { el.textContent = '—'; el.className = 'text-xs font-semibold text-white/40'; return; }
+                if (!model || model === 'Unknown') {
+                    el.textContent = '—'; el.className = 'text-xs font-semibold text-white/40';
+                    // Clear the throughput chip too: leaving the last model's
+                    // number on screen with no model beside it reads as current.
+                    const t = document.getElementById('hdr-tps'); if (t) t.classList.add('hidden');
+                    return;
+                }
                 const slot = llm.active_llm_slot ? ('P' + llm.active_llm_slot) : null;
                 const prov = llm.active_llm_provider || null;
                 el.textContent = [slot, prov, model].filter(Boolean).join(' · ');
@@ -3152,9 +3164,35 @@
                 el.className = 'text-xs font-semibold ' + (live ? 'text-emerald-300' : 'text-white/40');
                 el.title = (live ? 'Serving LLM calls now' : 'Last provider used (idle)') +
                            (at ? ' — ' + new Date(at * 1000).toLocaleTimeString() : '');
+                (llm.tps_by_model || []).forEach(r => { window._bfTps[r.model] = r; });
+                const tpsEl = document.getElementById('hdr-tps');
+                if (tpsEl) {
+                    const tps = llm.tps_avg;
+                    if (tps === null || tps === undefined) {
+                        tpsEl.classList.add('hidden');
+                    } else {
+                        tpsEl.textContent = tps + ' tok/s';
+                        tpsEl.title = 'Average over the last ' + (llm.tps_samples || 0) +
+                                      ' generation(s), busy time only — ' + model;
+                        tpsEl.classList.remove('hidden');
+                    }
+                }
             }).catch(() => { /* leave last-known text on a transient fetch failure */ });
         }
         if (document.getElementById('hdr-active-llm')) { refreshActiveLlm(); setInterval(refreshActiveLlm, 5000); }
+
+
+        // Measured generation throughput per model, so the model picker can show
+        // "what will I actually get from this one on THIS box" rather than making
+        // the operator infer it from parameter count. Populated from the same
+        // /api/system-stats poll the header already runs; only models that have
+        // actually generated something appear.
+        window._bfTps = {};
+        function bfTpsLabel(model) {
+            const r = window._bfTps[model];
+            if (!r) return '';
+            return `  ·  ${r.avg} tok/s${r.n > 1 ? ` (avg of ${r.n})` : ''}`;
+        }
 
         // Local HTML escaper — this template has no global one (the only other
         // escaper is function-scoped at the Diagnostics raw-copy helper). Provider
@@ -4170,7 +4208,11 @@
                     models.forEach(m => {
                         const opt = document.createElement('option');
                         opt.value = m.name;
-                        opt.textContent = m.details ? `${m.name} — ${m.details}` : m.name;
+                        const base = m.details ? `${m.name} — ${m.details}` : m.name;
+                        opt.textContent = base + bfTpsLabel(m.name);
+                        const _r = window._bfTps[m.name];
+                        if (_r) opt.title = `${_r.avg} tok/s average over ${_r.n} generation(s) ` +
+                                            `(min ${_r.min}, max ${_r.max}) measured on this box`;
                         if (m.name === prevVal) { opt.selected = true; found = true; }
                         select.appendChild(opt);
                     });

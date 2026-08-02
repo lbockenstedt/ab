@@ -1308,6 +1308,47 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
     return text
 
 
+
+#: How many recent generations feed the rolling tok/s average, per model. Small
+#: enough to track a real change in box load, large enough that one unlucky
+#: generation does not swing the number an operator is watching.
+_TPS_WINDOW = 20
+
+
+def _record_ollama_tps(model, payload):
+    """Record one generation's tokens/sec from an Ollama response.
+
+    Ollama returns ``eval_count`` (tokens generated) and ``eval_duration``
+    (nanoseconds spent generating) on the final object of both the streaming and
+    non-streaming paths, so this is free -- no extra call, no timing of our own,
+    and no clock skew from network or queueing because the duration covers
+    GENERATION ONLY. That is what makes the average "when busy": idle time is
+    never part of it.
+
+    Never raises: throughput telemetry must not be able to fail an LLM call.
+    """
+    try:
+        if not isinstance(payload, dict):
+            return
+        n = payload.get("eval_count")
+        ns = payload.get("eval_duration")
+        if not n or not ns or ns <= 0:
+            return
+        tps = float(n) / (float(ns) / 1e9)
+        # A nonsensical value means the fields were not what we assumed; drop it
+        # rather than poison the average.
+        if not (0 < tps < 100000):
+            return
+        import main
+        store = main.state.setdefault("llm_tps", {})
+        key = str(model or "unknown")
+        samples = store.setdefault(key, [])
+        samples.append(round(tps, 2))
+        if len(samples) > _TPS_WINDOW:
+            del samples[:-_TPS_WINDOW]
+    except Exception:  # noqa: BLE001 — telemetry is never fatal
+        pass
+
 def _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
                     provider="ollama"):
     """Call an Ollama-compatible API (local or Ollama Cloud). Uses /api/chat natively.
@@ -1368,6 +1409,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         text = msg.get("content") or ""
         raw_tcs = msg.get("tool_calls") or None
         tool_calls = raw_tcs if isinstance(raw_tcs, list) and raw_tcs else None
+        _record_ollama_tps(model, data)
         return {"text": text, "tool_calls": tool_calls}
 
     full_response = ""
@@ -1377,6 +1419,10 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         try:
             chunk = json.loads(line.decode("utf-8") if isinstance(line, bytes) else line)
             content = chunk.get("message", {}).get("content") or chunk.get("response") or ""
+            # The last object of a stream carries done=true plus the eval_*
+            # counters for the whole generation; earlier chunks have neither.
+            if chunk.get("done"):
+                _record_ollama_tps(model, chunk)
             full_response += content
             main.state["llm_stream"] = full_response
             if task_id and task_id in main.state.get("active_tasks", {}):

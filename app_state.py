@@ -208,6 +208,14 @@ state = {
     "last_run": "Never", "api_status": "Not Triggered",
     "processed": processed_init,
     "version": get_version(), "llm_stream": "",
+    # Rolling generation throughput, "when busy": each entry is one completed
+    # Ollama generation's own tok/s, computed from the eval_count / eval_duration
+    # it already returns. Because those cover GENERATION time only, idle periods
+    # are excluded by construction -- no need to track busy/idle separately.
+    # Bounded deque: this is a live gauge, not history, and an unbounded list on
+    # a long-running service is a slow leak. Keyed by model, since a 31b and a 7b
+    # differ by an order of magnitude and one average over both is meaningless.
+    "llm_tps": {},
     "active_tasks": {}, "pr_reviews": load_pr_reviews(), "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "pending_verification_count": pending_verification_count,

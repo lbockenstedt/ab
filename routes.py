@@ -570,6 +570,49 @@ def _hub_connection_diag():
         return {"available": False, "error": str(e)}
 
 
+def _llm_tps_table():
+    """Per-model generation throughput, fastest first.
+
+    Each entry: model, avg, min, max, n. Only models with at least one completed
+    generation appear -- an entry with no samples would imply a measurement that
+    never happened.
+    """
+    try:
+        import main
+        rows = []
+        for model, samples in (main.state.get("llm_tps") or {}).items():
+            if not samples:
+                continue
+            rows.append({
+                "model": model,
+                "avg": round(sum(samples) / len(samples), 1),
+                "min": round(min(samples), 1),
+                "max": round(max(samples), 1),
+                "n": len(samples),
+            })
+        rows.sort(key=lambda r: r["avg"], reverse=True)
+        return rows
+    except Exception:  # noqa: BLE001 — a stats field must never 500 the endpoint
+        return []
+
+
+def _llm_tps_avg(model):
+    """Mean tok/s over the recent generations recorded for *model*.
+
+    Returns None when nothing has been measured yet, so the UI can show a dash
+    rather than a misleading 0 -- "no data" and "zero throughput" are different
+    states and conflating them would make a healthy idle box look broken.
+    """
+    try:
+        import main
+        samples = (main.state.get("llm_tps") or {}).get(str(model or ""), [])
+        if not samples:
+            return None
+        return round(sum(samples) / len(samples), 1)
+    except Exception:  # noqa: BLE001 — a stats field must never 500 the endpoint
+        return None
+
+
 def _system_stats():
     """Live host + process + LLM telemetry for the Diagnostics page. Never raises —
     every field degrades to None/[] so the panel can render partial data. psutil is
@@ -683,6 +726,18 @@ def _system_stats():
             "daily_fixes_count": state.get("daily_fixes_count"),
             "local_ensemble": bool(cfg.get("local_ensemble")),
             "crosscheck_target": cfg.get("CPU_CROSSCHECK_TARGET"),
+            # Rolling generation throughput for the model currently/last serving.
+            # Averaged over completed generations only (Ollama's eval_duration
+            # covers generation time), so it reads as "tok/s while busy" and is
+            # not diluted by idle time between calls.
+            "tps_avg": _llm_tps_avg(state.get("active_llm")),
+            "tps_samples": len((state.get("llm_tps") or {}).get(
+                str(state.get("active_llm") or ""), [])),
+            # EVERY model measured so far, fastest first — the point is comparing
+            # models against each other on this box, which a single active-model
+            # figure cannot answer. min/max come along because an average alone
+            # hides a model that is erratic rather than merely slower.
+            "tps_by_model": _llm_tps_table(),
         }
     except Exception:
         pass
