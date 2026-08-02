@@ -1262,7 +1262,11 @@
                                 <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 300 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
                             </div>
-                            <div class="space-y-2 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
+                            <!-- col-span-2, matching the parent md:grid-cols-2. It was
+                                 col-span-3: a child spanning 3 tracks in a 2-track grid makes
+                                 the browser add an implicit column, which distorts every track
+                                 and squeezes the whole section into a narrow left-hand column. -->
+                            <div class="space-y-2 col-span-1 md:col-span-2 border-t border-slate-200 pt-4 mt-2">
                                 <div class="flex items-center justify-between">
                                     <label class="text-sm font-medium text-slate-600">User Accounts <span class="text-slate-400 font-normal">(every account has full admin access)</span></label>
                                     <button type="button" onclick="loadAuthUsers()" class="btn-sec px-3 py-1 rounded font-bold text-xs">Refresh</button>
