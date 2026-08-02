@@ -316,6 +316,16 @@ cat > /usr/local/bin/bugfixer-ollama-setup <<'HELPER'
 set -uo pipefail
 num_thread="${1:-1}"
 max_loaded="${2:-3}"    # OLLAMA_MAX_LOADED_MODELS — how many models stay resident at once
+# OLLAMA_HOST — the address ollama BINDS to. Upstream defaults to 127.0.0.1, which
+# makes the API reachable only from the box itself; other hosts (a second
+# bugfixer, the hub, a workstation) get connection-refused. Bind all interfaces
+# so the model server is usable across the lab.
+#
+# NOTE: ollama has NO authentication. Anything that can reach this port can run
+# inference AND manage models (pull/delete). Keep it on a trusted segment, or
+# pass a specific address (e.g. 172.16.1.100:11434) as the 3rd argument to bind
+# one interface instead of all of them.
+bind_host="${3:-0.0.0.0:11434}"
 
 say() { echo "$1"; }
 
@@ -347,7 +357,7 @@ fi
 # CPU-tuning override.
 OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
 OVERRIDE="$OVERRIDE_DIR/override.conf"
-wanted=$(printf '[Service]\nEnvironment="OLLAMA_NUM_PARALLEL=1"\nEnvironment="OLLAMA_KEEP_ALIVE=-1"\nEnvironment="OLLAMA_NUM_THREAD=%s"\nEnvironment="OLLAMA_MAX_LOADED_MODELS=%s"\n' "$num_thread" "$max_loaded")
+wanted=$(printf '[Service]\nEnvironment="OLLAMA_NUM_PARALLEL=1"\nEnvironment="OLLAMA_KEEP_ALIVE=-1"\nEnvironment="OLLAMA_NUM_THREAD=%s"\nEnvironment="OLLAMA_MAX_LOADED_MODELS=%s"\nEnvironment="OLLAMA_HOST=%s"\n' "$num_thread" "$max_loaded" "$bind_host")
 current=""
 [ -f "$OVERRIDE" ] && current=$(cat "$OVERRIDE" 2>/dev/null || true)
 if [ "$current" != "$wanted" ]; then
@@ -358,7 +368,7 @@ if [ "$current" != "$wanted" ]; then
     if ! systemctl restart ollama; then
         say "ERROR: systemctl restart ollama failed"; exit 1
     fi
-    say "ok override applied + ollama restarted"
+    say "ok override applied + ollama restarted (listening on $bind_host)"
 else
     say "ok override already current"
 fi
