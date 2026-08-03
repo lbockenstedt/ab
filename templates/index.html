@@ -3497,8 +3497,14 @@
                                 : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">FAILED</span>'));
                     // A substituted model is called out explicitly — that swap is
                     // invisible in the vault UI and is exactly what 404s.
+                    // Reviewer and routed rows both carry routed_from, but they
+                    // mean different things: one is a model PR review calls
+                    // directly, the other a tier substitution. Same wording for
+                    // both would misattribute the failure.
                     const routed = x.routed_from
-                        ? '<div class="text-[11px] text-amber-700">slot is set to <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> — router uses <span class="font-mono">' + _bfEsc(x.model || '') + '</span> for this task tier</div>'
+                        ? (x.role === 'reviewer'
+                            ? '<div class="text-[11px] text-amber-700">reviewer model for this slot (used by PR review, not by normal tasks)</div>'
+                            : '<div class="text-[11px] text-amber-700">slot is set to <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> — router uses <span class="font-mono">' + _bfEsc(x.model || '') + '</span> for this task tier</div>')
                         : '';
                     const detail = x.ok
                         ? '<span class="text-slate-500">replied “' + _bfEsc(String(x.reply || '').slice(0, 60)) + '”</span>'

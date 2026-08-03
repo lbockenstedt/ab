@@ -2213,10 +2213,13 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
             # So probe the configured model, then the routed model when routing
             # actually resolves to something different. Each becomes its own row.
             # Collect EVERY distinct model this slot can actually serve.
-            routed_models = []
+            # (model, role) pairs. `seen` is hoisted OUT of the try below: the
+            # reviewer lookup after it dedupes against the same set, and a failed
+            # router import must not leave it undefined.
+            extra_models = []
+            seen = {model}
             try:
                 from model_router import pick_model as _rp
-                seen = {model}
                 # A specific task_kind probes just that tier; otherwise sweep all
                 # three so the default "Test all" covers every model the router
                 # can substitute, not only the small one.
@@ -2224,9 +2227,23 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
                     picked = _rp(_tk, provider, config, default=model)
                     if picked and picked not in seen:
                         seen.add(picked)
-                        routed_models.append(picked)
+                        extra_models.append((picked, "routed"))
             except Exception as e:  # noqa: BLE001 — routing is advisory here
                 logger.debug("llm_diag: router lookup failed for slot %s: %s", n, e)
+
+            # The reviewer model is a THIRD model a slot can serve, reached by a
+            # path nothing else here exercises: PR review calls it directly,
+            # bypassing both the configured model and tier routing. A stale ID
+            # there surfaces only when a review runs -- the moment it is least
+            # convenient to discover it.
+            try:
+                rev = (_get_reviewer_model(n, config) or "").strip()
+            except Exception as e:  # noqa: BLE001 — advisory, like routing
+                logger.debug("llm_diag: reviewer lookup failed for slot %s: %s", n, e)
+                rev = ""
+            if rev and rev not in seen:
+                seen.add(rev)
+                extra_models.append((rev, "reviewer"))
 
             # Which of those the account can actually serve. Routing now skips a
             # model that is not in the live catalogue (see the routing block in
@@ -2258,17 +2275,26 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
                 })
             else:
                 out.append(_probe_one(n, provider, key, url, model, None, pool))
-            for rm in routed_models:
+            for rm, role in extra_models:
                 if _avail is not None and rm not in _avail:
+                    # A reviewer model IS called as-is -- nothing substitutes for
+                    # it -- so an unavailable one is a real failure, not a
+                    # routing detail that resolves itself.
+                    _msg = ("not offered by this account — routing keeps the "
+                            "configured model, so nothing calls it"
+                            if role == "routed" else
+                            "not offered by this account — PR review on this slot "
+                            "will fail until it is changed")
                     out.append({
                         "slot": n, "pool": pool, "provider": provider, "model": rm,
-                        "routed_from": model, "configured": True, "ok": False,
-                        "skipped": True, "latency_ms": None, "reply": None,
-                        "error": ("not offered by this account — routing keeps the "
-                                  "configured model, so nothing calls it"),
+                        "routed_from": model, "role": role, "configured": True,
+                        "ok": False, "skipped": (role == "routed"),
+                        "latency_ms": None, "reply": None, "error": _msg,
                     })
                     continue
-                out.append(_probe_one(n, provider, key, url, rm, model, pool))
+                e = _probe_one(n, provider, key, url, rm, model, pool)
+                e["role"] = role
+                out.append(e)
             continue
         except Exception as e:  # noqa: BLE001 — one bad slot never sinks the report
             entry["error"] = f"diag failed for slot {n}: {str(e)[:300]}"
