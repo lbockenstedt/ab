@@ -1,3 +1,51 @@
+import os
+import sys
+
+# ── bytecode self-heal ───────────────────────────────────────────────────────
+# If the venv's site-packages is not writable by the user running us, CPython
+# fails on the FIRST import that has no cached .pyc:
+#   [Errno 13] Permission denied: .../site-packages/__pycache__/<mod>.pyc.<pid>
+# The real cause is install-time: install.sh chowns the tree to the service user
+# at step 2 but builds the venv as root at step 5, so site-packages is left
+# root-owned. That has been fixed in install.sh -- but the self-update path only
+# does a git pull and NEVER re-runs the installer, so an already-broken box would
+# stay broken forever and keep reporting it as "Self-update check failed",
+# a message that names neither permissions nor the venv.
+#
+# Repairing ownership needs root, which this process does not have. What it CAN
+# do is stop needing the write: disabling bytecode caching removes the failure
+# entirely. Costs a little import time and nothing else -- and only when the
+# directory is genuinely unwritable, so a healthy install keeps its cache.
+#
+# Deliberately does NOT silence the underlying problem: it logs, once, with the
+# exact command to fix it properly.
+def _bf_bytecode_self_heal():
+    try:
+        import sysconfig
+        target = sysconfig.get_paths().get("purelib")
+        if not target or not os.path.isdir(target):
+            return
+        if os.access(target, os.W_OK):
+            return          # healthy: keep bytecode caching
+        sys.dont_write_bytecode = True
+        owner = ""
+        try:
+            import pwd
+            owner = pwd.getpwuid(os.stat(target).st_uid).pw_name
+        except Exception:  # noqa: BLE001
+            pass
+        print(
+            f"[bugfixer] {target} is not writable by this user"
+            + (f" (owned by {owner})" if owner else "")
+            + " — disabling bytecode caching so imports do not fail. "
+              f"Repair with: sudo chown -R $(id -un) {os.path.dirname(os.path.dirname(os.path.dirname(target)))}",
+            file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001 — self-heal must never block startup
+        pass
+
+
+_bf_bytecode_self_heal()
+
 import asyncio
 import contextlib
 import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, re, uuid, collections
