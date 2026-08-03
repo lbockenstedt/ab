@@ -782,7 +782,13 @@ def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
             # tell which issue was in flight, or how far through the cycles it
             # was. task_id already identifies the issue; carry it, plus the file
             # under edit and the cycle position.
-            _tgt = os.path.basename(path) if path else ""
+            # Only name the target when it is actually a FILE. `path` is
+            # sometimes the repo root (the multi-file fix path passes the clone
+            # dir), and basename() on that yields the directory name -- the task
+            # read "· repo", which looks like a filename and tells you nothing.
+            # A directory carries no more information than task_id already does,
+            # so omit the segment entirely rather than print something wrong.
+            _tgt = os.path.basename(path) if (path and os.path.isfile(path)) else ""
             update_task_state(
                 task_id=task_id,
                 task_name=(f"Fixing {task_id}" + (f" · {_tgt}" if _tgt else "") +
