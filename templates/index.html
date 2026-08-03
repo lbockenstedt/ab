@@ -1956,7 +1956,7 @@
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead class="text-left text-xs text-slate-500 uppercase tracking-wider">
-                            <tr><th class="py-2 pr-3">Slot</th><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3">Configured</th><th class="py-2 pr-3">Online</th><th class="py-2 pr-3">Cooldown</th><th class="py-2 pr-3">Last result</th><th class="py-2 pr-3">RPM</th></tr>
+                            <tr><th class="py-2 pr-3">Slot</th><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3">Configured</th><th class="py-2 pr-3">Online</th><th class="py-2 pr-3">Cooldown</th><th class="py-2 pr-3">Last result</th><th class="py-2 pr-3" title="Measured generation speed for this slot's model — averaged over completed generations, so idle time is excluded">tok/s</th><th class="py-2 pr-3">RPM</th></tr>
                         </thead>
                         <tbody id="diag-providers-body"></tbody>
                     </table>
@@ -2834,9 +2834,21 @@
             if (h > 0) return h + 'h ' + m + 'm';
             return m + 'm';
         }
+        // Measured tok/s per model, shared by the header chip, the Model
+        // Performance panel, the provider table and the model picker — ONE
+        // cache so they cannot disagree. Declared here, above every consumer:
+        // refreshDiagnostics() runs well before the poller that fills it, and
+        // a later declaration left it undefined on the first render.
+        window._bfTps = window._bfTps || {};
+
         async function refreshSystemStats() {
             try {
                 const s = await fetch('/api/system-stats').then(r => r.json());
+                // Same payload carries the throughput table; fill the shared cache
+                // here as well as in the header poll, so the providers table has
+                // numbers on the FIRST Diagnostics render instead of dashes until
+                // the 5s header poll happens to land.
+                (((s || {}).llm || {}).tps_by_model || []).forEach(r => { window._bfTps[r.model] = r; });
                 const cpu = s.cpu || {}, mem = s.memory || {}, disk = s.disk || {}, up = s.uptime || {};
                 const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
                 // CPU: prefer sampled percent, else load%/1m
@@ -2922,6 +2934,13 @@
                         + '<td class="py-2 pr-3">' + _diagPill(p.online, p.online ? 'up' : 'down') + '</td>'
                         + '<td class="py-2 pr-3 text-xs text-slate-600">' + cd + '</td>'
                         + '<td class="py-2 pr-3 text-xs text-slate-600">' + lastTxt + '</td>'
+                        // Throughput for THIS slot's model. Keyed by model rather
+                        // than slot because that is how it is measured — two slots
+                        // pointed at the same model share one figure, which is
+                        // correct: the speed is a property of the model on this
+                        // box, not of the slot. '—' when never measured, never 0.
+                        + '<td class="py-2 pr-3 text-xs tabular-nums ' + (_tpsFor(p.model) ? 'font-semibold text-slate-700' : 'text-slate-400') + '">'
+                          + (_tpsFor(p.model) || '—') + '</td>'
                         + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.rpm || 0) + '</td>'
                         + '</tr>';
                 }).join('');
@@ -3212,9 +3231,15 @@
         // the operator infer it from parameter count. Populated from the same
         // /api/system-stats poll the header already runs; only models that have
         // actually generated something appear.
-        window._bfTps = {};
+        // Bare "N tok/s" for table cells, from the same measured cache the header
+        // and Model Performance panel use — one source, so they cannot disagree.
+        function _tpsFor(model) {
+            const r = (window._bfTps || {})[model];
+            return r ? (r.avg + ' tok/s') : '';
+        }
+
         function bfTpsLabel(model) {
-            const r = window._bfTps[model];
+            const r = (window._bfTps || {})[model];
             if (!r) return '';
             return `  ·  ${r.avg} tok/s${r.n > 1 ? ` (avg of ${r.n})` : ''}`;
         }
@@ -4280,7 +4305,7 @@
                         opt.value = m.name;
                         const base = m.details ? `${m.name} — ${m.details}` : m.name;
                         opt.textContent = base + bfTpsLabel(m.name);
-                        const _r = window._bfTps[m.name];
+                        const _r = (window._bfTps || {})[m.name];
                         if (_r) opt.title = `${_r.avg} tok/s average over ${_r.n} generation(s) ` +
                                             `(min ${_r.min}, max ${_r.max}) measured on this box`;
                         if (m.name === prevVal) { opt.selected = true; found = true; }
