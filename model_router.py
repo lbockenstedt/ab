@@ -45,8 +45,14 @@ _DEFAULT_MODELS = {
         "large":  "claude-opus-4-8",              # Opus 4.8 — top reasoning
     },
     "google": {
-        "small":  "gemini-2.5-flash-lite",
-        "medium": "gemini-2.5-flash",
+        # Rolling aliases, not pinned versions. gemini-2.5-flash-lite was pinned
+        # here and Google retired it for new accounts -- it still appears in the
+        # models listing but 404s on generateContent with "no longer available to
+        # new users", so every small-tier task on a Google slot failed and the
+        # live-catalogue guard could not see it coming. An alias tracks whatever
+        # is current and does not strand us on a retired version again.
+        "small":  "gemini-flash-lite-latest",
+        "medium": "gemini-flash-latest",
         "large":  "gemini-2.5-pro",
     },
 }
