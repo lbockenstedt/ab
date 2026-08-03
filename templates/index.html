@@ -570,6 +570,17 @@
                                 {% endfor %}
                             </div>
                             {% endif %}
+                            {% if pr.panel_status %}
+                            <div class="text-[11px] text-slate-500 italic mb-1">🧠 Panel unavailable this pass ({{ pr.panel_status }}).</div>
+                            {% elif pr.panel_critique %}
+                            <!-- The panel's reasoning, the same text the GitHub comment
+                                 carries. Without it the row showed only a verdict badge,
+                                 so reading the review meant leaving the app. -->
+                            <div class="mb-1">
+                                <span class="font-semibold text-slate-600 text-xs">🧠 Skeptical review{% if pr.panel_verdict %} — {{ pr.panel_verdict }}{% if pr.panel_confidence is not none %} · {{ (pr.panel_confidence * 100)|round|int }}%{% endif %}{% endif %}:</span>
+                                <div class="text-[11px] text-slate-600 whitespace-pre-line pl-2 mt-0.5">{{ pr.panel_critique }}</div>
+                            </div>
+                            {% endif %}
                             <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-[10px] italic">
                                 <span class="font-semibold not-italic text-slate-600 break-all">{{ pr.title }}</span>
                                 <span class="mx-2 text-slate-300">|</span>

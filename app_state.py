@@ -96,6 +96,13 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     _r = review or {}
     panel_status = _r.get("status") or ""          # set only when the panel could not run
     panel_verdict = "" if panel_status else str(_r.get("verdict") or "")
+    # The panel's REASONING, not just its verdict. The GitHub comment renders this
+    # (pr_review._render_panel appends `critique`), but it was never stored -- so
+    # the UI could say "ADVISORY APPROVE · 95%" and nothing about WHY, forcing a
+    # click through to GitHub for the substance of a review the bot had already
+    # done. Bounded because it is persisted to pr_reviews.json and rendered in a
+    # table row.
+    panel_critique = ("" if panel_status else str(_r.get("critique") or "").strip())[:4000]
     panel_confidence = None
     if not panel_status and _r.get("confidence") is not None:
         try:
@@ -126,6 +133,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "panel_verdict": panel_verdict,
                 "panel_confidence": panel_confidence,
                 "panel_status": panel_status,
+                "panel_critique": panel_critique,
                 # Preserve a human's Approve across re-scans; reset if the head moved.
                 "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
                 # Merged is terminal — keep it so the PR stays listed with its badge.
