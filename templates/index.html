@@ -144,6 +144,14 @@
            `flex`/`w-full` utilities some buttons already use. */
         button { white-space: nowrap; }
         .btn-primary, .btn-sec, .filter-btn { align-items: center; justify-content: center; gap: 0.375rem; }
+        /* Uniform filter buttons. Width is set from the LONGEST label
+           ("Pending Verification", 20 chars) plus the icon, gap and padding, so
+           nothing wraps and every button matches -- which also makes the issue
+           row and the PR row line up column-for-column instead of each being
+           packed to its own content width. Scoped to .filter-btn: the same
+           min-width on .btn-primary/.btn-sec would stretch every Save button in
+           the app. */
+        .filter-btn { min-width: 11rem; white-space: nowrap; }
         /* Soft danger variant (LM red-100 token) — matches btn-primary/btn-sec so
            Dismiss / Clear actions are a consistent size + shape, colour aside. */
         .btn-danger {
