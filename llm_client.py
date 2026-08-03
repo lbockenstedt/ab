@@ -2035,6 +2035,28 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
     probe_cfg["LLM_5XX_MAX_RETRIES"] = 0
     probe_cfg["batch_enabled"] = False          # never route a probe through the batch API
 
+    def _probe_one(n, provider, key, url, model, routed_from, pool):
+        """One real call against ONE model. Returns a result entry."""
+        e = {"slot": n, "pool": pool, "provider": provider, "model": model,
+             "routed_from": routed_from, "configured": True, "ok": False,
+             "latency_ms": None, "error": None, "reply": None}
+        t0 = time.time()
+        try:
+            res = _call_provider(provider, model, key, url, messages,
+                                 None, False, None, probe_cfg)
+            e["latency_ms"] = int((time.time() - t0) * 1000)
+            text = res.get("text") if isinstance(res, dict) else res
+            e["reply"] = (str(text or "").strip()[:200]) or None
+            # An empty body is a failure: the call "succeeded" but the model
+            # returned nothing usable, which downstream code treats as an error.
+            e["ok"] = bool(e["reply"])
+            if not e["ok"]:
+                e["error"] = "provider returned an empty response"
+        except Exception as ex:  # noqa: BLE001 — the error IS the result here
+            e["latency_ms"] = int((time.time() - t0) * 1000)
+            e["error"] = str(ex)[:400]
+        return e
+
     out = []
     for n in slots:
         # Which pool this slot belongs to, so the UI can group them and an
@@ -2054,31 +2076,42 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
                                   else "no API key (this provider requires one)")
                 out.append(entry)
                 continue
-            # Report + probe the model the ROUTER would actually use for this task.
-            if task_kind:
-                try:
-                    from model_router import pick_model as _rp
-                    picked = _rp(task_kind, provider, config, default=model)
-                    if picked and picked != model:
-                        entry["routed_from"], entry["model"] = model, picked
-                        model = picked
-                except Exception as e:  # noqa: BLE001 — routing is advisory here
-                    logger.debug("llm_diag: router lookup failed for slot %s: %s", n, e)
-            t0 = time.time()
+            pool = entry["pool"]
+            # A slot can serve TWO different models: the one configured on it,
+            # and the one model_router SUBSTITUTES for a task tier (cloud slots
+            # only — local providers keep their configured model). Testing just
+            # one proves nothing about the other: a configured model that answers
+            # fine says nothing about a routed model that 404s on the account,
+            # which is exactly the failure the router introduces and the reason
+            # this probe reports routed_from at all.
+            #
+            # So probe the configured model, then the routed model when routing
+            # actually resolves to something different. Each becomes its own row.
+            # Collect EVERY distinct model this slot can actually serve.
+            routed_models = []
             try:
-                res = _call_provider(provider, model, key, url, messages,
-                                     None, False, None, probe_cfg)
-                entry["latency_ms"] = int((time.time() - t0) * 1000)
-                text = res.get("text") if isinstance(res, dict) else res
-                entry["reply"] = (str(text or "").strip()[:200]) or None
-                # An empty body is a failure: the call "succeeded" but the model
-                # returned nothing usable, which downstream code treats as an error.
-                entry["ok"] = bool(entry["reply"])
-                if not entry["ok"]:
-                    entry["error"] = "provider returned an empty response"
-            except Exception as e:  # noqa: BLE001 — the error IS the result here
-                entry["latency_ms"] = int((time.time() - t0) * 1000)
-                entry["error"] = str(e)[:400]
+                from model_router import pick_model as _rp
+                seen = {model}
+                # A specific task_kind probes just that tier; otherwise sweep all
+                # three so the default "Test all" covers every model the router
+                # can substitute, not only the small one.
+                for _tk in ([task_kind] if task_kind else ("triage", "review", "fix")):
+                    picked = _rp(_tk, provider, config, default=model)
+                    if picked and picked not in seen:
+                        seen.add(picked)
+                        routed_models.append(picked)
+            except Exception as e:  # noqa: BLE001 — routing is advisory here
+                logger.debug("llm_diag: router lookup failed for slot %s: %s", n, e)
+
+            # Configured model first, then each routed one, as separate rows.
+            # Local providers (ollama / lmstudio / claude_cli) keep their
+            # configured model, so routed_models is empty for them and this stays
+            # one call per slot -- the extra calls land only on cloud slots,
+            # which is where a routed-model failure can actually happen.
+            out.append(_probe_one(n, provider, key, url, model, None, pool))
+            for rm in routed_models:
+                out.append(_probe_one(n, provider, key, url, rm, model, pool))
+            continue
         except Exception as e:  # noqa: BLE001 — one bad slot never sinks the report
             entry["error"] = f"diag failed for slot {n}: {str(e)[:300]}"
         out.append(entry)

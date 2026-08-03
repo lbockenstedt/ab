@@ -283,11 +283,16 @@ async def llm_diag_run(request: Request):
         started = time.time()
         results = await asyncio.to_thread(
             llm_diag, slot=slot, task_kind=task_kind, timeout_s=timeout_s)
+        # A slot can now yield MORE THAN ONE row (configured model + each model
+        # the router substitutes), so "rows" and "slots" are different numbers
+        # and the summary must not conflate them.
         ok = sum(1 for r in results if r.get("ok"))
         configured = sum(1 for r in results if r.get("configured"))
+        slots_seen = len({r.get("slot") for r in results})
         return {
             "results": results,
             "summary": {"ok": ok, "configured": configured, "total": len(results),
+                        "slots": slots_seen,
                         "elapsed_ms": int((time.time() - started) * 1000)},
             "task_kind": task_kind,
             "timeout_s": timeout_s,

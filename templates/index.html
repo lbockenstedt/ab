@@ -3523,7 +3523,8 @@
                     '<th class="px-3 py-2 text-left">Result</th><th class="px-3 py-2 text-center">Latency</th>' +
                     '<th class="px-3 py-2 text-left">Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
                 const s = d.summary || {};
-                if (summary) summary.textContent = s.ok + '/' + s.configured + ' configured slot(s) answered' +
+                if (summary) summary.textContent = s.ok + '/' + s.configured + ' model check(s) passed across ' +
+                    (s.slots != null ? s.slots + ' slot(s)' : 'all slots') +
                     (s.elapsed_ms != null ? ' · ' + (s.elapsed_ms / 1000).toFixed(1) + 's' : '');
             } catch (e) {
                 body.innerHTML = '<span class="text-red-600">Diag request failed: ' + _bfEsc(String(e && e.message || e)) + '</span>';
