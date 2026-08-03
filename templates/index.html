@@ -377,6 +377,15 @@
                                         {% endif %}
                                     </div>
                                     <p class="text-slate-700 font-mono text-xs break-all font-bold">{{ task.name }}</p>
+                                    <!-- The task id (issue / repo / worker) shown regardless of
+                                         what the name happens to say. Task names are written by
+                                         many call sites and some describe only the mechanism
+                                         ("CPU build <model>"), leaving an operator unable to tell
+                                         WHICH issue is in flight. Rendering the id here fixes that
+                                         for every task, not just the ones whose name remembers. -->
+                                    {% if tid and tid not in task.name %}
+                                    <p class="text-slate-500 font-mono text-[10px] break-all mt-0.5">{{ tid }}</p>
+                                    {% endif %}
                                 </div>
                             {% endfor %}
                         {% else %}

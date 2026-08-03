@@ -775,7 +775,19 @@ def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
                 repo_git.git.clean("-fd")
             except Exception:  # noqa: BLE001
                 pass
-            update_task_state(task_id=task_id, task_name=f"CPU build {mdl}", action="start")
+            # Name the WORK, not just the mechanism. This used to read
+            # "CPU build <model>", which says what the machine is doing but not
+            # what it is doing it TO -- and the dashboard renders only the task
+            # NAME, so an operator watching a multi-minute ensemble had no way to
+            # tell which issue was in flight, or how far through the cycles it
+            # was. task_id already identifies the issue; carry it, plus the file
+            # under edit and the cycle position.
+            _tgt = os.path.basename(path) if path else ""
+            update_task_state(
+                task_id=task_id,
+                task_name=(f"Fixing {task_id}" + (f" · {_tgt}" if _tgt else "") +
+                           f" — CPU build {mdl} (cycle {cycle}/{len(external_slots)})"),
+                action="start")
             fix_code = apply_ai_fix(path, fix_body, err, force_provider=1, model_override=mdl, task_id=task_id)
             ok, fixes, _conf = parse_and_apply(fix_code, path)
             if not ok:
