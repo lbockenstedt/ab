@@ -12,7 +12,6 @@ from main import (
     _module_log_fix_context,
     _find_claude_cli_slot,
     _get_provider_config,
-    _get_reviewer_model,
     _get_escalation_models,
     _is_ollama,
     _ollama_base_url,
@@ -525,8 +524,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         provider, key, model, _ = _get_provider_config(n, config)
         if not _provider_configured(provider, key, model):
             continue
-        r_model = _get_reviewer_model(n, config) or model
-        reviewers.append({"name": f"Reviewer {n} ({provider})", "model": r_model, "provider_n": n})
+        reviewers.append({"name": f"Reviewer {n} ({provider})", "model": model, "provider_n": n})
 
     if not reviewers:
         logger.warning("No reviewers configured. Falling back to default LLM review.")

@@ -1029,9 +1029,6 @@
                                         <option value="">— save credential first —</option>
                                     </select>
                                     <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <select id="new-entry-reviewer" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="">— same as model —</option>
-                                    </select>
                                     <input type="text" id="new-entry-baseurl" placeholder="Base URL (optional — e.g. http://gpu-box:11434)" title="Per-entry endpoint. Overrides the shared credential — lets 3 ollama entries target local CPU / LAN GPU / cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <input type="text" id="new-entry-apikey" placeholder="API key (optional — overrides shared)" title="Per-entry key. Set only for a cloud endpoint that needs one." class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <input type="text" id="new-entry-escalation" placeholder="Ratchet models (optional — 7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every model installed on this ollama endpoint. Blank = just the model above." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
@@ -1074,9 +1071,6 @@
                                                 <option value="{{ entry.model }}" selected>{{ entry.model }}</option>
                                             </select>
                                             <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <select id="edit-reviewer-{{ entry.id }}" data-saved="{{ entry.reviewer_model or '' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                                {% if entry.reviewer_model %}<option value="{{ entry.reviewer_model }}" selected>{{ entry.reviewer_model }}</option>{% else %}<option value="" selected>— same as model —</option>{% endif %}
-                                            </select>
                                             <input type="text" id="edit-baseurl-{{ entry.id }}" value="{{ entry.base_url or '' }}" placeholder="Base URL (e.g. http://localhost:11434)" title="Per-entry endpoint. Overrides the shared credential — set localhost for a local CPU ollama, a LAN IP for a GPU box, or https://ollama.com for cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-apikey-{{ entry.id }}" value="{{ entry.api_key or '' }}" placeholder="API key (optional — overrides shared)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-escalation-{{ entry.id }}" value="{{ entry.escalation_models or '' }}" placeholder="Ratchet models (7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every installed model on this endpoint." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
@@ -3532,14 +3526,8 @@
                                 : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">FAILED</span>'));
                     // A substituted model is called out explicitly — that swap is
                     // invisible in the vault UI and is exactly what 404s.
-                    // Reviewer and routed rows both carry routed_from, but they
-                    // mean different things: one is a model PR review calls
-                    // directly, the other a tier substitution. Same wording for
-                    // both would misattribute the failure.
                     const routed = x.routed_from
-                        ? (x.role === 'reviewer'
-                            ? '<div class="text-[11px] text-amber-700">reviewer model for this slot (used by PR review, not by normal tasks)</div>'
-                            : '<div class="text-[11px] text-amber-700">slot is set to <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> — router uses <span class="font-mono">' + _bfEsc(x.model || '') + '</span> for this task tier</div>')
+                        ? '<div class="text-[11px] text-amber-700">slot is set to <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> — router uses <span class="font-mono">' + _bfEsc(x.model || '') + '</span> for this task tier</div>'
                         : '';
                     const detail = x.ok
                         ? '<span class="text-slate-500">replied “' + _bfEsc(String(x.reply || '').slice(0, 60)) + '”</span>'
@@ -3919,18 +3907,9 @@
             }
         }
 
-        // Reviewer Model is optional: a blank value means "use the entry's main
-        // model" (the backend treats an empty reviewer_model as same-as-model).
-        // Same option list as the model select, but the blank choice reads
-        // "— same as model —" instead of "— pick a model —".
-        function _fillReviewerSelect(sel, models, currentReviewer, provider) {
-            _fillModelSelect(sel, models, currentReviewer, provider, '— same as model —');
-        }
-
         async function loadVaultModels() {
             const provider = document.getElementById('new-entry-provider')?.value;
             const sel = document.getElementById('new-entry-model');
-            const reviewerSel = document.getElementById('new-entry-reviewer');
             if (!sel || !provider) return;
             sel.innerHTML = '<option value="">Loading…</option>';
             sel.disabled = true;
@@ -3940,7 +3919,6 @@
             if (provider === 'claude_cli') {
                 sel.disabled = false;
                 _fillModelSelect(sel, _CLAUDE_CLI_MODELS, '', provider);
-                _fillReviewerSelect(reviewerSel, _CLAUDE_CLI_MODELS, '', provider);
                 updateDefaultRpm();
                 return;
             }
@@ -3964,10 +3942,8 @@
                     o.value = ''; o.textContent = '⚠ ' + data.error;
                     o.style.color = '#b91c1c';
                     sel.appendChild(o);
-                    if (reviewerSel) reviewerSel.innerHTML = '<option value="">— same as model —</option>';
                 } else {
                     _fillModelSelect(sel, models, '', provider);
-                    _fillReviewerSelect(reviewerSel, models, '', provider);
                 }
             } catch(e) {
                 sel.disabled = false;
@@ -3975,7 +3951,6 @@
                 const err = document.createElement('option');
                 err.value = ''; err.textContent = 'Error loading models';
                 sel.appendChild(err);
-                if (reviewerSel) reviewerSel.innerHTML = '<option value="">— same as model —</option>';
             }
         }
 
@@ -3984,7 +3959,6 @@
             const provider = document.getElementById('new-entry-provider')?.value;
             const model = document.getElementById('new-entry-model')?.value;
             const rpm = parseInt(document.getElementById('new-entry-rpm')?.value || '0');
-            const reviewer_model = document.getElementById('new-entry-reviewer')?.value.trim() || '';
             const base_url = document.getElementById('new-entry-baseurl')?.value.trim() || '';
             const api_key = document.getElementById('new-entry-apikey')?.value.trim() || '';
             const escalation_models = document.getElementById('new-entry-escalation')?.value.trim() || '';
@@ -3992,7 +3966,7 @@
             const resp = await fetch('/api/llm/entries', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model, base_url, api_key, escalation_models})
+                body: JSON.stringify({label: label || model, provider, model, rpm, base_url, api_key, escalation_models})
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to add entry.', 'error');
@@ -4014,15 +3988,12 @@
             const sel = document.getElementById(`edit-model-${id}`);
             if (!sel || !provider) return;
             const currentModel = sel.value;
-            const reviewerSel = document.getElementById(`edit-reviewer-${id}`);
-            const savedReviewer = reviewerSel?.dataset.saved || '';
             sel.innerHTML = '<option value="">Loading…</option>';
             sel.disabled = true;
             // claude_cli has a fixed model roster — no server call needed.
             if (provider === 'claude_cli') {
                 sel.disabled = false;
                 _fillModelSelect(sel, _CLAUDE_CLI_MODELS, currentModel, provider);
-                _fillReviewerSelect(reviewerSel, _CLAUDE_CLI_MODELS, savedReviewer, provider);
                 return;
             }
             const vaultBaseUrl = (document.getElementById('vault-url-' + provider)?.value || '').trim();
@@ -4043,16 +4014,8 @@
                     o.value = currentModel; o.textContent = '⚠ ' + data.error;
                     o.style.color = '#b91c1c';
                     sel.appendChild(o);
-                    if (reviewerSel) {
-                        reviewerSel.innerHTML = '';
-                        const ro = document.createElement('option');
-                        ro.value = savedReviewer; ro.textContent = savedReviewer || '— same as model —';
-                        if (!savedReviewer) ro.selected = true;
-                        reviewerSel.appendChild(ro);
-                    }
                 } else {
                     _fillModelSelect(sel, models, currentModel, provider);
-                    _fillReviewerSelect(reviewerSel, models, savedReviewer, provider);
                 }
             } catch(e) {
                 sel.disabled = false;
@@ -4060,13 +4023,6 @@
                 const o = document.createElement('option');
                 o.value = currentModel; o.textContent = currentModel;
                 sel.appendChild(o);
-                if (reviewerSel) {
-                    reviewerSel.innerHTML = '';
-                    const ro = document.createElement('option');
-                    ro.value = savedReviewer; ro.textContent = savedReviewer || '— same as model —';
-                    if (!savedReviewer) ro.selected = true;
-                    reviewerSel.appendChild(ro);
-                }
             }
         }
 
@@ -4082,7 +4038,6 @@
             const provider = document.getElementById(`edit-provider-${id}`)?.value;
             const model = document.getElementById(`edit-model-${id}`)?.value;
             const rpm = parseInt(document.getElementById(`edit-rpm-${id}`)?.value || '0');
-            const reviewer_model = document.getElementById(`edit-reviewer-${id}`)?.value.trim() || '';
             const base_url = document.getElementById(`edit-baseurl-${id}`)?.value.trim() || '';
             const api_key = document.getElementById(`edit-apikey-${id}`)?.value.trim() || '';
             const escalation_models = document.getElementById(`edit-escalation-${id}`)?.value.trim() || '';
@@ -4090,7 +4045,7 @@
             const resp = await fetch(`/api/llm/entries/${id}`, {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, reviewer_model, base_url, api_key, escalation_models})
+                body: JSON.stringify({label: label || model, provider, model, rpm, base_url, api_key, escalation_models})
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to save entry.', 'error');
@@ -4469,20 +4424,6 @@
                     }
                     if (statusEl) statusEl.textContent = `(${models.length} available)`;
                     bfAnnotateModelSelects();
-                }
-
-                // Mirror the same options into the matching Reviewer Model dropdown.
-                const reviewerSel = document.getElementById(`reviewer-model-${n}`);
-                if (reviewerSel && models.length > 0) {
-                    const savedReviewer = reviewerSel.value;
-                    reviewerSel.innerHTML = '<option value="">— same as Provider ' + n + ' —</option>';
-                    models.forEach(m => {
-                        const opt = document.createElement('option');
-                        opt.value = m.name;
-                        opt.textContent = m.details ? `${m.name} — ${m.details}` : m.name;
-                        if (m.name === savedReviewer) opt.selected = true;
-                        reviewerSel.appendChild(opt);
-                    });
                 }
             } catch (e) {
                 select.innerHTML = '<option value="">— fetch failed —</option>';

@@ -1640,10 +1640,6 @@ DEFAULT_ENV = {
     "LLM_TIMEOUT": "900",
     "MAX_CONCURRENT_FIXES": "5",
     "TRIAGE_STRICTNESS": "Moderate",
-    "REVIEWER_MODEL_1": "",
-    "REVIEWER_MODEL_2": "",
-    "REVIEWER_MODEL_3": "",
-    "REVIEWER_MODEL_4": "",
     "LLM_RPM_1": "0",
     "LLM_RPM_2": "0",
     "LLM_RPM_3": "0",
@@ -1902,10 +1898,6 @@ async def save_settings(request: Request):
         "LLM_TIMEOUT": lambda v: v,
         "MAX_CONCURRENT_FIXES": lambda v: v,
         "TRIAGE_STRICTNESS": lambda v: v,
-        "REVIEWER_MODEL_1": lambda v: v,
-        "REVIEWER_MODEL_2": lambda v: v,
-        "REVIEWER_MODEL_3": lambda v: v,
-        "REVIEWER_MODEL_4": lambda v: v,
         "LLM_RPM_1": lambda v: v,
         "LLM_RPM_2": lambda v: v,
         "LLM_RPM_3": lambda v: v,
@@ -2282,7 +2274,6 @@ async def create_llm_entry(request: Request):
         "provider": (data.get("provider") or "openai").lower().strip(),
         "model": (data.get("model") or "").strip(),
         "rpm": int(data.get("rpm") or 0),
-        "reviewer_model": (data.get("reviewer_model") or "").strip(),
         # Per-entry base_url / api_key override the shared per-provider credential,
         # so e.g. three `ollama` entries can independently target local CPU
         # (http://localhost:11434), a remote-GPU box on the LAN, and Ollama Cloud.
@@ -2320,7 +2311,6 @@ async def update_llm_entry(entry_id: str, request: Request):
                     e["rpm"] = max(0, int(data.get("rpm") or 0))
                 except (TypeError, ValueError):
                     e["rpm"] = 0
-            e["reviewer_model"] = (data.get("reviewer_model") or "").strip()
             # Per-entry overrides. Only overwrite when the key is present in the
             # payload so a partial update doesn't wipe an existing value.
             if "base_url" in data:

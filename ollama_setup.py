@@ -474,7 +474,6 @@ def run_local_llm_setup(model, num_ctx, cores, slot=4):
                 "provider": "ollama",
                 "model": derived_tag,
                 "rpm": 0,
-                "reviewer_model": "",
             }
             entries.append(entry)
         else:

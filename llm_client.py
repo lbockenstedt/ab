@@ -1,7 +1,7 @@
 """Multi-provider LLM routing + circuit breakers for BugFixer.
 
 Extracted verbatim from main.py (highest-value split): the provider constants,
-message converters, per-provider config/rpm/reviewer helpers, credit-exhaustion
+message converters, per-provider config/rpm helpers, credit-exhaustion
 and rate-limit circuit breakers, the shared LLM semaphore, the retry-aware POST
 wrapper, the per-provider request functions, _call_provider, and call_llm. Pure
 move, no behavior change.
@@ -460,17 +460,6 @@ def _get_provider_rpm(n, config):
             if e.get("id") == entry_id:
                 return int(e.get("rpm") or 0)
     return int(config.get(f"LLM_RPM_{n}") or 0)
-
-
-def _get_reviewer_model(n, config):
-    """Return reviewer model override for slot n, from vault entry or legacy key."""
-    slots = config.get("llm_slots") or {}
-    entry_id = slots.get(str(n))
-    if entry_id:
-        for e in (config.get("llm_entries") or []):
-            if e.get("id") == entry_id:
-                return (e.get("reviewer_model") or "").strip()
-    return (config.get(f"REVIEWER_MODEL_{n}") or "").strip()
 
 
 def _get_escalation_models(n, config):
@@ -2236,9 +2225,8 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
             # So probe the configured model, then the routed model when routing
             # actually resolves to something different. Each becomes its own row.
             # Collect EVERY distinct model this slot can actually serve.
-            # (model, role) pairs. `seen` is hoisted OUT of the try below: the
-            # reviewer lookup after it dedupes against the same set, and a failed
-            # router import must not leave it undefined.
+            # (model, role) pairs. `seen` is hoisted OUT of the try below so a
+            # failed router import cannot leave it undefined.
             extra_models = []
             seen = {model}
             try:
@@ -2253,20 +2241,6 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
                         extra_models.append((picked, "routed"))
             except Exception as e:  # noqa: BLE001 — routing is advisory here
                 logger.debug("llm_diag: router lookup failed for slot %s: %s", n, e)
-
-            # The reviewer model is a THIRD model a slot can serve, reached by a
-            # path nothing else here exercises: PR review calls it directly,
-            # bypassing both the configured model and tier routing. A stale ID
-            # there surfaces only when a review runs -- the moment it is least
-            # convenient to discover it.
-            try:
-                rev = (_get_reviewer_model(n, config) or "").strip()
-            except Exception as e:  # noqa: BLE001 — advisory, like routing
-                logger.debug("llm_diag: reviewer lookup failed for slot %s: %s", n, e)
-                rev = ""
-            if rev and rev not in seen:
-                seen.add(rev)
-                extra_models.append((rev, "reviewer"))
 
             # Which of those the account can actually serve. Routing now skips a
             # model that is not in the live catalogue (see the routing block in
@@ -2300,19 +2274,13 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
                 out.append(_probe_one(n, provider, key, url, model, None, pool))
             for rm, role in extra_models:
                 if _avail is not None and rm not in _avail:
-                    # A reviewer model IS called as-is -- nothing substitutes for
-                    # it -- so an unavailable one is a real failure, not a
-                    # routing detail that resolves itself.
-                    _msg = ("not offered by this account — routing keeps the "
-                            "configured model, so nothing calls it"
-                            if role == "routed" else
-                            "not offered by this account — PR review on this slot "
-                            "will fail until it is changed")
                     out.append({
                         "slot": n, "pool": pool, "provider": provider, "model": rm,
                         "routed_from": model, "role": role, "configured": True,
-                        "ok": False, "skipped": (role == "routed"),
-                        "latency_ms": None, "reply": None, "error": _msg,
+                        "ok": False, "skipped": True,
+                        "latency_ms": None, "reply": None,
+                        "error": ("not offered by this account — routing keeps the "
+                                  "configured model, so nothing calls it"),
                     })
                     continue
                 e = _probe_one(n, provider, key, url, rm, model, pool)
