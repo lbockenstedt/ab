@@ -1821,7 +1821,7 @@
                         </select></label>
                     <label class="text-xs text-slate-500">Timeout (s)
                         <input type="number" id="llmdiag-timeout" value="30" min="5" max="120" class="mt-1 block w-24 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]"></label>
-                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded font-bold text-xs">Test all slots</button>
+                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded font-bold text-xs">Test all (code + log) slots</button>
                     <span id="llmdiag-summary" class="text-xs text-slate-500"></span>
                 </div>
                 <div id="llmdiag-body" class="text-sm text-slate-500 italic">Not run yet — nothing is called until you click Test.</div>
@@ -3501,7 +3501,16 @@
                         ? '<span class="text-slate-500">replied “' + _bfEsc(String(x.reply || '').slice(0, 60)) + '”</span>'
                         : '<span class="text-red-600">' + _bfEsc(x.error || 'no response') + '</span>';
                     return '<tr class="border-b border-slate-100 align-top">' +
-                        '<td class="px-3 py-2 font-bold text-slate-700">P' + x.slot + '</td>' +
+                        '<td class="px-3 py-2 font-bold text-slate-700">P' + x.slot +
+                            // Pool label: slots 5-6 serve log analysis only and are
+                            // usually a different provider/host from the code slots,
+                            // so "P5 failed" needs to read as a LOG failure, not just
+                            // another slot. Consequences differ — code slots stop
+                            // fixes, log slots stop analysis silently.
+                            (x.pool === 'log'
+                              ? '<div class="text-[10px] font-normal text-indigo-600 uppercase tracking-wider">log</div>'
+                              : '<div class="text-[10px] font-normal text-slate-400 uppercase tracking-wider">code</div>')
+                            + '</td>' +
                         '<td class="px-3 py-2 text-slate-600">' + _bfEsc(x.provider || '—') +
                             '<div class="font-mono text-[11px] text-slate-500">' + _bfEsc(x.model || '—') + '</div>' + routed + '</td>' +
                         '<td class="px-3 py-2">' + pill + '</td>' +

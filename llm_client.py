@@ -2017,7 +2017,13 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
     reported as ``ok: False`` with the error text.
     """
     config = config or load_config()
-    slots = [int(slot)] if slot else [1, 2, 3, 4]
+    # _ALL_SLOTS, not a hardcoded 1-4: the log-analysis pool (5-6) was excluded
+    # from this probe entirely, so a log slot with a bad key, an unreachable host
+    # or a model that 404s reported nothing here and only surfaced as log analysis
+    # quietly producing nothing. Those slots are exactly the ones a reachability
+    # check should cover — they are usually a DIFFERENT provider/host from the
+    # code slots, so the code slots passing says nothing about them.
+    slots = [int(slot)] if slot else list(_ALL_SLOTS)
     # Small but not empty: some providers reject a zero-token turn, and a fixed
     # expected answer makes a garbled/echoing model obvious at a glance.
     messages = [{"role": "user", "content": "Reply with the single word: OK"}]
@@ -2031,7 +2037,11 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
 
     out = []
     for n in slots:
-        entry = {"slot": n, "provider": None, "model": None, "routed_from": None,
+        # Which pool this slot belongs to, so the UI can group them and an
+        # operator can tell at a glance that a failure is log-side rather than
+        # code-side — the two have very different consequences.
+        entry = {"slot": n, "pool": ("log" if n in _LOG_SLOTS else "code"),
+                 "provider": None, "model": None, "routed_from": None,
                  "configured": False, "ok": False, "latency_ms": None,
                  "error": None, "reply": None}
         try:
