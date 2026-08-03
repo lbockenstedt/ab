@@ -3498,7 +3498,7 @@
                     // A substituted model is called out explicitly — that swap is
                     // invisible in the vault UI and is exactly what 404s.
                     const routed = x.routed_from
-                        ? '<div class="text-[11px] text-amber-700">router substituted <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> → <span class="font-mono">' + _bfEsc(x.model || '') + '</span></div>'
+                        ? '<div class="text-[11px] text-amber-700">slot is set to <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> — router uses <span class="font-mono">' + _bfEsc(x.model || '') + '</span> for this task tier</div>'
                         : '';
                     const detail = x.ok
                         ? '<span class="text-slate-500">replied “' + _bfEsc(String(x.reply || '').slice(0, 60)) + '”</span>'
