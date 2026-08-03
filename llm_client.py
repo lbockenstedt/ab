@@ -2186,13 +2186,46 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
             except Exception as e:  # noqa: BLE001 — routing is advisory here
                 logger.debug("llm_diag: router lookup failed for slot %s: %s", n, e)
 
+            # Which of those the account can actually serve. Routing now skips a
+            # model that is not in the live catalogue (see the routing block in
+            # call_llm), so probing it anyway would spend a call on a 404 and
+            # report a red FAILED for a model the runtime will never use — an
+            # alarm about something already handled. Report it as SKIPPED
+            # instead, which still surfaces that the tier default is wrong.
+            _avail = _live_models(provider, key, url)
+
             # Configured model first, then each routed one, as separate rows.
             # Local providers (ollama / lmstudio / claude_cli) keep their
             # configured model, so routed_models is empty for them and this stays
             # one call per slot -- the extra calls land only on cloud slots,
             # which is where a routed-model failure can actually happen.
-            out.append(_probe_one(n, provider, key, url, model, None, pool))
+            # Same treatment for the CONFIGURED model. Nothing substitutes for
+            # this one -- it is what the operator set -- so a bad ID here means
+            # EVERY task on the slot 404s, and each probe adds another error to
+            # the provider's dashboard. Naming the models the account can serve
+            # turns "404 Not Found" into an instruction.
+            if _avail is not None and model not in _avail:
+                _hint = ", ".join(sorted(_avail)[:6]) or "(account lists none)"
+                out.append({
+                    "slot": n, "pool": pool, "provider": provider, "model": model,
+                    "routed_from": None, "configured": True, "ok": False,
+                    "latency_ms": None, "reply": None,
+                    "error": ("this account does not offer this model — every task on "
+                              "this slot will fail until it is changed. Available: "
+                              + _hint),
+                })
+            else:
+                out.append(_probe_one(n, provider, key, url, model, None, pool))
             for rm in routed_models:
+                if _avail is not None and rm not in _avail:
+                    out.append({
+                        "slot": n, "pool": pool, "provider": provider, "model": rm,
+                        "routed_from": model, "configured": True, "ok": False,
+                        "skipped": True, "latency_ms": None, "reply": None,
+                        "error": ("not offered by this account — routing keeps the "
+                                  "configured model, so nothing calls it"),
+                    })
+                    continue
                 out.append(_probe_one(n, provider, key, url, rm, model, pool))
             continue
         except Exception as e:  # noqa: BLE001 — one bad slot never sinks the report

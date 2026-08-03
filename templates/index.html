@@ -3488,10 +3488,13 @@
                 const d = await r.json();
                 if (d.error) { body.innerHTML = '<span class="text-red-600">' + _bfEsc(d.error) + '</span>'; return; }
                 const rows = (d.results || []).map(x => {
+                    // SKIPPED is amber, not red: the model is unreachable but
+                    // routing already declines to use it, so nothing is broken.
                     const pill = !x.configured
                         ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">NOT CONFIGURED</span>'
+                        : (x.skipped ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700">SKIPPED</span>'
                         : (x.ok ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">OK</span>'
-                                : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">FAILED</span>');
+                                : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">FAILED</span>'));
                     // A substituted model is called out explicitly — that swap is
                     // invisible in the vault UI and is exactly what 404s.
                     const routed = x.routed_from
