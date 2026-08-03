@@ -1020,7 +1020,7 @@
                                     <select id="new-entry-model" onchange="updateDefaultRpm()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="">— save credential first —</option>
                                     </select>
-                                    <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <select id="new-entry-reviewer" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         <option value="">— same as model —</option>
                                     </select>
@@ -1065,7 +1065,7 @@
                                             <select id="edit-model-{{ entry.id }}" onchange="updateEditRpm('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                                 <option value="{{ entry.model }}" selected>{{ entry.model }}</option>
                                             </select>
-                                            <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <select id="edit-reviewer-{{ entry.id }}" data-saved="{{ entry.reviewer_model or '' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                                 {% if entry.reviewer_model %}<option value="{{ entry.reviewer_model }}" selected>{{ entry.reviewer_model }}</option>{% else %}<option value="" selected>— same as model —</option>{% endif %}
                                             </select>
@@ -3822,7 +3822,10 @@
             const provider = document.getElementById('new-entry-provider')?.value;
             const model = document.getElementById('new-entry-model')?.value;
             const rpmEl = document.getElementById('new-entry-rpm');
-            if (rpmEl && model) rpmEl.value = getDefaultRpm(provider, model);
+            // Never overwrite a value the operator typed. Auto-fill is a
+            // convenience for an untouched field; a deliberate 0 (= unlimited)
+            // was silently replaced by the provider default on every model change.
+            if (rpmEl && model && rpmEl.dataset.userSet !== '1') rpmEl.value = getDefaultRpm(provider, model);
         }
 
         const _CLAUDE_CLI_MODELS = [
@@ -3886,7 +3889,7 @@
             sel.innerHTML = '<option value="">Loading…</option>';
             sel.disabled = true;
             const rpmEl = document.getElementById('new-entry-rpm');
-            if (rpmEl) rpmEl.value = '';
+            if (rpmEl) { rpmEl.value = ''; delete rpmEl.dataset.userSet; }
             // claude_cli has a fixed model roster — no server call needed.
             if (provider === 'claude_cli') {
                 sel.disabled = false;
@@ -4025,7 +4028,7 @@
             const provider = document.getElementById(`edit-provider-${id}`)?.value;
             const model = document.getElementById(`edit-model-${id}`)?.value;
             const rpmEl = document.getElementById(`edit-rpm-${id}`);
-            if (rpmEl && model) rpmEl.value = getDefaultRpm(provider, model);
+            if (rpmEl && model && rpmEl.dataset.userSet !== '1') rpmEl.value = getDefaultRpm(provider, model);
         }
 
         async function saveEntry(id) {

@@ -2309,7 +2309,15 @@ async def update_llm_entry(entry_id: str, request: Request):
             e["label"] = (data.get("label") or e.get("label") or "").strip()
             e["provider"] = (data.get("provider") or e.get("provider") or "openai").lower().strip()
             e["model"] = (data.get("model") or e.get("model") or "").strip()
-            e["rpm"] = int(data.get("rpm") or e.get("rpm") or 0)
+            # rpm=0 means UNLIMITED, and 0 is falsy -- chaining `or` through the
+            # stored value made unlimited unsettable: saving 0 silently restored
+            # the previous limit. Fall back only when the key is absent, matching
+            # the partial-update convention used for the fields below.
+            if "rpm" in data:
+                try:
+                    e["rpm"] = max(0, int(data.get("rpm") or 0))
+                except (TypeError, ValueError):
+                    e["rpm"] = 0
             e["reviewer_model"] = (data.get("reviewer_model") or "").strip()
             # Per-entry overrides. Only overwrite when the key is present in the
             # payload so a partial update doesn't wipe an existing value.
