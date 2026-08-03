@@ -2849,6 +2849,7 @@
                 // numbers on the FIRST Diagnostics render instead of dashes until
                 // the 5s header poll happens to land.
                 (((s || {}).llm || {}).tps_by_model || []).forEach(r => { window._bfTps[r.model] = r; });
+                bfAnnotateModelSelects();
                 const cpu = s.cpu || {}, mem = s.memory || {}, disk = s.disk || {}, up = s.uptime || {};
                 const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
                 // CPU: prefer sampled percent, else load%/1m
@@ -3209,6 +3210,7 @@
                 el.title = (live ? 'Serving LLM calls now' : 'Last provider used (idle)') +
                            (at ? ' — ' + new Date(at * 1000).toLocaleTimeString() : '');
                 (llm.tps_by_model || []).forEach(r => { window._bfTps[r.model] = r; });
+                bfAnnotateModelSelects();
                 const tpsEl = document.getElementById('hdr-tps');
                 if (tpsEl) {
                     const tps = llm.tps_avg;
@@ -3236,6 +3238,31 @@
         function _tpsFor(model) {
             const r = (window._bfTps || {})[model];
             return r ? (r.avg + ' tok/s') : '';
+        }
+
+        // Re-apply the tok/s suffix to every model dropdown.
+        //
+        // Annotating only at option-BUILD time loses the race: the dropdowns are
+        // populated once on settings load, before the first /api/system-stats
+        // poll has filled the cache, and nothing rebuilds them afterwards -- so
+        // the labels stayed bare no matter how much data arrived later. This is
+        // called whenever the cache is refreshed instead.
+        //
+        // The original label is stashed in data-base-label so repeated calls
+        // replace the suffix rather than appending another one each poll.
+        function bfAnnotateModelSelects() {
+            document.querySelectorAll('select[id^="llm-model-"]').forEach(sel => {
+                Array.from(sel.options).forEach(opt => {
+                    if (!opt.value) return;
+                    if (opt.dataset.baseLabel === undefined) opt.dataset.baseLabel = opt.textContent;
+                    opt.textContent = opt.dataset.baseLabel + bfTpsLabel(opt.value);
+                    const r = (window._bfTps || {})[opt.value];
+                    if (r) {
+                        opt.title = `${r.avg} tok/s average over ${r.n} generation(s) ` +
+                                    `(min ${r.min}, max ${r.max}) measured on this box`;
+                    }
+                });
+            });
         }
 
         function bfTpsLabel(model) {
@@ -4320,6 +4347,7 @@
                         select.insertBefore(opt, select.firstChild);
                     }
                     if (statusEl) statusEl.textContent = `(${models.length} available)`;
+                    bfAnnotateModelSelects();
                 }
 
                 // Mirror the same options into the matching Reviewer Model dropdown.
