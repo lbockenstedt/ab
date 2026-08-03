@@ -1313,6 +1313,9 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
 #: enough to track a real change in box load, large enough that one unlucky
 #: generation does not swing the number an operator is watching.
 _TPS_WINDOW = 20
+#: Minimum seconds between cache writes (see _record_ollama_tps).
+_TPS_SAVE_INTERVAL = 60
+_tps_last_save = 0.0
 
 
 def _record_ollama_tps(model, payload):
@@ -1346,6 +1349,20 @@ def _record_ollama_tps(model, payload):
         samples.append(round(tps, 2))
         if len(samples) > _TPS_WINDOW:
             del samples[:-_TPS_WINDOW]
+        # Persist so the panel is warm after a restart. DEBOUNCED: this runs on
+        # every completed generation, and rewriting the file each time would be
+        # pointless disk churn for a number that barely moves. At most one write
+        # per _TPS_SAVE_INTERVAL means the cache can lag by a few samples, which
+        # costs nothing -- it is a warm-start hint, not an audit trail.
+        global _tps_last_save
+        now = time.time()
+        if now - _tps_last_save >= _TPS_SAVE_INTERVAL:
+            _tps_last_save = now
+            try:
+                import config_store
+                config_store.save_llm_tps(store)
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                pass
     except Exception:  # noqa: BLE001 — telemetry is never fatal
         pass
 

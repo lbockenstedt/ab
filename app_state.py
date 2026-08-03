@@ -21,6 +21,7 @@ from main import (
     load_config,
     load_processed,
     load_pr_reviews,
+    load_llm_tps,
     save_pr_reviews,
     get_version,
     _llm_cb_snapshot,
@@ -215,7 +216,10 @@ state = {
     # Bounded deque: this is a live gauge, not history, and an unbounded list on
     # a long-running service is a slow leak. Keyed by model, since a 31b and a 7b
     # differ by an order of magnitude and one average over both is meaningless.
-    "llm_tps": {},
+    # Warm-loaded from disk so the Model Performance panel is populated
+    # immediately after a restart instead of blank until every model
+    # happens to run again.
+    "llm_tps": load_llm_tps(),
     "active_tasks": {}, "pr_reviews": load_pr_reviews(), "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "pending_verification_count": pending_verification_count,

@@ -30,6 +30,7 @@ PR_REVIEWS_FILE = os.path.join(CONFIG_DIR, "pr_reviews.json")
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
 CHAT_HISTORY_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
+LLM_TPS_FILE = os.path.join(CONFIG_DIR, "llm_tps.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
 # Chat-agent configuration defaults. Applied (without overriding user values) by
@@ -186,6 +187,57 @@ def save_pr_reviews(pr_reviews):
         logger.error(f"Error saving PR reviews to {PR_REVIEWS_FILE}: {e}")
 
 
+
+def load_llm_tps():
+    """Warm-load the per-model tok/s samples measured before the last restart.
+
+    Without this the Model Performance panel is empty after every restart and
+    stays empty until each model happens to run again -- which, for a model used
+    by one provider slot on an occasional task, can be hours. An operator
+    comparing models then sees a blank table and reasonably concludes the feature
+    is broken rather than merely cold.
+
+    Shape is {model: [tps, ...]}. Anything else on disk is discarded rather than
+    trusted: a malformed entry would poison the averages, and the cost of
+    dropping it is only that the numbers rebuild.
+    """
+    if not os.path.exists(LLM_TPS_FILE):
+        return {}
+    try:
+        with open(LLM_TPS_FILE, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        out = {}
+        for model, samples in data.items():
+            if not isinstance(samples, list):
+                continue
+            clean = [float(x) for x in samples
+                     if isinstance(x, (int, float)) and 0 < float(x) < 100000]
+            if clean:
+                out[str(model)] = clean[-20:]
+        return out
+    except Exception as e:
+        logger.error(f"Error loading LLM tok/s cache from {LLM_TPS_FILE}: {e}")
+        return {}
+
+
+def save_llm_tps(llm_tps):
+    """Persist the per-model tok/s samples.
+
+    Written via a temp file + os.replace: this is called from the LLM path, so a
+    process death mid-write must not leave a truncated JSON that load_llm_tps
+    then discards -- losing the very history the cache exists to keep.
+    """
+    try:
+        tmp = LLM_TPS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(llm_tps, f)
+        os.replace(tmp, LLM_TPS_FILE)
+    except Exception as e:
+        logger.error(f"Error saving LLM tok/s cache to {LLM_TPS_FILE}: {e}")
+
+
 def load_update_state():
     """Loads the update state for recovery."""
     if os.path.exists(UPDATE_STATE_FILE):
@@ -238,6 +290,8 @@ def write_startup_stamp():
 
 
 __all__ = [
+    "load_llm_tps", "save_llm_tps", "LLM_TPS_FILE",
+
     "CONFIG_DIR",
     "CONFIG_FILE",
     "ENV_FILE",
