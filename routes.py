@@ -25,6 +25,7 @@ from main import (
     _fetch_models_for_provider,
     _get_hub_agent_client,
     _get_provider_config,
+    _ALL_SLOTS,
     _get_provider_rpm,
     _log_restart_event,
     _persist_config_key,
@@ -702,9 +703,10 @@ def _system_stats():
     try:
         cfg = load_config()
         slots = []
-        # Includes the log-only slots (5-6) so their health is visible alongside the
-        # code slots — a log pool that is silently failing should not be invisible.
-        for n in (1, 2, 3, 4, 5, 6):
+        # Includes the dedicated pools — log (5-6) and review (7-8) — so their
+        # health is visible alongside the code slots. A pool that is silently
+        # failing should not be invisible just because it serves one task family.
+        for n in _ALL_SLOTS:
             provider, key, model, base_url = _get_provider_config(n, cfg)
             cb = (state.get("provider_credit_cb") or {}).get(n) or {}
             slots.append({
@@ -870,7 +872,7 @@ async def diagnostics():
             lkg_version = None
 
     providers = []
-    for n in (1, 2, 3, 4, 5, 6):
+    for n in _ALL_SLOTS:
         provider, key, model, _ = _get_provider_config(n, config)
         cb = (state.get("provider_credit_cb") or {}).get(n) or {}
         providers.append({

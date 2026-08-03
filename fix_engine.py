@@ -7,6 +7,8 @@ from main import (
     CHAT_CONFIG_DEFAULTS,
     _apply_closed_label,
     _bug_report_fix_context,
+    _CODE_SLOTS,
+    _REVIEW_SLOTS,
     _module_log_fix_context,
     _find_claude_cli_slot,
     _get_provider_config,
@@ -501,10 +503,24 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     if builder_n is None:
         builder_n = 2 if force_cloud is True else 1
 
-    # Build reviewer panel from all providers EXCEPT the builder.
+    # Build the reviewer panel. The dedicated review pool (7-8) wins when any of
+    # it is configured: those slots exist so a strong judging model is not also
+    # spent on triage and file identification. Nothing is excluded from it for
+    # being the builder -- a review slot never builds, so the conflict the
+    # exclusion guards against cannot arise there.
+    #
+    # With no review slot configured, fall back to the original behaviour: code
+    # slots minus the builder, so an install that has not set up the new pool
+    # behaves exactly as before.
+    review_pool = tuple(
+        n for n in _REVIEW_SLOTS
+        if _provider_configured(*_get_provider_config(n, config)[:3])
+    )
+    pool, skip_builder = (review_pool, False) if review_pool else (_CODE_SLOTS, True)
+
     reviewers = []
-    for n in (1, 2, 3, 4):
-        if n == builder_n:
+    for n in pool:
+        if skip_builder and n == builder_n:
             continue
         provider, key, model, _ = _get_provider_config(n, config)
         if not _provider_configured(provider, key, model):
@@ -518,7 +534,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
 
     # Check if any provider is online at all.
     any_provider_online = any(
-        state.get(f"provider_{n}_online", True) for n in (1, 2, 3, 4) if n != builder_n
+        state.get(f"provider_{n}_online", True) for n in pool
+        if not (skip_builder and n == builder_n)
     )
     if not any_provider_online:
         logger.warning("All reviewer LLM providers appear offline. Signaling retry queue.")

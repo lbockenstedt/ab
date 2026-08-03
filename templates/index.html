@@ -1135,6 +1135,33 @@
                             </div>
                         </div>
 
+                        <!-- Step C3: dedicated REVIEW pool. Judging a fix is worth the strongest
+                             model available, but a strong model on a code slot also gets spent
+                             on triage and file identification. Its own pool makes it
+                             structurally unreachable from that work. -->
+                        <div class="mb-6">
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3c — Review Slots (P7 → P8 — fix review and PR confidence only)</p>
+                            <p class="text-xs text-slate-400 mb-3">Used <b>only</b> to judge a generated fix and assess PR confidence — never for building, triage, file identification or PR summaries. Put your strongest models here without paying for them on minor work. Leave unset to review on the code slots as before. These are never used for fixes or code review. Leave both unset to fall back to the code slots (previous behaviour).</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {% for slot_n, slot_label, slot_color in [
+                                    (7, 'P7 — Review Primary', 'text-rose-500'),
+                                    (8, 'P8 — Review Failover', 'text-amber-500')
+                                ] %}
+                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
+                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <option value="">— Not configured —</option>
+                                        {% for entry in settings.llm_entries or [] %}
+                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
+                                            {{ entry.label or entry.model }} ({{ entry.provider }})
+                                        </option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+
                         <!-- Timeout -->
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
@@ -3518,6 +3545,8 @@
                             // fixes, log slots stop analysis silently.
                             (x.pool === 'log'
                               ? '<div class="text-[10px] font-normal text-indigo-600 uppercase tracking-wider">log</div>'
+                              : x.pool === 'review'
+                              ? '<div class="text-[10px] font-normal text-rose-600 uppercase tracking-wider">review</div>'
                               : '<div class="text-[10px] font-normal text-slate-400 uppercase tracking-wider">code</div>')
                             + '</td>' +
                         '<td class="px-3 py-2 text-slate-600">' + _bfEsc(x.provider || '—') +
@@ -4068,7 +4097,9 @@
 
         async function saveSlots() {
             const slots = {};
-            [1,2,3,4,5,6].forEach(n => {
+            // 1-4 code, 5-6 log, 7-8 review. Omitting a slot here silently drops
+            // its assignment on every save, since the endpoint REPLACES the map.
+            [1,2,3,4,5,6,7,8].forEach(n => {
                 const sel = document.getElementById(`slot-${n}`);
                 if (sel) slots[n] = sel.value || null;
             });

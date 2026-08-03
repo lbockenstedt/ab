@@ -322,9 +322,18 @@ _LOG_TASK_KINDS = frozenset({"log_review", "log_analysis"})
 #: logs can't be dragged into writing a fix.
 _CODE_SLOTS = (1, 2, 3, 4)
 _LOG_SLOTS = (5, 6)
+#: Slots 7-8 are the REVIEW pool: judging a fix wants the strongest model
+#: available, but a strong model on a code slot also gets spent on triage,
+#: file identification and PR summaries — minor work that a cheap model does
+#: just as well. Keeping review on its own pool makes those models structurally
+#: unreachable from that work rather than merely discouraged.
+_REVIEW_SLOTS = (7, 8)
+#: Tasks that are a judgement call on someone else's output, not production of
+#: it. Both are worth a strong model; neither is high-volume.
+_REVIEW_TASK_KINDS = frozenset({"review", "pr_confidence"})
 #: Every slot the app knows about — circuit breakers and rate limiters are keyed
 #: over this, not over a hardcoded 1-4.
-_ALL_SLOTS = _CODE_SLOTS + _LOG_SLOTS
+_ALL_SLOTS = _CODE_SLOTS + _LOG_SLOTS + _REVIEW_SLOTS
 
 
 #: Live model catalogue per (provider, base_url), so routing can check whether a
@@ -390,13 +399,19 @@ def _mark_routed_model_dead(provider, model) -> None:
 def _slots_for_task(task_kind, config):
     """Ordered provider slots that should serve *task_kind*.
 
-    Log tasks use the log pool (5-6) when at least one of those slots is
-    configured; otherwise they fall back to the code pool, so an install that has
-    not set up log providers behaves exactly as before. Code tasks always use 1-4
-    and can never be routed to the log pool.
+    Log tasks use the log pool (5-6) and review tasks the review pool (7-8),
+    when at least one slot in that pool is configured; otherwise they fall back
+    to the code pool, so an install that has not set up those providers behaves
+    exactly as before. Code tasks always use 1-4 and can never be routed into a
+    dedicated pool.
     """
     if task_kind in _LOG_TASK_KINDS:
         pool = tuple(n for n in _LOG_SLOTS
+                     if _provider_configured(*_get_provider_config(n, config)[:3]))
+        if pool:
+            return pool
+    if task_kind in _REVIEW_TASK_KINDS:
+        pool = tuple(n for n in _REVIEW_SLOTS
                      if _provider_configured(*_get_provider_config(n, config)[:3]))
         if pool:
             return pool
@@ -814,7 +829,10 @@ def _provider_credit_cb_remaining(n, provider=None):
 def _provider_credit_cb_snapshot():
     result = {}
     with _PROVIDER_CREDIT_CB_LOCK:
-        for n in (1, 2, 3, 4):
+        # _ALL_SLOTS: the map is keyed over every slot, and the dashboard reads
+        # this per slot. Reporting only 1-4 left a log or review slot sitting in
+        # a credit cooldown with nothing on screen to say so.
+        for n in _ALL_SLOTS:
             rem = max(0.0, _PROVIDER_CREDIT_CB[n]["cooldown_until"] - time.time())
             result[n] = {
                 "active": rem > 0,
@@ -1727,17 +1745,20 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     Providers in a 1-hour credit-exhaustion cooldown are skipped automatically.
     """
     config = load_config()
-    # Which pool serves this call: code slots (1-4) or the dedicated log slots
-    # (5-6). A log task only reaches the log pool when one of those slots is
-    # actually configured, so existing installs are unaffected.
+    # Which pool serves this call: code slots (1-4), the dedicated log slots
+    # (5-6), or the review slots (7-8). A task only reaches a dedicated pool when
+    # one of its slots is actually configured, so existing installs are
+    # unaffected.
     _pool = _slots_for_task(task_kind, config)
     _cfg_rows = {n: _get_provider_config(n, config) for n in _pool}
     if model_override:
         _cfg_rows = {n: (pv, k, model_override, u) for n, (pv, k, _m, u) in _cfg_rows.items()}
     if url_override:
         _cfg_rows = {n: (pv, k, m, url_override) for n, (pv, k, m, _u) in _cfg_rows.items()}
-    if task_kind in _LOG_TASK_KINDS and _pool is not _CODE_SLOTS:
-        logger.debug("task_kind=%s routed to the LOG provider pool %s", task_kind, list(_pool))
+    if _pool is not _CODE_SLOTS:
+        _pool_name = "LOG" if task_kind in _LOG_TASK_KINDS else "REVIEW"
+        logger.debug("task_kind=%s routed to the %s provider pool %s",
+                     task_kind, _pool_name, list(_pool))
 
     effective_stream = True if stream is None else bool(stream)
 
@@ -2187,7 +2208,9 @@ def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
         # Which pool this slot belongs to, so the UI can group them and an
         # operator can tell at a glance that a failure is log-side rather than
         # code-side — the two have very different consequences.
-        entry = {"slot": n, "pool": ("log" if n in _LOG_SLOTS else "code"),
+        entry = {"slot": n,
+                 "pool": ("log" if n in _LOG_SLOTS
+                          else "review" if n in _REVIEW_SLOTS else "code"),
                  "provider": None, "model": None, "routed_from": None,
                  "configured": False, "ok": False, "latency_ms": None,
                  "error": None, "reply": None}
