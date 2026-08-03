@@ -327,6 +327,42 @@ _LOG_SLOTS = (5, 6)
 _ALL_SLOTS = _CODE_SLOTS + _LOG_SLOTS
 
 
+#: Live model catalogue per (provider, base_url), so routing can check whether a
+#: model actually EXISTS on this account before spending a call on it. Cached:
+#: the listing is a network round-trip and routing runs on every task.
+_MODEL_CATALOG: "dict" = {}
+_MODEL_CATALOG_TTL_S = 3600
+_MODEL_CATALOG_LOCK = threading.Lock()
+
+
+def _live_models(provider, api_key, base_url):
+    """Model names this provider/account can actually serve, or None if unknown.
+
+    None means "could not determine" (no network, no key, provider has no listing
+    endpoint) and callers MUST treat it as "do not block" — refusing to route on
+    a failed lookup would be worse than the 404 it is trying to avoid.
+    """
+    key = ((provider or "").lower().strip(), (base_url or "").strip())
+    now = time.time()
+    with _MODEL_CATALOG_LOCK:
+        hit = _MODEL_CATALOG.get(key)
+        if hit and (now - hit[0]) < _MODEL_CATALOG_TTL_S:
+            return hit[1]
+    try:
+        # Lazy import: workers imports llm_client, so a module-level import here
+        # would be a cycle.
+        from workers import _fetch_models_for_provider
+        res = _fetch_models_for_provider(provider, api_key, base_url) or {}
+        names = {m.get("name") for m in (res.get("models") or []) if m.get("name")}
+        names = names or None          # empty list == could not determine
+    except Exception as e:  # noqa: BLE001 — never let a lookup break routing
+        logger.debug("live model lookup failed for %s: %s", provider, e)
+        names = None
+    with _MODEL_CATALOG_LOCK:
+        _MODEL_CATALOG[key] = (now, names)
+    return names
+
+
 #: Routed models that have 404'd for a provider — (provider, model) pairs.
 #: A router tier default the account cannot reach 404s on EVERY task of that
 #: tier. The retry-on-configured-model fallback below keeps the work flowing, but
@@ -1692,11 +1728,28 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             _routed = []
             for (n, prov, mdl, k, u) in all_providers:
                 picked = _router_pick(task_kind, prov, config, default=mdl)
-                # Do not route to a model this provider has already 404'd on —
-                # keep the configured model instead of paying the same failed
-                # round-trip on every task of this tier.
-                if picked and picked != mdl and _routed_model_dead(prov, picked):
-                    picked = mdl
+                # Do not route to a model this provider cannot serve. Two
+                # checks, cheapest first:
+                #   1. already 404'd this process — skip, no call needed.
+                #   2. not in the provider's LIVE model list — skip before the
+                #      first 404 rather than learning from it. The router's tier
+                #      defaults are hardcoded guesses at model IDs; whether an
+                #      account can reach them is account-specific, so asking the
+                #      provider is the only reliable answer.
+                # A lookup that fails returns None and is treated as "unknown",
+                # which routes as before and falls back on 404 as it always did.
+                if picked and picked != mdl:
+                    if _routed_model_dead(prov, picked):
+                        picked = mdl
+                    else:
+                        _avail = _live_models(prov, k, u)
+                        if _avail is not None and picked not in _avail:
+                            logger.info(
+                                "Provider %s (%s): routed model %r is not in this "
+                                "account's model list — keeping configured %r.",
+                                n, prov, picked, mdl)
+                            _mark_routed_model_dead(prov, picked)
+                            picked = mdl
                 if picked and mdl and picked != mdl:
                     _routed_from[n] = mdl
                 _routed.append((n, prov, picked, k, u))

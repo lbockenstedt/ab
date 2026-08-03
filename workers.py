@@ -1577,6 +1577,13 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             resp.raise_for_status()
             for m in resp.json().get("models", []):
                 name = m.get("name", "").replace("models/", "")
+                # Only models that actually support generateContent are usable
+                # here. The endpoint also returns embedding / tuning-only models,
+                # and offering one of those yields a 404 at call time that reads
+                # as "the model does not exist" rather than "wrong method".
+                methods = m.get("supportedGenerationMethods") or []
+                if methods and "generateContent" not in methods:
+                    continue
                 if "gemini" in name or "gemma" in name:
                     models.append({"name": name, "details": m.get("displayName", "")})
         elif p == "groq":
