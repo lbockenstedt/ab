@@ -1049,6 +1049,27 @@ def _reset_llm_semaphore():
     with _LLM_SEM_LOCK:
         _LLM_SEMAPHORE = None
 
+#: Headers whose value is a credential. A provider error body can echo the
+#: request back at you, so the key is stripped before the body reaches a log
+#: line or the UI -- surfacing the reason for a 403 must not leak the key.
+_SECRETISH_HEADERS = ("authorization", "x-api-key", "x-goog-api-key", "api-key")
+
+
+def _redact_secrets(text, headers=None):
+    """Remove request credentials from a provider error body."""
+    if not text:
+        return text
+    t = str(text)
+    for name, val in (headers or {}).items():
+        if not val or str(name).lower() not in _SECRETISH_HEADERS:
+            continue
+        for tok in (str(val), str(val).replace("Bearer ", "").strip()):
+            # Short values cannot be a key and could be a common substring.
+            if len(tok) >= 8:
+                t = t.replace(tok, "***REDACTED***")
+    return t
+
+
 def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="openai"):
     """POST to endpoint with retry/backoff. Returns the response object on success.
 
@@ -1136,6 +1157,27 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                 time.sleep(wait_time)
                 continue
 
+            # 4xx: attach the provider's own explanation. raise_for_status()
+            # produces only "403 Client Error: Forbidden for url: ...", which says
+            # nothing actionable -- Google's body carries the actual reason
+            # (SERVICE_DISABLED, API_KEY_HTTP_REFERRER_BLOCKED, a project/billing
+            # problem, a model the key cannot use), and discarding it is why a 403
+            # here has been indistinguishable from a 404. 5xx already logs its
+            # body above; this is the same courtesy for the errors an operator can
+            # actually fix.
+            if 400 <= resp.status_code < 500:
+                err_body = ""
+                try:
+                    err_body = _redact_secrets(resp.text[:600], headers)
+                except Exception:  # noqa: BLE001 — body is best-effort
+                    pass
+                if err_body:
+                    logger.warning(
+                        f"LLM {resp.status_code} at {endpoint}. body={err_body!r}")
+                    resp.close()
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} Client Error: {resp.reason} for url: "
+                        f"{endpoint} — {err_body}", response=resp)
             resp.raise_for_status()
             _llm_cb_reset()
             return resp
