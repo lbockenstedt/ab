@@ -327,6 +327,30 @@ _LOG_SLOTS = (5, 6)
 _ALL_SLOTS = _CODE_SLOTS + _LOG_SLOTS
 
 
+#: Routed models that have 404'd for a provider — (provider, model) pairs.
+#: A router tier default the account cannot reach 404s on EVERY task of that
+#: tier. The retry-on-configured-model fallback below keeps the work flowing, but
+#: without remembering the failure every single small-tier task pays a wasted
+#: round-trip to the same dead model first. Remembered process-wide (cleared on
+#: restart, which is also when config/model access may have changed).
+_ROUTED_404: "set" = set()
+_ROUTED_404_LOCK = threading.Lock()
+
+
+def _routed_model_dead(provider, model) -> bool:
+    if not provider or not model:
+        return False
+    with _ROUTED_404_LOCK:
+        return ((provider or "").lower().strip(), model) in _ROUTED_404
+
+
+def _mark_routed_model_dead(provider, model) -> None:
+    if not provider or not model:
+        return
+    with _ROUTED_404_LOCK:
+        _ROUTED_404.add(((provider or "").lower().strip(), model))
+
+
 def _slots_for_task(task_kind, config):
     """Ordered provider slots that should serve *task_kind*.
 
@@ -1668,6 +1692,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             _routed = []
             for (n, prov, mdl, k, u) in all_providers:
                 picked = _router_pick(task_kind, prov, config, default=mdl)
+                # Do not route to a model this provider has already 404'd on —
+                # keep the configured model instead of paying the same failed
+                # round-trip on every task of this tier.
+                if picked and picked != mdl and _routed_model_dead(prov, picked):
+                    picked = mdl
                 if picked and mdl and picked != mdl:
                     _routed_from[n] = mdl
                 _routed.append((n, prov, picked, k, u))
@@ -1772,6 +1801,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             if ("404" in err_str and n in _routed_from
                     and _routed_from[n] and _routed_from[n] != model):
                 _cfg_model = _routed_from[n]
+                _mark_routed_model_dead(provider, model)
                 logger.warning(
                     "Provider %s (%s) routed model %r is unavailable (404) — retrying on the "
                     "configured model %r. Set config[\"router_models\"][%r][<tier>] to a model "
