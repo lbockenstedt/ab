@@ -714,6 +714,42 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
     return {"confidence": avg, "verdict": verdict, "votes": votes, "n": len(votes)}
 
 
+#: Failure kind -> operator-facing label. The pipeline knows precisely why it
+#: gave up; before this the UI showed a generic sentence and the reason lived
+#: only in the logs.
+_FAILURE_LABELS = {
+    "review_rejected": "Reviewers rejected the fix",
+    "low_confidence":  "Confidence below threshold",
+    "qa_failed":       "Fix failed QA tests",
+    "error":           "Error during fix",
+    "unknown":         "No verified fix found",
+}
+
+
+def _failure_summary(last_failure, attempts):
+    """One line naming why the run gave up, cause first.
+
+    Shown truncated in the status table, so the distinguishing part -- the label
+    and any confidence numbers -- has to come before the boilerplate, not after.
+    """
+    kind = (last_failure or {}).get("kind") or "unknown"
+    label = _FAILURE_LABELS.get(kind, _FAILURE_LABELS["unknown"])
+    conf = (last_failure or {}).get("confidence")
+    thr = (last_failure or {}).get("threshold")
+    bits = []
+    try:
+        if conf is not None:
+            bits.append(f"confidence {float(conf):.0%}"
+                        + (f" < required {float(thr):.0%}" if thr is not None else ""))
+    except (TypeError, ValueError):
+        pass
+    detail = str((last_failure or {}).get("detail") or "").strip()
+    if detail:
+        bits.append(detail[:160])
+    head = f"{label} after {attempts} attempt(s)"
+    return head + (" — " + "; ".join(bits) if bits else "")
+
+
 def _norm_confidence(value):
     """Coerce a reviewer's ``confidence`` to the 0.0–1.0 scale every consumer assumes.
 
@@ -1617,6 +1653,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     escalate = False  # nothing to escalate to
             success = False
             error_context = None
+            # WHY the last attempt failed, structured. error_context is written for
+            # the NEXT builder prompt, so it is phrased as instructions to a model
+            # and gets buried behind boilerplate by the time it reaches the UI.
+            # This is the operator-facing answer to "why did this fail", kept as
+            # (kind, detail, confidence, threshold) so the UI can lead with the
+            # cause instead of truncating it away.
+            last_failure = {}
             final_verdict = "Reject"
             final_confidence = 0.0
             base_branch = config.get("default_branch", "main")
@@ -1767,6 +1810,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             if review_verdict == "Reject":
                                 logger.warning(f"Reviewer REJECTED fix for {issue_id}: {critique}")
                                 error_context = f"Reviewer rejected the fix: {critique}"
+                                last_failure = {
+                                    "kind": "review_rejected",
+                                    "detail": str(critique or "").strip(),
+                                    "confidence": review_conf,
+                                }
                                 try:
                                     repo_git.git.reset("--hard", "HEAD")
                                     repo_git.git.clean("-fd")
@@ -1794,6 +1842,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                     f"The previous provider's fix passed tests but only reached "
                                     f"{final_confidence:.0%} confidence. Review critique: {critique}. "
                                     f"Produce a more robust fix.")
+                                last_failure = {
+                                    "kind": "low_confidence",
+                                    "detail": str(critique or "").strip(),
+                                    "confidence": final_confidence,
+                                    "threshold": min_conf,
+                                }
                                 try:
                                     repo_git.git.reset("--hard", "HEAD")
                                     repo_git.git.clean("-fd")
@@ -1806,6 +1860,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             break
                         else:
                             error_context = failure_msg
+                            last_failure = {"kind": "qa_failed",
+                                            "detail": str(failure_msg or "").strip()}
                 except Exception as inner_e:
                     if "No LLM providers" in str(inner_e):
                         logger.error(f"No LLM providers configured for issue {issue_id}: {inner_e}")
@@ -1816,6 +1872,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     # provider (e.g. a pinned P1 that's unreachable → try P2/P3).
                     logger.warning(f"Attempt {attempt} errored ({inner_e}); escalating to the next provider/attempt.")
                     error_context = f"Previous attempt failed with: {str(inner_e)[:300]}"
+                    last_failure = {"kind": "error", "detail": str(inner_e)[:300]}
                     try:
                         repo_git.git.reset("--hard", "HEAD")
                         repo_git.git.clean("-fd")
@@ -1825,9 +1882,17 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             if not success:
                 state["failure_count"] += 1
-                failure_reason = "AI failed to find a verified fix after max attempts."
-                if error_context:
-                    failure_reason += f" Last attempt error: {error_context}"
+                # Lead with the CAUSE. This string is shown truncated in the
+                # status table, and the old form spent its first 72 characters on
+                # "AI failed to find a verified fix after max attempts. Last
+                # attempt error: " -- so the operator saw boilerplate and had to
+                # open the logs to learn anything, which is the whole complaint.
+                _summary = _failure_summary(last_failure, max_attempts)
+                failure_reason = _summary
+                if error_context and last_failure.get("kind") != "error":
+                    failure_reason += f" | detail: {error_context}"
+                elif error_context and not last_failure:
+                    failure_reason += f" | detail: {error_context}"
 
                 try:
                     issue.create_comment(f"🤖 **BugFixer Failure**\n\nI attempted to fix this issue {max_attempts} times, but I could not find a solution that passed verification.\n\n**Final Error:** `{failure_reason}`")
@@ -1839,6 +1904,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     "status": "failed",
                     "timestamp": datetime.now().isoformat(),
                     "error": failure_reason,
+                    # Structured so the UI can render the cause as a label plus
+                    # numbers rather than parsing it back out of a sentence.
+                    "failure_kind": last_failure.get("kind") or "unknown",
+                    "failure_detail": (last_failure.get("detail") or "")[:1000],
+                    "failure_confidence": last_failure.get("confidence"),
+                    "failure_threshold": last_failure.get("threshold"),
+                    "attempts": max_attempts,
                     "original_body": issue.body
                 }
                 save_processed(processed)

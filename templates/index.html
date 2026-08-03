@@ -519,7 +519,15 @@
                                         <span class="mx-2 text-slate-300">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% elif info.status == 'failed' %}
-                                        <span class="font-semibold text-red-600">Error:</span> {{ info.error if info.error else 'AI failed to find a verified fix.' }}
+                                        <span class="font-semibold text-red-600">Why:</span> {{ info.error if info.error else 'AI failed to find a verified fix.' }}
+                                        {% if info.get('failure_confidence') is not none %}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Confidence:</span> {{ '%.0f%%' % (info.failure_confidence * 100) }}{% if info.get('failure_threshold') is not none %} (required {{ '%.0f%%' % (info.failure_threshold * 100) }}){% endif %}
+                                        {% endif %}
+                                        {% if info.get('failure_detail') %}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Reviewer feedback:</span> {{ info.failure_detail }}
+                                        {% endif %}
                                         <span class="mx-2 text-slate-300">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% else %}
