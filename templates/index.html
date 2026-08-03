@@ -151,7 +151,13 @@
            packed to its own content width. Scoped to .filter-btn: the same
            min-width on .btn-primary/.btn-sec would stretch every Save button in
            the app. */
-        .filter-btn { min-width: calc(20ch + 2.25rem); white-space: nowrap; }
+        /* 25% narrower than the label-derived width (was 20ch + 2.25rem).
+           min-width is a FLOOR, not a cap, and these are flex items — so
+           nothing clips: 11 of the 12 labels fit inside this width and are
+           therefore uniform, while "Pending Verification" (the longest) simply
+           sizes to its own content and ends up ~25px wider than the rest.
+           Shorten that one label if the odd-one-out bothers you. */
+        .filter-btn { min-width: calc(15ch + 1.7rem); white-space: nowrap; }
         /* Soft danger variant (LM red-100 token) — matches btn-primary/btn-sec so
            Dismiss / Clear actions are a consistent size + shape, colour aside. */
         .btn-danger {
