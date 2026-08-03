@@ -44,17 +44,19 @@ _DEFAULT_MODELS = {
         "medium": "claude-sonnet-5",              # Sonnet 5 — balanced
         "large":  "claude-opus-4-8",              # Opus 4.8 — top reasoning
     },
-    "google": {
-        # Rolling aliases, not pinned versions. gemini-2.5-flash-lite was pinned
-        # here and Google retired it for new accounts -- it still appears in the
-        # models listing but 404s on generateContent with "no longer available to
-        # new users", so every small-tier task on a Google slot failed and the
-        # live-catalogue guard could not see it coming. An alias tracks whatever
-        # is current and does not strand us on a retired version again.
-        "small":  "gemini-flash-lite-latest",
-        "medium": "gemini-flash-latest",
-        "large":  "gemini-2.5-pro",
-    },
+    # Google: deliberately EMPTY -- the slot's configured model wins.
+    #
+    # These were pinned model IDs, and a pinned ID is a promise the provider can
+    # break: Google retired gemini-2.5-flash-lite for new accounts, so every
+    # small-tier task on every Google slot 404'd on a model that appeared in no
+    # config field and no part of the UI. Changing the slot's model could not fix
+    # it, because the constant overrode the slot on every routed call. Swapping
+    # one pin for another only moves the next outage.
+    #
+    # So there is no Google default to go stale: the model selected on the slot
+    # is the model used. Tier routing is still available for anyone who wants it
+    # via config["router_models"]["google"], which is opt-in and visible.
+    "google": {},
 }
 
 
@@ -80,8 +82,9 @@ def task_tier(task_kind, config=None):
 def pick_model(task_kind, provider, config=None, default=None):
     """Model to use for ``task_kind`` on ``provider``.
 
-    Cloud families (anthropic / google) → the tier-appropriate model. Anything
-    else (local) → ``default`` (its configured model). Router disabled → default.
+    A family with tier defaults (anthropic) → the tier-appropriate model. A
+    family without them (google, by design) and anything local → ``default``,
+    the slot's configured model. Router disabled → default.
     """
     config = config or {}
     try:
@@ -91,7 +94,10 @@ def pick_model(task_kind, provider, config=None, default=None):
         if not fam:
             return default
         tier = task_tier(task_kind, config)
-        catalog = dict(_DEFAULT_MODELS[fam])
+        # .get: a family may deliberately carry no defaults (see google above),
+        # in which case nothing substitutes and `default` -- the slot's own model
+        # -- is returned.
+        catalog = dict(_DEFAULT_MODELS.get(fam) or {})
         catalog.update((config.get("router_models") or {}).get(fam) or {})
         return catalog.get(tier) or default
     except Exception:
@@ -109,6 +115,6 @@ def recommendations(config=None):
             "task": task,
             "tier": tier,
             "anthropic": pick_model(task, "anthropic", config),
-            "google": pick_model(task, "google", config),
+            "google": pick_model(task, "google", config) or "(slot's own model)",
         })
     return out
