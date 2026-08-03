@@ -2697,15 +2697,34 @@
             }
         }
 
-        let _activityFilter = 'all';
+        // The Dashboard always opens on 'pr_review' — the PR Pending filter, the
+        // queue that actually needs a human (BugFixer never approves or denies).
+        // It used to restore whatever was last clicked from sessionStorage, so a
+        // session that once clicked e.g. "PR Merged" reopened there on every
+        // later visit and login, which reads as the dashboard being stuck rather
+        // than remembering.
+        //
+        // sessionStorage still carries ONE case: goFilter() clicking a System
+        // Health count navigates to '/' and needs the target filter to survive
+        // that navigation. That is now a ONE-SHOT key, consumed and cleared on
+        // read, so it applies to exactly the load it was set for and never
+        // becomes a sticky default.
+        let _activityFilter = 'pr_review';   // PR Pending
         try {
-            const saved = sessionStorage.getItem('bf_activity_filter');
-            if (saved) _activityFilter = saved;
+            const once = sessionStorage.getItem('bf_activity_filter_once');
+            if (once) {
+                _activityFilter = once;
+                sessionStorage.removeItem('bf_activity_filter_once');
+            }
+            // Drop the old sticky key so an existing session stops resurrecting
+            // its last filter after this ships.
+            sessionStorage.removeItem('bf_activity_filter');
         } catch (e) {}
 
         function filterActivity(status) {
             _activityFilter = status;
-            try { sessionStorage.setItem('bf_activity_filter', status); } catch (e) {}
+            // Deliberately NOT persisted: a click applies to this view only. See
+            // the one-shot key above for the goFilter navigation handoff.
 
             const buttons = document.querySelectorAll('.filter-btn');
             buttons.forEach(btn => {
@@ -2750,7 +2769,7 @@
         // place + scroll to the feed; elsewhere we persist the choice and navigate
         // to '/', where the on-load applier picks it up from sessionStorage.
         function goFilter(status) {
-            try { sessionStorage.setItem('bf_activity_filter', status); } catch (e) {}
+            try { sessionStorage.setItem('bf_activity_filter_once', status); } catch (e) {}
             const onStatus = window.BF_REFRESH && window.BF_REFRESH.view === 'status';
             if (onStatus && document.querySelector('tbody tr[data-status]')) {
                 filterActivity(status);
