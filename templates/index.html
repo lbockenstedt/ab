@@ -151,13 +151,21 @@
            packed to its own content width. Scoped to .filter-btn: the same
            min-width on .btn-primary/.btn-sec would stretch every Save button in
            the app. */
-        /* 25% narrower than the label-derived width (was 20ch + 2.25rem).
-           min-width is a FLOOR, not a cap, and these are flex items — so
-           nothing clips: 11 of the 12 labels fit inside this width and are
-           therefore uniform, while "Pending Verification" (the longest) simply
-           sizes to its own content and ends up ~25px wider than the rest.
-           Shorten that one label if the odd-one-out bothers you. */
-        .filter-btn { min-width: calc(15ch + 1.7rem); white-space: nowrap; }
+        /* Each row is ONE line, always. flex:1 1 0 + min-width:0 makes the
+           buttons divide the row equally and SHRINK to fit, instead of keeping a
+           min-width floor that forces a wrap once the total exceeds the
+           container — a floor plus flex-wrap is what made them spill onto extra
+           lines. min-width:0 is the load-bearing half: without it a flex item
+           refuses to shrink below its content, so the wrap comes back.
+           Ellipsis rather than clipping for the one label ("Pending
+           Verification") that can outgrow a narrow column. */
+        .filter-btn {
+            flex: 1 1 0;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         /* Soft danger variant (LM red-100 token) — matches btn-primary/btn-sec so
            Dismiss / Clear actions are a consistent size + shape, colour aside. */
         .btn-danger {
@@ -432,7 +440,7 @@
                     </div>
                 </div>
                 <!-- Row 2: filters (pinned right) -->
-                <div class="flex items-center flex-wrap gap-2 justify-end">
+                <div class="flex items-center flex-nowrap gap-2">
                     <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border-[#01A982]" title="Active issues (closed hidden)">Active</button>
                     <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
                     <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
@@ -444,7 +452,7 @@
                     <!-- PR filters on their own row: they are a different object
                          (pull requests, not issues) and wrapping them into the issue
                          row made the two sets read as one list. -->
-                    <div class="flex items-center flex-wrap gap-2 justify-end mt-1">
+                    <div class="flex items-center flex-nowrap gap-2 mt-1">
                     <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs BugFixer has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PR Pending</button>
                     <button data-filter="pr_approved" onclick="filterActivity('pr_approved')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Approved"><i class="fas fa-code-branch mr-1"></i>PR Approved</button>
                     <button data-filter="pr_merged" onclick="filterActivity('pr_merged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs that were Merged"><i class="fas fa-code-branch mr-1"></i>PR Merged</button>
