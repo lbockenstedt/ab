@@ -1192,7 +1192,7 @@
                         <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-4">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Model</label>
-                                <input type="text" id="local-llm-model" value="qwen2.5-coder:32b"
+                                <input type="text" id="local-llm-model" value="qwen2.5-coder:14b"
                                        class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                             </div>
                             <div class="space-y-2">
@@ -4121,7 +4121,7 @@
         let localLLMPollInterval = null;
 
         async function startLocalLLMSetup() {
-            const model = (document.getElementById('local-llm-model')?.value || 'qwen2.5-coder:32b').trim();
+            const model = (document.getElementById('local-llm-model')?.value || 'qwen2.5-coder:14b').trim();
             const num_ctx = parseInt(document.getElementById('local-llm-ctx')?.value || '32768', 10) || 0;
             const cores = parseInt(document.getElementById('local-llm-cores')?.value || '1', 10) || 1;
             const slot = parseInt(document.getElementById('local-llm-slot')?.value || '4', 10) || 4;

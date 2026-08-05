@@ -2374,7 +2374,7 @@ async def local_llm_setup(request: Request):
         data = await request.json()
     except Exception:
         data = {}
-    model = (data.get("model") or "qwen2.5-coder:32b").strip()
+    model = (data.get("model") or "qwen2.5-coder:14b").strip()
     try:
         num_ctx = int(data.get("num_ctx") or 32768)
     except (TypeError, ValueError):
