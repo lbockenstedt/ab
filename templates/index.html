@@ -574,10 +574,13 @@
                                 {% if pr.merged %}
                                 <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
                                 {% elif pr.denied %}
+                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                 <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-red-100 text-red-700 border border-red-300"><i class="fas fa-ban mr-1"></i>DENIED</span>
                                 {% elif pr.closed %}
+                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                 <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
                                 {% else %}
+                                    <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                     {% if pr.approved %}
                                     {# Approved → the human sign-off is done; Merge is now unlocked. #}
                                     <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>
@@ -2669,6 +2672,28 @@
                 }
             } catch (e) {
                 showToast('Approve failed: ' + e, 'error');
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        async function reprocessPr(repo, number, btn) {
+            // Fire-and-forget like the issue Retry button (triggerFix/retry_issue) —
+            // the panel pass can take a while, so this just queues it off-thread and
+            // toasts; the row's findings/verdict update on the next page load once
+            // the new review comment lands (same as the background poll would do).
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Reprocessing…'; }
+            try {
+                const resp = await fetch('/api/pr-review/reprocess', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo: repo, number: number })
+                });
+                const d = await resp.json();
+                showToast(d.message || (resp.ok && d.status === 'triggered' ? 'Reprocessing…' : 'Reprocess failed.'),
+                          (resp.ok && d.status === 'triggered') ? 'success' : 'error');
+            } catch (e) {
+                showToast('Reprocess failed: ' + e, 'error');
+            } finally {
                 if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
         }

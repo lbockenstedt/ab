@@ -47,12 +47,14 @@ proven, load them from `.claude/skills/dual-copy-guard/reference.md` (or a share
 machine-readable pairs file) so there is a single source of truth.
 """
 import logging
+import os
 import re
 
 from github_ops import get_monitored_repos
 from app_state import update_task_state, record_pr_review, update_pr_review, state
 from secrets_scan import check_secrets
 from lint_python import check_undefined_names
+from config_store import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -603,7 +605,12 @@ def _resolve_cross_repo_twins(gh, findings):
     return out
 
 
-def _review_one(gh, repo, pr, config):
+def _review_one(gh, repo, pr, config, force=False):
+    """force=True (the "Reprocess" button) bypasses the already-current cache
+    check below and regenerates the comment + panel(s) even when the head SHA
+    hasn't changed since the last scan — for when the underlying code (a repo
+    twin, a route the panel couldn't see) changed without this PR's own head
+    moving, or the operator just doesn't want to wait for the next poll cycle."""
     if getattr(pr, "draft", False):
         return  # skip WIP drafts
     # Skip BugFixer's OWN AI-fix PRs — they were already vetted by the fix panel
@@ -628,7 +635,7 @@ def _review_one(gh, repo, pr, config):
     findings += check_secrets(files)
     findings += check_undefined_names(repo, files, head_sha)
     existing = _find_marker_comment(pr)
-    already_current = bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
+    already_current = (not force) and bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
     if already_current:
         # Recover the previously-generated summary from the comment — no LLM call
         # on a cached re-scan / post-restart.
@@ -685,6 +692,31 @@ def _review_one(gh, repo, pr, config):
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                     repo.full_name, pr.number, len(findings), action)
+
+
+def reprocess_one_pr(repo_full_name, number, config=None):
+    """Entry point for the UI's per-PR "Reprocess" button (routes.py
+    /api/pr-review/reprocess) — immediately re-runs the full pre-review for
+    ONE PR, bypassing the head-SHA cache (see _review_one's force= param), so
+    the operator doesn't have to wait for the next poll cycle. Raises on a
+    genuine failure (bad token/repo/PR number) so the caller can surface it;
+    a per-check internal error still degrades gracefully same as scan_open_prs
+    (best-effort findings/panels), because it shares _review_one's own
+    exception handling for those.
+
+    Deliberately does NOT check pr_review_enabled — a manual reprocess is an
+    explicit operator action, not the background poll, so it should work even
+    if the operator hasn't (or doesn't want to) turn on the automatic scan.
+    """
+    config = config or load_config()
+    token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        raise RuntimeError("No GitHub token configured")
+    from github import Github
+    gh = Github(token)
+    repo = gh.get_repo(repo_full_name)
+    pr = repo.get_pull(int(number))
+    _review_one(gh, repo, pr, config, force=True)
 
 
 def scan_open_prs(gh, config):
