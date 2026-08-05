@@ -453,6 +453,38 @@ async def pr_review_deny(request: Request):
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+@router.post("/api/pr-review/reprocess")
+async def pr_review_reprocess(request: Request):
+    """Human 'Reprocess' for a reviewed PR — immediately re-runs the full
+    pre-review (parity/secrets/lint findings + panel(s)) for this ONE PR,
+    bypassing the head-SHA cache so a code change that doesn't move the PR's
+    own head (a twin-repo fix, e.g.) or simple impatience with the poll
+    cadence doesn't mean waiting up to an hour. Refuses on an already-merged
+    PR — nothing to reprocess, the code is final. Runs off-thread (an LLM
+    panel pass can take a while) so the request returns immediately."""
+    try:
+        data = await request.json()
+        repo_name = (data.get("repo") or "").strip()
+        number = int(data.get("number"))
+    except Exception:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, number)) or {}
+    if rec.get("merged"):
+        return JSONResponse(status_code=409, content={"status": "error",
+            "message": f"PR #{number} is already merged — nothing to reprocess."})
+
+    def run_reprocess():
+        try:
+            from pr_review import reprocess_one_pr
+            reprocess_one_pr(repo_name, number)
+            logger.info("pr_review: %s #%s reprocessed via UI", repo_name, number)
+        except Exception as e:  # noqa: BLE001
+            logger.error("pr_review reprocess failed for %s#%s: %s", repo_name, number, e)
+
+    threading.Thread(target=run_reprocess, daemon=True).start()
+    return {"status": "triggered", "message": f"Reprocessing {repo_name}#{number}…"}
+
+
 @router.get("/")
 async def dashboard(request: Request):
     recent_processed = {}
