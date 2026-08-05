@@ -461,12 +461,12 @@
                     <i class="fas fa-history text-slate-400 ml-2"></i>
                 </div>
             </div>
-            <table class="w-full text-left text-sm">
+            <table class="w-full text-left text-sm table-fixed">
                 <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
                     <tr class="border-b border-slate-200">
-                        <th class="px-6 py-3 font-medium">Issue ID</th>
-                        <th class="px-6 py-3 font-medium text-right">Status</th>
-                        <th class="px-6 py-3 font-medium text-center">Actions</th>
+                        <th class="px-3 py-3 font-medium w-[20%]">Issue ID</th>
+                        <th class="px-3 py-3 font-medium text-right w-[30%]">Status</th>
+                        <th class="px-3 py-3 font-medium text-center w-[50%]">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-200">
@@ -550,46 +550,51 @@
                     {% endfor %}
                     {% for _k, pr in sorted_pr_reviews %}
                     <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" data-pr-state="{% if pr.merged %}merged{% elif pr.denied %}denied{% elif pr.closed %}closed{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
-                        <td class="px-6 py-3 font-mono align-middle">
+                        <td class="px-3 py-2 font-mono align-middle truncate">
                             <a href="{{ pr.url }}" target="_blank" class="text-indigo-600 hover:underline"><i class="fas fa-code-branch mr-1"></i>{{ pr.repo }} #{{ pr.number }}</a>
                         </td>
-                        <td class="px-6 py-3 text-right align-middle">
+                        <td class="px-3 py-2 text-right align-middle">
+                            <div class="flex flex-wrap gap-1 justify-end items-center">
                             {% if pr.findings and pr.findings > 0 %}
-                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap text-indigo-700 bg-indigo-100">REVIEWED · {{ pr.findings }} FINDING{{ 'S' if pr.findings != 1 else '' }}</span>
+                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-indigo-700 bg-indigo-100">REVIEWED · {{ pr.findings }} FINDING{{ 'S' if pr.findings != 1 else '' }}</span>
                             {% else %}
-                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap text-green-700 bg-green-100">REVIEWED · CLEAN</span>
+                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-green-700 bg-green-100">REVIEWED · CLEAN</span>
                             {% endif %}
                             {# Advisory skeptical-panel verdict — the same signal the GitHub
                                comment carries, surfaced here so it isn't github.com-only.
                                Advisory ONLY: a human is still the sole approver. #}
                             {% if pr.panel_status %}
-                            <span class="ml-1 px-2 py-1 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The skeptical panel could not run for this pass: {{ pr.panel_status }}">PANEL N/A</span>
+                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The skeptical panel could not run for this pass: {{ pr.panel_status }}">PANEL N/A</span>
                             {% elif pr.panel_verdict %}
-                            <span class="ml-1 px-2 py-1 rounded text-xs font-bold whitespace-nowrap {{ 'text-green-700 bg-green-100' if pr.panel_verdict == 'Approve' else 'text-red-700 bg-red-100' }}" title="Advisory cross-provider panel verdict — a human is still the sole approver. Confidence is a fraction rendered as a percentage.">ADVISORY {{ pr.panel_verdict|upper }}{% if pr.panel_confidence is not none %} · {{ (pr.panel_confidence * 100)|round|int }}%{% endif %}</span>
+                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {{ 'text-green-700 bg-green-100' if pr.panel_verdict == 'Approve' else 'text-red-700 bg-red-100' }}" title="Advisory cross-provider panel verdict — a human is still the sole approver. Confidence is a fraction rendered as a percentage.">ADVISORY {{ pr.panel_verdict|upper }}{% if pr.panel_confidence is not none %} · {{ (pr.panel_confidence * 100)|round|int }}%{% endif %}</span>
                             {% endif %}
+                            </div>
                         </td>
-                        <td class="px-6 py-3 align-middle">
-                            <div class="flex flex-wrap gap-1.5 justify-center items-center">
-                                <a href="{{ pr.url }}" target="_blank" class="btn-sec text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap">View PR</a>
+                        <td class="px-3 py-2 align-middle">
+                            <div class="flex flex-nowrap gap-1 justify-center items-center">
+                                <a href="{{ pr.url }}" target="_blank" class="btn-sec text-xs px-2 py-1 rounded font-bold whitespace-nowrap">View PR</a>
                                 {% if pr.merged %}
-                                <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
+                                <span class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
                                 {% elif pr.denied %}
-                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
-                                <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-red-100 text-red-700 border border-red-300"><i class="fas fa-ban mr-1"></i>DENIED</span>
+                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                <span class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-red-100 text-red-700 border border-red-300"><i class="fas fa-ban mr-1"></i>DENIED</span>
                                 {% elif pr.closed %}
-                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
-                                <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
+                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                <span class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
                                 {% else %}
-                                    <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                    <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                     {% if pr.approved %}
-                                    {# Approved → the human sign-off is done; Merge is now unlocked. #}
-                                    <span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>
-                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
+                                    {# Approved → the human sign-off is done and Merge is unlocked. No
+                                       separate APPROVED badge here — Merge being visible at all IS the
+                                       approved signal (mirrors the dynamic approvePr() swap below), and
+                                       this is the busiest row state, so dropping the redundant badge
+                                       actually saves the space it needs. #}
+                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
                                     {% else %}
                                     {# Not approved yet → Merge is gated; only Approve (or Deny) is offered. #}
-                                    <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
+                                    <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
                                     {% endif %}
-                                    <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
+                                    <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
                                 {% endif %}
                             </div>
                         </td>
@@ -2660,11 +2665,13 @@
                 });
                 const d = await resp.json();
                 if (resp.ok && d.status === 'success') {
-                    // Approve unlocks Merge — swap the Approve button for the APPROVED
-                    // badge AND the now-permitted Merge button (no refresh needed).
+                    // Approve unlocks Merge — swap the Approve button directly for the
+                    // now-permitted Merge button. No separate APPROVED badge: Merge being
+                    // visible IS the approved signal, and this row is already the busiest
+                    // one (Reprocess + this + Deny), so the badge would just cost space
+                    // for no new information.
                     if (btn) btn.outerHTML =
-                        '<span class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-green-100 text-green-700 border border-green-300"><i class="fas fa-check mr-1"></i>APPROVED</span>'
-                        + `<button onclick="mergePr('${repo}', ${number}, this)" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
+                        `<button onclick="mergePr('${repo}', ${number}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
                     showToast('Approved ' + repo + ' #' + number, 'success');
                 } else {
                     showToast('Approve failed: ' + (d.message || resp.status), 'error');
