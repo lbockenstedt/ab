@@ -1,27 +1,46 @@
 """
 pr_review.py — BugFixer PR PRE-REVIEW (review-only; a human is the sole gate).
 
-Polls OPEN pull requests on the monitored repos and runs the dual-copy-guard
-parity checks against each PR's changed-file set, then posts a COMMENT-type
-summary (upserted in place, keyed by head SHA so it never spams) plus a
-NON-required informational `bugfixer/review` commit status.
+Polls OPEN pull requests on the monitored repos and runs a Tier-1 deterministic
+pass (dual-copy-guard parity, secrets scan, undefined-name lint) against each
+PR's changed-file set, then posts a COMMENT-type summary (upserted in place,
+keyed by head SHA so it never spams) plus a NON-required informational
+`bugfixer/review` commit status.
 
 INVARIANTS (see memory pr-gate-bugfixer-prereview):
   * NEVER approves/denies a PR and NEVER pushes to the branch. It posts findings
     as a comment; only a human approves/denies.
   * The status check is informational only (always `success`, count in the
     description). It must stay a NON-required check so it can never block a merge.
-  * Tier-1 is the cheap, deterministic parity check (zero LLM, always on). On a
-    head change it also runs the LLM change-summary and — when
-    ``pr_review_llm_enabled`` is set — the SAME cross-provider skeptical
-    reviewer panel the bug/feature fix pipeline uses (``fix_engine.review_fix``,
-    ≥0.80 confidence gate), unified so a human PR and a bot fix are judged by one
-    mechanism. Its verdict is rendered ADVISORY-only; it never approves/denies.
+  * Tier-1 (zero LLM, always on, three checks — see ``_review_one``):
+      - ``check_parity`` — dual-copy/cross-platform drift (see module list below).
+      - ``check_secrets`` (secrets_scan.py) — regex scan of ADDED diff lines for
+        hardcoded credentials. Never echoes the actual secret into the comment.
+      - ``check_undefined_names`` (lint_python.py) — ruff F821/F822/F823 against
+        the FULL post-patch file (fetched via the contents API, not the diff),
+        for changed .py files. Exists specifically because the LLM panel below
+        only sees diff hunks and can hallucinate "missing import" when the
+        import is just outside the visible hunk — this is deterministic ground
+        truth to catch (or debunk) that class of claim.
+  * On a head change, also runs (each independently opt-in):
+      - the LLM change-summary (always, if an LLM is configured).
+      - ``pr_review_llm_enabled`` → the general cross-provider skeptical
+        reviewer panel (``fix_engine.review_fix``, ≥0.80 confidence gate) the
+        bug/feature fix pipeline uses.
+      - ``pr_review_state_logic_enabled`` → a SECOND, narrow-scope panel pass
+        (``_state_logic_review``) that ONLY checks two defect shapes: a
+        status/enum value conflating distinct states (e.g. "any warning" read
+        as "failed"), and new logic placed after an early-return that skips it
+        on the path it was meant to cover. Added after both shapes hit the same
+        PR (lm#135) in one review cycle.
+    All panel verdicts render ADVISORY-only; none ever approve/deny.
     (skill-completeness + QA layers still get added on top later.)
 
-Cross-repo caveat: several mirror pairs span SEPARATE GitHub repos (lm <-> cs).
-A PR lives in ONE repo, so those can only be flagged ADVISORY ("ensure the twin
-PR exists"); within-repo pairs are hard findings.
+Cross-repo caveat: several mirror pairs span SEPARATE GitHub repos (lm <-> cs,
+dns <-> lm/dns, dhcp <-> lm/dhcp). A PR lives in ONE repo, so those can only be
+flagged ADVISORY ("ensure the twin PR exists"); within-repo pairs are hard
+findings. ``_resolve_cross_repo_twins`` auto-drops the advisory when a matching
+open PR in the twin repo already touches the twin path.
 
 TODO: the pair rules below duplicate the dual-copy-guard skill's reference. Once
 proven, load them from `.claude/skills/dual-copy-guard/reference.md` (or a shared
@@ -32,6 +51,8 @@ import re
 
 from github_ops import get_monitored_repos
 from app_state import update_task_state, record_pr_review, update_pr_review, state
+from secrets_scan import check_secrets
+from lint_python import check_undefined_names
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +78,8 @@ def check_parity(repo_full_name, changed):
     owner = (repo_full_name or "").split("/")[0] or "lbockenstedt"
     is_cs = repo.endswith("/cs") or repo == "cs"
     is_lm = repo.endswith("/lm") or repo == "lm"
+    is_dns = repo.endswith("/dns") or repo == "dns"
+    is_dhcp = repo.endswith("/dhcp") or repo == "dhcp"
 
     # ---- cs (client-sim) WITHIN-REPO pairs -------------------------------
     if is_cs:
@@ -149,6 +172,58 @@ def check_parity(repo_full_name, changed):
                 "twin": {"repo": "%s/cs" % owner, "path": "lm-spoke/src/sim_quota.py"},
             })
 
+    # ---- dns / dhcp dual-module-copy advisories ---------------------------
+    # These two modules deliberately exist in TWO shapes: a standalone repo
+    # (dns / dhcp, root = the module) and a copy nested under lm/ (lm/dns/,
+    # lm/dhcp/). Unlike the single-file pairs above, ANY changed file inside
+    # the module maps 1:1 to its twin path in the other repo — one advisory
+    # per file (not one combined advisory) so _resolve_cross_repo_twins can
+    # verify/drop each individually against the twin repo's open PRs.
+    _DNS_DHCP_CAP = 15  # a module-wide rename/refactor could touch many files
+    if is_dns:
+        for p in sorted(changed)[:_DNS_DHCP_CAP]:
+            findings.append({
+                "level": "advisory",
+                "title": "dns module twin lives in the lm repo",
+                "detail": "This PR changes `%s`; its twin `lm/dns/%s` is in the **lm** repo "
+                          "(dual-copy — see memory `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`). "
+                          "Ensure a matching lm PR." % (p, p),
+                "twin": {"repo": "%s/lm" % owner, "path": "dns/%s" % p},
+            })
+    if is_dhcp:
+        for p in sorted(changed)[:_DNS_DHCP_CAP]:
+            findings.append({
+                "level": "advisory",
+                "title": "dhcp module twin lives in the lm repo",
+                "detail": "This PR changes `%s`; its twin `lm/dhcp/%s` is in the **lm** repo "
+                          "(dual-copy — see memory `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`). "
+                          "Ensure a matching lm PR." % (p, p),
+                "twin": {"repo": "%s/lm" % owner, "path": "dhcp/%s" % p},
+            })
+    if is_lm:
+        _dns_changed = sorted(p for p in changed if p.startswith("dns/"))[:_DNS_DHCP_CAP]
+        for p in _dns_changed:
+            stripped = p[len("dns/"):]
+            findings.append({
+                "level": "advisory",
+                "title": "lm/dns twin lives in the standalone dns repo",
+                "detail": "This PR changes `%s`; its twin `%s` is in the **dns** repo "
+                          "(dual-copy — see memory `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`). "
+                          "Ensure a matching dns PR." % (p, stripped),
+                "twin": {"repo": "%s/dns" % owner, "path": stripped},
+            })
+        _dhcp_changed = sorted(p for p in changed if p.startswith("dhcp/"))[:_DNS_DHCP_CAP]
+        for p in _dhcp_changed:
+            stripped = p[len("dhcp/"):]
+            findings.append({
+                "level": "advisory",
+                "title": "lm/dhcp twin lives in the standalone dhcp repo",
+                "detail": "This PR changes `%s`; its twin `%s` is in the **dhcp** repo "
+                          "(dual-copy — see memory `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`). "
+                          "Ensure a matching dhcp PR." % (p, stripped),
+                "twin": {"repo": "%s/dhcp" % owner, "path": stripped},
+            })
+
     return findings
 
 
@@ -218,8 +293,18 @@ def _extract_summary(body):
 
 _PANEL_HEADER = "### \U0001F9E0 Skeptical review (panel)"   # 🧠 — kept in sync w/ _render
 _PANEL_MAX_FILES = 40
-_PANEL_PATCH_CHARS = 4000
-_PANEL_DIFF_CHARS = 24000
+# Raised from 4000/24000 after cs#65: a single legitimately-large-but-normal
+# file diff (a ~34KB dual-copy-guard port, one file) got sliced to ~12% of its
+# actual content by the OLD per-file cap alone — well before the total budget
+# was even touched — and the panel rejected at 32% confidence reasoning purely
+# from what it couldn't see, not from any real defect (verified: every
+# specific claim in that review was false when checked against the full file).
+# Both values are still well inside what every configured provider's context
+# window supports (modest local Ollama models run num_ctx=32768 tokens by
+# default, i.e. ~130K+ chars); a wasted reject costs more in human triage time
+# and a burned LLM call than the extra review-time tokens do.
+_PANEL_PATCH_CHARS = 20000
+_PANEL_DIFF_CHARS = 60000
 
 
 def _pr_diff_text(files):
@@ -286,6 +371,108 @@ def _skeptical_review(pr, files, config):
     return review if isinstance(review, dict) else None
 
 
+_STATE_PANEL_HEADER = "### \U0001F500 State-logic / control-flow review (panel)"   # 🔀
+
+
+def _state_logic_review(pr, files, config):
+    """Second, narrower skeptical-panel pass focused specifically on the bug
+    SHAPE that hit lm#135 twice in one review cycle: a status/enum value that
+    conflates two distinct states (e.g. "any warning" silently treated as
+    "failed"), and new logic placed after an early-return/guard that skips it
+    on the exact path it was meant to cover. General-purpose review (see
+    _skeptical_review) reads each hunk for local correctness; it does not
+    reliably ask "trace every value this status variable can take" or "does
+    this line actually execute on the failure path" — this pass asks nothing
+    ELSE, so it can't get distracted the way a broad-scope reviewer can.
+
+    Independent opt-in: gated behind ``pr_review_state_logic_enabled``
+    (default False) — separate from ``pr_review_llm_enabled`` so a user can
+    run the general panel without paying for this one, or vice versa. Same
+    advisory-only contract as _skeptical_review: never blocks, never
+    approves/denies. Best-effort: None when disabled, no diff, or on error."""
+    if not config.get("pr_review_state_logic_enabled", False):
+        return None
+    diff = _pr_diff_text(files)
+    if not diff.strip():
+        return None
+    try:
+        from fix_engine import review_fix
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: state-logic panel skipped (fix_engine import failed: %s)", e)
+        return None
+    issue_body = (
+        "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
+        % (pr.title or "", (pr.body or "").strip()[:4000])
+    ) + (
+        "NOTE: This is a HUMAN-authored pull request under pre-review. Ignore style, "
+        "naming, and general correctness — a SEPARATE broad reviewer already covers "
+        "those. Your ONLY job is two specific defect shapes:\n\n"
+        "1) STATE/STATUS COVERAGE — for every boolean/enum/status value this diff "
+        "computes or changes the computation of: list every distinct state the "
+        "underlying data can actually be in (not just the two the author had in "
+        "mind), and check whether the new logic conflates states that should stay "
+        "distinct (e.g. 'a warning present' vs 'the operation failed' vs 'the "
+        "operation never ran' are three different things — treating any two of "
+        "them as the same value is a defect even if each individually looks "
+        "reasonable).\n\n"
+        "2) REACHABILITY — for every new line of logic (a render call, a state "
+        "update, a side effect): trace the function's control flow BACKWARD from "
+        "that line to its entry. Does an early-return, guard clause, or "
+        "short-circuit ABOVE it in the function actually let execution reach that "
+        "line on the specific input/condition the author intended it for? A line "
+        "that only runs when there's nothing left to act on (e.g. UI added after "
+        "an empty-result early-return, when the UI's whole purpose is describing "
+        "why the result is empty) is a defect even though the line itself is "
+        "syntactically and logically correct in isolation.\n\n"
+        "Report ONLY concrete instances of these two shapes, with the exact "
+        "variable/line and which states/paths are conflated or unreachable. If you "
+        "find neither, say so plainly — do not manufacture a finding to have "
+        "something to report.")
+    try:
+        review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff)
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: state-logic panel skipped (review_fix error: %s)", e)
+        return None
+    return review if isinstance(review, dict) else None
+
+
+def _render_state_panel(review):
+    """Render the state-logic panel section (empty list when no review) —
+    same rendering shape as _render_panel, distinct header/framing so the two
+    advisory panels are never confused for one combined verdict."""
+    if not review:
+        return []
+    if review.get("status"):
+        return [_STATE_PANEL_HEADER, "",
+                "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
+                ""]
+    verdict = str(review.get("verdict") or "—")
+    crit = str(review.get("critique") or "").strip()
+    try:
+        from fix_engine import _norm_confidence
+    except Exception:  # noqa: BLE001
+        def _norm_confidence(v):
+            c = float(v)
+            return max(0.0, min(1.0, c / 100.0 if c > 1.0 else c))
+    try:
+        conf_str = "%.0f%%" % (_norm_confidence(review.get("confidence")) * 100)
+    except (TypeError, ValueError):
+        conf_str = "n/a"
+    vicon = "\U0001F7E2" if verdict == "Approve" else "\U0001F534"
+    out = [
+        _STATE_PANEL_HEADER, "",
+        "_Narrow-scope panel: state/status coverage + control-flow reachability "
+        "ONLY (see pr_review.py `_state_logic_review` for what it does/doesn't "
+        "check). Advisory — a human still approves/denies._",
+        "",
+        "%s **Advisory verdict: %s** · confidence **%s**" % (vicon, verdict, conf_str),
+        "",
+    ]
+    if crit:
+        out += [crit, ""]
+    return out
+
+
 def _render_panel(review):
     """Render the advisory skeptical-panel section (empty list when no review)."""
     if not review:
@@ -325,7 +512,7 @@ def _render_panel(review):
     return out
 
 
-def _render(findings, head_sha, summary="", review=None):
+def _render(findings, head_sha, summary="", review=None, state_review=None):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
@@ -339,17 +526,19 @@ def _render(findings, head_sha, summary="", review=None):
         lines += [_SUMMARY_HEADER, "", summary, ""]
     if not findings:
         lines += [
-            "### Parity check",
+            "### Tier-1 checks",
             "",
-            "✅ **Passed** — no dual-copy / cross-platform drift detected in the changed files.",
+            "✅ **Passed** — no dual-copy/cross-platform drift, no likely hardcoded "
+            "credentials, and no undefined names detected in the changed files.",
             "",
         ]
     else:
-        lines += ["### Parity findings", ""]
+        lines += ["### Tier-1 findings (parity + secrets + undefined-names)", ""]
         for f in sorted(findings, key=lambda x: _LEVEL_ORDER.get(x["level"], 9)):
             icon = _LEVEL_ICON.get(f["level"], "•")
             lines += ["%s **%s — %s**" % (icon, f["level"].upper(), f["title"]), "", f["detail"], ""]
     lines += _render_panel(review)
+    lines += _render_state_panel(state_review)
     return "\n".join(lines)
 
 
@@ -436,6 +625,8 @@ def _review_one(gh, repo, pr, config):
     changed = [f.filename for f in files]
     findings = check_parity(repo.full_name, changed)
     findings = _resolve_cross_repo_twins(gh, findings)
+    findings += check_secrets(files)
+    findings += check_undefined_names(repo, files, head_sha)
     existing = _find_marker_comment(pr)
     already_current = bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
     if already_current:
@@ -443,14 +634,29 @@ def _review_one(gh, repo, pr, config):
         # on a cached re-scan / post-restart.
         summary = _extract_summary(existing.body if existing else "")
         action = "cached"
+        # Recover the last persisted panel result(s) rather than leaving `review`/
+        # `state_review` unset. NOTE: `review` used to be referenced UNCONDITIONALLY
+        # below (in the record_pr_review call) but was only ever assigned in the
+        # `else` branch — every cached re-scan (i.e. most polls, since a PR's head
+        # rarely changes between cycles) raised NameError here, silently swallowed
+        # by scan_open_prs' broad except. That meant record_pr_review never
+        # actually ran on a cache hit despite the comment below claiming it always
+        # persists — this recovery is the fix, not just a null-init, so a cache hit
+        # re-persists the SAME panel verdict instead of erasing it to blank.
+        _prior = (state.get("pr_reviews") or {}).get("%s#%s" % (repo.full_name, pr.number)) or {}
+        review = ({"status": _prior["panel_status"]} if _prior.get("panel_status") else
+                  {"verdict": _prior.get("panel_verdict"), "confidence": _prior.get("panel_confidence"),
+                   "critique": _prior.get("panel_critique")}) if _prior.get("panel_verdict") or _prior.get("panel_status") else None
+        state_review = None  # no separate storage for this yet (see note on record_pr_review below)
     else:
         # New/changed head: generate the plain-language change summary (LLM,
-        # best-effort) and run the skeptical reviewer panel (the unified
+        # best-effort) and run the skeptical reviewer panel(s) (the unified
         # bug/feature confidence engine, advisory-only) — then (re)post the
-        # comment + status. Both are per-head, not per-cycle, to bound LLM cost.
+        # comment + status. All per-head, not per-cycle, to bound LLM cost.
         summary = _summarize_changes(pr, files, config)
         review = _skeptical_review(pr, files, config)
-        body = _render(findings, head_sha, summary, review=review)
+        state_review = _state_logic_review(pr, files, config)
+        body = _render(findings, head_sha, summary, review=review, state_review=state_review)
         if existing:
             existing.edit(body)
             action = "updated"
@@ -469,7 +675,11 @@ def _review_one(gh, repo, pr, config):
             logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
     # Always persist for the UI 'PRs Reviewed' filter (survives restarts). The
     # panel result rides along so the advisory verdict/confidence shows in
-    # BugFixer's own PR list, not only in the GitHub comment.
+    # BugFixer's own PR list, not only in the GitHub comment. state_review (the
+    # state-logic panel) is NOT yet persisted here — app_state.record_pr_review
+    # only has flat panel_* fields for ONE panel; it renders in the GitHub
+    # comment via _render's state_review param but doesn't show in BugFixer's
+    # own UI yet. Follow-up if that's wanted.
     record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha,
                      summary=summary, review=review)
     if action != "cached":

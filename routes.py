@@ -1725,6 +1725,9 @@ async def settings_page(request: Request):
     config.setdefault("pr_review_enabled", False)
     # Skeptical reviewer panel on PR pre-review (advisory) — OFF (opt-in sub-option).
     config.setdefault("pr_review_llm_enabled", False)
+    # Narrow state-logic/control-flow panel on PR pre-review (advisory) — a SECOND,
+    # independent opt-in sub-option (see pr_review._state_logic_review).
+    config.setdefault("pr_review_state_logic_enabled", False)
     config.setdefault("batch_enabled", False)
     config.setdefault("prompt_caching_enabled", True)
     # Source knobs (default ON keeps the LM bug-fix pipeline working; the per-
@@ -1960,6 +1963,8 @@ async def save_settings(request: Request):
     config_data["pr_review_enabled"] = data.get("pr_review_enabled") == "on"
     # Advisory skeptical-panel sub-option (unifies PR review with the AI-fix reviewer).
     config_data["pr_review_llm_enabled"] = data.get("pr_review_llm_enabled") == "on"
+    # Advisory state-logic/control-flow panel sub-option (independent of the above).
+    config_data["pr_review_state_logic_enabled"] = data.get("pr_review_state_logic_enabled") == "on"
     config_data["batch_enabled"] = data.get("batch_enabled") == "on"
     config_data["prompt_caching_enabled"] = data.get("prompt_caching_enabled") == "on"
     # File-a-Bug toggle (defaults on so the footer button works out of the box).
