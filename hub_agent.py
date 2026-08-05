@@ -1205,14 +1205,26 @@ class HubAgentClient:
                 msgs = data.get("messages") or []
                 tools = data.get("tools") or None
                 system = data.get("system") or "You are the Lab Manager help assistant."
-                result, err = await asyncio.to_thread(
+                # call_llm does NOT return a (value, error) tuple — it returns the
+                # result directly (a {"text", "tool_calls"} dict when `tools` is
+                # passed, per _request_ollama et al.; a bare string otherwise) and
+                # RAISES on failure (see llm_client.call_llm's final `return result`
+                # / `raise Exception(...)`). The previous `result, err = call_llm(...)`
+                # unpacked the returned dict's KEYS via tuple-assignment — result
+                # became the literal string "text", err became "tool_calls" — so
+                # `if err:` was ALWAYS true on a successful tool-turn and every
+                # working call surfaced as {"status": "ERROR", "message":
+                # "tool_calls"}. This is what "Ask AI gives a tool_calls error" was.
+                result = await asyncio.to_thread(
                     call_llm, "", system_prompt=system, messages=msgs, tools=tools)
-                if err or not isinstance(result, dict):
-                    rdata = {"status": "ERROR", "message": str(err or "no result from LLM")}
-                else:
+                if isinstance(result, dict):
                     rdata = {"status": "SUCCESS", "assistant": {
                         "content": result.get("text") or "",
                         "tool_calls": result.get("tool_calls") or [],
+                    }}
+                else:
+                    rdata = {"status": "SUCCESS", "assistant": {
+                        "content": str(result or ""), "tool_calls": [],
                     }}
             except Exception as e:  # noqa: BLE001
                 logger.warning("HELP_ASK failed: %s", e)
