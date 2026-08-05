@@ -49,6 +49,7 @@ machine-readable pairs file) so there is a single source of truth.
 import logging
 import os
 import re
+from datetime import timedelta
 
 from github_ops import get_monitored_repos
 from app_state import update_task_state, record_pr_review, update_pr_review, state
@@ -555,10 +556,24 @@ def _find_marker_comment(pr):
     return None
 
 
-def _twin_open_pr_touches(gh, twin_repo, twin_path):
-    """Does an OPEN PR in `twin_repo` modify `twin_path`? Returns True/False, or
-    None if the twin repo can't be reached (so the caller keeps the advisory rather
-    than falsely clearing OR falsely warning)."""
+_TWIN_MERGED_SCAN_LIMIT = 20   # bounded: newest-updated-first, so a real merge is near the front
+
+
+def _twin_open_pr_touches(gh, twin_repo, twin_path, since=None):
+    """Does an OPEN PR in `twin_repo` modify `twin_path` — OR did a RECENTLY
+    MERGED one already land it? A merged twin PR means the drift is ALREADY
+    resolved on the twin repo's default branch; only checking OPEN PRs meant
+    the warning kept firing for hours after the twin PR merged (confirmed:
+    cs#64 kept saying "twin NOT updated" for lm's sim-views.js long after
+    lm#135 — the actual twin PR — merged and the fix was already on lm's
+    main). ``since`` (the reviewed PR's own created_at, with a 1-day grace
+    buffer) bounds the merged-PR scan to merges concurrent with or after this
+    PR — an OLD merge touching the same path is unrelated history, not proof
+    THIS drift was addressed, so it must not silently clear a real warning.
+
+    Returns True/False, or None if the twin repo can't be reached (so the
+    caller keeps the advisory rather than falsely clearing OR falsely
+    warning)."""
     try:
         r = gh.get_repo(twin_repo)
     except Exception as e:  # noqa: BLE001
@@ -572,20 +587,46 @@ def _twin_open_pr_touches(gh, twin_repo, twin_path):
                         return True
             except Exception:
                 continue
+        # No open PR touches it — check recently MERGED ones too (bounded,
+        # newest-updated-first) before concluding the twin is un-updated.
+        if since is not None:
+            # PyGithub's tz-awareness has varied across versions — normalize
+            # both sides to naive UTC before comparing so this never raises
+            # "can't compare offset-naive and offset-aware datetimes" and
+            # silently kills the whole twin check via the outer except.
+            since_naive = since.replace(tzinfo=None) if since.tzinfo else since
+            cutoff = since_naive - timedelta(days=1)
+            checked = 0
+            for tpr in r.get_pulls(state="closed", sort="updated", direction="desc"):
+                if checked >= _TWIN_MERGED_SCAN_LIMIT:
+                    break
+                checked += 1
+                if not tpr.merged or not tpr.merged_at:
+                    continue
+                merged_at = tpr.merged_at.replace(tzinfo=None) if tpr.merged_at.tzinfo else tpr.merged_at
+                if merged_at < cutoff:
+                    continue
+                try:
+                    for f in tpr.get_files():
+                        if f.filename == twin_path:
+                            return True
+                except Exception:
+                    continue
     except Exception as e:  # noqa: BLE001
         logger.debug("pr_review twin-check: listing PRs for %s failed: %s", twin_repo, e)
         return None
     return False
 
 
-def _resolve_cross_repo_twins(gh, findings):
+def _resolve_cross_repo_twins(gh, findings, since=None):
     """Verify each cross-repo twin advisory against the OTHER repo.
 
-    If a matching PR there already updates the twin file → DROP the advisory (the
-    pair IS in lockstep, no reminder needed). If NOT → escalate to a WARNING naming
-    the file to update. If the twin repo can't be checked → leave the advisory as-is.
-    Findings without a `twin` key pass through untouched; the key is stripped so the
-    render/record layers never see it."""
+    If a matching PR there already updates the twin file (open, OR merged
+    since ``since``) → DROP the advisory (the pair IS in lockstep, no
+    reminder needed). If NOT → escalate to a WARNING naming the file to
+    update. If the twin repo can't be checked → leave the advisory as-is.
+    Findings without a `twin` key pass through untouched; the key is stripped
+    so the render/record layers never see it."""
     out = []
     for f in (findings or []):
         twin = (f or {}).get("twin")
@@ -594,7 +635,7 @@ def _resolve_cross_repo_twins(gh, findings):
             continue
         f = dict(f)
         f.pop("twin", None)
-        verdict = _twin_open_pr_touches(gh, twin.get("repo", ""), twin.get("path", ""))
+        verdict = _twin_open_pr_touches(gh, twin.get("repo", ""), twin.get("path", ""), since=since)
         if verdict is True:
             # Twin is being updated in a matching PR — no warning needed.
             continue
@@ -635,7 +676,7 @@ def _review_one(gh, repo, pr, config, force=False):
     files = list(pr.get_files())
     changed = [f.filename for f in files]
     findings = check_parity(repo.full_name, changed)
-    findings = _resolve_cross_repo_twins(gh, findings)
+    findings = _resolve_cross_repo_twins(gh, findings, since=getattr(pr, "created_at", None))
     findings += check_secrets(files)
     findings += check_undefined_names(repo, files, head_sha)
     existing = _find_marker_comment(pr)
