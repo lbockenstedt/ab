@@ -321,7 +321,7 @@ def _pr_diff_text(files):
     return "\n\n".join(parts)[:_PANEL_DIFF_CHARS]
 
 
-def _skeptical_review(pr, files, config):
+def _skeptical_review(pr, files, config, repo=None, head_sha=None):
     """Run the cross-provider skeptical reviewer panel on the PR diff — the SAME
     panel (``fix_engine.review_fix``, ≥0.80 confidence gate) the bug/feature fix
     pipeline uses, now unified so a human PR and a bot fix are judged by one
@@ -363,8 +363,11 @@ def _skeptical_review(pr, files, config):
         "Reject (lower confidence) if any such defect is present.")
     try:
         # builder_n=0 → no builder to exclude, so EVERY configured provider reviews
-        # the human's diff (there is no bot author to leave out).
-        review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff)
+        # the human's diff (there is no bot author to leave out). repo+head_sha
+        # (when available) let each reviewer fetch_repo_file instead of rejecting
+        # on a truncated/incomplete diff view.
+        review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
+                            repo=repo, head_sha=head_sha)
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: panel skipped (review_fix error: %s)", e)
         return None
@@ -374,7 +377,7 @@ def _skeptical_review(pr, files, config):
 _STATE_PANEL_HEADER = "### \U0001F500 State-logic / control-flow review (panel)"   # 🔀
 
 
-def _state_logic_review(pr, files, config):
+def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     """Second, narrower skeptical-panel pass focused specifically on the bug
     SHAPE that hit lm#135 twice in one review cycle: a status/enum value that
     conflates two distinct states (e.g. "any warning" silently treated as
@@ -429,7 +432,8 @@ def _state_logic_review(pr, files, config):
         "find neither, say so plainly — do not manufacture a finding to have "
         "something to report.")
     try:
-        review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff)
+        review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
+                            repo=repo, head_sha=head_sha)
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: state-logic panel skipped (review_fix error: %s)", e)
         return None
@@ -654,8 +658,8 @@ def _review_one(gh, repo, pr, config):
         # bug/feature confidence engine, advisory-only) — then (re)post the
         # comment + status. All per-head, not per-cycle, to bound LLM cost.
         summary = _summarize_changes(pr, files, config)
-        review = _skeptical_review(pr, files, config)
-        state_review = _state_logic_review(pr, files, config)
+        review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha)
+        state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
         body = _render(findings, head_sha, summary, review=review, state_review=state_review)
         if existing:
             existing.edit(body)
