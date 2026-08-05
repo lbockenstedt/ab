@@ -473,8 +473,143 @@ def prepare_environment(repo_path):
         logger.info("No known dependency file detected. Skipping installation.")
 
 
+
+# ── Review-panel tool access (fetch_repo_file) ──────────────────────────────
+# The panel is normally fed only a diff/patch, which can be truncated or
+# simply not show a referenced symbol's definition (it lives outside the
+# changed hunk). Rather than reject on "can't verify" — the exact failure
+# mode that produced a false-negative Reject on cs#65 — a reviewer can call
+# this tool to pull the ACTUAL file content from the commit being reviewed
+# and settle the question. Read-only, scoped to the SAME repo/commit already
+# under review: this is the same content a human reviewer sees browsing the
+# repo on GitHub, not a broader system-state probe — contrast chat.py's
+# CHAT_TOOLS, which redact results (_sanitize_tool_result there) because they
+# CAN reach other tenants'/system state a single source file never does.
+#
+# Only wired up when the caller passes repo+head_sha (i.e. pr_review.py's PR
+# pre-review path). Every other review_fix caller (the bot-fix pipeline,
+# which has no GitHub repo/commit context) is completely unaffected — falls
+# through to the exact prior single-turn call, unchanged.
+_REVIEW_TOOLS = [
+    {"type": "function", "function": {
+        "name": "fetch_repo_file",
+        "description": "Fetch the FULL content of a file from this repo at the "
+                        "commit being reviewed. Use this when the diff doesn't "
+                        "show whether a referenced symbol (function, route, "
+                        "constant) actually exists, or when the diff was "
+                        "truncated and you need more of a file than you were "
+                        "shown. Do not guess or default to rejecting when a "
+                        "tool call would settle it — but don't call this for "
+                        "every trivial PR either; most reviews don't need it.",
+        "parameters": {"type": "object",
+                       "properties": {"path": {"type": "string",
+                                                "description": "repo-relative file path"}},
+                       "required": ["path"]},
+    }},
+]
+_REVIEW_TOOL_MAX_ITER = 3
+_REVIEW_TOOL_MAX_FILES = 5
+_REVIEW_FILE_MAX_CHARS = 20000
+# Some local models emit a tool call as "<tool_call>{...}</tool_call>" TEXT
+# instead of the structured tool_calls field (the same shape chat.py's agent
+# loop already guards against). Kept as its own minimal copy rather than an
+# import from chat.py, to keep this change isolated to the review path.
+_REVIEW_TOOLCALL_TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+
+def _parse_review_text_tool_calls(text):
+    if not text or "<tool_call>" not in text:
+        return text, []
+    calls = []
+    for m in _REVIEW_TOOLCALL_TAG_RE.finditer(text):
+        try:
+            obj = json.loads(m.group(1))
+        except Exception:  # noqa: BLE001
+            continue
+        fn = obj.get("function") if isinstance(obj.get("function"), dict) else {}
+        name = obj.get("name") or fn.get("name")
+        args = obj.get("arguments") or fn.get("arguments") or {}
+        if name:
+            calls.append({"function": {"name": name, "arguments": args}})
+    return _REVIEW_TOOLCALL_TAG_RE.sub("", text).strip(), calls
+
+
+def _fetch_repo_file_for_review(repo, head_sha, path):
+    """Executor for fetch_repo_file — read-only, bounded, never raises (a bad
+    path/binary/oversized file degrades to an {"error": ...} the reviewer can
+    react to instead of crashing the panel turn)."""
+    try:
+        c = repo.get_contents(path, ref=head_sha)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"could not fetch {path}@{head_sha}: {e}"}
+    raw = getattr(c, "decoded_content", None)
+    if raw is None:
+        return {"error": f"{path} has no fetchable content (directory or binary?)"}
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"error": f"{path} is not valid UTF-8 (binary file?)"}
+    return {"path": path, "content": _trunc(text, _REVIEW_FILE_MAX_CHARS),
+            "truncated": len(text) > _REVIEW_FILE_MAX_CHARS}
+
+
+def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, head_sha):
+    """One reviewer's turn. With repo+head_sha, runs a bounded tool-calling
+    loop (fetch_repo_file, up to _REVIEW_TOOL_MAX_ITER turns /
+    _REVIEW_TOOL_MAX_FILES files) before producing final text. Without them,
+    falls back to the exact prior single-turn call.
+
+    Returns the reviewer's final text (same plain-string contract call_llm's
+    non-tools return already had) so the caller's existing JSON-extraction
+    regex needs no changes."""
+    if repo is None or head_sha is None:
+        return call_llm(prompt, system_prompt=system_prompt, force_provider=provider_n,
+                        task_id=task_id, model_override=model)
+
+    messages = [{"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}]
+    files_fetched = 0
+    last_text = ""
+    for _ in range(_REVIEW_TOOL_MAX_ITER):
+        result = call_llm("", messages=messages, tools=_REVIEW_TOOLS,
+                          force_provider=provider_n, task_id=task_id, model_override=model)
+        if not isinstance(result, dict):
+            return str(result or "")
+        text = result.get("text") or ""
+        tool_calls = result.get("tool_calls") or []
+        if not tool_calls:
+            text, tool_calls = _parse_review_text_tool_calls(text)
+        last_text = text
+        if not tool_calls:
+            return text
+        messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name") or tc.get("name")
+            raw_args = fn.get("arguments") if fn else tc.get("arguments")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+            except Exception:  # noqa: BLE001
+                args = {}
+            if name == "fetch_repo_file" and files_fetched < _REVIEW_TOOL_MAX_FILES:
+                files_fetched += 1
+                out = _fetch_repo_file_for_review(repo, head_sha, str(args.get("path") or ""))
+            elif name == "fetch_repo_file":
+                out = {"error": "file-fetch budget exhausted for this review (%d files) "
+                                "— decide from what you've already seen" % _REVIEW_TOOL_MAX_FILES}
+            else:
+                out = {"error": f"unknown tool: {name}"}
+            messages.append({"role": "tool", "name": name or "unknown",
+                             "content": json.dumps(out)[:_REVIEW_FILE_MAX_CHARS + 500],
+                             "tool_call_id": tc.get("id") or f"call_{name}"})
+    # Iteration cap reached without a tool-free turn — use whatever text the
+    # last turn produced (existing JSON-extraction just won't find a match if
+    # it's incomplete, same as any other malformed reviewer response today).
+    return last_text
+
+
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
-               builder_n=None, diff_override=None):
+               builder_n=None, diff_override=None, repo=None, head_sha=None):
     """Run a cross-provider reviewer panel on a proposed fix.
 
     builder_n: which provider slot (1/2/3) generated the fix being reviewed.
@@ -511,20 +646,33 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     # With no review slot configured, fall back to the original behaviour: code
     # slots minus the builder, so an install that has not set up the new pool
     # behaves exactly as before.
-    review_pool = tuple(
-        n for n in _REVIEW_SLOTS
-        if _provider_configured(*_get_provider_config(n, config)[:3])
-    )
+    review_pool = tuple()
+    try:
+        review_pool = tuple(
+            n for n in _REVIEW_SLOTS
+            if _provider_configured(*_get_provider_config(n, config)[:3])
+        )
+    except Exception as e:
+        logger.warning(f"Error checking review slots configuration: {e}")
+        # Fall back to code slots if there's an error in review slot configuration
+        pass
+
+    # Ensure we always have a valid pool (fallback to _CODE_SLOTS)
     pool, skip_builder = (review_pool, False) if review_pool else (_CODE_SLOTS, True)
 
     reviewers = []
     for n in pool:
         if skip_builder and n == builder_n:
             continue
-        provider, key, model, _ = _get_provider_config(n, config)
-        if not _provider_configured(provider, key, model):
+        try:
+            provider, key, model, _ = _get_provider_config(n, config)
+            if not _provider_configured(provider, key, model):
+                continue
+            reviewers.append({"name": f"Reviewer {n} ({provider})", "model": model, "provider_n": n})
+        except Exception as e:
+            logger.warning(f"Error configuring reviewer for slot {n}: {e}")
+            # Continue to next reviewer instead of failing completely
             continue
-        reviewers.append({"name": f"Reviewer {n} ({provider})", "model": model, "provider_n": n})
 
     if not reviewers:
         logger.warning("No reviewers configured. Falling back to default LLM review.")
@@ -578,18 +726,26 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         "\"confidence\" MUST be a fraction between 0.0 and 1.0 — e.g. 0.95 for 95% confidence. Do NOT return a 0-100 percentage.\n"
         "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 0.90 confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 0.90). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back."
     )
+    if repo is not None and head_sha is not None:
+        prompt += (
+            "\n\nThe diff above may be TRUNCATED (large files/diffs are capped). "
+            "You have a fetch_repo_file tool that reads the ACTUAL file at this "
+            "commit — use it to confirm whether a referenced symbol exists, or "
+            "to see the rest of a file the diff cut off, INSTEAD OF rejecting "
+            "because you can't verify something. Most reviews won't need it; "
+            "use it when a specific, nameable uncertainty would change your "
+            "verdict, not as a first step."
+        )
 
     votes = []
     failed_reviewers = []
     for r in reviewers:
         try:
             logger.info(f"{r['name']} analyzing fix...")
-            res = call_llm(
+            res = _run_reviewer_turn(
                 prompt,
-                system_prompt="You are a skeptical senior engineer. Be critical. Only return JSON.",
-                force_provider=r["provider_n"],
-                task_id=task_id,
-                model_override=r.get("model"),
+                "You are a skeptical senior engineer. Be critical. Only return JSON.",
+                r["provider_n"], r.get("model"), task_id, repo, head_sha,
             )
             match = re.search(r'\{.*\}', res, re.DOTALL)
             if match:
