@@ -293,8 +293,18 @@ def _extract_summary(body):
 
 _PANEL_HEADER = "### \U0001F9E0 Skeptical review (panel)"   # 🧠 — kept in sync w/ _render
 _PANEL_MAX_FILES = 40
-_PANEL_PATCH_CHARS = 4000
-_PANEL_DIFF_CHARS = 24000
+# Raised from 4000/24000 after cs#65: a single legitimately-large-but-normal
+# file diff (a ~34KB dual-copy-guard port, one file) got sliced to ~12% of its
+# actual content by the OLD per-file cap alone — well before the total budget
+# was even touched — and the panel rejected at 32% confidence reasoning purely
+# from what it couldn't see, not from any real defect (verified: every
+# specific claim in that review was false when checked against the full file).
+# Both values are still well inside what every configured provider's context
+# window supports (modest local Ollama models run num_ctx=32768 tokens by
+# default, i.e. ~130K+ chars); a wasted reject costs more in human triage time
+# and a burned LLM call than the extra review-time tokens do.
+_PANEL_PATCH_CHARS = 20000
+_PANEL_DIFF_CHARS = 60000
 
 
 def _pr_diff_text(files):
