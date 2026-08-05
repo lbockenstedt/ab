@@ -861,6 +861,12 @@
                                         └ LLM reviewer panel + confidence score (same engine as AI fixes; flags render crashes / bugs parity can't)
                                     </label>
                                 </div>
+                                <div class="flex items-center gap-3 mt-2 ml-6">
+                                    <input type="checkbox" name="pr_review_state_logic_enabled" id="pr_review_state_logic_enabled" {{ 'checked' if settings.pr_review_state_logic_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_review_state_logic_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review on; independent of the LLM reviewer panel above). Runs a SECOND, narrow-scope panel pass that checks ONLY two defect shapes: a status/enum value conflating distinct states (e.g. a warning silently read as a failure), and new logic placed after an early-return/guard that skips it on the path it was meant to cover. Advisory only. Uses your configured LLM provider slots (an extra pass = extra cost per PR).">
+                                        └ State-logic / control-flow panel (narrow: status-conflation + unreachable-new-code only)
+                                    </label>
+                                </div>
                                 <div class="flex items-center gap-3 mt-2">
                                     <input type="checkbox" name="batch_enabled" id="batch_enabled" {{ 'checked' if settings.batch_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
                                     <label for="batch_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, CLOUD LLM calls (non-streaming, non-tool) route through the Anthropic/Gemini Batch API — ~50% cheaper but SLOWER (block-and-wait, minutes-to-hours). Needs a direct anthropic/google provider slot + API key; falls back to a normal call if batch fails. Local (ollama) calls are unaffected.">
