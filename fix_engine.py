@@ -554,18 +554,42 @@ def _fetch_repo_file_for_review(repo, head_sha, path):
 
 
 def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, head_sha):
-    """One reviewer's turn. With repo+head_sha, runs a bounded tool-calling
-    loop (fetch_repo_file, up to _REVIEW_TOOL_MAX_ITER turns /
-    _REVIEW_TOOL_MAX_FILES files) before producing final text. Without them,
-    falls back to the exact prior single-turn call.
+    """One reviewer's turn. With repo+head_sha AND a provider that can actually
+    receive `tools=`, runs a bounded tool-calling loop (fetch_repo_file, up to
+    _REVIEW_TOOL_MAX_ITER turns / _REVIEW_TOOL_MAX_FILES files) before
+    producing final text. Otherwise falls back to the exact prior single-turn
+    call — this includes claude_cli, which silently DROPS `tools=`
+    (_request_claude_cli never receives the param; the whole conversation is
+    serialised into a plain CLI prompt) — telling it about a fetch_repo_file
+    tool it has no way to invoke made it try to fake a tool call in prose
+    instead of returning clean JSON (bugfixer#730/#731: "Expecting ':'
+    delimiter" / "Extra data" parse errors on every claude_cli review), so the
+    tool-primed addendum below is only added when the provider will really see
+    it as a callable tool.
 
     Returns the reviewer's final text (same plain-string contract call_llm's
     non-tools return already had) so the caller's existing JSON-extraction
     regex needs no changes."""
-    if repo is None or head_sha is None:
+    provider = None
+    if provider_n:
+        try:
+            provider = _get_provider_config(provider_n, load_config())[0]
+        except Exception:  # noqa: BLE001
+            provider = None
+    supports_tools = not (repo is None or head_sha is None or (provider or "").lower().strip() == "claude_cli")
+    if not supports_tools:
         return call_llm(prompt, system_prompt=system_prompt, force_provider=provider_n,
                         task_id=task_id, model_override=model)
 
+    prompt = prompt + (
+        "\n\nThe diff above may be TRUNCATED (large files/diffs are capped). "
+        "You have a fetch_repo_file tool that reads the ACTUAL file at this "
+        "commit — use it to confirm whether a referenced symbol exists, or "
+        "to see the rest of a file the diff cut off, INSTEAD OF rejecting "
+        "because you can't verify something. Most reviews won't need it; "
+        "use it when a specific, nameable uncertainty would change your "
+        "verdict, not as a first step."
+    )
     messages = [{"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}]
     files_fetched = 0
@@ -726,16 +750,11 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         "\"confidence\" MUST be a fraction between 0.0 and 1.0 — e.g. 0.95 for 95% confidence. Do NOT return a 0-100 percentage.\n"
         "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 0.90 confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 0.90). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back."
     )
-    if repo is not None and head_sha is not None:
-        prompt += (
-            "\n\nThe diff above may be TRUNCATED (large files/diffs are capped). "
-            "You have a fetch_repo_file tool that reads the ACTUAL file at this "
-            "commit — use it to confirm whether a referenced symbol exists, or "
-            "to see the rest of a file the diff cut off, INSTEAD OF rejecting "
-            "because you can't verify something. Most reviews won't need it; "
-            "use it when a specific, nameable uncertainty would change your "
-            "verdict, not as a first step."
-        )
+    # NOTE: the tool-primed addendum used to be appended here, to one shared
+    # `prompt` handed to every reviewer regardless of provider. Moved into
+    # _run_reviewer_turn, which resolves each reviewer's actual provider and
+    # only adds it for providers that can actually receive `tools=` — see its
+    # docstring for why (claude_cli silently drops tools and got confused).
 
     votes = []
     failed_reviewers = []
@@ -760,7 +779,20 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             failed_reviewers.append(r["name"])
 
     if not votes:
-        return {"confidence": 0.0, "verdict": "Reject", "critique": "All reviewers failed."}
+        # Every configured reviewer errored (transient network/provider issue,
+        # a tool-calling edge case, a malformed response) — NOT the panel
+        # actually judging the fix. This used to return a hard 0%-confidence
+        # Reject, which reads identically to "the panel looked at this and
+        # rejected it" everywhere it's rendered (PR row, GitHub comment) even
+        # though no reviewer produced an opinion at all. Queue for retry
+        # instead, same as the pre-check above for all-offline — the caller
+        # (process_single_issue) already handles this status by retrying in an
+        # hour; PR review's _render_panel already renders it as "Panel
+        # unavailable this pass" rather than a false verdict.
+        _names = ", ".join(failed_reviewers) if failed_reviewers else "reviewer(s)"
+        logger.warning("review_fix: all %d reviewer(s) failed to produce a parseable response (%s).",
+                       len(reviewers), _names)
+        return {"status": "queue_for_retry", "reason": "all_reviewers_failed: %s" % _names}
 
     avg_conf = sum(v.get("confidence", 0.0) for v in votes) / len(votes)
     approvals = [v for v in votes if v.get("verdict") == "Approve"]
@@ -1944,7 +1976,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
                             # --- Handle Queue for Retry ---
                             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
-                                logger.info(f"Review queued for {issue_id}: Cloud LLM offline. Saving fix for retry in 1 hour.")
+                                _q_reason = review.get("reason") or "reviewers unavailable"
+                                logger.info(f"Review queued for {issue_id}: {_q_reason}. Saving fix for retry in 1 hour.")
                                 processed = load_processed()
                                 processed[issue_id] = {
                                     "status": "awaiting_review",
@@ -1955,7 +1988,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 save_processed(processed)
                                 state["processed"] = processed
                                 update_task_state(task_id=issue_id, action="end")
-                                return False, "Cloud offline: Review queued for retry in 1 hour."
+                                return False, f"Review queued for retry in 1 hour ({_q_reason})."
 
                             review_conf = review.get("confidence", 0.0)
                             review_verdict = review.get("verdict", "Reject")

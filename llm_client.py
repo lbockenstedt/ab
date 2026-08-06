@@ -501,18 +501,37 @@ def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
     return min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.0)
 
 
+def _tool_spec(t):
+    """Normalize one tool entry to its flat {name, description, parameters} spec.
+
+    Two shapes coexist in the codebase: the legacy flat one (chat.py's
+    CHAT_TOOLS: {"name": ..., "description": ..., "parameters": ...}) and the
+    standard OpenAI-nested one (fix_engine.py's _REVIEW_TOOLS:
+    {"type": "function", "function": {"name": ..., ...}} — the shape Ollama's
+    API itself expects, since _request_ollama passes `tools` through as-is).
+    The converters below used to assume only the flat shape and did `t["name"]`
+    directly, which KeyError'd('name') on every nested tool — breaking every
+    non-Ollama reviewer (copilot, openai, anthropic, google) whenever the PR
+    pre-review panel's fetch_repo_file tool was in play (bugfixer#727)."""
+    fn = t.get("function")
+    return fn if isinstance(fn, dict) else t
+
+
 def _tools_to_openai(tools):
-    """Convert Ollama-style tool list to OpenAI function-calling format."""
+    """Convert either tool-schema shape (see _tool_spec) to OpenAI function-calling format."""
     return [
-        {"type": "function", "function": {"name": t["name"], "description": t.get("description", ""), "parameters": t.get("parameters", {})}}
+        {"type": "function", "function": {"name": (fn := _tool_spec(t)).get("name", ""),
+                                          "description": fn.get("description", ""),
+                                          "parameters": fn.get("parameters", {})}}
         for t in (tools or [])
     ]
 
 
 def _tools_to_anthropic(tools):
-    """Convert Ollama-style tool list to Anthropic tool format."""
+    """Convert either tool-schema shape (see _tool_spec) to Anthropic tool format."""
     return [
-        {"name": t["name"], "description": t.get("description", ""), "input_schema": t.get("parameters", {"type": "object", "properties": {}, "required": []})}
+        {"name": (fn := _tool_spec(t)).get("name", ""), "description": fn.get("description", ""),
+         "input_schema": fn.get("parameters", {"type": "object", "properties": {}, "required": []})}
         for t in (tools or [])
     ]
 
@@ -1387,7 +1406,8 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
         payload["systemInstruction"] = {"parts": [{"text": system_text}]}
     if tools:
         payload["tools"] = [{"function_declarations": [
-            {"name": t["name"], "description": t.get("description", ""), "parameters": t.get("parameters", {})}
+            {"name": (fn := _tool_spec(t)).get("name", ""), "description": fn.get("description", ""),
+             "parameters": fn.get("parameters", {})}
             for t in tools
         ]}]
 
