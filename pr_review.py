@@ -860,7 +860,8 @@ def fix_one_pr(repo_full_name, number, config=None):
 
             review = review_fix(path, fix_body, fixes, task_id=lock_id, builder_n=0, repo=repo, head_sha=head_sha)
             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
-                return False, "Cloud LLM offline — click Fix again shortly."
+                _q_reason = review.get("reason") or "reviewers unavailable"
+                return False, f"Reviewer panel could not run ({_q_reason}) — click Fix again shortly."
             review_conf = review.get("confidence", 0.0) if isinstance(review, dict) else 0.0
             review_verdict = review.get("verdict", "Reject") if isinstance(review, dict) else "Reject"
             critique = review.get("critique", "") if isinstance(review, dict) else ""
