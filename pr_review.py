@@ -764,6 +764,159 @@ def reprocess_one_pr(repo_full_name, number, config=None):
     _review_one(gh, repo, pr, config, force=True)
 
 
+def fix_one_pr(repo_full_name, number, config=None):
+    """Entry point for the UI's per-PR "Fix" button (routes.py
+    /api/pr-review/fix) — the ONLY way this ever runs; BugFixer never applies a
+    PR fix on its own. A human clicks Fix, and this:
+
+      1. Recomputes this PR's Tier-1 findings (parity/secrets/lint) fresh, and
+         folds in the persisted skeptical-panel critique, into a fix prompt.
+      2. Clones the PR's OWN head branch (not a new branch) into a sandboxed
+         temp checkout, mirroring process_single_issue's clone/token handling.
+      3. Generates a fix via apply_ai_fix (targeted at exactly the PR's changed
+         files — files_override, since a PR review has no "issue text" for the
+         usual identifier-grep to anchor on) and parse_and_apply.
+      4. Gates it through the SAME skeptical reviewer panel (review_fix) the
+         bug/issue fix pipeline uses (builder_n=0: no builder to exclude, every
+         configured provider reviews) — reject means no push, full stop.
+      5. On approval (+ QA verify, if enabled), commits and pushes as a NEW
+         commit onto the PR's EXISTING branch — never a new branch/PR — then
+         triggers an immediate reprocess so the review comment/panel reflect
+         the fix right away.
+
+    Returns (True, message) on a pushed fix, (False, message) on any refusal/
+    rejection (surfaced to the UI, not an error). Raises only on setup failure
+    (bad token/repo/PR number), same contract as reprocess_one_pr.
+    """
+    import git
+    import tempfile
+    from github import Github
+    from fix_engine import (
+        _claim_issue, _release_issue, _authenticated_remote,
+        apply_ai_fix, parse_and_apply, review_fix, verify_fix, prepare_environment,
+    )
+
+    config = config or load_config()
+    token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        raise RuntimeError("No GitHub token configured")
+
+    lock_id = "pr-fix:%s#%s" % (repo_full_name, number)
+    if not _claim_issue(lock_id):
+        return False, "A fix is already in progress for this PR."
+    try:
+        gh = Github(token)
+        repo = gh.get_repo(repo_full_name)
+        pr = repo.get_pull(int(number))
+        if pr.merged:
+            return False, "PR #%s is already merged — nothing to fix." % number
+        if (pr.state or "").lower() == "closed":
+            return False, "PR #%s is closed — nothing to fix." % number
+
+        head_sha = pr.head.sha
+        branch = pr.head.ref
+        files = list(pr.get_files())
+        changed = [f.filename for f in files]
+
+        findings = check_parity(repo_full_name, changed)
+        findings = _resolve_cross_repo_twins(gh, findings, since=getattr(pr, "created_at", None))
+        findings += check_secrets(files)
+        findings += check_undefined_names(repo, files, head_sha)
+
+        rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}
+        panel_critique = (rec.get("panel_critique") or "").strip()
+        if not findings and not panel_critique:
+            return False, "No findings to fix — this PR has a clean pre-review."
+
+        lines = ["PR #%s: %s" % (pr.number, pr.title or "")]
+        if pr.body:
+            lines.append((pr.body or "").strip()[:2000])
+        if findings:
+            lines.append("\nBugFixer pre-review findings to fix:")
+            for f in findings:
+                lines.append("- [%s] %s: %s" % (
+                    (f.get("level") or "advisory").upper(), f.get("title") or "", f.get("detail") or ""))
+        if panel_critique:
+            lines.append("\nSkeptical reviewer critique (from the last panel pass):\n" + panel_critique)
+        fix_body = "\n".join(lines)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "repo")
+            url = repo.clone_url.replace("https://", "https://%s@" % token)
+            repo_git = git.Repo.clone_from(url, path)
+            repo_git.remotes.origin.set_url(repo.clone_url)
+            try:
+                repo_git.git.checkout(branch)
+            except Exception as e:
+                return False, "Could not check out PR branch %s: %s" % (branch, e)
+
+            try:
+                fix_code = apply_ai_fix(path, fix_body, files_override=changed, task_id=lock_id)
+            except Exception as e:
+                return False, "Fix generation failed: %s" % e
+            success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+            if not success_applied:
+                return False, "AI generated invalid JSON format for the fix."
+
+            review = review_fix(path, fix_body, fixes, task_id=lock_id, builder_n=0, repo=repo, head_sha=head_sha)
+            if isinstance(review, dict) and review.get("status") == "queue_for_retry":
+                _q_reason = review.get("reason") or "reviewers unavailable"
+                return False, f"Reviewer panel could not run ({_q_reason}) — click Fix again shortly."
+            review_conf = review.get("confidence", 0.0) if isinstance(review, dict) else 0.0
+            review_verdict = review.get("verdict", "Reject") if isinstance(review, dict) else "Reject"
+            critique = review.get("critique", "") if isinstance(review, dict) else ""
+            if review_verdict != "Approve":
+                try:
+                    pr.create_issue_comment(
+                        "\U0001F916 **BugFixer — Fix attempt rejected**\n\nGenerated a fix for the "
+                        "findings above, but the skeptical reviewer panel rejected it (not pushed):"
+                        "\n\n%s" % (critique or "no critique given"))
+                except Exception:  # noqa: BLE001
+                    pass
+                return False, "Reviewer panel rejected the generated fix: %s" % critique
+
+            if config.get("qa_enabled", True):
+                try:
+                    prepare_environment(path)
+                    verified, failure_msg = verify_fix(path, repo_full_name, config)
+                except Exception as e:  # noqa: BLE001
+                    verified, failure_msg = False, str(e)
+                if not verified:
+                    try:
+                        pr.create_issue_comment(
+                            "\U0001F916 **BugFixer — Fix attempt failed verification**\n\nA fix was "
+                            "generated and approved by the reviewer panel, but failed verification "
+                            "(not pushed):\n\n%s" % (failure_msg or "unknown failure"))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return False, "Fix failed verification: %s" % failure_msg
+
+            final_confidence = (confidence + review_conf) / 2
+            files_list = ", ".join(fixes.keys())
+            commit_msg = "BugFixer: fix PR #%s review findings" % pr.number
+            repo_git.git.add(A=True)
+            repo_git.index.commit(commit_msg)
+            with _authenticated_remote(repo_git.remotes.origin, repo.clone_url, token):
+                repo_git.remotes.origin.push("HEAD:%s" % branch)
+
+            try:
+                pr.create_issue_comment(
+                    "\U0001F916 **BugFixer — Fix applied**\n\nPushed a fix commit for the findings "
+                    "above onto this PR's branch (avg confidence %.0f%%).\n\n**Files:** `%s`"
+                    % (final_confidence * 100, files_list))
+            except Exception:  # noqa: BLE001
+                pass
+
+            try:
+                _review_one(gh, repo, repo.get_pull(int(number)), config, force=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("fix_one_pr: post-fix reprocess failed for %s#%s: %s", repo_full_name, number, e)
+
+            return True, "Fix pushed to %s (%s)" % (branch, files_list)
+    finally:
+        _release_issue(lock_id)
+
+
 def scan_open_prs(gh, config):
     """Poll open PRs on monitored repos and post a parity pre-review on each.
 

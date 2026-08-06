@@ -583,6 +583,13 @@
                                 <span class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
                                 {% else %}
                                     <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                    {% if pr.findings and pr.findings > 0 %}
+                                    {# Human-triggered only — BugFixer never applies a PR fix on its
+                                       own. Generates a fix for the findings above, gates it through
+                                       the same skeptical panel the bug/issue pipeline uses, and on
+                                       approval pushes a new commit onto THIS PR's own branch. #}
+                                    <button onclick="fixPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-amber-500 text-white hover:bg-amber-600 border border-amber-600" title="Generate an AI fix for this PR's findings, gate it through the skeptical reviewer panel, and push it as a new commit onto this PR's branch. You will still Approve/Merge separately."><i class="fas fa-wrench mr-1"></i>Fix</button>
+                                    {% endif %}
                                     {% if pr.approved %}
                                     {# Approved → the human sign-off is done and Merge is unlocked. No
                                        separate APPROVED badge here — Merge being visible at all IS the
@@ -2700,6 +2707,30 @@
                           (resp.ok && d.status === 'triggered') ? 'success' : 'error');
             } catch (e) {
                 showToast('Reprocess failed: ' + e, 'error');
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        async function fixPr(repo, number, btn) {
+            // Same fire-and-forget shape as reprocessPr: fix generation + the
+            // skeptical panel + QA verify can take a while, so this queues it
+            // off-thread. The result (pushed / rejected / failed verification)
+            // is posted as a PR comment and triggers an automatic reprocess, so
+            // the row's findings/verdict refresh on the next page load.
+            if (!confirm('Generate an AI fix for PR ' + repo + ' #' + number + '\'s findings and push it as a new commit onto this PR\'s branch (after passing the skeptical reviewer panel)? You still Approve/Merge separately.')) return;
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Fixing…'; }
+            try {
+                const resp = await fetch('/api/pr-review/fix', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo: repo, number: number })
+                });
+                const d = await resp.json();
+                showToast(d.message || (resp.ok && d.status === 'triggered' ? 'Generating a fix…' : 'Fix failed.'),
+                          (resp.ok && d.status === 'triggered') ? 'success' : 'error');
+            } catch (e) {
+                showToast('Fix failed: ' + e, 'error');
             } finally {
                 if (btn) { btn.disabled = false; btn.innerHTML = orig; }
             }
