@@ -466,7 +466,7 @@
                     <tr class="border-b border-slate-200">
                         <th class="px-3 py-3 font-medium w-[20%]">Issue ID</th>
                         <th class="px-3 py-3 font-medium text-right w-[30%]">Status</th>
-                        <th class="px-3 py-3 font-medium text-center w-[50%]">Actions</th>
+                        <th class="px-3 py-3 font-medium text-right w-[50%]">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-200">
@@ -477,12 +477,12 @@
                             <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
                         <td class="px-6 py-3 align-middle">
-                            <div class="flex flex-wrap gap-1.5 justify-center items-center">
-                                <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap">Retry</button>
-                                <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
-                                <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
-                                <button onclick="deleteIssue('{{ issue_id }}')" class="btn-danger text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                            <div class="flex flex-wrap gap-1.5 justify-end items-center">
+                                <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap">Retry</button>
+                                <button onclick="reopenIssue('{{ issue_id }}')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
+                                <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
+                                <button onclick="deleteIssue('{{ issue_id }}')" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                             </div>
                         </td>
                     </tr>
@@ -571,30 +571,30 @@
                             </div>
                         </td>
                         <td class="px-3 py-2 align-middle">
-                            <div class="flex flex-nowrap gap-1 justify-center items-center">
-                                <a href="{{ pr.url }}" target="_blank" class="btn-sec text-xs px-2 py-1 rounded font-bold whitespace-nowrap">View PR</a>
+                            <div class="flex flex-nowrap gap-1 justify-end items-center">
+                                <a href="{{ pr.url }}" target="_blank" class="btn-sec text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap">View PR</a>
                                 {% if pr.merged %}
-                                <span class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
+                                <span class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
                                 {% elif pr.denied %}
-                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
-                                <span class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-red-100 text-red-700 border border-red-300"><i class="fas fa-ban mr-1"></i>DENIED</span>
+                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                <span class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-red-100 text-red-700 border border-red-300"><i class="fas fa-ban mr-1"></i>DENIED</span>
                                 {% elif pr.closed %}
-                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
-                                <span class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
+                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                <span class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
                                 {% else %}
-                                    <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                    <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                     {% if pr.approved %}
                                     {# Approved → the human sign-off is done and Merge is unlocked. No
                                        separate APPROVED badge here — Merge being visible at all IS the
                                        approved signal (mirrors the dynamic approvePr() swap below), and
                                        this is the busiest row state, so dropping the redundant badge
                                        actually saves the space it needs. #}
-                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
+                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
                                     {% else %}
                                     {# Not approved yet → Merge is gated; only Approve (or Deny) is offered. #}
-                                    <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-2 py-1 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
+                                    <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
                                     {% endif %}
-                                    <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
+                                    <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
                                 {% endif %}
                             </div>
                         </td>
@@ -2671,7 +2671,7 @@
                     // one (Reprocess + this + Deny), so the badge would just cost space
                     // for no new information.
                     if (btn) btn.outerHTML =
-                        `<button onclick="mergePr('${repo}', ${number}, this)" class="text-xs px-2 py-1 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
+                        `<button onclick="mergePr('${repo}', ${number}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
                     showToast('Approved ' + repo + ' #' + number, 'success');
                 } else {
                     showToast('Approve failed: ' + (d.message || resp.status), 'error');
@@ -2711,7 +2711,7 @@
             if (!cell) return;
             cell.querySelectorAll('button').forEach(b => b.remove());
             const span = document.createElement('span');
-            span.className = 'text-xs px-2.5 py-1 rounded font-bold whitespace-nowrap border ' + cls;
+            span.className = 'text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap border ' + cls;
             span.innerHTML = '<i class="fas ' + icon + ' mr-1"></i>' + label;
             cell.appendChild(span);
         }
