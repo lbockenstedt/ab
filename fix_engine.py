@@ -2150,6 +2150,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             new_v = None
             can_actually_direct_push = False
             new_v = None
+            # Only the direct-push attempt below sets this. Stays None when
+            # can_direct_push is False (the common case — most repos/fixes go
+            # via PR, not direct push), so the else branch's ternary further
+            # down doesn't crash trying to read an unassigned local.
+            decision_reason = None
             if can_direct_push and final_verdict == "Approve":
                 new_v = bump_repo_version(path)
                 if new_v:
@@ -2197,7 +2202,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 _trigger_spoke_updates(config)
                 _wait_for_spokes_online(config, min_count=1, timeout=90)
             else:
-                reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (decision_reason if not can_direct_push or "Direct push failed" in decision_reason else "Trust/Ownership requirements not met")
+                reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met")
                 decision_reason = reason
                 logger.info(f"Decision: Pull Request. Reason: {reason}.")
                 target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
