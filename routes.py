@@ -485,6 +485,40 @@ async def pr_review_reprocess(request: Request):
     return {"status": "triggered", "message": f"Reprocessing {repo_name}#{number}…"}
 
 
+@router.post("/api/pr-review/fix")
+async def pr_review_fix(request: Request):
+    """Human 'Fix' for a reviewed PR — the ONLY trigger for this; BugFixer never
+    applies a PR fix on its own. Generates an AI fix for this PR's pre-review
+    findings, gates it through the same skeptical-panel review the bug/issue fix
+    pipeline uses, and on approval pushes it as a new commit onto the PR's OWN
+    branch (never a new branch/PR). Refuses on an already-merged/closed PR.
+    Runs off-thread (LLM fix + review + QA verify can take a while); result is
+    posted as a PR comment and the review is reprocessed automatically, so the
+    UI picks it up on the next refresh."""
+    try:
+        data = await request.json()
+        repo_name = (data.get("repo") or "").strip()
+        number = int(data.get("number"))
+    except Exception:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, number)) or {}
+    if rec.get("merged"):
+        return JSONResponse(status_code=409, content={"status": "error",
+            "message": f"PR #{number} is already merged — nothing to fix."})
+
+    def run_fix():
+        try:
+            from pr_review import fix_one_pr
+            ok, message = fix_one_pr(repo_name, number)
+            logger.info("pr_review: %s #%s fix %s — %s", repo_name, number,
+                        "applied" if ok else "not applied", message)
+        except Exception as e:  # noqa: BLE001
+            logger.error("pr_review fix failed for %s#%s: %s", repo_name, number, e)
+
+    threading.Thread(target=run_fix, daemon=True).start()
+    return {"status": "triggered", "message": f"Generating a fix for {repo_name}#{number}…"}
+
+
 @router.get("/")
 async def dashboard(request: Request):
     recent_processed = {}

@@ -1256,12 +1256,17 @@ def _targeted_file_context(content, identifiers, max_chars, window=60, max_hits_
     return "\n".join(parts) if parts else None
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None, model_override=None):
+def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None, model_override=None, files_override=None):
+    """files_override: skip the identify_files_to_fix guess and target exactly
+    these repo-relative paths instead — for callers (pr_review's fix_one_pr)
+    that already know precisely which files are at issue (a PR's own changed-
+    file set), where the identifier-grep heuristic has nothing reliable to
+    anchor on."""
     config = load_config()
     max_files = int(config.get("FIX_MAX_FILES", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"])
     max_file_chars = int(config.get("FIX_MAX_FILE_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"])
     max_ctx_chars = int(config.get("FIX_MAX_CONTEXT_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"])
-    relevant_files = identify_files_to_fix(repo_path, issue_body)
+    relevant_files = list(files_override) if files_override else identify_files_to_fix(repo_path, issue_body)
     if not relevant_files:
         logger.warning(f"No specific files identified for issue. Attempting general fix.")
     # Bound the prompt: cap file count, per-file chars, and total chars so the
@@ -2344,5 +2349,7 @@ __all__ = [
     'process_single_issue',
     'run_sandboxed_command',
     '_authenticated_remote',
+    '_claim_issue',
+    '_release_issue',
     'QueueLocalException',
 ]
