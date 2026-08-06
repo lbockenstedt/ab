@@ -44,6 +44,35 @@ class QueueLocalException(Exception):
 _BUG_REPORT_ID_RE = re.compile(r'<!--\s*bug-report-id:\s*([0-9a-fA-F]+)\s*-->')
 _FIX_COMMIT_RE = re.compile(r'Commit:\s*`?([0-9a-f]{7,40})`?')
 
+# A backslash that is NOT the start of a valid JSON escape (\" \\ \/ \b \f \n
+# \r \t \uXXXX). Used by _robust_json_loads to repair the single most common
+# way an LLM's otherwise-valid JSON response breaks.
+_JSON_BAD_ESCAPE_RE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+
+def _robust_json_loads(text):
+    """json.loads with one repair retry for a recurring, specific failure:
+    a free-text field (a reviewer's critique, an error message) containing a
+    raw backslash — a Windows path, a regex, LaTeX — that isn't a valid JSON
+    escape. json.loads then raises "Invalid \\escape" immediately, discarding
+    an otherwise well-formed object (observed repeatedly from claude_cli
+    reviewer responses, e.g. 'Invalid \\escape: line 1 column 581').
+
+    On that specific error, doubles every such stray backslash (a safe,
+    non-lossy transform for text that was otherwise valid JSON) and retries
+    once. Any other JSONDecodeError (missing comma, unmatched brace, ...)
+    re-raises immediately — this is a targeted repair, not a generic
+    'try harder' pass that could mask a genuinely malformed response."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        if "escape" not in str(e).lower():
+            raise
+        try:
+            return json.loads(_JSON_BAD_ESCAPE_RE.sub(r'\\\\', text))
+        except json.JSONDecodeError:
+            raise e
+
 
 def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=None):
     """For a REOPENED, previously-fixed issue: figure out what changed the fix's
@@ -235,7 +264,7 @@ def analyze_issue(issue):
         import re
         match = re.search(r'\{.*\}', res, re.DOTALL)
         if match:
-            data = json.loads(match.group())
+            data = _robust_json_loads(match.group())
             return data.get("actionable", False), data.get("request", "More information is needed to proceed with a fix.")
         return False, "Information provided is not in a usable format. Please provide more details."
     except Exception as e:
@@ -433,7 +462,7 @@ def identify_files_to_fix(repo_path, issue_body):
         import re
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:
-            llm_files = json.loads(match.group())
+            llm_files = _robust_json_loads(match.group())
     except Exception as e:
         if is_llm_cooldown_error(e):
             logger.warning(f"File identification deferred — LLM providers cooling down: {e}")
@@ -768,7 +797,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             )
             match = re.search(r'\{.*\}', res, re.DOTALL)
             if match:
-                _v = json.loads(match.group())
+                _v = _robust_json_loads(match.group())
                 _v["confidence"] = _norm_confidence(_v.get("confidence"))
                 votes.append({**_v, "reviewer": r["name"]})
         except Exception as e:
@@ -873,7 +902,7 @@ def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, confi
                            force_provider=slot, model_override=mdl, task_id=task_id)
             m = re.search(r"\{.*\}", res, re.DOTALL)
             if m:
-                v = json.loads(m.group())
+                v = _robust_json_loads(m.group())
                 v["confidence"] = _norm_confidence(v.get("confidence"))
                 v["model"] = mdl
                 votes.append(v)
