@@ -2031,6 +2031,12 @@ async def save_settings(request: Request):
     config_data["pr_review_llm_enabled"] = data.get("pr_review_llm_enabled") == "on"
     # Advisory state-logic/control-flow panel sub-option (independent of the above).
     config_data["pr_review_state_logic_enabled"] = data.get("pr_review_state_logic_enabled") == "on"
+    # Test-regression sub-option (default OFF): actually clones + runs the repo's
+    # test suite for a PR's head vs. base branch and flags NEW failures — real
+    # code execution against PR-authored content, opt-in per install (see
+    # check_test_regressions.py for why this is a different risk/cost class
+    # from the other, pure-static Tier-1 checks).
+    config_data["pr_test_regression_enabled"] = data.get("pr_test_regression_enabled") == "on"
     config_data["batch_enabled"] = data.get("batch_enabled") == "on"
     config_data["prompt_caching_enabled"] = data.get("prompt_caching_enabled") == "on"
     # File-a-Bug toggle (defaults on so the footer button works out of the box).

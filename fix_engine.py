@@ -582,19 +582,36 @@ def _fetch_repo_file_for_review(repo, head_sha, path):
             "truncated": len(text) > _REVIEW_FILE_MAX_CHARS}
 
 
+_DIFF_FILE_HEADER_RE = re.compile(r'^diff --git a/(\S+) b/\S+', re.MULTILINE)
+
+
 def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, head_sha):
     """One reviewer's turn. With repo+head_sha AND a provider that can actually
     receive `tools=`, runs a bounded tool-calling loop (fetch_repo_file, up to
     _REVIEW_TOOL_MAX_ITER turns / _REVIEW_TOOL_MAX_FILES files) before
-    producing final text. Otherwise falls back to the exact prior single-turn
-    call — this includes claude_cli, which silently DROPS `tools=`
-    (_request_claude_cli never receives the param; the whole conversation is
-    serialised into a plain CLI prompt) — telling it about a fetch_repo_file
-    tool it has no way to invoke made it try to fake a tool call in prose
-    instead of returning clean JSON (bugfixer#730/#731: "Expecting ':'
-    delimiter" / "Extra data" parse errors on every claude_cli review), so the
-    tool-primed addendum below is only added when the provider will really see
-    it as a callable tool.
+    producing final text. Otherwise falls back to a single-turn call — this
+    includes claude_cli, which silently DROPS `tools=` (_request_claude_cli
+    never receives the param; the whole conversation is serialised into a
+    plain CLI prompt) — telling it about a fetch_repo_file tool it has no way
+    to invoke made it try to fake a tool call in prose instead of returning
+    clean JSON (bugfixer#730/#731: "Expecting ':' delimiter" / "Extra data"
+    parse errors on every claude_cli review), so the tool-primed addendum
+    below is only added when the provider will really see it as a callable
+    tool.
+
+    For that tools-blind fallback, when repo+head_sha ARE available (so the
+    files genuinely could be fetched, just not by this provider itself),
+    proactively embed the FULL current content of every file the diff
+    touches instead of leaving the reviewer stuck with only the diff hunk.
+    Without this, a tools-blind reviewer has no way to confirm a referenced
+    symbol exists, an import is already present above the visible diff, etc.
+    — and reliably produces exactly that class of unverifiable, false-alarm
+    finding (confirmed live: BugFixer's own review of lm#151 flagged "is
+    `time` imported" and "does `_all_tenant_ids` exist" as unverifiable from
+    the diff — both were actually true, just outside the hunk claude_cli was
+    shown). Bounded the same way the tool-calling path is (_REVIEW_TOOL_MAX_FILES
+    files, _REVIEW_FILE_MAX_CHARS each) so this can't blow the prompt budget
+    on a big PR.
 
     Returns the reviewer's final text (same plain-string contract call_llm's
     non-tools return already had) so the caller's existing JSON-extraction
@@ -607,7 +624,27 @@ def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, 
             provider = None
     supports_tools = not (repo is None or head_sha is None or (provider or "").lower().strip() == "claude_cli")
     if not supports_tools:
-        return call_llm(prompt, system_prompt=system_prompt, force_provider=provider_n,
+        extra = ""
+        if repo is not None and head_sha is not None:
+            paths = _DIFF_FILE_HEADER_RE.findall(prompt)[:_REVIEW_TOOL_MAX_FILES]
+            blocks = []
+            for p in paths:
+                out = _fetch_repo_file_for_review(repo, head_sha, p)
+                if "content" in out:
+                    blocks.append(
+                        "\n--- FULL FILE (for cross-reference — this reviewer "
+                        "can't fetch files on its own): %s ---\n%s\n" % (p, out["content"])
+                    )
+            if blocks:
+                extra = (
+                    "\n\nThe file(s) below are shown in FULL (not just the diff "
+                    "above) so you can verify whether a referenced symbol exists "
+                    "elsewhere in the file, an import is already present above "
+                    "the visible diff, etc. Do not reject or call something "
+                    "'unverifiable' when the file below would settle it:\n"
+                    + "".join(blocks)
+                )
+        return call_llm(prompt + extra, system_prompt=system_prompt, force_provider=provider_n,
                         task_id=task_id, model_override=model)
 
     prompt = prompt + (

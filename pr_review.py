@@ -55,6 +55,8 @@ from github_ops import get_monitored_repos
 from app_state import update_task_state, record_pr_review, update_pr_review, state
 from secrets_scan import check_secrets
 from lint_python import check_undefined_names
+from check_unattended_mutation import check_unattended_mutation
+from check_test_regressions import check_test_regressions
 from config_store import load_config
 
 logger = logging.getLogger(__name__)
@@ -536,11 +538,12 @@ def _render(findings, head_sha, summary="", review=None, state_review=None):
             "### Tier-1 checks",
             "",
             "✅ **Passed** — no dual-copy/cross-platform drift, no likely hardcoded "
-            "credentials, and no undefined names detected in the changed files.",
+            "credentials, no undefined names detected in the changed files, and no "
+            "unattended-mutation-without-tests pattern.",
             "",
         ]
     else:
-        lines += ["### Tier-1 findings (parity + secrets + undefined-names)", ""]
+        lines += ["### Tier-1 findings (parity + secrets + undefined-names + unattended-mutation)", ""]
         for f in sorted(findings, key=lambda x: _LEVEL_ORDER.get(x["level"], 9)):
             icon = _LEVEL_ICON.get(f["level"], "•")
             lines += ["%s **%s — %s**" % (icon, f["level"].upper(), f["title"]), "", f["detail"], ""]
@@ -679,6 +682,7 @@ def _review_one(gh, repo, pr, config, force=False):
     findings = _resolve_cross_repo_twins(gh, findings, since=getattr(pr, "created_at", None))
     findings += check_secrets(files)
     findings += check_undefined_names(repo, files, head_sha)
+    findings += check_unattended_mutation(files)
     existing = _find_marker_comment(pr)
     already_current = (not force) and bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
     if already_current:
@@ -705,6 +709,14 @@ def _review_one(gh, repo, pr, config, force=False):
         # best-effort) and run the skeptical reviewer panel(s) (the unified
         # bug/feature confidence engine, advisory-only) — then (re)post the
         # comment + status. All per-head, not per-cycle, to bound LLM cost.
+        #
+        # Test-regression check goes here too (not in the unconditional block
+        # above with the cheap static checks) — it actually clones + runs the
+        # test suite, so it must only fire on a genuine head change, never on
+        # every poll of an unchanged PR. OFF by default
+        # (pr_test_regression_enabled); see check_test_regressions.py.
+        token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+        findings += check_test_regressions(repo, pr, config, token)
         summary = _summarize_changes(pr, files, config)
         review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha)
         state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)

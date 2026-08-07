@@ -882,6 +882,12 @@
                                         └ State-logic / control-flow panel (narrow: status-conflation + unreachable-new-code only)
                                     </label>
                                 </div>
+                                <div class="flex items-center gap-3 mt-2 ml-6">
+                                    <input type="checkbox" name="pr_test_regression_enabled" id="pr_test_regression_enabled" {{ 'checked' if settings.pr_test_regression_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_test_regression_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review + QA testing both on; independent of the LLM panels above). ACTUALLY CLONES AND RUNS this repo's test suite for the PR's head branch AND its base branch, inside the same Docker sandbox verify_fix uses, and flags tests that fail on head but NOT on base — a real, reproducible regression, not a heuristic guess. Pre-existing failures are excluded. This is real code execution against PR-authored content (a different risk/cost class from the other, pure-static Tier-1 checks) — enable only on repos you're comfortable running untrusted branch code against in the sandbox.">
+                                        └ Test-regression check (runs the test suite on head vs. base, flags NEW failures only — real code execution)
+                                    </label>
+                                </div>
                                 <div class="flex items-center gap-3 mt-2">
                                     <input type="checkbox" name="batch_enabled" id="batch_enabled" {{ 'checked' if settings.batch_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
                                     <label for="batch_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, CLOUD LLM calls (non-streaming, non-tool) route through the Anthropic/Gemini Batch API — ~50% cheaper but SLOWER (block-and-wait, minutes-to-hours). Needs a direct anthropic/google provider slot + API key; falls back to a normal call if batch fails. Local (ollama) calls are unaffected.">
