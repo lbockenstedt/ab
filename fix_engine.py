@@ -788,6 +788,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     votes = []
     failed_reviewers = []
     for r in reviewers:
+        res = None
         try:
             logger.info(f"{r['name']} analyzing fix...")
             res = _run_reviewer_turn(
@@ -803,6 +804,16 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         except Exception as e:
             if is_llm_cooldown_error(e):
                 logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
+            elif isinstance(e, json.JSONDecodeError) and res is not None:
+                # _robust_json_loads only repairs one specific, confirmed-recurring
+                # pattern (a stray backslash) and re-raises anything else
+                # unchanged. A bare exception message ("Expecting value: line 1
+                # column 30") gives no way to root-cause or repair the NEXT
+                # occurrence of a different pattern — unlike parse_and_apply's
+                # last_failures for edit misses, there was nothing to go on here.
+                # Truncated: this is a raw LLM response, not something to log
+                # unbounded.
+                logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
             else:
                 logger.error(f"{r['name']} failed: {e}")
             failed_reviewers.append(r["name"])
