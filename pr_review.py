@@ -57,6 +57,8 @@ from secrets_scan import check_secrets
 from lint_python import check_undefined_names
 from check_unattended_mutation import check_unattended_mutation
 from check_test_regressions import check_test_regressions
+from attr_definition_lookup import (
+    extract_getattr_names, find_attr_definitions, format_wiring_context)
 from config_store import load_config
 
 logger = logging.getLogger(__name__)
@@ -326,7 +328,7 @@ def _pr_diff_text(files):
     return "\n\n".join(parts)[:_PANEL_DIFF_CHARS]
 
 
-def _skeptical_review(pr, files, config, repo=None, head_sha=None):
+def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
     """Run the cross-provider skeptical reviewer panel on the PR diff — the SAME
     panel (``fix_engine.review_fix``, ≥0.80 confidence gate) the bug/feature fix
     pipeline uses, now unified so a human PR and a bot fix are judged by one
@@ -336,7 +338,17 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None):
     ADVISORY ONLY: the caller renders this into the review COMMENT; it is never
     turned into a real PR approval/denial or a blocking status — a human remains
     the sole gate (pr-gate INVARIANT). Gated behind ``pr_review_llm_enabled``
-    (default False). Best-effort: None when disabled, no diff, or on any error."""
+    (default False). Best-effort: None when disabled, no diff, or on any error.
+
+    ``gh`` (the PyGithub client), when supplied, is used to resolve
+    getattr(x, "name", ...) accesses in the diff against their REAL definition
+    elsewhere in the repo (see attr_definition_lookup) — the class of doubt a
+    diff-only or even full-file-of-changed-files view can't settle, because the
+    defining file (e.g. the class `deploy`/`cp` is an instance of) is often
+    NOT one this PR touches at all. cs#74's reviewer flagged exactly this
+    shape (`getattr(deploy, "proxmox_states", {})`, `getattr(cp,
+    "connected_agents", {})`) as unverifiable and landed on a 58% advisory
+    reject over doubts a human later confirmed were both unfounded."""
     if not config.get("pr_review_llm_enabled", False):
         return None
     diff = _pr_diff_text(files)
@@ -366,6 +378,13 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None):
         "in a <script>, leftover merge-conflict markers.\n"
         "3) Undefined names, obvious logic errors, security issues.\n"
         "Reject (lower confidence) if any such defect is present.")
+    try:
+        attr_names = extract_getattr_names(files)
+        wiring_defs = find_attr_definitions(
+            gh, repo, attr_names, changed_paths=[f.filename for f in files])
+        issue_body += format_wiring_context(wiring_defs)
+    except Exception as e:  # noqa: BLE001 — this only ever ADDS context; never block the review over it
+        logger.info("pr_review: wiring-context lookup skipped (%s)", e)
     try:
         # builder_n=0 → no builder to exclude, so EVERY configured provider reviews
         # the human's diff (there is no bot author to leave out). repo+head_sha
@@ -718,7 +737,7 @@ def _review_one(gh, repo, pr, config, force=False):
         token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
         findings += check_test_regressions(repo, pr, config, token)
         summary = _summarize_changes(pr, files, config)
-        review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha)
+        review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh)
         state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
         body = _render(findings, head_sha, summary, review=review, state_review=state_review)
         if existing:
