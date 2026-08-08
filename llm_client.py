@@ -30,6 +30,7 @@ import requests
 
 import main  # lazy access to the shared app_state dict via main.state
 from main import logger, load_config
+import claude_cli_native_tools
 
 # ============================================================================
 # Multi-Provider LLM Routing
@@ -1578,12 +1579,41 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
     return full_response
 
 
-def _request_claude_cli(model, messages, task_id, config):
+def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=None,
+                        json_schema=None, enable_native_tools=False, search_model=None):
     """Call the local `claude` CLI in non-interactive print mode.
 
     Uses the Claude Code session auth — no API key required. The claude binary
-    must be in PATH. Tool calling is not supported; the full conversation is
-    serialised into a single prompt string.
+    must be in PATH.
+
+    By default tool calling is NOT supported (unchanged legacy behavior): the
+    full conversation is serialised into a single prompt string, same as
+    always — the caller's `tools=` (the generic OpenAI-style function-schema
+    parameter every OTHER provider consumes) is simply never wired here,
+    because claude_cli has no such API param.
+
+    ``enable_native_tools=True`` opts into a DIFFERENT, claude_cli-specific
+    capability instead: the CLI's own REAL built-in tools (Read/Grep/Glob, plus
+    a narrow git-history Bash allowlist), restricted to read-only exploration
+    (see claude_cli_native_tools.ALLOWED_TOOLS/DISALLOWED_TOOLS) and scoped to
+    ``repo_checkout_path`` via --add-dir (a real checkout the CLI can actually
+    read — pass one or this degrades to no useful file access). A cheap-model
+    search subagent (--agents, default haiku) handles the mechanical grep/
+    file-hunting legwork so the (usually pricier) top-level `model` only
+    spends tokens on judgment, not searching — mirrors how this session
+    itself delegates exploration to lightweight agents.
+    --permission-mode bypassPermissions is required for headless operation
+    (no human to answer a tool-approval prompt); the allow/deny lists above
+    are what actually keeps this safe, not the permission mode.
+
+    ``json_schema`` (a dict or pre-serialized JSON string), when given, is
+    passed as --json-schema — the CLI validates + returns a pre-parsed
+    ``structured_output`` object, which this function then re-serializes as
+    the returned string instead of the freeform ``result`` text. This is
+    ALSO the fix for claude_cli's "JSON parse failed (Extra data: ...)"
+    class of error: the caller's downstream `json.loads()` was tripping over
+    stray prose/markdown fences around a freeform response; a schema-
+    validated result has none of that by construction.
     """
     import subprocess
 
@@ -1605,14 +1635,16 @@ def _request_claude_cli(model, messages, task_id, config):
         prompt = system_parts[0] + "\n\n" + prompt
 
     # Pass the prompt via stdin to avoid OS ARG_MAX limits on large conversations.
-    cmd = [claude_bin_or_raise(config), "--output-format", "json"]
-    if model:
-        cmd += ["--model", model]
+    cmd = claude_cli_native_tools.build_command(
+        claude_bin_or_raise(config), model=model, repo_checkout_path=repo_checkout_path,
+        json_schema=json_schema, enable_native_tools=enable_native_tools,
+        search_model=search_model)
 
     timeout_val = int(config.get("LLM_TIMEOUT", 900))
     try:
         proc = subprocess.run(
-            cmd, input=prompt, capture_output=True, text=True, timeout=timeout_val
+            cmd, input=prompt, capture_output=True, text=True, timeout=timeout_val,
+            cwd=repo_checkout_path if (enable_native_tools and repo_checkout_path) else None,
         )
         output = proc.stdout.strip()
         stderr = proc.stderr.strip()
@@ -1620,7 +1652,11 @@ def _request_claude_cli(model, messages, task_id, config):
         # Parse JSON response if possible.
         try:
             data = json.loads(output)
-            text = data.get("result") or data.get("text") or output
+            # A schema-validated call returns structured_output pre-parsed —
+            # re-serialize IT (guaranteed clean JSON) rather than trusting
+            # the freeform `result` text, which is where "Extra data" parse
+            # failures came from (stray prose/markdown around the JSON).
+            text = claude_cli_native_tools.extract_text(data, json_schema=json_schema) or output
             combined_text = (text or "") + " " + stderr
             # Session-limit is NOT an auth failure — the CLI is authenticated but
             # has exhausted its per-session quota.  Raise a rate-limit style error
@@ -1717,8 +1753,11 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
     return full_response
 
 
-def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config):
-    """Dispatch to the correct provider implementation."""
+def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                   repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None):
+    """Dispatch to the correct provider implementation. The last 4 kwargs are
+    claude_cli-specific (see _request_claude_cli's docstring) — every other
+    provider ignores them; they are not the generic `tools=` param."""
     p = (provider or "openai").lower().strip()
     if _is_copilot(p):
         return _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
@@ -1737,12 +1776,15 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
         effective_url = _normalize_lmstudio_url(base_url)
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
     if p == "claude_cli":
-        return _request_claude_cli(model, messages, task_id, config)
+        return _request_claude_cli(model, messages, task_id, config,
+                                   repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                   enable_native_tools=enable_native_tools, search_model=search_model)
     return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
 
 
 # Shared LLM Utility
-def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None, task_kind=None):
+def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None, task_kind=None,
+             repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None):
     """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
 
     Routing priority:
@@ -1750,6 +1792,12 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
       force_cloud=True               — start at Provider 2, fall to 1 then 3 then 4.
       force_cloud=False              — Provider 1 only, no failover.
       force_cloud=None (default)     — Provider 1 → 2 → 3 → 4 in order.
+
+    ``repo_checkout_path``/``json_schema``/``enable_native_tools``/``search_model``
+    are claude_cli-specific (see _request_claude_cli's docstring) — every other
+    provider silently ignores them. Distinct from the generic ``tools=`` param
+    (an OpenAI-style function-schema every OTHER provider consumes; claude_cli
+    has no such API param).
 
     Providers in a 1-hour credit-exhaustion cooldown are skipped automatically.
     """
@@ -1883,7 +1931,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     logger.debug(f"batch route skipped: {_bex}")
                     result = None
             if result is None:
-                result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config)
+                result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config,
+                                        repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                        enable_native_tools=enable_native_tools, search_model=search_model)
             # Successful call: clear any rate-limit cooldown for this provider.
             with _PROVIDER_CREDIT_CB_LOCK:
                 if _PROVIDER_CREDIT_CB[n].get("cause") == "rate_limit":
@@ -1912,7 +1962,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 )
                 try:
                     _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
-                    result = _call_provider(provider, model, key, url, messages, None, effective_stream, task_id, config)
+                    result = _call_provider(provider, model, key, url, messages, None, effective_stream, task_id, config,
+                                            repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                            enable_native_tools=enable_native_tools, search_model=search_model)
                     return result, None
                 except Exception as retry_e:
                     err_str = str(retry_e)
@@ -1939,7 +1991,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     main.state["active_llm_provider"] = provider
                     main.state["active_llm_at"] = time.time()
                     result = _call_provider(provider, _cfg_model, key, url, messages, tools,
-                                            effective_stream, task_id, config)
+                                            effective_stream, task_id, config,
+                                            repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                            enable_native_tools=enable_native_tools, search_model=search_model)
                     return result, None
                 except Exception as retry_e:  # noqa: BLE001 — fall through to normal handling
                     err_str = str(retry_e)
