@@ -59,6 +59,7 @@ from check_unattended_mutation import check_unattended_mutation
 from check_test_regressions import check_test_regressions
 from attr_definition_lookup import (
     extract_getattr_names, find_attr_definitions, format_wiring_context)
+from pr_review_retry import is_queued_for_retry_stale
 from config_store import load_config
 
 logger = logging.getLogger(__name__)
@@ -703,7 +704,13 @@ def _review_one(gh, repo, pr, config, force=False):
     findings += check_undefined_names(repo, files, head_sha)
     findings += check_unattended_mutation(files)
     existing = _find_marker_comment(pr)
-    already_current = (not force) and bool(existing) and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
+    _prior_review = (state.get("pr_reviews") or {}).get("%s#%s" % (repo.full_name, pr.number)) or {}
+    _prior_queued = is_queued_for_retry_stale(_prior_review, head_sha)
+    already_current = ((not force) and not _prior_queued and bool(existing)
+                       and ("<!-- head: %s -->" % head_sha) in (existing.body or ""))
+    if _prior_queued and not force:
+        logger.info("pr_review: %s PR #%s retrying — prior scan queued for retry (panel unavailable)",
+                    repo.full_name, pr.number)
     if already_current:
         # Recover the previously-generated summary from the comment — no LLM call
         # on a cached re-scan / post-restart.
