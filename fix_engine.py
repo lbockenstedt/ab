@@ -74,6 +74,51 @@ def _robust_json_loads(text):
             raise e
 
 
+def _sanitize_json_string_newlines(raw):
+    """Escape raw control characters (newline/CR/tab) found INSIDE a JSON or
+    Python-dict string literal — the other recurring, confirmed way an LLM's
+    fix response breaks parsing: a multi-line code snippet dropped into a
+    "search"/"replace" value with literal newlines instead of \\n, which
+    trips json.loads ("Invalid control character") and, after the
+    single-quote-dict fallback, ast.literal_eval ("unterminated string
+    literal" / "invalid syntax" — a bare newline can't appear inside a
+    non-triple-quoted Python string either).
+
+    Walks the text tracking quote state (honoring backslash escapes) and
+    rewrites control chars ONLY while inside an open string — structural
+    whitespace between tokens is left untouched, so this is a no-op on
+    already-valid input."""
+    out = []
+    in_string = False
+    quote_char = ''
+    escape = False
+    for ch in raw:
+        if in_string:
+            if escape:
+                out.append(ch)
+                escape = False
+            elif ch == '\\':
+                out.append(ch)
+                escape = True
+            elif ch == quote_char:
+                in_string = False
+                out.append(ch)
+            elif ch == '\n':
+                out.append('\\n')
+            elif ch == '\r':
+                out.append('\\r')
+            elif ch == '\t':
+                out.append('\\t')
+            else:
+                out.append(ch)
+        else:
+            if ch in ('"', "'"):
+                in_string = True
+                quote_char = ch
+            out.append(ch)
+    return ''.join(out)
+
+
 def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=None):
     """For a REOPENED, previously-fixed issue: figure out what changed the fix's
     files SINCE our fix landed, so the builder triages from the regression cause
@@ -886,7 +931,12 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     fix_details = ""
     if diff_override is not None:
         # Caller supplied the diff (e.g. a PR diff not checked out locally) —
-        # review it directly, skip the working-tree git diff.
+        # review it directly, skip the working-tree git diff. pr_review._pr_diff_text
+        # already budgets this to _PANEL_DIFF_CHARS (60000, per-file capped at
+        # _PANEL_PATCH_CHARS) — re-truncating it here at a tighter flat cap silently
+        # re-introduced the exact cs#65 bug d504df3 fixed one layer up: on PR #759 it
+        # clipped llm_client.py's diff to 2% of its content and the panel rejected
+        # reasoning almost entirely from what it couldn't see. Trust the caller's budget.
         diff_text = str(diff_override or "")
     else:
         try:
@@ -894,9 +944,14 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         except Exception as e:  # noqa: BLE001
             logger.debug(f"review_fix: git diff unavailable ({e}); using file bodies")
             diff_text = ""
+        # No caller-side budgeting on this path (raw working-tree diff, not the
+        # per-file-capped PR diff above) — cap it ourselves. Matches _PANEL_DIFF_CHARS
+        # in pr_review.py and d504df3's reasoning: local Ollama models default to
+        # num_ctx=32768 tokens (~130K+ chars), so this is still comfortably inside
+        # every configured provider's context window.
+        if len(diff_text) > 60000:
+            diff_text = diff_text[:60000] + "\n… [diff truncated for review] …"
     if diff_text.strip():
-        if len(diff_text) > 20000:
-            diff_text = diff_text[:20000] + "\n… [diff truncated for review] …"
         fix_details = f"\n--- DIFF (working tree vs HEAD) ---\n{diff_text}\n"
     else:
         for path, code in proposed_fixes.items():
@@ -1601,20 +1656,41 @@ def parse_and_apply(content, repo_path):
 
         raw = match.group()
         try:
-            data = json.loads(raw)
+            data = _robust_json_loads(raw)
         except json.JSONDecodeError:
-            # Fallback: some LLMs (Gemini Flash) return Python-style dicts with
-            # single quotes instead of JSON double quotes.  ast.literal_eval is
-            # safe (only evaluates literals) and handles those cleanly.
+            # Fallback 1: a multi-line code snippet with literal (unescaped)
+            # newlines in a string value — repair and retry as JSON.
             try:
-                parsed = _ast.literal_eval(raw)
-                if not isinstance(parsed, dict):
-                    raise ValueError(f"Expected dict, got {type(parsed).__name__}")
-                data = parsed
-            except Exception as ast_err:
-                logger.error(f"Error parsing or applying JSON fix: {ast_err}")
-                logger.debug(f"Failed content: {content[:500]}")
-                return False, {}, 0.0
+                data = _robust_json_loads(_sanitize_json_string_newlines(raw))
+            except json.JSONDecodeError:
+                # Fallback 2: some LLMs (Gemini Flash) return Python-style dicts
+                # with single quotes instead of JSON double quotes. ast.literal_eval
+                # is safe (only evaluates literals) and handles those cleanly.
+                try:
+                    parsed = _ast.literal_eval(raw)
+                    if not isinstance(parsed, dict):
+                        raise ValueError(f"Expected dict, got {type(parsed).__name__}")
+                    data = parsed
+                except Exception:
+                    # Fallback 3: same single-quote-dict case, but with the same
+                    # literal-newline repair as fallback 1 applied first.
+                    try:
+                        parsed = _ast.literal_eval(_sanitize_json_string_newlines(raw))
+                        if not isinstance(parsed, dict):
+                            raise ValueError(f"Expected dict, got {type(parsed).__name__}")
+                        data = parsed
+                    except Exception as ast_err:
+                        # Content embedded IN the ERROR line (not a separate DEBUG
+                        # line): the self-log scanner captures single ERROR/CRITICAL
+                        # lines verbatim with no surrounding context, so a DEBUG-only
+                        # dump here is invisible to it — this exact gap is why this
+                        # failure kept recurring as a "non-actionable, please provide
+                        # the full log snippet" issue instead of ever being fixed.
+                        logger.error(
+                            f"Error parsing or applying JSON fix: {ast_err} — "
+                            f"raw content ({len(content)} chars): {content[:1500]!r}"
+                        )
+                        return False, {}, 0.0
 
         fixes = data.get("fixes", {}) or {}
         edits = data.get("edits", []) or []
@@ -1749,8 +1825,10 @@ def parse_and_apply(content, repo_path):
             return False, {}, 0.0
         return True, applied, confidence
     except Exception as e:
-        logger.error(f"Error parsing or applying JSON fix: {e}")
-        logger.debug(f"Failed content: {content[:500]}")
+        logger.error(
+            f"Error parsing or applying JSON fix: {e} — "
+            f"raw content ({len(content)} chars): {content[:1500]!r}"
+        )
         return False, {}, 0.0
 
 

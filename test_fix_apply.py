@@ -29,8 +29,10 @@ def _load_funcs():
     src = open(path).read()
     tree = ast.parse(src)
     want = {"_safe_repo_target", "_issue_identifiers", "_targeted_file_context",
-            "parse_and_apply", "_claim_issue", "_release_issue"}
-    want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues"}
+            "parse_and_apply", "_claim_issue", "_release_issue",
+            "_robust_json_loads", "_sanitize_json_string_newlines"}
+    want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
+                    "_JSON_BAD_ESCAPE_RE"}
     segs = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
@@ -106,6 +108,26 @@ def main():
         {"file": "../escape.txt", "search": "a", "replace": "b"}]})
     esc_ok, esc_applied, _ = ns["parse_and_apply"](esc, d)
     ok &= _check("path traversal in an edit is rejected", esc_ok is False and not esc_applied)
+
+    # Regression guard for GitHub issue #735 (recurring "unterminated string
+    # literal" / "invalid syntax" self-diagnosis failures): an LLM response with
+    # a multi-line code snippet that has a LITERAL (unescaped) newline inside a
+    # JSON string value — json.dumps() never produces this, so build the raw
+    # string by hand the way a model's free-text output does.
+    raw_newline_resp = (
+        '{"confidence": 0.95, "edits": [{"file": "WebUI/main.js", '
+        # search targets the ALREADY-FIXED line ("targeted edit applied" above
+        # already replaced the typo in main_js) — a distinct sibling edit, not
+        # a re-application of the first one.
+        '"search": "    await ensureLDAPTenants();", '
+        '"replace": "    await ensureLDAPTenants();\n    logAudit();"}]}'
+    )
+    nl_ok, nl_applied, _ = ns["parse_and_apply"](raw_newline_resp, d)
+    nl_result = open(main_js).read()
+    ok &= _check("literal-newline-in-string response still parses and applies",
+                 nl_ok and "WebUI/main.js" in nl_applied)
+    ok &= _check("literal-newline replacement landed correctly",
+                 "logAudit();" in nl_result and "ensureLDAPTennants" not in nl_result)
 
     # In-flight claim: two workers can't process the same issue concurrently
     # (the reopen re-queue + a scan both grabbing an issue → duplicate commits).
