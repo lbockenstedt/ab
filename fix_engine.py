@@ -539,6 +539,43 @@ _REVIEW_TOOLS = [
 _REVIEW_TOOL_MAX_ITER = 3
 _REVIEW_TOOL_MAX_FILES = 5
 _REVIEW_FILE_MAX_CHARS = 20000
+# The reviewer's required output shape (confidence/verdict/critique) — passed
+# as claude_cli's --json-schema so the CLI itself validates + pre-parses the
+# response (structured_output) instead of the caller regex-extracting a
+# {...} blob from freeform text, which is where claude_cli's "JSON parse
+# failed (Extra data: ...)" errors came from (stray prose/markdown fences
+# around the JSON). Other providers are unaffected — this is only consumed
+# by _request_claude_cli via call_llm's json_schema= kwarg.
+_REVIEWER_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "confidence": {"type": "number", "description": "0.0-1.0"},
+        "verdict": {"type": "string", "enum": ["Approve", "Reject"]},
+        "critique": {"type": "string"},
+    },
+    "required": ["confidence", "verdict", "critique"],
+}
+# apply_ai_fix's required output shape — same --json-schema treatment as the
+# reviewer, for the same reason (claude_cli only; other providers ignore it).
+_FIX_GENERATION_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "confidence": {"type": "number", "description": "0.0-1.0"},
+        "edits": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "description": "repo-relative path"},
+                    "search": {"type": "string", "description": "exact substring to find"},
+                    "replace": {"type": "string", "description": "its replacement"},
+                },
+                "required": ["file", "search", "replace"],
+            },
+        },
+    },
+    "required": ["confidence", "edits"],
+}
 # Some local models emit a tool call as "<tool_call>{...}</tool_call>" TEXT
 # instead of the structured tool_calls field (the same shape chat.py's agent
 # loop already guards against). Kept as its own minimal copy rather than an
@@ -585,19 +622,32 @@ def _fetch_repo_file_for_review(repo, head_sha, path):
 _DIFF_FILE_HEADER_RE = re.compile(r'^diff --git a/(\S+) b/\S+', re.MULTILINE)
 
 
-def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, head_sha):
+def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, head_sha,
+                       repo_checkout_path=None):
     """One reviewer's turn. With repo+head_sha AND a provider that can actually
     receive `tools=`, runs a bounded tool-calling loop (fetch_repo_file, up to
     _REVIEW_TOOL_MAX_ITER turns / _REVIEW_TOOL_MAX_FILES files) before
-    producing final text. Otherwise falls back to a single-turn call — this
-    includes claude_cli, which silently DROPS `tools=` (_request_claude_cli
-    never receives the param; the whole conversation is serialised into a
-    plain CLI prompt) — telling it about a fetch_repo_file tool it has no way
-    to invoke made it try to fake a tool call in prose instead of returning
-    clean JSON (bugfixer#730/#731: "Expecting ':' delimiter" / "Extra data"
-    parse errors on every claude_cli review), so the tool-primed addendum
-    below is only added when the provider will really see it as a callable
-    tool.
+    producing final text.
+
+    claude_cli is a special case — not because it can't use tools at all
+    (it can, natively, just not via the generic `tools=` API param every
+    OTHER provider consumes), but because that requires an actual local
+    checkout its Read/Grep/Glob can see. When ``repo_checkout_path`` is
+    given, this runs claude_cli through its OWN native-tool path instead
+    (call_llm's enable_native_tools=True — see _request_claude_cli): real
+    Read/Grep/Glob/git-log access, scoped to that checkout, plus
+    --json-schema (_REVIEWER_JSON_SCHEMA) so the response is pre-validated
+    JSON rather than something to regex out of freeform text — the fix for
+    claude_cli's "JSON parse failed (Extra data: ...)" errors, which came
+    from stray prose/markdown around the JSON in the old single-turn path.
+
+    Without a checkout (repo_checkout_path is None — e.g. the caller
+    couldn't clone), claude_cli falls back to the tools-blind path below,
+    same as before this existed: telling it about a fetch_repo_file tool it
+    has no way to invoke made it try to fake a tool call in prose instead of
+    returning clean JSON (bugfixer#730/#731 — the ORIGINAL report of this
+    error class), so the tool-primed addendum is only ever added when a
+    provider will really see it as a callable tool.
 
     For that tools-blind fallback, when repo+head_sha ARE available (so the
     files genuinely could be fetched, just not by this provider itself),
@@ -622,7 +672,24 @@ def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, 
             provider = _get_provider_config(provider_n, load_config())[0]
         except Exception:  # noqa: BLE001
             provider = None
-    supports_tools = not (repo is None or head_sha is None or (provider or "").lower().strip() == "claude_cli")
+    is_claude_cli = (provider or "").lower().strip() == "claude_cli"
+    if is_claude_cli and repo_checkout_path:
+        native_prompt = prompt + (
+            "\n\nYou have real Read/Grep/Glob access to this repo's checkout "
+            "(plus git log/diff/show/blame) — use it to confirm whether a "
+            "referenced symbol exists, check a file the diff didn't fully "
+            "show, or see recent history INSTEAD OF rejecting because you "
+            "can't verify something. Most reviews won't need it; use it when "
+            "a specific, nameable uncertainty would change your verdict, not "
+            "as a first step. You may delegate mechanical file-hunting "
+            "('find where X is defined', 'which files reference Y') to the "
+            "searcher subagent instead of searching yourself."
+        )
+        return call_llm(native_prompt, system_prompt=system_prompt, force_provider=provider_n,
+                        task_id=task_id, model_override=model,
+                        repo_checkout_path=repo_checkout_path, enable_native_tools=True,
+                        json_schema=_REVIEWER_JSON_SCHEMA)
+    supports_tools = not (repo is None or head_sha is None or is_claude_cli)
     if not supports_tools:
         extra = ""
         if repo is not None and head_sha is not None:
@@ -696,6 +763,41 @@ def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, 
     # last turn produced (existing JSON-extraction just won't find a match if
     # it's incomplete, same as any other malformed reviewer response today).
     return last_text
+
+
+def _ensure_review_checkout(repo_path, repo, head_sha, config):
+    """A local directory claude_cli's native tools (Read/Grep/Glob/git) can
+    see, or (None, False) if none is available — best-effort, a review must
+    never fail just because this couldn't be arranged (every caller falls
+    back to the tools-blind path when it gets None).
+
+    Two cases:
+      * ``repo_path`` is already a real local checkout — the bug-fix pipeline
+        (apply_ai_fix/verify_fix) already operates on one. Used directly, no
+        clone; ``is_temp=False`` so the caller never deletes a LIVE working
+        tree it doesn't own.
+      * Otherwise, with ``repo``+``head_sha`` (the PR pre-review path, which
+        reviews a ``diff_override`` string — no local checkout exists yet),
+        clones fresh into a temp dir at that exact commit, reusing
+        check_test_regressions.py's ``_clone_and_checkout`` (same
+        token-embedded-URL clone + strip pattern used elsewhere in this file
+        for the QA-suite clone). ``is_temp=True`` — the caller must clean it
+        up once every reviewer in the pass is done with it.
+
+    Returns (path_or_None, is_temp)."""
+    if repo_path and os.path.isdir(repo_path):
+        return repo_path, False
+    if repo is None or head_sha is None:
+        return None, False
+    try:
+        from check_test_regressions import _clone_and_checkout
+        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
+        dest = tempfile.mkdtemp(prefix="bugfixer-review-")
+        _clone_and_checkout(repo.clone_url, token, head_sha, dest)
+        return dest, True
+    except Exception as e:  # noqa: BLE001 — best-effort; reviewer falls back to tools-blind
+        logger.info("review checkout skipped (%s) — claude_cli reviewer(s) fall back to tools-blind", e)
+        return None, False
 
 
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
@@ -822,38 +924,54 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     # only adds it for providers that can actually receive `tools=` — see its
     # docstring for why (claude_cli silently drops tools and got confused).
 
+    # A local checkout for claude_cli reviewers' native Read/Grep/Glob/git
+    # tools (see _run_reviewer_turn / _ensure_review_checkout) — only worth
+    # acquiring (and, if cloned fresh, cleaning up) when a claude_cli
+    # reviewer is actually in the panel; every other provider ignores it.
+    checkout_path, checkout_is_temp = (None, False)
+    if any((r.get("provider_n") and
+           (_get_provider_config(r["provider_n"], config)[0] or "").lower().strip() == "claude_cli")
+           for r in reviewers):
+        checkout_path, checkout_is_temp = _ensure_review_checkout(repo_path, repo, head_sha, config)
+
     votes = []
     failed_reviewers = []
-    for r in reviewers:
-        res = None
-        try:
-            logger.info(f"{r['name']} analyzing fix...")
-            res = _run_reviewer_turn(
-                prompt,
-                "You are a skeptical senior engineer. Be critical. Only return JSON.",
-                r["provider_n"], r.get("model"), task_id, repo, head_sha,
-            )
-            match = re.search(r'\{.*\}', res, re.DOTALL)
-            if match:
-                _v = _robust_json_loads(match.group())
-                _v["confidence"] = _norm_confidence(_v.get("confidence"))
-                votes.append({**_v, "reviewer": r["name"]})
-        except Exception as e:
-            if is_llm_cooldown_error(e):
-                logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
-            elif isinstance(e, json.JSONDecodeError) and res is not None:
-                # _robust_json_loads only repairs one specific, confirmed-recurring
-                # pattern (a stray backslash) and re-raises anything else
-                # unchanged. A bare exception message ("Expecting value: line 1
-                # column 30") gives no way to root-cause or repair the NEXT
-                # occurrence of a different pattern — unlike parse_and_apply's
-                # last_failures for edit misses, there was nothing to go on here.
-                # Truncated: this is a raw LLM response, not something to log
-                # unbounded.
-                logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
-            else:
-                logger.error(f"{r['name']} failed: {e}")
-            failed_reviewers.append(r["name"])
+    try:
+        for r in reviewers:
+            res = None
+            try:
+                logger.info(f"{r['name']} analyzing fix...")
+                res = _run_reviewer_turn(
+                    prompt,
+                    "You are a skeptical senior engineer. Be critical. Only return JSON.",
+                    r["provider_n"], r.get("model"), task_id, repo, head_sha,
+                    repo_checkout_path=checkout_path,
+                )
+                match = re.search(r'\{.*\}', res, re.DOTALL)
+                if match:
+                    _v = _robust_json_loads(match.group())
+                    _v["confidence"] = _norm_confidence(_v.get("confidence"))
+                    votes.append({**_v, "reviewer": r["name"]})
+            except Exception as e:
+                if is_llm_cooldown_error(e):
+                    logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
+                elif isinstance(e, json.JSONDecodeError) and res is not None:
+                    # _robust_json_loads only repairs one specific, confirmed-recurring
+                    # pattern (a stray backslash) and re-raises anything else
+                    # unchanged. A bare exception message ("Expecting value: line 1
+                    # column 30") gives no way to root-cause or repair the NEXT
+                    # occurrence of a different pattern — unlike parse_and_apply's
+                    # last_failures for edit misses, there was nothing to go on here.
+                    # Truncated: this is a raw LLM response, not something to log
+                    # unbounded.
+                    logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
+                else:
+                    logger.error(f"{r['name']} failed: {e}")
+                failed_reviewers.append(r["name"])
+    finally:
+        if checkout_is_temp and checkout_path:
+            import shutil
+            shutil.rmtree(checkout_path, ignore_errors=True)
 
     if not votes:
         # Every configured reviewer errored (transient network/provider issue,
@@ -1418,7 +1536,21 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
             f"{fix_format}"
         )
     try:
-        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider, model_override=model_override, task_kind="fix")
+        # repo_checkout_path/enable_native_tools/json_schema are claude_cli-only
+        # (see _request_claude_cli) — every other provider ignores them and
+        # behaves exactly as before. Lets claude_cli verify/explore beyond the
+        # pre-selected relevant_files (e.g. a symbol's real definition) instead
+        # of guessing from context_code alone; the returned edits are still
+        # matched via exact-substring search against the real file content in
+        # parse_and_apply, so nothing here bypasses that safety net. Gated on
+        # repo_path actually being a real directory — enabling native tools
+        # with no valid --add-dir would fall back to the subprocess's own cwd
+        # (bugfixer's own source tree), not the target repo.
+        _native = bool(repo_path and os.path.isdir(repo_path))
+        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider, model_override=model_override, task_kind="fix",
+                        repo_checkout_path=repo_path if _native else None,
+                        enable_native_tools=_native,
+                        json_schema=_FIX_GENERATION_JSON_SCHEMA)
     except Exception as e:
         raise Exception(f"Fix generation failed: {e}")
 
