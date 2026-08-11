@@ -1647,6 +1647,34 @@ def _relaxed_edit_span(haystack, needle):
     return matches[0].span() if len(matches) == 1 else None
 
 
+# Cheap cross-language sanity check for a failed edit (bugfixer#760): a search
+# snippet with JS-only syntax against a .py target (or vice versa) can NEVER
+# match — that's not a whitespace/staleness miss, it's the model crossing the
+# file/search pairing between two DIFFERENT edits in the same response (e.g. a
+# fix that touches both a JS caller and a Python route). Token sets are each
+# other's near-complement (arrow functions/`.catch(`/`console.log(` don't
+# occur in Python; `def `/`self.`/`elif `/indented `except` don't occur in JS)
+# so a real snippet should trip at most one side — this is a hint for the
+# retry prompt and log line, never a gate on whether the edit is attempted.
+_JS_ONLY_TOKENS_RE = re.compile(r'=>|\.catch\(|\bconst\s|\blet\s|console\.log\(|===|!==')
+_PY_ONLY_TOKENS_RE = re.compile(r'\bdef\s|\bself\.|\belif\s|\bexcept\s+\w|^\s*#', re.MULTILINE)
+_JS_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+_PY_EXTS = {".py"}
+
+
+def _snippet_language_mismatch_hint(search, filepath):
+    """Return a short explanation when *search*'s syntax looks like the wrong
+    language for *filepath*'s extension, else None."""
+    ext = os.path.splitext(filepath)[1].lower()
+    has_js = bool(_JS_ONLY_TOKENS_RE.search(search))
+    has_py = bool(_PY_ONLY_TOKENS_RE.search(search))
+    if ext in _PY_EXTS and has_js and not has_py:
+        return "search snippet looks like JavaScript, not Python — wrong file for this edit?"
+    if ext in _JS_EXTS and has_py and not has_js:
+        return "search snippet looks like Python, not JavaScript/TypeScript — wrong file for this edit?"
+    return None
+
+
 def parse_and_apply(content, repo_path):
     import re as _re, ast as _ast
     parse_and_apply.last_failures = []   # reset per call; read by the retry loop
@@ -1761,8 +1789,19 @@ def parse_and_apply(content, repo_path):
                     # returns only (ok, fixes, conf), so the detail was previously
                     # logged and lost — leaving the next attempt to guess.
                     _first = (search.strip().splitlines() or [""])[0][:160]
-                    _miss.append(f"{filepath}: search snippet not found (starts with: {_first!r})")
-                    logger.error(f"Edit search snippet not found in {filepath!r}; skipping this edit")
+                    _hint = _snippet_language_mismatch_hint(search, filepath)
+                    _hint_sfx = f" — {_hint}" if _hint else ""
+                    _miss.append(f"{filepath}: search snippet not found (starts with: {_first!r}){_hint_sfx}")
+                    # _first embedded IN the ERROR line (not left only in _miss/
+                    # last_failures): the self-log scanner captures single ERROR
+                    # lines verbatim with no surrounding context, so this is the
+                    # only copy of the actual failing snippet it will ever see —
+                    # the same gap that made bugfixer#735 recur as "non-actionable,
+                    # please provide more context" instead of ever getting fixed.
+                    logger.error(
+                        f"Edit search snippet not found in {filepath!r}; skipping this edit "
+                        f"(search starts with: {_first!r}){_hint_sfx}"
+                    )
                     continue
                 if count > 1:
                     logger.warning(f"Edit search matches {count}× in {filepath!r}; applying to all occurrences")

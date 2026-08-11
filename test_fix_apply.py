@@ -31,9 +31,11 @@ def _load_funcs():
     want = {"_safe_repo_target", "_issue_identifiers", "_targeted_file_context",
             "parse_and_apply", "_claim_issue", "_release_issue",
             "_robust_json_loads", "_sanitize_json_string_newlines",
-            "_fetch_repo_file_for_review"}
+            "_fetch_repo_file_for_review", "_snippet_language_mismatch_hint",
+            "_relaxed_edit_span"}
     want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
-                    "_JSON_BAD_ESCAPE_RE"}
+                    "_JSON_BAD_ESCAPE_RE", "_JS_ONLY_TOKENS_RE", "_PY_ONLY_TOKENS_RE",
+                    "_JS_EXTS", "_PY_EXTS"}
     segs = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
@@ -43,12 +45,18 @@ def _load_funcs():
                 if getattr(t, "id", "") in want_assign:
                     segs.append(ast.get_source_segment(src, node))
 
+    captured_errors = []
+
     class _L:
+        def error(self, msg, *a, **k):
+            captured_errors.append(msg)
+
         def __getattr__(self, _):
             return lambda *a, **k: None
 
     ns = {"os": os, "json": json, "re": re, "threading": threading, "logger": _L()}
     exec("\n\n".join(segs), ns)
+    ns["_captured_errors"] = captured_errors
     return ns
 
 
@@ -105,10 +113,36 @@ def main():
     bad_ok, bad_applied, _ = ns["parse_and_apply"](bad, d)
     ok &= _check("non-matching edit does NOT report success", bad_ok is False and not bad_applied)
 
+    # Regression guard for GitHub issue #755 ("Edit search snippet not found in
+    # '...'; skipping this edit" — non-actionable, no context): the failing
+    # snippet was computed (for the retry loop's last_failures) but never
+    # logged, so the self-scanner's single-line capture had nothing to go on.
+    # It must now appear directly in the logged ERROR line itself.
+    ok &= _check("missing-snippet ERROR line embeds the actual failing snippet",
+                 any("nonexistent snippet zzz" in m for m in ns["_captured_errors"]))
+
     esc = json.dumps({"confidence": 0.9, "edits": [
         {"file": "../escape.txt", "search": "a", "replace": "b"}]})
     esc_ok, esc_applied, _ = ns["parse_and_apply"](esc, d)
     ok &= _check("path traversal in an edit is rejected", esc_ok is False and not esc_applied)
+
+    # Regression guard for GitHub issue #760 ("No fixes could be applied
+    # (core/src/simulations/routes.py: search snippet not found (starts with:
+    # 'await r.json().catch(() => ({}))')))" — non-actionable): the search
+    # snippet is JAVASCRIPT, applied against a .py file — it can never match,
+    # because the model crossed the file/search pairing between a JS edit and
+    # a Python edit in the same response. A plain "not found" gives no signal
+    # toward THAT diagnosis; the language-mismatch hint should.
+    routes_py = os.path.join(d, "routes.py")
+    open(routes_py, "w").write("def handler(request):\n    return {}\n")
+    js_in_py = json.dumps({"confidence": 0.9, "edits": [
+        {"file": "routes.py", "search": "await r.json().catch(() => ({}))", "replace": "x"}]})
+    ns["_captured_errors"].clear()
+    mismatch_ok, mismatch_applied, _ = ns["parse_and_apply"](js_in_py, d)
+    ok &= _check("JS-in-.py mismatched edit does NOT report success",
+                 mismatch_ok is False and not mismatch_applied)
+    ok &= _check("cross-language hint appears in the ERROR line",
+                 any("looks like JavaScript, not Python" in m for m in ns["_captured_errors"]))
 
     # Regression guard for GitHub issue #735 (recurring "unterminated string
     # literal" / "invalid syntax" self-diagnosis failures): an LLM response with
