@@ -653,7 +653,16 @@ def _fetch_repo_file_for_review(repo, head_sha, path):
         c = repo.get_contents(path, ref=head_sha)
     except Exception as e:  # noqa: BLE001
         return {"error": f"could not fetch {path}@{head_sha}: {e}"}
-    raw = getattr(c, "decoded_content", None)
+    # getattr(..., None) only swallows AttributeError (the directory-listing
+    # case, where `c` is a list). PyGithub's decoded_content property instead
+    # raises AssertionError ("unsupported encoding: none") when GitHub's
+    # Contents API doesn't inline the file (seen for files >1MB) — that
+    # escaped getattr entirely and broke this function's "never raises"
+    # contract, crashing the reviewer's whole tool-call turn (bugfixer#753).
+    try:
+        raw = c.decoded_content
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{path} has no fetchable content ({e})"}
     if raw is None:
         return {"error": f"{path} has no fetchable content (directory or binary?)"}
     try:

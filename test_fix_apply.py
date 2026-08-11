@@ -30,7 +30,8 @@ def _load_funcs():
     tree = ast.parse(src)
     want = {"_safe_repo_target", "_issue_identifiers", "_targeted_file_context",
             "parse_and_apply", "_claim_issue", "_release_issue",
-            "_robust_json_loads", "_sanitize_json_string_newlines"}
+            "_robust_json_loads", "_sanitize_json_string_newlines",
+            "_fetch_repo_file_for_review"}
     want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
                     "_JSON_BAD_ESCAPE_RE"}
     segs = []
@@ -128,6 +129,28 @@ def main():
                  nl_ok and "WebUI/main.js" in nl_applied)
     ok &= _check("literal-newline replacement landed correctly",
                  "logAudit();" in nl_result and "ensureLDAPTennants" not in nl_result)
+
+    # Regression guard for GitHub issue #753 ("Reviewer N (copilot) failed:
+    # unsupported encoding: none"): PyGithub's ContentFile.decoded_content
+    # raises AssertionError("unsupported encoding: none") when GitHub's
+    # Contents API doesn't inline a file's content (e.g. >1MB), and that
+    # escaped getattr(c, "decoded_content", None) — which only catches
+    # AttributeError — breaking this function's documented "never raises"
+    # contract and crashing the whole reviewer turn.
+    class _OversizedContentFile:
+        path = "big.bin"
+
+        @property
+        def decoded_content(self):
+            assert False, "unsupported encoding: none"
+
+    class _FakeRepo:
+        def get_contents(self, path, ref=None):
+            return _OversizedContentFile()
+
+    oversized_out = ns["_fetch_repo_file_for_review"](_FakeRepo(), "deadbeef", "big.bin")
+    ok &= _check("oversized-file AssertionError degrades to an error dict, not a raise",
+                 isinstance(oversized_out, dict) and "error" in oversized_out)
 
     # In-flight claim: two workers can't process the same issue concurrently
     # (the reopen re-queue + a scan both grabbing an issue → duplicate commits).
