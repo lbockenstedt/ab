@@ -1297,11 +1297,21 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
 
     resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider=provider_name)
 
-    if tools:
+    if not use_stream:
+        # A non-streamed request (tools always forces this, but a caller can also
+        # pass effective_stream=False directly — the provider-diagnostics probe
+        # does, for a fast bounded check) gets back ONE JSON object with
+        # choices[].message.content, never choices[].delta.content. The SSE loop
+        # below only understands delta chunks — parsing a non-streamed response
+        # with it silently produced an empty string (surfaced as "provider
+        # returned an empty response" in the diag probe for any provider hitting
+        # this path with streaming off, e.g. openrouter/groq/lmstudio).
         data = resp.json()
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         text = msg.get("content") or ""
+        if not tools:
+            return text
         raw_tcs = msg.get("tool_calls") or None
         tool_calls = None
         if raw_tcs:
@@ -1743,10 +1753,17 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
     if tools:
         payload["tools"] = _tools_to_openai(tools)
     resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="copilot")
-    if tools:
+    if not use_stream:
+        # See _request_openai's matching branch: a non-streamed response is ONE
+        # JSON object with choices[].message.content, not delta chunks — the SSE
+        # loop below silently returned "" for any tools=None + effective_stream=
+        # False call (e.g. the provider diagnostics probe).
         data = resp.json()
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
+        text = msg.get("content") or ""
+        if not tools:
+            return text
         raw_tcs = msg.get("tool_calls") or None
         tool_calls = None
         if raw_tcs:
@@ -1757,7 +1774,7 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
                 }}
                 for i, tc in enumerate(raw_tcs)
             ]
-        return {"text": msg.get("content") or "", "tool_calls": tool_calls}
+        return {"text": text, "tool_calls": tool_calls}
     full_response = ""
     for line in resp.iter_lines():
         if not line:
