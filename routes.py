@@ -334,7 +334,8 @@ async def pr_review_approve(request: Request):
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
         return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
-    try:
+
+    def _do_approve():
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(number)
@@ -354,6 +355,16 @@ async def pr_review_approve(request: Request):
             pr.create_issue_comment("✅ **Approved** via BugFixer (human review). Cleared to merge/pull.")
         except Exception:
             pass
+
+    try:
+        # PyGithub is synchronous — every call in _do_approve is a blocking
+        # HTTP request to the GitHub API. Running it inline on this coroutine
+        # blocked the ENTIRE app (uvicorn runs single-process/single-event-
+        # loop, no workers=) for however long GitHub took to respond — same
+        # class of bug as hub_logs_raw's request_sync. A slow GitHub response
+        # (or a client-side timeout mid-stall) surfaced as a network failure
+        # ("TypeError: Load failed" in Safari) rather than a slow success.
+        await asyncio.get_event_loop().run_in_executor(None, _do_approve)
         mark_pr_approved(repo_name, number, True)
         logger.info("pr_review: %s #%s APPROVED via UI", repo_name, number)
         return {"status": "success", "repo": repo_name, "number": number}
@@ -377,32 +388,40 @@ async def pr_review_merge(request: Request):
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
         return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
-    try:
+
+    def _do_merge():
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(number)
         if pr.merged:
             update_pr_review(repo_name, number, merged=True)
-            return {"status": "success", "message": "already merged"}
+            return 200, {"status": "success", "message": "already merged"}
         # Closed without a merge (e.g. superseded by another PR). Don't attempt the
         # merge — GitHub would 405 "not mergeable". Reconcile the record to CLOSED so
         # the row stops offering Merge, and tell the user plainly.
         if (pr.state or "").lower() == "closed":
             update_pr_review(repo_name, number, closed=True)
-            return JSONResponse(status_code=409, content={"status": "error", "closed": True,
-                "message": f"PR #{number} is closed on GitHub (not merged) — its changes may have merged under another PR. Marked CLOSED."})
+            return 409, {"status": "error", "closed": True,
+                "message": f"PR #{number} is closed on GitHub (not merged) — its changes may have merged under another PR. Marked CLOSED."}
         # Approve gates Merge: a human must Approve first. The UI only offers Merge
         # once approved; this backstops the gate so a direct API call can't bypass it.
         rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, number)) or {}
         if not rec.get("approved"):
-            return JSONResponse(status_code=409, content={"status": "error", "needs_approval": True,
-                "message": f"PR #{number} must be Approved before it can be merged."})
+            return 409, {"status": "error", "needs_approval": True,
+                "message": f"PR #{number} must be Approved before it can be merged."}
         res = pr.merge()  # default merge commit; raises if not mergeable
         # Keep the record, flag it MERGED (stays listed with a badge).
         update_pr_review(repo_name, number, merged=True)
         logger.info("pr_review: %s #%s MERGED via UI", repo_name, number)
-        return {"status": "success", "merged": bool(getattr(res, "merged", True)),
-                "message": getattr(res, "message", "merged")}
+        return 200, {"status": "success", "merged": bool(getattr(res, "merged", True)),
+                     "message": getattr(res, "message", "merged")}
+
+    try:
+        # See pr_review_approve's identical note: PyGithub is synchronous, so
+        # every call inside _do_merge blocks — offload it so a slow GitHub
+        # response can't stall the whole app.
+        status_code, content = await asyncio.get_event_loop().run_in_executor(None, _do_merge)
+        return content if status_code == 200 else JSONResponse(status_code=status_code, content=content)
     except Exception as e:  # noqa: BLE001
         logger.error("pr_review merge failed for %s#%s: %s", repo_name, number, e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
@@ -423,7 +442,8 @@ async def pr_review_deny(request: Request):
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
         return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
-    try:
+
+    def _do_deny():
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(number)
@@ -445,6 +465,12 @@ async def pr_review_deny(request: Request):
             pass
         if not pr.merged and pr.state == "open":
             pr.edit(state="closed")
+
+    try:
+        # See pr_review_approve's identical note: PyGithub is synchronous, so
+        # every call inside _do_deny blocks — offload it so a slow GitHub
+        # response can't stall the whole app.
+        await asyncio.get_event_loop().run_in_executor(None, _do_deny)
         update_pr_review(repo_name, number, denied=True)
         logger.info("pr_review: %s #%s DENIED via UI", repo_name, number)
         return {"status": "success", "repo": repo_name, "number": number}
@@ -1461,7 +1487,19 @@ async def hub_logs_raw():
     client = _get_hub_agent_client()
     if not client:
         return JSONResponse({"error": "Hub agent not configured"}, status_code=400)
-    result = client.request_sync("GET_LOGS", {}, timeout=20)
+    # client.request_sync() is a THREAD-BLOCKING bridge (future.result()) meant
+    # for plain-def callers running on their own worker thread (see
+    # _trigger_spoke_updates / _wait_for_spokes_online in workers.py). Calling
+    # it directly here blocked THIS route's coroutine for up to 25s — and since
+    # uvicorn runs single-process/single-event-loop (no workers=), that froze
+    # EVERY concurrent request on the server, not just this one. Worse while
+    # the hub connection is flapping (request() times out at the full 20s
+    # instead of failing fast), which is exactly when an operator reaches for
+    # this debug endpoint. run_in_executor moves the blocking wait to a pool
+    # thread so the event loop — and every other page/request — stays free.
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: client.request_sync("GET_LOGS", {}, timeout=20))
     if not isinstance(result, dict):
         return JSONResponse({"error": "Hub agent not approved/connected"}, status_code=503)
     return JSONResponse({
@@ -2532,10 +2570,8 @@ async def clear_history():
     logger.info("Clearing all issue history and resetting counters.")
 
     state["processed"] = {}
-    state["success_count"] = 0
-    state["failure_count"] = 0
-
     save_processed({})
+    recompute_issue_counters({})
 
     return {"status": "success", "message": "All history and tasks have been cleared."}
 
@@ -2603,18 +2639,18 @@ async def delete_issue(request: Request):
     processed = load_processed()
     was_in_history = issue_id in processed
     if was_in_history:
-        entry = processed.pop(issue_id)
-        if entry.get("status") in ("fixed", "verified", "awaiting_prod_verification"):
-            state["success_count"] = max(0, state.get("success_count", 0) - 1)
-        elif entry.get("status") == "failed":
-            state["failure_count"] = max(0, state.get("failure_count", 0) - 1)
+        processed.pop(issue_id)
         state["processed"] = processed
         save_processed(processed)
+        recompute_issue_counters(processed)
 
-    # Close the issue on GitHub.
+    # Close the issue on GitHub. Offloaded like the pr_review actions —
+    # _close_issue_on_github is synchronous (PyGithub), so calling it inline
+    # here blocked the whole app for however long GitHub took to respond.
     github_msg = ""
     try:
-        _ok, github_msg = _close_issue_on_github(issue_id)
+        _ok, github_msg = await asyncio.get_event_loop().run_in_executor(
+            None, _close_issue_on_github, issue_id)
         logger.info(f"Dismissed issue {issue_id}: removed from history, {github_msg}")
     except Exception as e:
         github_msg = f"GitHub close failed: {e}"
@@ -2643,9 +2679,8 @@ async def delete_all_issues(request: Request):
     # Clear local history + counters now; close on GitHub in the background
     # against the snapshot so the clear doesn't race the sweep.
     state["processed"] = {}
-    state["success_count"] = 0
-    state["failure_count"] = 0
     save_processed({})
+    recompute_issue_counters({})
 
     def _bulk_close():
         closed = failed = 0
@@ -2695,7 +2730,7 @@ async def resolve_issue(request: Request):
             "message": "GitHub close failed: No GitHub token configured. Local status left unchanged.",
         })
 
-    try:
+    def _do_resolve():
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         issue = repo.get_issue(issue_num)
@@ -2710,9 +2745,9 @@ async def resolve_issue(request: Request):
 
         if issue.state != "closed":
             issue.edit(state="closed")
-            github_msg = f"Issue #{issue_num} closed on GitHub."
+            msg = f"Issue #{issue_num} closed on GitHub."
         else:
-            github_msg = f"Issue #{issue_num} was already closed on GitHub."
+            msg = f"Issue #{issue_num} was already closed on GitHub."
         # Human sign-off → tell the hub the bug report is fixed, ALWAYS — even when the
         # issue was already closed on GitHub. (This used to be inside the "if not
         # closed" branch, so an already-closed issue never flipped the LM report to
@@ -2724,6 +2759,13 @@ async def resolve_issue(request: Request):
             pass
         # Apply the closed label (best-effort; existing labels kept).
         _apply_closed_label(repo, issue, issue_id)
+        return msg
+
+    try:
+        # PyGithub is synchronous — every call inside _do_resolve blocks, same
+        # note as pr_review_approve. Offloaded so a slow GitHub response can't
+        # stall the whole app.
+        github_msg = await asyncio.get_event_loop().run_in_executor(None, _do_resolve)
         logger.info(f"Resolved issue {issue_id}: status -> closed, {github_msg}")
     except Exception as e:
         logger.warning(f"Could not close {issue_id} on GitHub: {e}")
@@ -2850,7 +2892,7 @@ async def reopen_issue(request: Request):
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
         return JSONResponse(status_code=400, content={"message": "No GitHub token configured"})
-    try:
+    def _do_reopen():
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         issue = repo.get_issue(issue_num)
@@ -2868,6 +2910,12 @@ async def reopen_issue(request: Request):
             )
         except Exception:  # noqa: BLE001
             pass
+
+    try:
+        # PyGithub is synchronous — every call inside _do_reopen blocks, same
+        # note as pr_review_approve. Offloaded so a slow GitHub response can't
+        # stall the whole app.
+        await asyncio.get_event_loop().run_in_executor(None, _do_reopen)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Reopen failed for {issue_id}: {e}")
         return JSONResponse(status_code=500, content={"message": f"Reopen failed: {e}"})

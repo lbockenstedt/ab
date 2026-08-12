@@ -302,8 +302,20 @@
                 </div>
             </div>
             {% set _hs = (state.hub_agent_status or 'not_registered') %}
+            {# Mirror refreshHubStatusDot()'s JS logic exactly (index.html ~3338):
+               approved is split on the LIVE socket, not just registration —
+               green only when actually connected, amber when approved but the
+               socket is down. Without this, every full-page reload (the
+               Dashboard/Logs views auto-reload every statusSeconds) re-painted
+               the dot from registration status ALONE, flashing green for ~10s
+               until the JS poll corrected it to amber — a green/amber flicker
+               that was really just this render lagging the truth, not the
+               connection actually flapping that fast. #}
+            {% set _hs_color = 'bg-green-500' if (_hs == 'approved' and state.hub_agent_connected)
+                else 'bg-amber-500' if _hs == 'approved'
+                else {'pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') %}
             <div id="hub-status-group" class="flex items-center gap-2 group relative cursor-pointer" onclick="location.href='/diagnostics'" title="Hub agent connection status">
-                <div id="hub-status-dot" class="w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] {{ {'approved':'bg-green-500','pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') }}"></div>
+                <div id="hub-status-dot" class="w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] {{ _hs_color }}"></div>
                 <span class="text-[10px] uppercase tracking-widest opacity-60">Hub</span>
                 <div id="hub-status-tooltip" class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[200px] text-left normal-case tracking-normal">
                     <div class="opacity-60 uppercase mb-1">Hub Agent</div>
