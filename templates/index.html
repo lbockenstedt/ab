@@ -956,7 +956,7 @@
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
-                                {% for pname in ['google','anthropic','openai','groq','ollama','ollama2','ollama_cloud','lmstudio','claude_cli','copilot'] %}
+                                {% for pname in ['google','anthropic','openai','groq','openrouter','ollama','ollama2','ollama_cloud','lmstudio','claude_cli','copilot'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
                                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                                     <div class="flex items-center justify-between mb-2">
@@ -965,6 +965,7 @@
                                             {% elif pname == 'anthropic' %}text-orange-500
                                             {% elif pname == 'openai' %}text-green-600
                                             {% elif pname == 'groq' %}text-yellow-600
+                                            {% elif pname == 'openrouter' %}text-teal-600
                                             {% elif pname == 'claude_cli' %}text-violet-600
                                             {% else %}text-purple-500{% endif %}">{{ pname }}</span>
                                         {% if pname == 'claude_cli' %}<span class="text-[10px] text-violet-600 font-bold">● Session Auth</span>
@@ -1045,6 +1046,7 @@
                                         <option value="anthropic">Anthropic</option>
                                         <option value="openai">OpenAI</option>
                                         <option value="groq">Groq</option>
+                                        <option value="openrouter">OpenRouter</option>
                                         <option value="ollama">Ollama</option>
                                         <option value="ollama2">Ollama 2 (remote)</option>
                                         <option value="ollama_cloud">Ollama Cloud (ollama.com — needs key)</option>
@@ -1087,6 +1089,7 @@
                                                 <option value="anthropic" {{ 'selected' if entry.provider == 'anthropic' else '' }}>Anthropic</option>
                                                 <option value="openai" {{ 'selected' if entry.provider == 'openai' else '' }}>OpenAI</option>
                                                 <option value="groq" {{ 'selected' if entry.provider == 'groq' else '' }}>Groq</option>
+                                                <option value="openrouter" {{ 'selected' if entry.provider == 'openrouter' else '' }}>OpenRouter</option>
                                                 <option value="ollama" {{ 'selected' if entry.provider == 'ollama' else '' }}>Ollama</option>
                                                 <option value="ollama2" {{ 'selected' if entry.provider == 'ollama2' else '' }}>Ollama 2 (remote)</option>
                                                 <option value="ollama_cloud" {{ 'selected' if entry.provider == 'ollama_cloud' else '' }}>Ollama Cloud (ollama.com — needs key)</option>
@@ -3908,7 +3911,7 @@
             ['gemma2-9b',              30],
             ['qwen-qwq',               30],
         ];
-        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, ollama2: 10, ollama_cloud: 30, groq: 30, lmstudio: 0, claude_cli: 10};
+        const _PROVIDER_RPM = {google: 10, anthropic: 50, openai: 60, ollama: 10, ollama2: 10, ollama_cloud: 30, groq: 30, openrouter: 20, lmstudio: 0, claude_cli: 10};
 
         // Ollama slots are no-key EXCEPT the hosted cloud one — mirrors
         // llm_client._provider_is_nokey so the UI and the failover gate agree on

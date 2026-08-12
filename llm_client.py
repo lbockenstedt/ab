@@ -39,6 +39,18 @@ import claude_cli_native_tools
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com"
+# OpenRouter: a single OpenAI-compatible endpoint that routes to many backends —
+# the "model" field is vendor-prefixed (e.g. "anthropic/claude-3.5-sonnet",
+# "meta-llama/llama-3.1-70b-instruct"), which is why it needs its own model-listing
+# branch (see _fetch_models_for_provider) instead of the generic openai one (that
+# filters to gpt/o1/o3/o4 substrings and would drop nearly every OpenRouter model
+# id). HTTP-Referer/X-Title are OpenRouter-specific attribution headers (optional,
+# improve OpenRouter's own dashboard/rate-limit attribution — not required to work).
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_HEADERS = {
+    "HTTP-Referer": "https://github.com/lbockenstedt/bugfixer",
+    "X-Title": "BugFixer",
+}
 LMSTUDIO_BASE_URL = "http://localhost:1234/v1"  # LM Studio local OpenAI-compatible server
 LMSTUDIO_DEFAULT_PORT = 1234
 ANTHROPIC_API_VERSION = "2023-06-01"
@@ -730,12 +742,17 @@ def _is_credit_exhaustion(status_code, body_text, provider):
     err = body.get("error") if isinstance(body.get("error"), dict) else {}
     err_msg = (err.get("message") or "").lower()
 
-    if p in ("openai", "ollama"):
+    if p in ("openai", "ollama", "openrouter"):
         if err.get("code") in {"insufficient_quota", "billing_hard_limit_reached"}:
             return True
         if err.get("type") in {"insufficient_quota", "billing_not_active"}:
             return True
-        # OpenAI-compat providers sometimes put it in the message too
+        # OpenAI-compat providers sometimes put it in the message too. OpenRouter
+        # proxies whichever upstream backend it routed to, so its error body
+        # shape varies — the universal HTTP 402 check above already covers
+        # OpenRouter's own "Insufficient credits" response; this keyword
+        # fallback catches a proxied upstream credit error surfaced at a
+        # different status code.
         if any(k in err_msg for k in _CREDIT_MSG_KEYWORDS):
             return True
 
@@ -1245,13 +1262,22 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
     raise Exception(f"LLM request to {endpoint} exhausted all {max_retries+1} attempts")
 
 
-def _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
-    """Call an OpenAI-compatible endpoint. Returns text string or tool-call dict."""
+def _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                    provider_name="openai", extra_headers=None):
+    """Call an OpenAI-compatible endpoint. Returns text string or tool-call dict.
+
+    ``provider_name``/``extra_headers`` let an OpenAI-compatible-but-distinct
+    provider (currently OpenRouter) reuse this function while still getting its
+    own circuit-breaker/credit-exhaustion key (instead of silently sharing
+    "openai"'s) and its own attribution headers. Every existing call site omits
+    both and is unaffected."""
     base = (base_url or OPENAI_BASE_URL).rstrip("/")
     endpoint = f"{base}/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    if extra_headers:
+        headers.update(extra_headers)
 
     msgs = _to_openai_messages(messages)
     use_stream = False if tools else effective_stream
@@ -1269,7 +1295,7 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     if tools:
         payload["tools"] = _tools_to_openai(tools)
 
-    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="openai")
+    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider=provider_name)
 
     if tools:
         data = resp.json()
@@ -1771,6 +1797,10 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     if p == "groq":
         effective_url = base_url or "https://api.groq.com/openai/v1"
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
+    if p == "openrouter":
+        effective_url = base_url or OPENROUTER_BASE_URL
+        return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config,
+                               provider_name="openrouter", extra_headers=OPENROUTER_HEADERS)
     if _is_lmstudio(p):
         # LM Studio exposes an OpenAI-compatible API; no auth key required.
         effective_url = _normalize_lmstudio_url(base_url)

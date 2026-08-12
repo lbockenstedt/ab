@@ -34,6 +34,7 @@ from main import (
     ANTHROPIC_BASE_URL,
     GOOGLE_BASE_URL,
     OPENAI_BASE_URL,
+    OPENROUTER_BASE_URL,
     CONFIG_DIR,
     SELF_SCAN_OFFSET_FILE,
     _any_provider_available,
@@ -176,6 +177,11 @@ def _check_provider_online(n, config):
             resp = requests.get(url, headers=headers, timeout=10)
         elif p == "groq":
             base = (base_url or "https://api.groq.com/openai/v1").rstrip("/")
+            url = f"{base}/models"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            resp = requests.get(url, headers=headers, timeout=10)
+        elif p == "openrouter":
+            base = (base_url or OPENROUTER_BASE_URL).rstrip("/")
             url = f"{base}/models"
             headers = {"Authorization": f"Bearer {api_key}"}
             resp = requests.get(url, headers=headers, timeout=10)
@@ -1594,6 +1600,18 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             resp.raise_for_status()
             for m in resp.json().get("data", []):
                 models.append({"name": m.get("id", ""), "details": m.get("owned_by", "")})
+        elif p == "openrouter":
+            # No gpt/o1/o3/o4 substring filter (unlike the generic openai-compat
+            # branch below): OpenRouter ids are vendor-prefixed
+            # ("anthropic/claude-3.5-sonnet", "meta-llama/llama-3.1-70b-instruct",
+            # ...) — that filter would drop nearly every one of them.
+            base = (base_url or OPENROUTER_BASE_URL).rstrip("/")
+            headers = {"Authorization": f"Bearer {api_key}"}
+            attempted = f"{base}/models"
+            resp = requests.get(attempted, headers=headers, timeout=10)
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                models.append({"name": m.get("id", ""), "details": (m.get("name") or m.get("owned_by") or "")})
         else:  # openai (and openai-compatible)
             base = (base_url or OPENAI_BASE_URL).rstrip("/")
             headers = {"Authorization": f"Bearer {api_key}"}
