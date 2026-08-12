@@ -1612,6 +1612,15 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             resp.raise_for_status()
             for m in resp.json().get("data", []):
                 models.append({"name": m.get("id", ""), "details": (m.get("name") or m.get("owned_by") or "")})
+            # "openrouter/free" (the Free Models Router — routes each request to a
+            # random available :free model, filtered for the features it needs)
+            # does NOT appear in OpenRouter's own /models listing (confirmed live:
+            # that endpoint returns only "openrouter/auto-beta", a DIFFERENT, paid
+            # router) even though it's a valid, documented model id. Inject it and
+            # pin it first so it's always selectable and easy to find.
+            models = [m for m in models if m.get("name") != "openrouter/free"]
+            models.insert(0, {"name": "openrouter/free",
+                              "details": "Free Models Router — random available :free model"})
         else:  # openai (and openai-compatible)
             base = (base_url or OPENAI_BASE_URL).rstrip("/")
             headers = {"Authorization": f"Bearer {api_key}"}
