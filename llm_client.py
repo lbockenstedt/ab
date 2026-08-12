@@ -1069,29 +1069,61 @@ def _llm_cb_snapshot():
             "last_trip_time": _LLM_CB["last_trip_time"],
         }
 
-_LLM_SEMAPHORE = None
-_LLM_SEM_LOCK = threading.Lock()
+#: Per-slot exclusivity: a single provider slot (1-8) may run only ONE job at a
+#: time. call_llm's failover loop try-acquires (non-blocking) each slot in a
+#: pool in turn — a busy slot is skipped in favor of the next one, exactly like
+#: an existing not_configured/cooldown skip, just for a different reason. A
+#: PINNED slot (force_provider — no failover partner to fall back to) instead
+#: blocking-acquires: waiting on that one slot IS the "queued" behavior there.
+#: Held for the full duration of _try_provider (including its own internal
+#: retries), not per HTTP attempt, so "busy" means "this slot has a job on it
+#: right now," not "one HTTP request is in flight."
+_SLOT_LOCKS = {n: threading.Lock() for n in _ALL_SLOTS}
 
-def _get_llm_semaphore():
-    global _LLM_SEMAPHORE
-    with _LLM_SEM_LOCK:
-        if _LLM_SEMAPHORE is None:
+#: Per-CATEGORY (CODE / LOG / REVIEW) concurrency cap, sized from
+#: LLM_MAX_CONCURRENT — this used to be ONE global limiter; now each pool gets
+#: its OWN semaphore of that size, so N jobs can run in CODE and, independently,
+#: a separate N in LOG and N in REVIEW at the same time. If LLM_MAX_CONCURRENT
+#: exceeds a pool's configured slot count, the semaphore alone can't guarantee a
+#: free slot — call_llm's busy-wait-and-rescan loop covers that case.
+_CATEGORY_SEMAPHORES = {}
+_CATEGORY_SEM_LOCK = threading.Lock()
+
+
+def _pool_category_name(pool):
+    """CODE / LOG / REVIEW label for a slot tuple from _slots_for_task — the key
+    the per-category semaphore is keyed on."""
+    if pool is _LOG_SLOTS:
+        return "LOG"
+    if pool is _REVIEW_SLOTS:
+        return "REVIEW"
+    return "CODE"
+
+
+def _get_category_semaphore(pool_name):
+    with _CATEGORY_SEM_LOCK:
+        sem = _CATEGORY_SEMAPHORES.get(pool_name)
+        if sem is None:
             try:
                 cfg = load_config()
                 max_conc = int(cfg.get("LLM_MAX_CONCURRENT", 1))
             except Exception:
                 max_conc = 1
-            _LLM_SEMAPHORE = threading.Semaphore(max(1, max_conc))
-            logger.info(f"LLM global concurrency limiter initialised: max_concurrent={max(1, max_conc)}")
-        return _LLM_SEMAPHORE
+            sem = threading.Semaphore(max(1, max_conc))
+            _CATEGORY_SEMAPHORES[pool_name] = sem
+            logger.info(f"LLM {pool_name} pool concurrency limiter initialised: max_concurrent={max(1, max_conc)}")
+        return sem
+
 
 def _reset_llm_semaphore():
-    """Drop the cached global LLM concurrency semaphore so it is rebuilt from
-    the (possibly changed) LLM_MAX_CONCURRENT setting on next use. Kept in main
-    so the rebind targets main's module global even when called from routes.py."""
-    global _LLM_SEMAPHORE
-    with _LLM_SEM_LOCK:
-        _LLM_SEMAPHORE = None
+    """Drop every cached per-category concurrency semaphore so each is rebuilt
+    from the (possibly changed) LLM_MAX_CONCURRENT setting on next use. Name
+    kept unchanged for the existing /save_settings caller in routes.py — it now
+    resets all three category gates (CODE/LOG/REVIEW) instead of one global
+    one; slot locks need no reset, they aren't sized by config."""
+    global _CATEGORY_SEMAPHORES
+    with _CATEGORY_SEM_LOCK:
+        _CATEGORY_SEMAPHORES = {}
 
 #: Headers whose value is a credential. A provider error body can echo the
 #: request back at you, so the key is stripped before the body reaches a log
@@ -1136,12 +1168,10 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
         is_last = attempt == max_retries
         _llm_cb_wait(provider)
         try:
-            sem = _get_llm_semaphore()
-            sem.acquire()
-            try:
-                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout_val, stream=stream)
-            finally:
-                sem.release()
+            # Concurrency gating happens one layer up now (call_llm holds a
+            # per-CATEGORY semaphore + this slot's lock for the whole
+            # _try_provider call) — this is just the bare HTTP attempt.
+            resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout_val, stream=stream)
 
             # Credit exhaustion check — happens before any retry logic so we don't
             # waste retries against a billing wall.
@@ -1847,6 +1877,16 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     has no such API param).
 
     Providers in a 1-hour credit-exhaustion cooldown are skipped automatically.
+
+    Concurrency: LLM_MAX_CONCURRENT gates PER CATEGORY (CODE/LOG/REVIEW), not
+    globally — this call blocks (queues) on that category's semaphore for the
+    duration of the whole invocation. Within the category, each provider SLOT
+    may run only one job at a time: the failover loop skips a busy slot in
+    favor of the next one in the pool (same as an existing not_configured/
+    cooldown skip); a pinned force_provider slot has no failover partner, so it
+    blocking-waits on that one slot instead. If every slot in the pool is busy
+    at once, the call waits and re-scans rather than failing — see the busy-
+    wait loop below (bounded so a leaked lock can't hang forever).
     """
     config = load_config()
     # Which pool serves this call: code slots (1-4), the dedicated log slots
@@ -1854,6 +1894,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     # one of its slots is actually configured, so existing installs are
     # unaffected.
     _pool = _slots_for_task(task_kind, config)
+    _pool_name = _pool_category_name(_pool)
     _cfg_rows = {n: _get_provider_config(n, config) for n in _pool}
     if model_override:
         _cfg_rows = {n: (pv, k, model_override, u) for n, (pv, k, _m, u) in _cfg_rows.items()}
@@ -2090,98 +2131,171 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 return None, msg
             return None, e
 
+    # LLM_MAX_CONCURRENT gates PER CATEGORY now: held for this whole call so at
+    # most N calls are simultaneously routing/running in this pool, independent
+    # of the other two pools' traffic.
+    _cat_sem = _get_category_semaphore(_pool_name)
+    _cat_sem.acquire()
     try:
-        # Bind for the except handler on EVERY path: the force_provider (reviewer)
-        # and force_cloud=False paths return/raise before the failover loop assigns
-        # last_err, so without this the handler hit "cannot access local variable
-        # 'last_err'" (UnboundLocalError), which crashed reviewers and masked the
-        # real provider error.
-        last_err = None
-        # force_provider=N: use that slot only, no failover.
-        if force_provider in _ALL_SLOTS:
-            # Look up by SLOT NUMBER. This indexed all_providers[n-1], which is only
-            # correct while the pool is exactly (1,2,3,4) — with the log pool (5,6)
-            # that arithmetic runs off the end or picks the wrong provider.
-            _row = next((r for r in all_providers if r[0] == force_provider), None)
-            if _row is None:
-                # Pinned a slot outside the pool serving this task (e.g. a code slot
-                # for a log call). Honour the pin explicitly rather than silently
-                # using someone else.
-                _p, _k, _m, _u = _get_provider_config(force_provider, config)
-                _row = (force_provider, _p, _m, _k, _u)
-            result, err = _try_provider(*_row)
-            if result is not None:
-                _record_provider_result(force_provider, "ok")
-                return result
-            _record_provider_result(force_provider, err if isinstance(err, str) else "failed", err)
-            raise Exception(f"Provider {force_provider} unavailable: {err}")
+        try:
+            # Bind for the except handler on EVERY path: the force_provider (reviewer)
+            # and force_cloud=False paths return/raise before the failover loop assigns
+            # last_err, so without this the handler hit "cannot access local variable
+            # 'last_err'" (UnboundLocalError), which crashed reviewers and masked the
+            # real provider error.
+            last_err = None
+            # Order follows the ACTIVE pool. force_cloud's "second slot first" swap is a
+            # code-pool convention (P1 local, P2 cloud) and is meaningless for the log
+            # pool, so it only applies there. Computed BEFORE the pinned-slot branches
+            # below — force_cloud=False references order[0] and previously did so
+            # before `order` was ever assigned (UnboundLocalError on that path).
+            order = list(_pool)
+            if force_cloud is True and _pool is _CODE_SLOTS and len(order) > 1:
+                order[0], order[1] = order[1], order[0]
+            pmap = {n: row for n, *row in [(r[0], *r[1:]) for r in all_providers]}
 
-        # force_cloud=False: Provider 1 only, no fallover.
-        if force_cloud is False:
-            _first = order[0] if order else 1
-            _r0 = next((r for r in all_providers if r[0] == _first), None)
-            if _r0 is None:
-                _p, _k, _m, _u = _get_provider_config(_first, config)
-                _r0 = (_first, _p, _m, _k, _u)
-            result, err = _try_provider(*_r0)
-            if result is not None:
-                _record_provider_result(_first, "ok")
-                return result
-            _record_provider_result(_first, err if isinstance(err, str) else "failed", err)
-            raise Exception(f"Provider {_first} (force-only) unavailable: {err}")
+            # force_provider=N: use that slot only, no failover. A pinned slot has no
+            # failover partner, so "busy" means WAIT for it (blocking acquire), not
+            # skip to a different slot.
+            if force_provider in _ALL_SLOTS:
+                # Look up by SLOT NUMBER. This indexed all_providers[n-1], which is only
+                # correct while the pool is exactly (1,2,3,4) — with the log pool (5,6)
+                # that arithmetic runs off the end or picks the wrong provider.
+                _row = next((r for r in all_providers if r[0] == force_provider), None)
+                if _row is None:
+                    # Pinned a slot outside the pool serving this task (e.g. a code slot
+                    # for a log call). Honour the pin explicitly rather than silently
+                    # using someone else.
+                    _p, _k, _m, _u = _get_provider_config(force_provider, config)
+                    _row = (force_provider, _p, _m, _k, _u)
+                _lock = _SLOT_LOCKS[force_provider]
+                _lock.acquire()
+                try:
+                    result, err = _try_provider(*_row)
+                finally:
+                    _lock.release()
+                if result is not None:
+                    _record_provider_result(force_provider, "ok")
+                    return result
+                _record_provider_result(force_provider, err if isinstance(err, str) else "failed", err)
+                raise Exception(f"Provider {force_provider} unavailable: {err}")
 
-        # Determine starting provider.
-        # Order follows the ACTIVE pool. force_cloud's "second slot first" swap is a
-        # code-pool convention (P1 local, P2 cloud) and is meaningless for the log
-        # pool, so it only applies there.
-        order = list(_pool)
-        if force_cloud is True and _pool is _CODE_SLOTS and len(order) > 1:
-            order[0], order[1] = order[1], order[0]
-        pmap = {n: row for n, *row in [(r[0], *r[1:]) for r in all_providers]}
+            # force_cloud=False: Provider 1 only, no failover — same pinned-slot
+            # reasoning as force_provider above.
+            if force_cloud is False:
+                _first = order[0] if order else 1
+                _r0 = next((r for r in all_providers if r[0] == _first), None)
+                if _r0 is None:
+                    _p, _k, _m, _u = _get_provider_config(_first, config)
+                    _r0 = (_first, _p, _m, _k, _u)
+                _lock = _SLOT_LOCKS[_first]
+                _lock.acquire()
+                try:
+                    result, err = _try_provider(*_r0)
+                finally:
+                    _lock.release()
+                if result is not None:
+                    _record_provider_result(_first, "ok")
+                    return result
+                _record_provider_result(_first, err if isinstance(err, str) else "failed", err)
+                raise Exception(f"Provider {_first} (force-only) unavailable: {err}")
 
-        last_err = None
-        for n in order:
-            provider, model, key, url = pmap[n]
-            result, err = _try_provider(n, provider, model, key, url)
-            if result is not None and str(result).strip():
-                _record_provider_result(n, "ok")
-                return result
-            if result is not None and not str(result).strip():
-                # Provider returned an empty body — treat as a transient failure so we
-                # fall through to the next provider instead of passing "" to the caller.
-                logger.warning(f"Provider {n} ({provider}) returned empty response. Trying next provider...")
-                _record_provider_result(n, "empty_response", "provider returned an empty body")
-                last_err = "empty_response"
-                continue
-            if err == "not_configured":
-                # Previously a silent continue — log it so a skipped provider (e.g. a
-                # no-key LM Studio with no model, or a missing API key) is visible.
-                reason = "no model configured" if not model else "no API key configured"
-                logger.info(f"Provider {n} ({provider}) skipped — not configured ({reason}).")
-                _record_provider_result(n, "not_configured", reason)
-                continue
-            if err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
-                _record_provider_result(n, err, "cooldown active")
-                last_err = err
-                continue
-            # Real failure — log and keep trying remaining providers.
-            logger.warning(f"Provider {n} ({provider}) failed: {err}. Trying next provider...")
-            _record_provider_result(n, "failed", err)
-            last_err = err
+            # General failover: try each slot in the pool in turn. A slot already
+            # running another job is SKIPPED (non-blocking try-lock) in favor of the
+            # next one — the same idea as the not_configured/cooldown skips below,
+            # just a different reason. If EVERY slot in the pool is busy on a given
+            # pass, wait briefly and re-scan instead of declaring failure — bounded
+            # so a stuck lock (a bug, not normal operation) can't hang a caller
+            # forever.
+            _wait_deadline = time.time() + max(60, 2 * int(config.get("LLM_TIMEOUT", 900)))
+            while True:
+                # Two independent signals per pass, NOT the same thing:
+                #   any_real_attempt — a CONFIGURED slot was tried and produced a
+                #     definitive outcome (success/failure/cooldown/empty). This is
+                #     the existing terminal condition: if the pass produced one of
+                #     these, we're done retrying regardless of what else happened.
+                #   any_busy — a slot was skipped because another job holds it
+                #     RIGHT NOW. A not_configured slot is neither: it does not
+                #     exist for this call, so it must not count as "genuinely
+                #     tried" (that would let 3 unconfigured slots + 1 busy real
+                #     slot masquerade as "the pool is exhausted" instead of
+                #     "the one real slot is just busy — wait for it").
+                any_real_attempt = False
+                any_busy = False
+                for n in order:
+                    provider, model, key, url = pmap[n]
+                    _lock = _SLOT_LOCKS[n]
+                    if not _lock.acquire(blocking=False):
+                        logger.debug(f"Provider {n} ({provider}) slot busy — trying next slot in the {_pool_name} pool.")
+                        any_busy = True
+                        continue
+                    try:
+                        result, err = _try_provider(n, provider, model, key, url)
+                    finally:
+                        _lock.release()
+                    if result is not None and str(result).strip():
+                        _record_provider_result(n, "ok")
+                        return result
+                    if result is not None and not str(result).strip():
+                        # Provider returned an empty body — treat as a transient failure so we
+                        # fall through to the next provider instead of passing "" to the caller.
+                        logger.warning(f"Provider {n} ({provider}) returned empty response. Trying next provider...")
+                        _record_provider_result(n, "empty_response", "provider returned an empty body")
+                        last_err = "empty_response"
+                        any_real_attempt = True
+                        continue
+                    if err == "not_configured":
+                        # Previously a silent continue — log it so a skipped provider (e.g. a
+                        # no-key LM Studio with no model, or a missing API key) is visible.
+                        # Does NOT set any_real_attempt: this slot doesn't exist for this
+                        # call, distinct from one that exists but is busy or failed.
+                        reason = "no model configured" if not model else "no API key configured"
+                        logger.info(f"Provider {n} ({provider}) skipped — not configured ({reason}).")
+                        _record_provider_result(n, "not_configured", reason)
+                        continue
+                    if err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
+                        _record_provider_result(n, err, "cooldown active")
+                        last_err = err
+                        any_real_attempt = True
+                        continue
+                    # Real failure — log and keep trying remaining providers.
+                    logger.warning(f"Provider {n} ({provider}) failed: {err}. Trying next provider...")
+                    _record_provider_result(n, "failed", err)
+                    last_err = err
+                    any_real_attempt = True
+                if any_real_attempt or not any_busy:
+                    # Either something definitive happened (fall through to the
+                    # terminal "all failed" raise below), or NOTHING in the pool
+                    # is even busy (every slot is simply unconfigured) — waiting
+                    # would never help, so fail the same way an all-unconfigured
+                    # pool always has.
+                    break
+                # At least one slot is a real, configured slot that's just busy
+                # right now (and nothing else in the pool produced a definitive
+                # outcome) — wait for it rather than declaring failure.
+                if time.time() >= _wait_deadline:
+                    raise Exception(
+                        f"All slots in the {_pool_name} pool are busy and none freed "
+                        f"within the wait budget — a slot lock may be stuck."
+                    )
+                logger.info(f"All {_pool_name} pool slots busy — waiting for one to free…")
+                time.sleep(random.uniform(0.5, 1.5))
 
-        raise Exception(
-            f"All configured LLM providers failed or are unavailable. "
-            f"Last status: {last_err}. Check billing and API keys in settings."
-        )
-    except Exception as e:
-        # A cooldown/rate-limit on every provider is an EXPECTED transient state
-        # (credits will refill / the window resets), not a fault to alarm on — log
-        # it as a warning. A genuine failure (bad key, real error) stays ERROR.
-        if last_err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
-            logger.warning(f"LLM request deferred — all providers cooling down: {e}")
-        else:
-            logger.error(f"LLM request failed after all providers: {e}")
-        raise
+            raise Exception(
+                f"All configured LLM providers failed or are unavailable. "
+                f"Last status: {last_err}. Check billing and API keys in settings."
+            )
+        except Exception as e:
+            # A cooldown/rate-limit on every provider is an EXPECTED transient state
+            # (credits will refill / the window resets), not a fault to alarm on — log
+            # it as a warning. A genuine failure (bad key, real error) stays ERROR.
+            if last_err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
+                logger.warning(f"LLM request deferred — all providers cooling down: {e}")
+            else:
+                logger.error(f"LLM request failed after all providers: {e}")
+            raise
+    finally:
+        _cat_sem.release()
 
 
 def is_llm_cooldown_error(e) -> bool:

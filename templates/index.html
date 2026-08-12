@@ -1527,6 +1527,10 @@
                                 <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600" title="A SEPARATE gate from Max Concurrent Fixes, applied PER POOL: this many jobs can run at once in Code, a SEPARATE this-many in Log, and a separate this-many in Review — not one shared total. Within a pool, each provider slot runs one job at a time; a busy slot is skipped for the next free one, and if every slot in the pool is busy the call waits and retries rather than failing.">Max Concurrent LLM Calls <span class="text-slate-400 font-normal">(per pool — Code / Log / Review each get this many, independently)</span></label>
+                                <input type="number" name="LLM_MAX_CONCURRENT" value="{{ settings.LLM_MAX_CONCURRENT }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Issues Per Cycle <span class="text-slate-400 font-normal">(per repo — rest defer to next scan)</span></label>
                                 <input type="number" name="MAX_ISSUES_PER_CYCLE" value="{{ settings.MAX_ISSUES_PER_CYCLE }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
