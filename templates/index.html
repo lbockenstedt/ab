@@ -1068,7 +1068,7 @@
                                         {% if pname == 'ollama_cloud' %}
                                         <p class="text-xs text-slate-500">Hosted <strong>Ollama Cloud</strong> — unlike the self-hosted <code class="bg-slate-100 px-1 rounded">ollama</code> slots this one <strong>requires an API key</strong> (from <span class="font-mono">ollama.com</span>); without one the slot is skipped in failover instead of failing every call. Base URL defaults to <span class="font-mono">https://ollama.com</span>.</p>
                                         {% endif %}
-                                        <input type="password" id="vault-key-{{ pname }}" placeholder="API Key" value="{{ cred.get('api_key','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                        <input type="password" id="vault-key-{{ pname }}" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if cred.get('has_key') else 'API Key' }}" data-touched="0" oninput="this.dataset.touched='1'" value="" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <input type="text" id="vault-url-{{ pname }}" placeholder="{% if pname == 'ollama_cloud' %}Base URL (optional — defaults to https://ollama.com){% else %}Base URL (optional){% endif %}" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs btn-primary rounded font-bold">Save {{ pname }} Credential</button>
                                     </div>
@@ -1151,7 +1151,7 @@
                                             </select>
                                             <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-baseurl-{{ entry.id }}" value="{{ entry.base_url or '' }}" placeholder="Base URL (e.g. http://localhost:11434)" title="Per-entry endpoint. Overrides the shared credential — set localhost for a local CPU ollama, a LAN IP for a GPU box, or https://ollama.com for cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <input type="text" id="edit-apikey-{{ entry.id }}" value="{{ entry.api_key or '' }}" placeholder="API key (optional — overrides shared)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="text" id="edit-apikey-{{ entry.id }}" value="" data-touched="0" oninput="this.dataset.touched='1'" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if entry.has_key else 'API key (optional — overrides shared)' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-escalation-{{ entry.id }}" value="{{ entry.escalation_models or '' }}" placeholder="Ratchet models (7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every installed model on this endpoint." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         </div>
                                         <div class="flex gap-2">
@@ -4017,12 +4017,19 @@
         }
 
         async function saveCredential(provider) {
-            const key = document.getElementById(`vault-key-${provider}`)?.value || '';
+            // The key field never carries the real stored value (only a
+            // "•••• already set" placeholder — see settings_page's
+            // redaction), so only include api_key in the payload when the
+            // operator actually typed into it; otherwise the backend keeps
+            // whatever's already stored instead of wiping it with blank.
+            const keyEl = document.getElementById(`vault-key-${provider}`);
             const url = document.getElementById(`vault-url-${provider}`)?.value || '';
+            const body = {provider, base_url: url};
+            if (keyEl && keyEl.dataset.touched === '1') body.api_key = keyEl.value || '';
             const resp = await fetch('/api/llm/credentials', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({provider, api_key: key, base_url: url})
+                body: JSON.stringify(body)
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to save credential.', 'error');
@@ -4335,13 +4342,21 @@
             const model = document.getElementById(`edit-model-${id}`)?.value;
             const rpm = parseInt(document.getElementById(`edit-rpm-${id}`)?.value || '0');
             const base_url = document.getElementById(`edit-baseurl-${id}`)?.value.trim() || '';
-            const api_key = document.getElementById(`edit-apikey-${id}`)?.value.trim() || '';
             const escalation_models = document.getElementById(`edit-escalation-${id}`)?.value.trim() || '';
             if (!model) { showToast('Please select a model.', 'warn'); return; }
+            const body = {label: label || model, provider, model, rpm, base_url, escalation_models};
+            // The key field never carries the real stored value (only a
+            // "•••• already set" placeholder — see settings_page's
+            // redaction), so only include api_key when the operator actually
+            // typed into it; update_llm_entry already only overwrites when
+            // the key is present in the payload, so omitting it here keeps
+            // whatever's already stored.
+            const apiKeyEl = document.getElementById(`edit-apikey-${id}`);
+            if (apiKeyEl && apiKeyEl.dataset.touched === '1') body.api_key = apiKeyEl.value.trim() || '';
             const resp = await fetch(`/api/llm/entries/${id}`, {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, base_url, api_key, escalation_models})
+                body: JSON.stringify(body)
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to save entry.', 'error');
