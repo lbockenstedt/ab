@@ -31,6 +31,8 @@ import requests
 import main  # lazy access to the shared app_state dict via main.state
 from main import logger, load_config
 import claude_cli_native_tools
+import config_store
+import llm_perf
 
 # ============================================================================
 # Multi-Provider LLM Routing
@@ -1293,7 +1295,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
 
 
 def _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                    provider_name="openai", extra_headers=None):
+                    provider_name="openai", extra_headers=None, usage_out=None):
     """Call an OpenAI-compatible endpoint. Returns text string or tool-call dict.
 
     ``provider_name``/``extra_headers`` let an OpenAI-compatible-but-distinct
@@ -1337,6 +1339,7 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
         # returned an empty response" in the diag probe for any provider hitting
         # this path with streaming off, e.g. openrouter/groq/lmstudio).
         data = resp.json()
+        _usage_from_openai_json(data, usage_out)
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         text = msg.get("content") or ""
@@ -1354,6 +1357,13 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
             ]
         return {"text": text, "tool_calls": tool_calls}
 
+    # Streaming without tools: usage is not observed here (would need
+    # stream_options={"include_usage":true} in the payload, which some
+    # OpenAI-compatible servers 400 on as an unrecognized key — left as a
+    # follow-up rather than risking every streaming chat call in this pass).
+    # usage_out simply stays unpopulated; a latency sample is still recorded
+    # by the caller regardless, so this only costs tok/s coverage, not the
+    # exhaustion/ranking signal.
     full_response = ""
     for line in resp.iter_lines():
         if not line:
@@ -1375,7 +1385,23 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     return full_response
 
 
-def _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+def _usage_from_openai_json(data, usage_out):
+    """Shared by _request_openai and _request_copilot (identical response
+    shape). Best-effort: an absent/malformed usage block leaves usage_out
+    untouched rather than raising — telemetry must never fail an LLM call."""
+    if usage_out is None:
+        return
+    try:
+        usage = data.get("usage") or {}
+        out_tok = usage.get("completion_tokens")
+        in_tok = usage.get("prompt_tokens")
+        if out_tok is not None or in_tok is not None:
+            usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
+    except Exception:  # noqa: BLE001 — telemetry is never fatal
+        pass
+
+
+def _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None):
     """Call the Anthropic Messages API. Returns text string or tool-call dict."""
     base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
     endpoint = f"{base}/messages"
@@ -1423,6 +1449,14 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
 
     if tools or not use_stream:
         data = resp.json()
+        try:
+            usage = data.get("usage") or {}
+            out_tok = usage.get("output_tokens")
+            in_tok = usage.get("input_tokens")
+            if usage_out is not None and (out_tok is not None or in_tok is not None):
+                usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
+        except Exception:  # noqa: BLE001 — telemetry is never fatal
+            pass
         content_blocks = data.get("content") or []
         text = ""
         tool_calls = []
@@ -1451,6 +1485,26 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
         try:
             chunk = json.loads(line[6:])
             full_response += (chunk.get("delta") or {}).get("text") or ""
+            # Usage arrives on two different event types, never with the text
+            # deltas: message_start carries input_tokens (the prompt side);
+            # message_delta carries the running output_tokens total (the
+            # generation side) — read both rather than the text-delta events,
+            # which never contain a "usage" key at all.
+            if usage_out is not None:
+                try:
+                    ctype = chunk.get("type")
+                    if ctype == "message_start":
+                        in_tok = ((chunk.get("message") or {}).get("usage") or {}).get("input_tokens")
+                        if in_tok is not None:
+                            usage_out["input_tokens"] = in_tok
+                            usage_out["source"] = "api"
+                    elif ctype == "message_delta":
+                        out_tok = (chunk.get("usage") or {}).get("output_tokens")
+                        if out_tok is not None:
+                            usage_out["output_tokens"] = out_tok
+                            usage_out["source"] = "api"
+                except Exception:  # noqa: BLE001 — telemetry is never fatal
+                    pass
             main.state["llm_stream"] = full_response
             if task_id and task_id in main.state.get("active_tasks", {}):
                 main.state["active_tasks"][task_id]["stream"] = full_response
@@ -1459,7 +1513,7 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
     return full_response
 
 
-def _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+def _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None):
     """Call the Google Gemini API. Returns text string or tool-call dict."""
     if not model:
         model = "gemini-1.5-pro"
@@ -1480,6 +1534,14 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
 
     resp = _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="google")
     data = resp.json()
+    try:
+        usage = data.get("usageMetadata") or {}
+        out_tok = usage.get("candidatesTokenCount")
+        in_tok = usage.get("promptTokenCount")
+        if usage_out is not None and (out_tok is not None or in_tok is not None):
+            usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
+    except Exception:  # noqa: BLE001 — telemetry is never fatal
+        pass
     candidates = data.get("candidates") or []
     parts = ((candidates[0].get("content") or {}) if candidates else {}).get("parts") or []
 
@@ -1562,8 +1624,32 @@ def _record_ollama_tps(model, payload):
     except Exception:  # noqa: BLE001 — telemetry is never fatal
         pass
 
+def _usage_from_ollama_payload(payload, usage_out):
+    """Shared by both _request_ollama return paths. Ollama's eval_count
+    (tokens generated) / eval_duration (nanoseconds spent generating) is
+    server-measured — no network/queue skew, unlike a wall-clock figure —
+    the same data _record_ollama_tps already reads for the legacy panel;
+    this is the new store's copy of that same read, not a second call."""
+    if usage_out is None or not isinstance(payload, dict):
+        return
+    try:
+        eval_count = payload.get("eval_count")
+        eval_duration_ns = payload.get("eval_duration")
+        if eval_count is not None:
+            usage_out["output_tokens"] = eval_count
+            usage_out["source"] = "server"
+        if eval_duration_ns:
+            usage_out["gen_duration_ms"] = eval_duration_ns / 1e6
+            usage_out["source"] = "server"
+        prompt_eval_count = payload.get("prompt_eval_count")
+        if prompt_eval_count is not None:
+            usage_out["input_tokens"] = prompt_eval_count
+    except Exception:  # noqa: BLE001 — telemetry is never fatal
+        pass
+
+
 def _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                    provider="ollama"):
+                    provider="ollama", usage_out=None):
     """Call an Ollama-compatible API (local or Ollama Cloud). Uses /api/chat natively.
 
     ``provider`` only selects the DEFAULT endpoint when no per-entry base_url is
@@ -1623,6 +1709,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         raw_tcs = msg.get("tool_calls") or None
         tool_calls = raw_tcs if isinstance(raw_tcs, list) and raw_tcs else None
         _record_ollama_tps(model, data)
+        _usage_from_ollama_payload(data, usage_out)
         return {"text": text, "tool_calls": tool_calls}
 
     full_response = ""
@@ -1636,6 +1723,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
             # counters for the whole generation; earlier chunks have neither.
             if chunk.get("done"):
                 _record_ollama_tps(model, chunk)
+                _usage_from_ollama_payload(chunk, usage_out)
             full_response += content
             main.state["llm_stream"] = full_response
             if task_id and task_id in main.state.get("active_tasks", {}):
@@ -1647,7 +1735,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
 
 def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=None,
                         json_schema=None, enable_native_tools=False, search_model=None,
-                        profile="readonly", extra_add_dirs=None):
+                        profile="readonly", extra_add_dirs=None, usage_out=None):
     """Call the local `claude` CLI in non-interactive print mode.
 
     Uses the Claude Code session auth — no API key required. The claude binary
@@ -1729,6 +1817,24 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
             # the freeform `result` text, which is where "Extra data" parse
             # failures came from (stray prose/markdown around the JSON).
             text = claude_cli_native_tools.extract_text(data, json_schema=json_schema) or output
+            # The CLI's --output-format json envelope carries its own
+            # server-measured usage/timing (usage.input_tokens/output_tokens,
+            # duration_ms covering the whole invocation, duration_api_ms the
+            # API portion alone) — never read before this. Best-effort: an
+            # envelope shape without these keys (or from a claude CLI
+            # version that changed field names) just leaves usage_out empty.
+            if usage_out is not None:
+                try:
+                    _usage = data.get("usage") or {}
+                    out_tok = _usage.get("output_tokens")
+                    in_tok = _usage.get("input_tokens")
+                    if out_tok is not None or in_tok is not None:
+                        usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "server"})
+                    _dur = data.get("duration_api_ms", data.get("duration_ms"))
+                    if _dur is not None:
+                        usage_out["gen_duration_ms"] = _dur
+                except Exception:  # noqa: BLE001 — telemetry is never fatal
+                    pass
             combined_text = (text or "") + " " + stderr
             # Session-limit is NOT an auth failure — the CLI is authenticated but
             # has exhausted its per-session quota.  Raise a rate-limit style error
@@ -1769,7 +1875,7 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
                         "on this server, or set 'claude_binary' in Settings.")
 
 
-def _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config):
+def _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None):
     """Call the GitHub Copilot chat API (OpenAI-compatible). api_key is the stored GitHub
     OAuth token; we exchange it for a short-lived Copilot token and add the editor headers
     Copilot requires. Mirrors _request_openai's response handling."""
@@ -1795,6 +1901,7 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
         # loop below silently returned "" for any tools=None + effective_stream=
         # False call (e.g. the provider diagnostics probe).
         data = resp.json()
+        _usage_from_openai_json(data, usage_out)
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         text = msg.get("content") or ""
@@ -1834,37 +1941,128 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
 
 def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
                    repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None,
-                   profile="readonly", extra_add_dirs=None):
-    """Dispatch to the correct provider implementation. The last 6 kwargs are
-    claude_cli-specific (see _request_claude_cli's docstring) — every other
-    provider ignores them; they are not the generic `tools=` param."""
+                   profile="readonly", extra_add_dirs=None, usage_out=None):
+    """Dispatch to the correct provider implementation. The last 6 kwargs
+    (before usage_out) are claude_cli-specific (see _request_claude_cli's
+    docstring) — every other provider ignores them; they are not the generic
+    `tools=` param.
+
+    ``usage_out``, when given a dict, is populated IN PLACE by whichever
+    `_request_*` function runs — {"output_tokens", "input_tokens", "source":
+    "server"|"api", "gen_duration_ms"} — never via a return-value change (a
+    uniform envelope return would ripple into every one of the 18 call
+    sites' unpacking logic; a mutable out-param does not). Unlike a
+    contextvar, a plain dict argument survives `asyncio.to_thread` (which
+    copies context but not object references), so hub_agent.py's proxy path
+    is covered too. Population is always best-effort — a provider whose
+    response doesn't carry the fields it expects leaves usage_out untouched
+    rather than raising; see each _request_*'s usage-capture comment."""
     p = (provider or "openai").lower().strip()
     if _is_copilot(p):
-        return _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+        return _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                                usage_out=usage_out)
     if p == "anthropic":
-        return _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+        return _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                                  usage_out=usage_out)
     if p == "google":
-        return _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+        return _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                               usage_out=usage_out)
     if _is_ollama(p):
         return _request_ollama(model, api_key, base_url, messages, tools, effective_stream, task_id,
-                               config, provider=p)
+                               config, provider=p, usage_out=usage_out)
     if p == "groq":
         effective_url = base_url or "https://api.groq.com/openai/v1"
-        return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
+        return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config,
+                               usage_out=usage_out)
     if p == "openrouter":
         effective_url = base_url or OPENROUTER_BASE_URL
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config,
-                               provider_name="openrouter", extra_headers=OPENROUTER_HEADERS)
+                               provider_name="openrouter", extra_headers=OPENROUTER_HEADERS, usage_out=usage_out)
     if _is_lmstudio(p):
         # LM Studio exposes an OpenAI-compatible API; no auth key required.
         effective_url = _normalize_lmstudio_url(base_url)
-        return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config)
+        return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config,
+                               usage_out=usage_out)
     if p == "claude_cli":
         return _request_claude_cli(model, messages, task_id, config,
                                    repo_checkout_path=repo_checkout_path, json_schema=json_schema,
                                    enable_native_tools=enable_native_tools, search_model=search_model,
-                                   profile=profile, extra_add_dirs=extra_add_dirs)
-    return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
+                                   profile=profile, extra_add_dirs=extra_add_dirs, usage_out=usage_out)
+    return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                           usage_out=usage_out)
+
+
+# ============================================================================
+# Performance telemetry (llm_perf.py-backed) — the future model picker's
+# ranking/exhaustion signal. Recorded here, at the SAME choke point every
+# provider already funnels through (_call_provider), so claude_cli
+# (subprocess, never touches the HTTP layer) is covered exactly like every
+# HTTP-based provider — instrumenting any lower layer would leave the single
+# most expensive provider permanently unmeasured.
+# ============================================================================
+_LLM_PERF_STORE = None
+_LLM_PERF_LOCK = threading.Lock()
+_llm_perf_last_save = 0.0
+_LLM_PERF_SAVE_INTERVAL = 60  # debounced, same rationale as the legacy _TPS_SAVE_INTERVAL
+
+
+def _get_llm_perf_store():
+    global _LLM_PERF_STORE
+    if _LLM_PERF_STORE is None:
+        with _LLM_PERF_LOCK:
+            if _LLM_PERF_STORE is None:
+                _LLM_PERF_STORE = llm_perf.load(config_store.LLM_PERF_FILE)
+    return _LLM_PERF_STORE
+
+
+def get_llm_perf_snapshot():
+    """{ModelKey: {"n", "tps", "latency_ms"}} — the read side model_selection's
+    select_model() consumes as its `perf` argument (wired in a later phase)."""
+    return llm_perf.snapshot(_get_llm_perf_store())
+
+
+def _model_key(provider, base_url, model):
+    return ((provider or "").lower().strip(), (base_url or "").strip().rstrip("/"), model or "")
+
+
+def _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                         **kwargs):
+    """Wraps _call_provider with wire-latency timing + usage capture, then
+    records one llm_perf sample on success. Every _try_provider call site
+    (main attempt, tools-retry, routed-404-retry) routes through here rather
+    than calling _call_provider directly, so a sample lands regardless of
+    which retry branch actually wins.
+
+    On failure this re-raises unchanged and records nothing — a failed call
+    has no latency signal worth ranking on, and _try_provider's existing
+    credit/rate-limit bookkeeping already covers that case."""
+    key = _model_key(provider, base_url, model)
+    usage_out = {}
+    t0 = time.monotonic()
+    result = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                            usage_out=usage_out, **kwargs)
+    latency_ms_wire = (time.monotonic() - t0) * 1000.0
+    try:
+        out_tok = usage_out.get("output_tokens")
+        gen_ms = usage_out.get("gen_duration_ms")
+        # Prefer the server-measured generation-only duration (ollama/
+        # claude_cli) when available — it excludes network/queue time, so
+        # it's the more honest tok/s denominator; wall-clock wire latency is
+        # the fallback for every provider that only reports total tokens.
+        duration_ms = gen_ms if gen_ms else latency_ms_wire
+        tps = (out_tok / (duration_ms / 1000.0)) if (out_tok and duration_ms) else None
+        source = usage_out.get("source", "api")
+        store = _get_llm_perf_store()  # its own lock guards only the lazy-load, released before here
+        with _LLM_PERF_LOCK:
+            llm_perf.record(store, key, latency_ms_wire, tps=tps, source=source)
+            global _llm_perf_last_save
+            now = time.time()
+            if now - _llm_perf_last_save >= _LLM_PERF_SAVE_INTERVAL:
+                _llm_perf_last_save = now
+                llm_perf.save(config_store.LLM_PERF_FILE, store)
+    except Exception:  # noqa: BLE001 — telemetry must never fail an LLM call
+        pass
+    return result
 
 
 # Shared LLM Utility
@@ -2028,10 +2226,10 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     logger.debug(f"batch route skipped: {_bex}")
                     result = None
             if result is None:
-                result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config,
-                                        repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                        enable_native_tools=enable_native_tools, search_model=search_model,
-                                        profile=profile, extra_add_dirs=extra_add_dirs)
+                result = _call_provider_timed(provider, model, key, url, messages, tools, effective_stream, task_id, config,
+                                              repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                              enable_native_tools=enable_native_tools, search_model=search_model,
+                                              profile=profile, extra_add_dirs=extra_add_dirs)
             # Successful call: clear any rate-limit cooldown for this provider.
             with _PROVIDER_CREDIT_CB_LOCK:
                 if _PROVIDER_CREDIT_CB[n].get("cause") == "rate_limit":
@@ -2060,10 +2258,10 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                 )
                 try:
                     _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
-                    result = _call_provider(provider, model, key, url, messages, None, effective_stream, task_id, config,
-                                            repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                            enable_native_tools=enable_native_tools, search_model=search_model,
-                                            profile=profile, extra_add_dirs=extra_add_dirs)
+                    result = _call_provider_timed(provider, model, key, url, messages, None, effective_stream, task_id, config,
+                                                  repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                                  enable_native_tools=enable_native_tools, search_model=search_model,
+                                                  profile=profile, extra_add_dirs=extra_add_dirs)
                     return result, None
                 except Exception as retry_e:
                     err_str = str(retry_e)
@@ -2089,11 +2287,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     main.state["active_llm_slot"] = n
                     main.state["active_llm_provider"] = provider
                     main.state["active_llm_at"] = time.time()
-                    result = _call_provider(provider, _cfg_model, key, url, messages, tools,
-                                            effective_stream, task_id, config,
-                                            repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                            enable_native_tools=enable_native_tools, search_model=search_model,
-                                            profile=profile, extra_add_dirs=extra_add_dirs)
+                    result = _call_provider_timed(provider, _cfg_model, key, url, messages, tools,
+                                                  effective_stream, task_id, config,
+                                                  repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                                  enable_native_tools=enable_native_tools, search_model=search_model,
+                                                  profile=profile, extra_add_dirs=extra_add_dirs)
                     return result, None
                 except Exception as retry_e:  # noqa: BLE001 — fall through to normal handling
                     err_str = str(retry_e)

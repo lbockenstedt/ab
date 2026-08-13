@@ -31,6 +31,13 @@ UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
 CHAT_HISTORY_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
 LLM_TPS_FILE = os.path.join(CONFIG_DIR, "llm_tps.json")
+#: llm_perf.py's v2 store (latency + tok/s, ModelKey-keyed) — a separate file
+#: from LLM_TPS_FILE, not a migration of it (llm_tps.json's bare model-name
+#: keys can't be safely mapped to a 3-tuple ModelKey; see llm_perf.load()'s
+#: docstring). llm_perf.py owns its own load()/save(), so no wrapper
+#: functions live here — this constant just keeps the path centralized with
+#: every other state file, per this module's existing convention.
+LLM_PERF_FILE = os.path.join(CONFIG_DIR, "llm_perf.json")
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
 # Chat-agent configuration defaults. Applied (without overriding user values) by
@@ -290,7 +297,7 @@ def write_startup_stamp():
 
 
 __all__ = [
-    "load_llm_tps", "save_llm_tps", "LLM_TPS_FILE",
+    "load_llm_tps", "save_llm_tps", "LLM_TPS_FILE", "LLM_PERF_FILE",
 
     "CONFIG_DIR",
     "CONFIG_FILE",

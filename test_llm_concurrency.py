@@ -32,7 +32,7 @@ def _load_ns(config, get_provider_config, call_provider):
     tree = ast.parse(src)
     want_funcs = {"call_llm", "_slots_for_task", "_pool_category_name",
                   "_get_category_semaphore", "_reset_llm_semaphore",
-                  "_record_provider_result"}
+                  "_record_provider_result", "_call_provider_timed", "_model_key"}
     want_assign = {"_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_ALL_SLOTS",
                    "_LOG_TASK_KINDS", "_REVIEW_TASK_KINDS",
                    "_SLOT_LOCKS", "_CATEGORY_SEMAPHORES", "_CATEGORY_SEM_LOCK",
@@ -53,6 +53,19 @@ def _load_ns(config, get_provider_config, call_provider):
     class LLMCreditExhausted(Exception):
         pass
 
+    class _FakeLlmPerf:
+        # This test is about slot/category locking timing, not perf-recording
+        # correctness (that's test_llm_client_instrumentation.py's job) — real
+        # llm_perf/config_store would drag in file I/O unrelated to what's
+        # under test here, so record()/save() are harmless no-ops.
+        @staticmethod
+        def record(*a, **k):
+            pass
+
+        @staticmethod
+        def save(*a, **k):
+            pass
+
     ns = {
         "threading": threading, "time": time, "random": random, "json": json,
         "logger": _NoLog(), "load_config": lambda: config,
@@ -65,6 +78,13 @@ def _load_ns(config, get_provider_config, call_provider):
         "_call_provider": call_provider,
         "LLMCreditExhausted": LLMCreditExhausted,
         "main": type("M", (), {"state": {"provider_last_result": {}}})(),
+        # _call_provider_timed's own dependencies (added Phase 3):
+        "llm_perf": _FakeLlmPerf(),
+        "config_store": type("FakeConfigStore", (), {"LLM_PERF_FILE": "/dev/null"})(),
+        "_get_llm_perf_store": lambda: {},
+        "_LLM_PERF_LOCK": threading.Lock(),
+        "_llm_perf_last_save": 0.0,
+        "_LLM_PERF_SAVE_INTERVAL": 60,
     }
     exec("\n\n".join(segs), ns)
     return ns
