@@ -1004,10 +1004,31 @@
                         <!-- Step A: Credentials Vault -->
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 1 — API Credentials</p>
+                            {# The list grew long once every provider rendered unconditionally. Now only providers already in use (a saved credential/base_url, or referenced by an entry) show by default; the rest are added on demand from the picker below. #}
+                            {% set _entry_providers = (settings.llm_entries or []) | map(attribute='provider') | list %}
+                            <div class="mb-3 flex flex-wrap items-center gap-2">
+                                <label for="add-cred-provider" class="text-xs font-medium text-slate-500">Add a provider:</label>
+                                <select id="add-cred-provider" onchange="revealCredCard(this.value); this.value='';" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="">＋ Select an LLM provider to configure…</option>
+                                    <option value="google">Google</option>
+                                    <option value="anthropic">Anthropic</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="groq">Groq</option>
+                                    <option value="openrouter">OpenRouter</option>
+                                    <option value="ollama">Ollama</option>
+                                    <option value="ollama2">Ollama 2 (remote)</option>
+                                    <option value="ollama_cloud">Ollama Cloud (ollama.com — needs key)</option>
+                                    <option value="lmstudio">LM Studio (local)</option>
+                                    <option value="claude_cli">Claude CLI (local)</option>
+                                    <option value="copilot">GitHub Copilot</option>
+                                </select>
+                            </div>
+                            <p id="vault-creds-empty" class="text-sm text-slate-400 italic hidden">No providers configured yet — pick one above to add its API credentials.</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
                                 {% for pname in ['google','anthropic','openai','groq','openrouter','ollama','ollama2','ollama_cloud','lmstudio','claude_cli','copilot'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
-                                <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                                {% set _is_active = cred.get('has_key') or cred.get('base_url') or (pname in _entry_providers) %}
+                                <div id="cred-card-{{ pname }}" data-provider="{{ pname }}" class="p-3 bg-slate-50 rounded-lg border border-slate-200 {% if not _is_active %}hidden{% endif %}">
                                     <div class="flex items-center justify-between mb-2">
                                         <span class="text-xs font-bold uppercase tracking-wider
                                             {% if pname == 'google' %}text-blue-500
@@ -4072,6 +4093,33 @@
             document.getElementById('add-entry-form').classList.remove('hidden');
             loadVaultModels();
         }
+
+        // Step 1 credential cards are hidden until their provider is picked from
+        // the "Add a provider" dropdown (or already in use on page load). This
+        // reveals one on demand, focuses its key field, and refreshes the
+        // empty-state hint. Already-configured providers render un-hidden from
+        // the template, so this is only ever a no-op-or-reveal.
+        function revealCredCard(pname) {
+            if (!pname) return;
+            const card = document.getElementById('cred-card-' + pname);
+            if (!card) return;
+            card.classList.remove('hidden');
+            updateCredEmptyState();
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            const key = document.getElementById('vault-key-' + pname);
+            if (key) key.focus();
+        }
+
+        // Show the "nothing configured yet" hint only when every credential card
+        // is still hidden — so a fresh install sees guidance, not a blank grid.
+        function updateCredEmptyState() {
+            const list = document.getElementById('vault-creds-list');
+            const hint = document.getElementById('vault-creds-empty');
+            if (!list || !hint) return;
+            const anyVisible = Array.from(list.children).some(el => !el.classList.contains('hidden'));
+            hint.classList.toggle('hidden', anyVisible);
+        }
+        document.addEventListener('DOMContentLoaded', updateCredEmptyState);
 
         // Known RPM limits per model (free tier or Tier 1 where noted).
         // Prefix-matched so version suffixes like "-preview-06-05" still resolve.
