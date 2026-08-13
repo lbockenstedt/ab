@@ -1209,9 +1209,16 @@ class HubAgentClient:
             corr = msg.get("header", {}).get("message_id")
             try:
                 from main import call_llm  # lazy: main imports this module
+                from model_selection import LlmRequirements
                 msgs = data.get("messages") or []
                 tools = data.get("tools") or None
                 system = data.get("system") or "You are the Lab Manager help assistant."
+                # A human is waiting on the hub's chat UI for this reply, and the
+                # tool set (if any) is caller-supplied by the hub itself, not fixed
+                # ahead of time -- so needs_tools mirrors whether the hub actually
+                # sent any this turn.
+                _help_ask_reqs = LlmRequirements(
+                    complexity="medium", needs_tools=bool(tools), latency_sensitive=True)
                 # call_llm does NOT return a (value, error) tuple — it returns the
                 # result directly (a {"text", "tool_calls"} dict when `tools` is
                 # passed, per _request_ollama et al.; a bare string otherwise) and
@@ -1223,7 +1230,8 @@ class HubAgentClient:
                 # working call surfaced as {"status": "ERROR", "message":
                 # "tool_calls"}. This is what "Ask AI gives a tool_calls error" was.
                 result = await asyncio.to_thread(
-                    call_llm, "", system_prompt=system, messages=msgs, tools=tools)
+                    call_llm, "", system_prompt=system, messages=msgs, tools=tools,
+                    requirements=_help_ask_reqs)
                 if isinstance(result, dict):
                     rdata = {"status": "SUCCESS", "assistant": {
                         "content": result.get("text") or "",
