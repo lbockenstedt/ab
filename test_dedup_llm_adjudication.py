@@ -7,13 +7,17 @@ github_ops.py cannot be imported directly (it pulls in the app's circular
 import chain), so this extracts the SOURCE of the pure functions via ast and
 execs them with a stubbed call_llm.
 
-Covers two things:
-1. _llm_confirms_same_issue itself: correct JSON-verdict parsing, and —
+Covers three things:
+1. _llm_confirms_same_issue's LLM Selection Redesign wiring: call_llm is
+   invoked with requirements=LlmRequirements(complexity="trivial",
+   needs_structured_output=True, min_context_tokens=<estimate>) instead of the
+   old task_kind="log_review" pin (Phase 5, call site #16).
+2. _llm_confirms_same_issue itself: correct JSON-verdict parsing, and —
    critically — FAILS CLOSED (same_issue=False) on every kind of failure
    (malformed response, non-dict JSON, an exception from call_llm itself).
    An LLM outage must only ever make the system file MORE issues / reopen or
    suppress FEWER, never silently swallow a genuinely new bug.
-2. The reopen gate inside find_global_duplicate_issue: when the fast body
+3. The reopen gate inside find_global_duplicate_issue: when the fast body
    heuristic is too strict to confirm a recurring CLOSED issue, the LLM gets
    a second opinion — confirms it -> issue is matched (reopened), declines or
    errors -> issue is correctly skipped, same as the pre-LLM behavior.
@@ -97,6 +101,28 @@ def _check(label, cond):
 
 def main():
     ok = True
+
+    # ---- 0. LLM Selection Redesign Phase 5, site #16: requirements= wiring ----
+    captured = {}
+
+    def _capturing_call_llm(prompt, **kwargs):
+        captured["prompt"] = prompt
+        captured["kwargs"] = kwargs
+        return '{"same_issue": true, "reason": "captured ok"}'
+
+    ns_cap = _load_ns(_capturing_call_llm)
+    ns_cap["_llm_confirms_same_issue"]("a", "b", "c", "d", 7)
+    kw = captured.get("kwargs", {})
+    ok &= _check("call_llm is invoked with requirements= (not task_kind=)",
+                 "requirements" in kw and "task_kind" not in kw)
+    reqs = kw.get("requirements")
+    ok &= _check("requirements.complexity == 'trivial'",
+                 reqs is not None and getattr(reqs, "complexity", None) == "trivial")
+    ok &= _check("requirements.needs_structured_output is True",
+                 reqs is not None and getattr(reqs, "needs_structured_output", None) is True)
+    ok &= _check("requirements.min_context_tokens is a positive estimate from the prompt length",
+                 reqs is not None and isinstance(reqs.min_context_tokens, int)
+                 and reqs.min_context_tokens == len(captured["prompt"]) // 4 > 0)
 
     # ---- 1. _llm_confirms_same_issue in isolation ----
     ns_ok = _load_ns(lambda *a, **k: '{"same_issue": true, "reason": "same root cause"}')

@@ -254,17 +254,26 @@ _SUMMARY_PATCH_CHARS = 1500
 _SUMMARY_PROMPT_CHARS = 14000
 
 
-def _summarize_changes(pr, files, config):
+def _summarize_changes(pr, files, config, repo=None):
     """Plain-language 'what changed' summary of the PR diff, via the LLM.
 
     Caller-gated to run only on a head change (not every scan), so the LLM cost is
     per-PR-update, not per-cycle. Best-effort: returns '' if disabled, the LLM is
     unavailable, or it yields nothing — the parity findings still post either way.
+
+    Routed via requirements=LlmRequirements(batch_ok=True) (LLM Selection
+    Redesign, Phase 5 site #15): this is the one call site fire-and-forget
+    batch processing is safe for (best-effort, discards failures, gated to
+    head-SHA changes already) — see _apply_batched_pr_summary below for what
+    happens when the batch result actually arrives. A "" return here (batch
+    queued, or genuinely no LLM available) just means THIS scan's comment
+    posts without a summary section, same as any other best-effort miss.
     """
     if not config.get("pr_review_summary_enabled", True):
         return ""
     try:
         from llm_client import call_llm
+        from model_selection import LlmRequirements
     except Exception:  # noqa: BLE001
         return ""
     parts = []
@@ -292,14 +301,83 @@ def _summarize_changes(pr, files, config):
               "speculate, do not just list file names, no preamble or sign-off.")
     prompt = ("Summarize what this pull request changes, for the reviewer.\n\n"
               "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest))
+    reqs = LlmRequirements(complexity="trivial", batch_ok=True,
+                           min_context_tokens=len(prompt) // 4)
+    batch_context = None
+    if repo is not None:
+        batch_context = {"repo": repo.full_name, "pr": pr.number, "head_sha": pr.head.sha}
     try:
-        out = call_llm(prompt, system_prompt=system, task_kind="pr_summary")
+        out = call_llm(prompt, system_prompt=system, requirements=reqs,
+                       batch_kind="pr_summary", batch_context=batch_context)
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: change-summary skipped (%s)", e)
         return ""
     if not isinstance(out, str):
         out = str(out or "")
     return out.strip()
+
+
+def _apply_batched_pr_summary(context, text):
+    """batch.py result handler for kind='pr_summary' (register_handler call
+    below) — injects the plain-language change summary into the PR's existing
+    marker comment once the batch result arrives, whenever poll_and_dispatch()
+    next runs. Runs independently of pr_review's own scan cycle (minutes to
+    hours after _summarize_changes queued it), so this re-fetches the PR from
+    scratch rather than assuming any in-memory state is still valid.
+
+    Best-effort/discardable exactly like the synchronous path it replaces: any
+    failure here just means the PR comment never gets its summary section,
+    same as if the LLM call had failed outright.
+    """
+    try:
+        text = (text or "").strip()
+        if not text or not context:
+            return
+        repo_full_name = context.get("repo")
+        number = context.get("pr")
+        head_sha = context.get("head_sha")
+        if not repo_full_name or not number:
+            return
+        config = load_config()
+        token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+        if not token:
+            return
+        from github import Github
+        gh = Github(token)
+        repo = gh.get_repo(repo_full_name)
+        pr = repo.get_pull(int(number))
+        # Discard if the head changed since this was queued — the comment
+        # already reflects the NEW head's own findings, and grafting an old
+        # summary onto it would be actively misleading.
+        if head_sha and pr.head.sha != head_sha:
+            logger.info("pr_review: discarding stale batched summary for %s#%s (head changed)",
+                       repo_full_name, number)
+            return
+        existing = _find_marker_comment(pr)
+        if not existing:
+            return
+        body = existing.body or ""
+        if _SUMMARY_HEADER in body:
+            return  # a synchronous re-scan already posted one — don't duplicate
+        # Insert right where _render always places it, so a later synchronous
+        # re-scan's _extract_summary() finds it in the same spot.
+        anchor = "this bot never approves, denies, or edits the branch._\n\n"
+        idx = body.find(anchor)
+        if idx == -1:
+            return
+        insert_at = idx + len(anchor)
+        new_body = body[:insert_at] + _SUMMARY_HEADER + "\n\n" + text + "\n\n" + body[insert_at:]
+        existing.edit(new_body)
+        logger.info("pr_review: applied batched change-summary to %s#%s", repo_full_name, number)
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: batched summary handler skipped (%s)", e)
+
+
+try:
+    from batch import register_handler as _register_batch_handler
+    _register_batch_handler("pr_summary", _apply_batched_pr_summary)
+except Exception:  # noqa: BLE001 - batch.py is optional/best-effort, per its own docstring
+    pass
 
 
 def _extract_summary(body):
@@ -905,7 +983,7 @@ def _review_one(gh, repo, pr, config, force=False):
         # (pr_test_regression_enabled); see check_test_regressions.py.
         token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
         findings += check_test_regressions(repo, pr, config, token)
-        summary = _summarize_changes(pr, files, config)
+        summary = _summarize_changes(pr, files, config, repo=repo)
         review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh)
         state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
         body = _render(findings, head_sha, summary, review=review, state_review=state_review)

@@ -31,7 +31,8 @@ from main import (
     call_llm,
 )
 from fix_engine import _authenticated_remote, find_existing_pull_request, _robust_json_loads
-from llm_client import _find_claude_cli_slot
+import llm_client
+from model_selection import LlmRequirements, select_model
 import skills_loader
 import feature_boundary
 from github_ops import _ensure_label
@@ -119,15 +120,19 @@ def _non_doc_files(changed_files):
     return [p for p in changed_files if not (p.startswith("docs/") and p.endswith(".md"))]
 
 
-def _run_build_agent(prompt, slot, config, checkout_path, extra_add_dirs, timeout_s):
-    """One call_llm invocation on the mutating build profile, pinned to the
-    configured claude_cli slot (the build profile only means anything for
-    claude_cli — every other provider ignores enable_native_tools/profile
-    entirely, so a non-claude_cli slot here would silently do nothing)."""
+def _run_build_agent(prompt, config, checkout_path, extra_add_dirs, timeout_s):
+    """One call_llm invocation on the mutating build profile. needs_mutating_agent=True
+    is a HARD capability filter satisfied only by claude_cli registry rules
+    (see model_registry.py) — the picker naturally lands on a claude_cli
+    model the same way _find_claude_cli_slot used to hand-search for one,
+    but now surfaces "no model has this capability" instead of "no
+    claude_cli slot configured" when nothing qualifies."""
     build_config = dict(config)
     build_config["LLM_TIMEOUT"] = timeout_s
+    reqs = LlmRequirements(complexity="large", needs_mutating_agent=True,
+                           needs_structured_output=True, min_context_tokens=len(prompt) // 4)
     raw = call_llm(
-        prompt, system_prompt=_BUILD_SYSTEM, force_provider=slot,
+        prompt, system_prompt=_BUILD_SYSTEM, requirements=reqs,
         enable_native_tools=True, profile="build",
         repo_checkout_path=checkout_path, extra_add_dirs=extra_add_dirs,
         json_schema=_BUILD_JSON_SCHEMA,
@@ -198,8 +203,14 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
                                           "was available to build it safely.")
         return False, "no skill resolved"
 
-    slot = _find_claude_cli_slot(config)
-    if slot is None:
+    # Fast-fail before the (expensive) clone+lock below if no model has the
+    # mutating-agent capability configured at all -- same early-exit UX
+    # _find_claude_cli_slot used to give, now derived from the picker's own
+    # capability filter instead of a hardcoded provider name.
+    _availability_reqs = LlmRequirements(complexity="large", needs_mutating_agent=True)
+    _candidates = llm_client._enumerate_candidates(config)
+    _perf = llm_client.get_llm_perf_snapshot()
+    if select_model(_availability_reqs, _candidates, _perf) is None:
         _flag_incomplete(repo_obj, issue, "Feature building requires a claude_cli provider slot "
                                           "configured in the LLM Vault, and none is set up.")
         return False, "no claude_cli slot configured"
@@ -254,7 +265,7 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
 
             prompt = _build_prompt(issue.title or "", issue.body or "", skill_name, skill_text, boundaries_block)
             try:
-                raw = _run_build_agent(prompt, slot, config, checkout_path, extra_add_dirs, timeout_s)
+                raw = _run_build_agent(prompt, config, checkout_path, extra_add_dirs, timeout_s)
             except Exception as e:
                 logger.error(f"feature_build: build agent call failed for {issue_id}: {e}")
                 _mark_failed(issue_id, f"Build agent call failed: {e}")
@@ -282,7 +293,7 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
             if config.get("feature_require_docs", True) and not _docs_touched(changed):
                 nudge = _DOCS_NUDGE_TMPL.format(files=", ".join(_non_doc_files(changed)))
                 try:
-                    raw2 = _run_build_agent(prompt + "\n\n" + nudge, slot, config, checkout_path,
+                    raw2 = _run_build_agent(prompt + "\n\n" + nudge, config, checkout_path,
                                             extra_add_dirs, timeout_s)
                     agent_summary2 = _robust_json_loads(raw2) or {}
                     if isinstance(agent_summary2, dict):

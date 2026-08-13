@@ -1018,13 +1018,13 @@
                                             {% elif pname == 'claude_cli' %}text-violet-600
                                             {% else %}text-purple-500{% endif %}">{{ pname }}</span>
                                         {% if pname == 'claude_cli' %}<span class="text-[10px] text-violet-600 font-bold">● Session Auth</span>
-                                        {% elif pname == 'copilot' and cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Connected</span>
-                                        {% elif cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
+                                        {% elif pname == 'copilot' and cred.get('has_key') %}<span class="text-[10px] text-green-600 font-bold">● Connected</span>
+                                        {% elif cred.get('has_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
                                     </div>
                                     {% if pname == 'copilot' %}
                                     <div class="space-y-2">
                                         <p class="text-xs text-slate-500">Uses your <strong>GitHub Copilot</strong> subscription via OAuth device flow — no API key to paste. Requires an active Copilot plan.</p>
-                                        {% if cred.get('api_key') %}
+                                        {% if cred.get('has_key') %}
                                         <button type="button" onclick="copilotSignout()" class="w-full py-1 text-xs btn-danger rounded font-bold">Sign out (clear authorization)</button>
                                         <button type="button" onclick="startCopilotAuth()" class="w-full py-1 text-xs btn-sec rounded font-bold">Re-authorize</button>
                                         {% else %}
@@ -1068,7 +1068,7 @@
                                         {% if pname == 'ollama_cloud' %}
                                         <p class="text-xs text-slate-500">Hosted <strong>Ollama Cloud</strong> — unlike the self-hosted <code class="bg-slate-100 px-1 rounded">ollama</code> slots this one <strong>requires an API key</strong> (from <span class="font-mono">ollama.com</span>); without one the slot is skipped in failover instead of failing every call. Base URL defaults to <span class="font-mono">https://ollama.com</span>.</p>
                                         {% endif %}
-                                        <input type="password" id="vault-key-{{ pname }}" placeholder="API Key" value="{{ cred.get('api_key','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                        <input type="password" id="vault-key-{{ pname }}" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if cred.get('has_key') else 'API Key' }}" data-touched="0" oninput="this.dataset.touched='1'" value="" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <input type="text" id="vault-url-{{ pname }}" placeholder="{% if pname == 'ollama_cloud' %}Base URL (optional — defaults to https://ollama.com){% else %}Base URL (optional){% endif %}" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs btn-primary rounded font-bold">Save {{ pname }} Credential</button>
                                     </div>
@@ -1151,7 +1151,7 @@
                                             </select>
                                             <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-baseurl-{{ entry.id }}" value="{{ entry.base_url or '' }}" placeholder="Base URL (e.g. http://localhost:11434)" title="Per-entry endpoint. Overrides the shared credential — set localhost for a local CPU ollama, a LAN IP for a GPU box, or https://ollama.com for cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <input type="text" id="edit-apikey-{{ entry.id }}" value="{{ entry.api_key or '' }}" placeholder="API key (optional — overrides shared)" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="text" id="edit-apikey-{{ entry.id }}" value="" data-touched="0" oninput="this.dataset.touched='1'" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if entry.has_key else 'API key (optional — overrides shared)' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-escalation-{{ entry.id }}" value="{{ entry.escalation_models or '' }}" placeholder="Ratchet models (7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every installed model on this endpoint." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         </div>
                                         <div class="flex gap-2">
@@ -1387,36 +1387,10 @@
                                 <label class="text-sm font-medium text-slate-600">Global QA Test Command <span class="text-xs text-slate-400">fallback</span></label>
                                 <input type="text" name="QA_TEST_COMMAND" value="{{ settings.QA_TEST_COMMAND }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. pytest tests/target_repo">
                             </div>
-                            <div class="space-y-2 col-span-1 md:col-span-2 pt-2 border-t border-slate-100">
-                                <div class="flex items-center gap-2">
-                                    <input type="checkbox" name="local_ensemble" id="local_ensemble" {{ 'checked' if settings.local_ensemble else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
-                                    <label for="local_ensemble" class="text-sm font-medium text-slate-700">CPU ensemble (P1 ratchets local models + all-local cross-check → external P2/P3 confirm → human)</label>
-                                </div>
-                                <span class="text-xs text-slate-500">P1 builds with every installed local model smallest→largest, all local models cross-check each fix, and once the CPU consensus hits the target below it's confirmed by one external slot (ramp P2→P3). If every external slot rejects, it's held for human review — never auto-committed. Accuracy over speed.</span>
-                                <div class="flex items-center gap-2 mt-2">
-                                    <input type="checkbox" name="ensemble_skip_external_at_full" id="ensemble_skip_external_at_full" {{ 'checked' if settings.ensemble_skip_external_at_full else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
-                                    <label for="ensemble_skip_external_at_full" class="text-xs font-medium text-slate-700">Skip the external check when the CPU cross-check is unanimous at ~100% (commit directly)</label>
-                                </div>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">External reviewer min confidence</label>
-                                <input type="number" name="EXTERNAL_MIN_CONFIDENCE" value="{{ settings.EXTERNAL_MIN_CONFIDENCE if settings.EXTERNAL_MIN_CONFIDENCE is not none else 0.90 }}" min="0" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <span class="text-xs text-slate-400">The external (cloud/GPU) confirmer is the <b>authority</b> that decides commit. It must Approve <b>and</b> reach this confidence. An Approve below it is not a rejection — its critique is fed back and the local pool rebuilds against it, same reviewer judging. Default 0.90. Floored on the reviewer's own confidence, not the blended average.</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">CPU cross-check target (0–1)</label>
-                                <input type="number" name="CPU_CROSSCHECK_TARGET" value="{{ settings.CPU_CROSSCHECK_TARGET if settings.CPU_CROSSCHECK_TARGET is not none else 0.90 }}" min="0.5" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <span class="text-xs text-slate-400">CPU consensus needed before an external confirmation is spent (default 0.90).</span>
-                            </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Log Analysis interval (minutes)</label>
                                 <input type="number" name="log_analysis_interval_min" value="{{ settings.log_analysis_interval_min if settings.log_analysis_interval_min is not none else 30 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">How far back Log Analysis looks + how often the idle snapshot refreshes (default 30).</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Min ensemble model size (B params)</label>
-                                <input type="number" name="ensemble_min_model_b" value="{{ settings.ensemble_min_model_b if settings.ensemble_min_model_b is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <span class="text-xs text-slate-400">Skip ensemble rungs below this size (e.g. 14 drops 7b/8b). 0 = use all installed models.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Startup grace (seconds)</label>
@@ -4017,12 +3991,19 @@
         }
 
         async function saveCredential(provider) {
-            const key = document.getElementById(`vault-key-${provider}`)?.value || '';
+            // The key field never carries the real stored value (only a
+            // "•••• already set" placeholder — see settings_page's
+            // redaction), so only include api_key in the payload when the
+            // operator actually typed into it; otherwise the backend keeps
+            // whatever's already stored instead of wiping it with blank.
+            const keyEl = document.getElementById(`vault-key-${provider}`);
             const url = document.getElementById(`vault-url-${provider}`)?.value || '';
+            const body = {provider, base_url: url};
+            if (keyEl && keyEl.dataset.touched === '1') body.api_key = keyEl.value || '';
             const resp = await fetch('/api/llm/credentials', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({provider, api_key: key, base_url: url})
+                body: JSON.stringify(body)
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to save credential.', 'error');
@@ -4335,13 +4316,21 @@
             const model = document.getElementById(`edit-model-${id}`)?.value;
             const rpm = parseInt(document.getElementById(`edit-rpm-${id}`)?.value || '0');
             const base_url = document.getElementById(`edit-baseurl-${id}`)?.value.trim() || '';
-            const api_key = document.getElementById(`edit-apikey-${id}`)?.value.trim() || '';
             const escalation_models = document.getElementById(`edit-escalation-${id}`)?.value.trim() || '';
             if (!model) { showToast('Please select a model.', 'warn'); return; }
+            const body = {label: label || model, provider, model, rpm, base_url, escalation_models};
+            // The key field never carries the real stored value (only a
+            // "•••• already set" placeholder — see settings_page's
+            // redaction), so only include api_key when the operator actually
+            // typed into it; update_llm_entry already only overwrites when
+            // the key is present in the payload, so omitting it here keeps
+            // whatever's already stored.
+            const apiKeyEl = document.getElementById(`edit-apikey-${id}`);
+            if (apiKeyEl && apiKeyEl.dataset.touched === '1') body.api_key = apiKeyEl.value.trim() || '';
             const resp = await fetch(`/api/llm/entries/${id}`, {
                 method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, base_url, api_key, escalation_models})
+                body: JSON.stringify(body)
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to save entry.', 'error');

@@ -35,7 +35,7 @@ def _load_ns():
 
     def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=None,
                             json_schema=None, enable_native_tools=False, search_model=None,
-                            profile="readonly", extra_add_dirs=None):
+                            profile="readonly", extra_add_dirs=None, usage_out=None):
         calls.append({"profile": profile, "enable_native_tools": enable_native_tools,
                       "repo_checkout_path": repo_checkout_path, "extra_add_dirs": extra_add_dirs})
         return "stub result"

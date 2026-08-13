@@ -429,9 +429,14 @@ class HubAgentClient:
         """The LM hub has no LLM of its own, so it delegates Log Analysis to us (we
         own the models + already read hub logs). Run analyze_logs off the event-loop
         thread and reply with the result; correlation_id lets the hub's
-        request_response match the answer. The hub must use a long timeout (LLM)."""
+        request_response match the answer. The hub must use a long timeout (LLM).
+
+        latency_sensitive=False here (unlike routes.py's synchronous Log Analysis
+        panel caller): this runs on a background executor thread with no human
+        blocked on the reply, only the hub's own long request timeout."""
         import asyncio as _aio
         from llm_client import analyze_logs, parse_log_verdict, is_llm_cooldown_error
+        from model_selection import LlmRequirements
         title = str(data.get("title") or "logs")[:200]
         log_text = data.get("logs") or ""
         status, analysis, verdict, error = "ok", "", "none", None
@@ -439,8 +444,10 @@ class HubAgentClient:
             if not str(log_text).strip():
                 status, error = "error", "no logs provided"
             else:
+                reqs = LlmRequirements(complexity="small", latency_sensitive=False,
+                                       min_context_tokens=len(log_text) // 4)
                 raw = await _aio.get_event_loop().run_in_executor(
-                    None, lambda: analyze_logs(log_text, title))
+                    None, lambda: analyze_logs(log_text, title, requirements=reqs))
                 verdict, analysis = parse_log_verdict(raw)
         except Exception as e:  # noqa: BLE001
             status = "error"
@@ -1202,9 +1209,16 @@ class HubAgentClient:
             corr = msg.get("header", {}).get("message_id")
             try:
                 from main import call_llm  # lazy: main imports this module
+                from model_selection import LlmRequirements
                 msgs = data.get("messages") or []
                 tools = data.get("tools") or None
                 system = data.get("system") or "You are the Lab Manager help assistant."
+                # A human is waiting on the hub's chat UI for this reply, and the
+                # tool set (if any) is caller-supplied by the hub itself, not fixed
+                # ahead of time -- so needs_tools mirrors whether the hub actually
+                # sent any this turn.
+                _help_ask_reqs = LlmRequirements(
+                    complexity="medium", needs_tools=bool(tools), latency_sensitive=True)
                 # call_llm does NOT return a (value, error) tuple — it returns the
                 # result directly (a {"text", "tool_calls"} dict when `tools` is
                 # passed, per _request_ollama et al.; a bare string otherwise) and
@@ -1216,7 +1230,8 @@ class HubAgentClient:
                 # working call surfaced as {"status": "ERROR", "message":
                 # "tool_calls"}. This is what "Ask AI gives a tool_calls error" was.
                 result = await asyncio.to_thread(
-                    call_llm, "", system_prompt=system, messages=msgs, tools=tools)
+                    call_llm, "", system_prompt=system, messages=msgs, tools=tools,
+                    requirements=_help_ask_reqs)
                 if isinstance(result, dict):
                     rdata = {"status": "SUCCESS", "assistant": {
                         "content": result.get("text") or "",

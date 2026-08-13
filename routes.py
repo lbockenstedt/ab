@@ -792,8 +792,6 @@ def _system_stats():
             "active_llm_provider": state.get("active_llm_provider"),
             "active_llm_at": state.get("active_llm_at"),
             "daily_fixes_count": state.get("daily_fixes_count"),
-            "local_ensemble": bool(cfg.get("local_ensemble")),
-            "crosscheck_target": cfg.get("CPU_CROSSCHECK_TARGET"),
             # Rolling generation throughput for the model currently/last serving.
             # Averaged over completed generations only (Ollama's eval_duration
             # covers generation time), so it reads as "tok/s while busy" and is
@@ -1569,11 +1567,14 @@ def _run_log_analysis(source, window_minutes=None, precomputed=False):
     what it means, and what to check. Streams into the LogAnalysis task (live
     'thought process') and stores the final answer in state['log_analysis']."""
     from main import analyze_logs, parse_log_verdict, is_llm_cooldown_error  # re-exported from llm_client
+    from model_selection import LlmRequirements
     title, log_text = _collect_logs_for_analysis(source, window_minutes=window_minutes)
     update_task_state(task_id=_LOG_ANALYSIS_TASK, task_name=f"Analyzing {title}", action="start")
     try:
+        reqs = LlmRequirements(complexity="small", latency_sensitive=True,
+                               min_context_tokens=len(log_text) // 4)
         raw = analyze_logs(log_text, title=f"{title} for the BugFixer system",
-                           task_id=_LOG_ANALYSIS_TASK)
+                           task_id=_LOG_ANALYSIS_TASK, requirements=reqs)
         verdict, result = parse_log_verdict(raw)  # strip the machine VERDICT line for display
         state["log_analysis"] = {
             "running": False, "source": source, "title": title, "precomputed": precomputed,
@@ -1792,7 +1793,6 @@ async def settings_page(request: Request):
     settings["ollama_preload_timeout_s"] = config.get("ollama_preload_timeout_s", 3600)
     settings["gate_scans_on_model_preload"] = config.get("gate_scans_on_model_preload", True)
     settings["model_gate_max_wait_s"] = config.get("model_gate_max_wait_s", 3600)
-    settings["EXTERNAL_MIN_CONFIDENCE"] = config.get("EXTERNAL_MIN_CONFIDENCE", 0.90)
     # Pretty-printed for the textarea editor; save_settings re-parses it back
     # to a list on save (feature_boundaries itself, not this string, is the
     # value everything else reads).
@@ -1896,9 +1896,30 @@ async def settings_page(request: Request):
     extra_am_repos = [r for r in feature_automerge_repos if r not in set(github_repos)]
     feature_automerge_repo_options = list(github_repos) + extra_am_repos
 
+    # SECURITY: llm_credentials/llm_entries carry plaintext api_key values.
+    # They used to flow into the template raw via the **config merge below,
+    # which embedded every configured key directly in the served HTML
+    # (readable via view-source, cached by any proxy, no JS required) — the
+    # same class of leak GET /api/llm/config already guards against for API
+    # consumers via safe_creds. Redact api_key to a presence flag here too;
+    # the edit forms show a "•••• already set" placeholder instead of the
+    # real value, and only send a NEW key back on save when the operator
+    # actually types into the field (see saveCredential/saveEntry JS +
+    # save_llm_credential/update_llm_entry's "only overwrite if present in
+    # the payload" handling).
+    _safe_llm_credentials = {
+        p: {"base_url": v.get("base_url", ""), "has_key": bool(v.get("api_key"))}
+        for p, v in (config.get("llm_credentials") or {}).items()
+    }
+    _safe_llm_entries = [
+        {**e, "api_key": "", "has_key": bool(e.get("api_key"))}
+        for e in (config.get("llm_entries") or [])
+    ]
+
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
-        "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]},
+        "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"],
+                     "llm_credentials": _safe_llm_credentials, "llm_entries": _safe_llm_entries},
         "available_labels": state.get("available_labels", []),
         "repo_options": repo_options,
         "monitored_set": monitored_set,
@@ -2105,21 +2126,6 @@ async def save_settings(request: Request):
     config_data["bug_report_enabled"] = data.get("bug_report_enabled") != "off"
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
     config_data["skip_review"] = data.get("skip_review") == "on"
-    config_data["local_ensemble"] = data.get("local_ensemble") == "on"
-    config_data["ensemble_skip_external_at_full"] = data.get("ensemble_skip_external_at_full") == "on"
-    # Confidence floor on the EXTERNAL confirmer — the authority that decides
-    # commit. Previously the external stage checked only the verdict word, so an
-    # Approve at any confidence committed. Default 0.90.
-    _emc = str(data.get("EXTERNAL_MIN_CONFIDENCE") or "").strip()
-    try:
-        config_data["EXTERNAL_MIN_CONFIDENCE"] = max(0.0, min(1.0, float(_emc))) if _emc else 0.90
-    except (TypeError, ValueError):
-        config_data["EXTERNAL_MIN_CONFIDENCE"] = 0.90
-    _cct = str(data.get("CPU_CROSSCHECK_TARGET") or "").strip()
-    try:
-        config_data["CPU_CROSSCHECK_TARGET"] = max(0.5, min(1.0, float(_cct))) if _cct else 0.90
-    except (TypeError, ValueError):
-        config_data["CPU_CROSSCHECK_TARGET"] = 0.90
     # Log Analysis window / idle-precompute interval in minutes (default 30). Governs
     # both how far back the LLM looks and how often the idle snapshot refreshes.
     _lai = str(data.get("log_analysis_interval_min") or "").strip()
@@ -2127,14 +2133,6 @@ async def save_settings(request: Request):
         config_data["log_analysis_interval_min"] = max(1, int(_lai)) if _lai else 30
     except (TypeError, ValueError):
         config_data["log_analysis_interval_min"] = 30
-    # Minimum ensemble model size in billions of params (0 = use all). Set e.g. 14 to
-    # skip the 7b/8b rungs that reliably whiff, while those models stay available for
-    # the CPU slot / chat / cross-check elsewhere.
-    _emm = str(data.get("ensemble_min_model_b") or "").strip()
-    try:
-        config_data["ensemble_min_model_b"] = max(0, int(float(_emm))) if _emm else 0
-    except (TypeError, ValueError):
-        config_data["ensemble_min_model_b"] = 0
     # Post-boot grace (seconds) before BugFixer runs LLM/scan work — lets ollama +
     # services finish starting after a reboot so it doesn't 404 on /api/chat. 0 = off.
     _sg = str(data.get("startup_grace_seconds") or "").strip()
@@ -2357,8 +2355,15 @@ async def save_llm_credential(request: Request):
         return JSONResponse(status_code=400, content={"error": "provider required"})
     config = load_config()
     creds = config.setdefault("llm_credentials", {})
+    existing = creds.get(provider) or {}
+    # api_key is only present in the payload when the operator actually typed
+    # into the (never-populated-with-the-real-value) key field on the
+    # Settings page — see settings_page's redaction + saveCredential's JS.
+    # Absent means "leave the stored key alone", not "clear it"; an empty
+    # string IS a legitimate value here (an explicit clear when the operator
+    # types into the field then deletes it).
     creds[provider] = {
-        "api_key": (data.get("api_key") or "").strip(),
+        "api_key": (data.get("api_key") if "api_key" in data else existing.get("api_key")) or "",
         "base_url": (data.get("base_url") or "").strip(),
     }
     save_config(config)
@@ -2573,14 +2578,18 @@ async def update_llm_slots(request: Request):
 
 @router.get("/api/llm/config")
 async def get_llm_config():
-    """Return current vault credentials (keys redacted), entries, and slot assignments."""
+    """Return current vault credentials (keys redacted), entries (keys redacted), and slot assignments."""
     config = load_config()
     creds = config.get("llm_credentials") or {}
     safe_creds = {p: {"configured": bool(v.get("api_key")), "base_url": v.get("base_url", "")}
                   for p, v in creds.items()}
+    # SECURITY: entries carry a per-entry plaintext api_key override — never
+    # return it. Mirrors safe_creds' configured-flag treatment above.
+    safe_entries = [{**e, "api_key": "", "has_key": bool(e.get("api_key"))}
+                    for e in (config.get("llm_entries") or [])]
     return {
         "credentials": safe_creds,
-        "entries": config.get("llm_entries") or [],
+        "entries": safe_entries,
         "slots": config.get("llm_slots") or {},
     }
 

@@ -71,10 +71,21 @@ def _load_ns():
         gh_repo.ensured_labels.append(name)
         return True
 
-    _slot_holder = {"slot": 1}
+    _candidates_holder = {"candidates": [{
+        "key": ("claude_cli", "", "claude"), "provider": "claude_cli", "model": "claude",
+        "base_url": "", "api_key": "", "rpm": 0, "available": True, "unavailable_reason": None,
+        "caps": {"supports_mutating_agent": True, "native_agentic_tools": True,
+                "supports_structured_output": True, "cost_tier": "cheap", "max_complexity": "large",
+                "context_window": 200000},
+    }]}
 
-    def _find_claude_cli_slot(config):
-        return _slot_holder["slot"]
+    class _FakeLlmClient:
+        def _enumerate_candidates(self, config):
+            return list(_candidates_holder["candidates"])
+        def get_llm_perf_snapshot(self):
+            return {}
+
+    import model_selection as real_model_selection
 
     _pr_holder = {"existing": None}
 
@@ -114,7 +125,9 @@ def _load_ns():
         "load_processed": load_processed, "save_processed": save_processed,
         "recompute_issue_counters": recompute_issue_counters,
         "_ensure_label": _ensure_label,
-        "_find_claude_cli_slot": _find_claude_cli_slot,
+        "llm_client": _FakeLlmClient(),
+        "LlmRequirements": real_model_selection.LlmRequirements,
+        "select_model": real_model_selection.select_model,
         "find_existing_pull_request": find_existing_pull_request,
         "_authenticated_remote": _authenticated_remote,
         "skills_loader": _FakeSkillsLoader(),
@@ -144,7 +157,7 @@ def _load_ns():
 
     exec("\n\n".join(segs), ns)
     ns["_store"] = _store
-    ns["_slot_holder"] = _slot_holder
+    ns["_candidates_holder"] = _candidates_holder
     ns["_pr_holder"] = _pr_holder
     ns["_llm_holder"] = _llm_holder
     return ns
@@ -273,11 +286,17 @@ def main():
     ns["_store"].clear()
     issue = _FakeGhIssue()
     repo = _FakeGhRepo()
-    ns["_slot_holder"]["slot"] = None
+    ns["_candidates_holder"]["candidates"] = []
     ok_result, msg = ns["build_feature"](None, repo, issue, classify_build, config)
     ok &= _check("no claude_cli slot -> refuses to build", ok_result is False)
     ok &= _check("no claude_cli slot -> flags", ns["_store"]["owner/repo:42"]["status"] == "feature_flagged")
-    ns["_slot_holder"]["slot"] = 1
+    ns["_candidates_holder"]["candidates"] = [{
+        "key": ("claude_cli", "", "claude"), "provider": "claude_cli", "model": "claude",
+        "base_url": "", "api_key": "", "rpm": 0, "available": True, "unavailable_reason": None,
+        "caps": {"supports_mutating_agent": True, "native_agentic_tools": True,
+                "supports_structured_output": True, "cost_tier": "cheap", "max_complexity": "large",
+                "context_window": 200000},
+    }]
 
     # ── skill has a name but no loaded instructions -> refuses, flags ───────
     ns["_store"].clear()
@@ -331,10 +350,18 @@ def main():
     _patch_clone(fake_repo_git)
     ns["_llm_holder"]["responses"] = ['{"pr_body": "Added the button and docs.", '
                                       '"touchpoints_done": ["route", "button"], "touchpoints_skipped": []}']
+    ns["_llm_holder"]["calls"] = []
     ns["_pr_holder"]["existing"] = None
     ok_result, pr_url = ns["build_feature"](None, repo, issue, classify_build, config)
     ok &= _check("docs present from the start -> build succeeds", ok_result is True)
     ok &= _check("build succeeds -> exactly one commit made", len(fake_repo_git.commits) == 1)
+    _first_call_kwargs = ns["_llm_holder"]["calls"][0]["kwargs"]
+    ok &= _check("build agent call uses requirements= (not force_provider=)",
+                "requirements" in _first_call_kwargs and "force_provider" not in _first_call_kwargs)
+    _build_reqs = _first_call_kwargs.get("requirements")
+    ok &= _check("build agent requirements: complexity='large', needs_mutating_agent=True",
+                _build_reqs is not None and _build_reqs.complexity == "large"
+                and _build_reqs.needs_mutating_agent is True)
     ok &= _check("commit message references the right issue number",
                 "AI Feature #7" in fake_repo_git.commits[0])
     ok &= _check("branch created is ai-feature-issue-<N> (load-bearing for pr_review's own-PR skip)",
