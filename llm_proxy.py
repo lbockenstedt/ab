@@ -1,0 +1,384 @@
+"""Anthropic Messages API-compatible proxy so external Anthropic clients
+(notably Claude Code, pointed at this host via ``ANTHROPIC_BASE_URL``) can use
+BugFixer as an LLM router.
+
+Every inbound ``POST /v1/messages`` is translated into BugFixer's internal
+message shape and routed through :func:`llm_client.call_llm` with an
+``LlmRequirements`` derived from the request (size + tool presence), so the
+existing capability/cost-aware ``model_selection.select_model`` picks the best
+LLM for the job — the same routing the fix engine and chat use. The winning
+model's reply is translated back into the Anthropic response envelope (plain
+JSON, or a synthetic SSE stream when the client asks for ``stream: true``).
+
+Auth: the WebUI's session middleware is bypassed for ``/v1/*`` (see main's
+``_AUTH_EXEMPT_PREFIX``); this router does its own API-key check instead. Set a
+key via the ``BUGFIXER_PROXY_KEY`` env var or the ``llm_proxy_api_key`` config
+value and clients must send it as ``x-api-key`` or ``Authorization: Bearer``.
+With no key configured the endpoint is open (a warning is logged) — fine for a
+trusted LAN, but set a key for anything exposed.
+
+Tool use round-trips: Anthropic ``tools`` / ``tool_use`` / ``tool_result``
+blocks map onto the internal OpenAI-style ``tools`` param and tool-call return
+shape (``{"text", "tool_calls"}``), so an agentic client's tool loop works
+through the proxy.
+"""
+import asyncio
+import json
+import logging
+import os
+import time
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from llm_client import call_llm
+from model_selection import LlmRequirements
+from config_store import load_config
+
+logger = logging.getLogger("LlmProxy")
+
+router = APIRouter()
+
+# Model id advertised to clients. Claude Code sends whatever model it's told to
+# use; the proxy ignores it for routing (BugFixer picks the model) and echoes a
+# stable synthetic id back so the client has something coherent to display.
+_PROXY_MODEL_ID = "bugfixer-router"
+
+
+# ── Auth ────────────────────────────────────────────────────────────────────
+def _configured_key() -> str:
+    env = (os.environ.get("BUGFIXER_PROXY_KEY") or "").strip()
+    if env:
+        return env
+    try:
+        return str((load_config() or {}).get("llm_proxy_api_key") or "").strip()
+    except Exception:  # noqa: BLE001 - config read must never 500 the proxy
+        return ""
+
+
+def _presented_key(request: Request) -> str:
+    key = (request.headers.get("x-api-key") or "").strip()
+    if key:
+        return key
+    auth = (request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return auth
+
+
+def _authorized(request: Request) -> bool:
+    want = _configured_key()
+    if not want:
+        logger.warning("LLM proxy request served with NO api key configured — "
+                       "endpoint is open. Set BUGFIXER_PROXY_KEY or "
+                       "llm_proxy_api_key to require authentication.")
+        return True
+    return _presented_key(request) == want
+
+
+# ── Request translation (Anthropic -> internal) ─────────────────────────────
+def _system_text(system: Any) -> str:
+    """Anthropic ``system`` is a string or a list of text blocks."""
+    if isinstance(system, str):
+        return system
+    if isinstance(system, list):
+        return "\n".join(b.get("text", "") for b in system
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _stringify_content(content: Any) -> str:
+    """A tool_result's ``content`` is a string or a list of text/other blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif "text" in b:
+                    parts.append(str(b.get("text")))
+                else:
+                    parts.append(json.dumps(b))
+            else:
+                parts.append(str(b))
+        return "\n".join(parts)
+    return "" if content is None else str(content)
+
+
+def _to_internal_messages(system: Any,
+                          messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Translate an Anthropic request's system+messages into BugFixer's internal
+    message list ({role, content[, tool_calls]} / {role:tool,...})."""
+    out: List[Dict[str, Any]] = []
+    sys_txt = _system_text(system)
+    if sys_txt:
+        out.append({"role": "system", "content": sys_txt})
+
+    for m in messages or []:
+        role = m.get("role")
+        content = m.get("content")
+
+        # Simple string content — the common case for plain chat.
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+        if not isinstance(content, list):
+            out.append({"role": role, "content": "" if content is None else str(content)})
+            continue
+
+        if role == "assistant":
+            text_parts, tool_calls = [], []
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text":
+                    text_parts.append(b.get("text", ""))
+                elif b.get("type") == "tool_use":
+                    tool_calls.append({
+                        "id": b.get("id") or f"toolu_{uuid.uuid4().hex[:8]}",
+                        "function": {"name": b.get("name") or "",
+                                     "arguments": json.dumps(b.get("input") or {})},
+                    })
+            msg: Dict[str, Any] = {"role": "assistant", "content": "\n".join(text_parts)}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            out.append(msg)
+        else:
+            # user (or any non-assistant) message: tool_result blocks become
+            # internal tool messages; remaining text becomes a user message.
+            text_parts = []
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_result":
+                    out.append({
+                        "role": "tool",
+                        "tool_call_id": b.get("tool_use_id") or "unknown",
+                        "content": _stringify_content(b.get("content")),
+                    })
+                elif b.get("type") == "text":
+                    text_parts.append(b.get("text", ""))
+            if text_parts:
+                out.append({"role": "user", "content": "\n".join(text_parts)})
+    return out
+
+
+def _to_internal_tools(tools: Any) -> Optional[List[Dict[str, Any]]]:
+    """Anthropic tools ({name, description, input_schema}) -> internal flat spec
+    ({name, description, parameters}) that llm_client's converters accept."""
+    if not isinstance(tools, list) or not tools:
+        return None
+    return [{"name": t.get("name", ""),
+             "description": t.get("description", ""),
+             "parameters": t.get("input_schema") or {"type": "object", "properties": {}}}
+            for t in tools if isinstance(t, dict)]
+
+
+def _estimate_tokens(system: Any, messages: List[Dict[str, Any]]) -> int:
+    """Rough input-token estimate (~4 chars/token) to drive routing (complexity
+    tier + minimum context window)."""
+    chars = len(_system_text(system))
+    for m in (messages or []):
+        c = m.get("content")
+        if isinstance(c, str):
+            chars += len(c)
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict):
+                    chars += len(json.dumps(b))
+    return max(1, chars // 4)
+
+
+def _build_requirements(system: Any, messages: List[Dict[str, Any]],
+                        has_tools: bool, max_tokens: int) -> LlmRequirements:
+    est_in = _estimate_tokens(system, messages)
+    if est_in > 16000:
+        complexity = "large"
+    elif est_in > 3000 or has_tools:
+        complexity = "medium"
+    else:
+        complexity = "small"
+    # Ask the picker for a model whose context window fits input + requested
+    # output headroom (select_model applies its own 1.25x margin on top).
+    min_ctx = est_in + max(256, int(max_tokens or 1024))
+    return LlmRequirements(complexity=complexity, needs_tools=has_tools,
+                           min_context_tokens=min_ctx)
+
+
+# ── Response translation (internal -> Anthropic) ────────────────────────────
+def _to_anthropic_content(result: Any) -> Tuple[List[Dict[str, Any]], str]:
+    """Turn call_llm's return (a text string, or {"text", "tool_calls"}) into
+    Anthropic content blocks + a stop_reason."""
+    blocks: List[Dict[str, Any]] = []
+    stop_reason = "end_turn"
+    if isinstance(result, dict):
+        text = result.get("text") or ""
+        tool_calls = result.get("tool_calls") or []
+        if text:
+            blocks.append({"type": "text", "text": text})
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            blocks.append({"type": "tool_use",
+                           "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:8]}",
+                           "name": fn.get("name") or "",
+                           "input": args or {}})
+        if tool_calls:
+            stop_reason = "tool_use"
+    else:
+        blocks.append({"type": "text", "text": result or ""})
+    if not blocks:
+        blocks.append({"type": "text", "text": ""})
+    return blocks, stop_reason
+
+
+def _message_envelope(msg_id: str, model: str, blocks: List[Dict[str, Any]],
+                      stop_reason: str, in_tok: int, out_tok: int) -> Dict[str, Any]:
+    return {
+        "id": msg_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": blocks,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": {"input_tokens": in_tok, "output_tokens": out_tok},
+    }
+
+
+def _sse(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _stream_events(envelope: Dict[str, Any]):
+    """Emit a valid Anthropic SSE sequence for an already-computed message.
+    Non-incremental (one delta per block) — the upstream result is complete
+    before streaming begins — but protocol-correct for streaming clients."""
+    msg_id = envelope["id"]
+    blocks = envelope["content"]
+    in_tok = envelope["usage"]["input_tokens"]
+    out_tok = envelope["usage"]["output_tokens"]
+
+    start_msg = {**envelope, "content": [],
+                 "stop_reason": None,
+                 "usage": {"input_tokens": in_tok, "output_tokens": 0}}
+    yield _sse("message_start", {"type": "message_start", "message": start_msg})
+
+    for i, block in enumerate(blocks):
+        if block.get("type") == "tool_use":
+            yield _sse("content_block_start", {
+                "type": "content_block_start", "index": i,
+                "content_block": {"type": "tool_use", "id": block["id"],
+                                  "name": block["name"], "input": {}}})
+            yield _sse("content_block_delta", {
+                "type": "content_block_delta", "index": i,
+                "delta": {"type": "input_json_delta",
+                          "partial_json": json.dumps(block.get("input") or {})}})
+        else:
+            yield _sse("content_block_start", {
+                "type": "content_block_start", "index": i,
+                "content_block": {"type": "text", "text": ""}})
+            yield _sse("content_block_delta", {
+                "type": "content_block_delta", "index": i,
+                "delta": {"type": "text_delta", "text": block.get("text", "")}})
+        yield _sse("content_block_stop", {"type": "content_block_stop", "index": i})
+
+    yield _sse("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": envelope["stop_reason"], "stop_sequence": None},
+        "usage": {"output_tokens": out_tok}})
+    yield _sse("message_stop", {"type": "message_stop"})
+
+
+# ── Routes ──────────────────────────────────────────────────────────────────
+@router.post("/v1/messages")
+async def messages(request: Request):
+    if not _authorized(request):
+        return JSONResponse(status_code=401, content={
+            "type": "error",
+            "error": {"type": "authentication_error",
+                      "message": "Missing or invalid api key (x-api-key / Authorization: Bearer)."}})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": "Body is not valid JSON."}})
+
+    system = body.get("system")
+    a_messages = body.get("messages") or []
+    a_tools = body.get("tools")
+    want_stream = bool(body.get("stream"))
+    try:
+        max_tokens = int(body.get("max_tokens") or 1024)
+    except Exception:
+        max_tokens = 1024
+
+    internal_msgs = _to_internal_messages(system, a_messages)
+    internal_tools = _to_internal_tools(a_tools)
+    reqs = _build_requirements(system, a_messages, bool(internal_tools), max_tokens)
+
+    used: Dict[str, Any] = {}
+    try:
+        result = await asyncio.to_thread(
+            call_llm, prompt="", task_id=f"proxy-{uuid.uuid4().hex[:8]}",
+            messages=internal_msgs, tools=internal_tools, stream=False,
+            requirements=reqs, used_model_out=used)
+    except Exception as e:  # noqa: BLE001 - surface as an API error, never 500-crash
+        logger.exception("LLM proxy call_llm failed")
+        return JSONResponse(status_code=502, content={
+            "type": "error",
+            "error": {"type": "api_error", "message": f"Upstream LLM routing failed: {e}"}})
+
+    blocks, stop_reason = _to_anthropic_content(result)
+    in_tok = _estimate_tokens(system, a_messages)
+    out_tok = max(1, sum(len(b.get("text", "")) for b in blocks) // 4)
+    model_label = (f"{used.get('provider')}/{used.get('model')}"
+                   if used.get("model") else _PROXY_MODEL_ID)
+    msg_id = f"msg_{uuid.uuid4().hex}"
+    logger.info("LLM proxy: routed to %s (stream=%s, tools=%s, stop=%s)",
+                model_label, want_stream, bool(internal_tools), stop_reason)
+
+    envelope = _message_envelope(msg_id, model_label, blocks, stop_reason, in_tok, out_tok)
+    if want_stream:
+        return StreamingResponse(_stream_events(envelope), media_type="text/event-stream")
+    return JSONResponse(content=envelope)
+
+
+@router.post("/v1/messages/count_tokens")
+async def count_tokens(request: Request):
+    """Anthropic's token-count endpoint. Claude Code calls it before some
+    requests; return a size estimate so those calls don't 404."""
+    if not _authorized(request):
+        return JSONResponse(status_code=401, content={
+            "type": "error",
+            "error": {"type": "authentication_error", "message": "Missing or invalid api key."}})
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    est = _estimate_tokens(body.get("system"), body.get("messages") or [])
+    return JSONResponse(content={"input_tokens": est})
+
+
+@router.get("/v1/models")
+async def models(request: Request):
+    """Minimal model list so clients that enumerate models get one coherent id.
+    Routing is decided per-request by BugFixer regardless of the id chosen."""
+    if not _authorized(request):
+        return JSONResponse(status_code=401, content={
+            "type": "error",
+            "error": {"type": "authentication_error", "message": "Missing or invalid api key."}})
+    now = int(time.time())
+    return JSONResponse(content={"data": [
+        {"type": "model", "id": _PROXY_MODEL_ID, "display_name": "BugFixer Router",
+         "created_at": now}]})

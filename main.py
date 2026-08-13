@@ -252,7 +252,7 @@ import auth as _auth  # noqa: E402 — after logger/app so its logging is config
 _AUTH_EXEMPT_EXACT = {"/api/health", "/login", "/logout", "/setup-admin",
                       "/favicon.ico", "/apple-touch-icon.png",
                       "/apple-touch-icon-precomposed.png"}
-_AUTH_EXEMPT_PREFIX = ("/static/", "/assets/")
+_AUTH_EXEMPT_PREFIX = ("/static/", "/assets/", "/v1/")
 
 
 def _auth_exempt(path: str) -> bool:
@@ -504,6 +504,10 @@ from chat import *  # noqa: E402,F401,F403
 from fix_engine import *  # noqa: E402,F401,F403
 from routes import *  # noqa: E402,F401,F403
 app.include_router(router)
+# Anthropic-compatible LLM-router proxy (/v1/*). Does its own api-key auth
+# (see llm_proxy), so it's exempt from the WebUI session middleware above.
+from llm_proxy import router as _llm_proxy_router  # noqa: E402
+app.include_router(_llm_proxy_router)
 
 # ── Single-instance guard for the scan workers ────────────────────────────────
 # These threads start at IMPORT time, before uvicorn binds the port. So a second

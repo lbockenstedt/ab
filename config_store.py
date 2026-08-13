@@ -65,6 +65,10 @@ CHAT_CONFIG_DEFAULTS = {
     # spoke_ids and/or module_types to never triage (e.g. an undeployed spoke).
     "HEARTBEAT_STALE_S": 300,          # Max age (seconds) of a heartbeat line before triage.
     "heartbeat_exclude": [],           # spoke_ids / module_types to skip (list).
+    # API key required by the Anthropic-compatible LLM-router proxy (/v1/*, see
+    # llm_proxy.py). Empty = proxy is open (a warning is logged per request).
+    # The BUGFIXER_PROXY_KEY env var overrides this when set.
+    "llm_proxy_api_key": "",
 }
 
 
