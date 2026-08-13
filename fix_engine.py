@@ -305,7 +305,11 @@ def analyze_issue(issue):
         "Return ONLY a JSON object: {\"actionable\": boolean, \"request\": \"message if not actionable\"}"
     )
     try:
-        res = call_llm(prompt, system_prompt="You are a triage bot. Only return a JSON object.", task_kind="triage")
+        from model_selection import LlmRequirements
+        reqs = LlmRequirements(complexity="trivial", needs_structured_output=True,
+                               min_context_tokens=len(prompt) // 4)
+        res = call_llm(prompt, system_prompt="You are a triage bot. Only return a JSON object.",
+                       requirements=reqs)
         import re
         match = re.search(r'\{.*\}', res, re.DOTALL)
         if match:
