@@ -507,7 +507,11 @@ def identify_files_to_fix(repo_path, issue_body):
     )
     llm_files = []
     try:
-        res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.", task_kind="identify_files")
+        from model_selection import LlmRequirements
+        reqs = LlmRequirements(complexity="small", needs_structured_output=True,
+                               min_context_tokens=len(prompt) // 4)
+        res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.",
+                       requirements=reqs)
         import re
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:
