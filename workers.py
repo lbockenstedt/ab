@@ -82,7 +82,7 @@ def _ollama_model_present(resp, model):
         # Tolerate the implicit :latest tag: a bare "llama3" matches pulled "llama3:latest".
         if ":" not in want and nm.split(":")[0] == base_want:
             return True
-    return False
+    return None
 
 
 def _check_provider_online(n, config):
@@ -92,25 +92,25 @@ def _check_provider_online(n, config):
     # claude_cli authenticates via Claude Code session — just check the binary exists.
     if p == "claude_cli":
         if not model:
-            return False
+            return None
         try:
             import subprocess
             r = subprocess.run(["claude", "--version"], capture_output=True, timeout=5)
             return r.returncode == 0
         except Exception:
-            return False
+            return None
     if _is_lmstudio(p):
         # LM Studio needs no API key — just confirm the local server is reachable.
         if not model:
-            return False
+            return None
         try:
             base = _normalize_lmstudio_url(base_url).rstrip("/")
             resp = requests.get(f"{base}/models", timeout=10)
             if resp.status_code == 401:
-                return False
+                return None
             return resp.status_code < 300
         except Exception:
-            return False
+            return None
     if _is_ollama(p):
         # Ollama needs no API key (self-hosted; Ollama Cloud sends a Bearer key) —
         # confirm the server is reachable (/api/tags) AND that the configured model
@@ -118,7 +118,7 @@ def _check_provider_online(n, config):
         # /api/chat 404s if the model is missing, so a bare server ping would
         # falsely show the provider green while every real call fails.
         if not model:
-            return False
+            return None
         try:
             base = _ollama_base_url(p, base_url).rstrip("/")
             headers = {}
@@ -127,36 +127,36 @@ def _check_provider_online(n, config):
                 headers["Authorization"] = f"Bearer {clean}"
             resp = requests.get(f"{base}/api/tags", headers=headers, timeout=10)
             if resp.status_code == 401:
-                return False
+                return None
             if resp.status_code >= 300:
-                return False
+                return None
             if not _ollama_model_present(resp, model):
                 logger.warning(
                     f"Provider {n} (ollama) server is up but model '{model}' is not pulled on "
                     f"{base} — pull it (Settings → Local LLM Setup, or `ollama pull {model}`)."
                 )
-                return False
+                return None
             return True
         except Exception:
-            return False
+            return None
     if p.startswith("copilot"):
         # Copilot: the stored api_key is a GitHub OAuth token; it must be exchanged
         # for a short-lived Copilot API token, and the models call needs editor headers.
         if not api_key:
-            return False
+            return None
         try:
             from llm_client import _copilot_api_token, _copilot_headers, COPILOT_API_BASE
             tok = _copilot_api_token(api_key)
             resp = requests.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=15)
             if resp.status_code == 401:
                 logger.warning(f"Provider {n} (copilot) connectivity check: 401 — token exchange rejected (re-authorize).")
-                return False
+                return None
             return resp.status_code < 300
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Provider {n} (copilot) connectivity check error: {e}")
-            return False
+            return None
     if not api_key or not model:
-        return False
+        return None
     try:
         if p == "anthropic":
             base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
@@ -192,14 +192,14 @@ def _check_provider_online(n, config):
             resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 401:
             logger.warning(f"Provider {n} ({provider}) connectivity check: 401 — API key invalid or missing.")
-            return False
+            return None
         if resp.status_code == 429:
             logger.warning(f"Provider {n} ({provider}) connectivity check: 429 — rate-limited (not tripping CB).")
-            return False
+            return None
         return resp.status_code < 300
     except Exception as e:
         logger.debug(f"Provider {n} ({provider}) connectivity check error: {e}")
-        return False
+        return None
 
 
 def connectivity_worker():
@@ -501,7 +501,7 @@ def check_for_updates():
             remote_head = None
         if remote_head and remote_head in update_state.get("failed_commits", []):
             logger.warning(f"Remote head {remote_head[:7]} is in failed_commits blocklist. Skipping pull.")
-            return False, f"Update skipped: remote head {remote_head[:7]} is a known-bad commit."
+            return None, f"Update skipped: remote head {remote_head[:7]} is a known-bad commit."
 
         # Advance to the fetched remote head. /opt/bugfixer is a DEPLOYMENT MIRROR,
         # not a dev tree — a plain `git pull` aborts with "local changes would be
@@ -547,7 +547,7 @@ def check_for_updates():
                 if new_commit not in update_state["failed_commits"]:
                     update_state["failed_commits"].append(new_commit)
                     save_update_state(update_state)
-                return False, f"Update failed: Syntax error detected. Rolled back to {old_commit[:7]}."
+                return None, f"Update failed: Syntax error detected. Rolled back to {old_commit[:7]}."
 
             try:
                 with open(os.path.join(CONFIG_DIR, "update_pending"), "w") as f:
@@ -563,10 +563,10 @@ def check_for_updates():
             logger.info("Restart scheduled — restart_worker will apply it shortly.")
             return True, f"Update found: {cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
 
-        return False, "No updates available."
+        return None, "No updates available."
     except Exception as e:
         logger.warning(f"Self-update check failed: {e}")
-        return False, f"Update check failed: {e}"
+        return None, f"Update check failed: {e}"
 
 def updater_worker():
     """Dedicated worker to check for updates every hour."""
@@ -614,14 +614,14 @@ def _request_watchdog_restart():
     ollama-setup delegation — bugfixer.service is cap-locked and can't restart
     itself, but the watchdog can."""
     if _watchdog_active() is False:
-        return False
+        return None
     try:
         with open(RESTART_REQUEST_FILE, "w") as f:
             json.dump({"requested_at": time.time()}, f)
         return True
     except Exception as e:  # noqa: BLE001
         logger.error("restart: could not write watchdog restart request (%s)", e)
-        return False
+        return None
 
 
 def _spawn_restart():
@@ -1319,7 +1319,7 @@ def _ollama_answers(base, timeout=4):
     try:
         return requests.get(f"{base}/api/tags", timeout=timeout).status_code < 300
     except Exception:  # noqa: BLE001 — not up yet
-        return False
+        return None
 
 
 def preload_ollama_models(config):
