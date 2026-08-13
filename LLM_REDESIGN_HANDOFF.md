@@ -25,6 +25,13 @@ source of truth for design intent — this file just tracks build status against
    all new, in `llm_client.py`. Identity-keyed circuit breakers
    (`_ENDPOINT_CREDIT_CB` by `(provider,base_url)`, `_MODEL_RATE_CB` by full
    ModelKey) are new and separate from the slot-keyed `_PROVIDER_CREDIT_CB`.
+4. `4409fde` — **Phase 5, call site #1**: `pr_review.py`'s pr_summary
+   (`_summarize_changes`) converted to `requirements=LlmRequirements(...)` and
+   is now the first (and still only) real caller of `requirements=`. Also gave
+   `call_llm()`/`_call_llm_with_requirements()` new `batch_kind=`/`batch_context=`
+   params, wiring `batch.py`'s previously-dead `enqueue()`/`register_handler()`
+   fire-and-forget path into production for the first time (see Phase 5 section
+   below for details). New test: `test_pr_summary_batch_routing.py`.
 
 **Verification state**: all 30 `test_*.py` files in the repo pass
 (`for f in test_*.py; do python3 "$f"; done` — every one prints `ALL CASES
@@ -70,10 +77,19 @@ fresh.
 The plan's own ordering (cheapest/lowest-risk first), with file:line from the
 plan's requirement table (§2) — **re-verify line numbers before editing**, they
 will have drifted:
-1. `pr_review.py:296` pr_summary (also: wire the batch route here —
-   `batch_ok=True`, async `enqueue()`+`register_handler()` path; this is
-   currently dead code per the plan's retirement map, R5)
-2. `github_ops.py:318` dedup adjudication
+1. ✅ **DONE** (commit `4409fde`) — `pr_review.py:296` pr_summary. Also wired
+   the batch route: `llm_client.py`'s `call_llm()`/`_call_llm_with_requirements()`
+   now accept `batch_kind=`/`batch_context=`; when `reqs.batch_ok` and eligible
+   (no tools, no explicit `messages`, `config['batch_enabled']`, cloud
+   candidate), the call goes through `batch.enqueue()` (previously dead code
+   per the plan's retirement map, R5) and returns `""` immediately instead of
+   blocking. `pr_review.py` gained `_apply_batched_pr_summary(context, text)`,
+   registered via `register_handler("pr_summary", ...)` — reconnects to the PR
+   via a fresh `Github(token)`, discards if `head_sha` is stale, else injects
+   the summary into the existing marker comment. New test:
+   `test_pr_summary_batch_routing.py` (13 cases, all passing). Full existing
+   suite re-run clean (30+ files).
+2. `github_ops.py:318` dedup adjudication  ← **next up**
 3. `llm_client.py:2355` analyze_logs (takes `requirements` as a **caller-supplied
    param**, not a constant — `routes.py:1575` and `hub_agent.py:443` need
    different profiles)
