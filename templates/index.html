@@ -2058,7 +2058,7 @@
             <!-- Model Performance: measured generation throughput, per model.
                  Sits beside LLM Reachability because they answer adjacent
                  questions — "can I reach it" and "how fast is it once reached".
-                 Populated from /api/system-stats (llm.tps_by_model); no button,
+                 Populated from /api/system-stats (llm.perf_by_key); no button,
                  because these are numbers already collected from real work
                  rather than a benchmark this panel runs. -->
             <div class="hpe-card p-5">
@@ -2216,13 +2216,13 @@
             <!-- Providers table -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">LLM Providers</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">LLM Endpoints</h3>
                     <button onclick="refreshDiagnostics()" class="text-xs text-slate-500 hover:text-slate-700"><i class="fas fa-sync-alt"></i> refresh</button>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead class="text-left text-xs text-slate-500 uppercase tracking-wider">
-                            <tr><th class="py-2 pr-3">Slot</th><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3">Configured</th><th class="py-2 pr-3">Online</th><th class="py-2 pr-3">Cooldown</th><th class="py-2 pr-3">Last result</th><th class="py-2 pr-3" title="Measured generation speed for this slot's model — averaged over completed generations, so idle time is excluded">tok/s</th><th class="py-2 pr-3">RPM</th></tr>
+                            <tr><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3" title="Cost tier resolved from the Model Registry">Tier</th><th class="py-2 pr-3" title="Measured generation speed for this endpoint — median over completed generations, so idle time is excluded">tok/s</th><th class="py-2 pr-3" title="Median successful-call wire latency">Latency</th><th class="py-2 pr-3" title="Available, or the reason it is currently skipped (credit/rate cooldown, dead model)">Status</th><th class="py-2 pr-3" title="Number of measured generations">Runs</th></tr>
                         </thead>
                         <tbody id="diag-providers-body"></tbody>
                     </table>
@@ -3173,15 +3173,31 @@
         // refreshDiagnostics() runs well before the poller that fills it, and
         // a later declaration left it undefined on the first render.
         window._bfTps = window._bfTps || {};
+        window._bfTpsByModel = window._bfTpsByModel || {};
+
+        // Index the per-endpoint perf rows (routes.py _endpoint_perf_rows) two
+        // ways: by full ModelKey (provider|base_url|model) for the endpoint
+        // tables/chat pin, and by bare model name (fastest measured row wins)
+        // for the per-entry model dropdowns whose option value is just a model
+        // name and can't carry an endpoint identity.
+        function _bfIndexPerf(rows) {
+            window._bfTps = {};
+            window._bfTpsByModel = {};
+            (rows || []).forEach(r => {
+                window._bfTps[r.key] = r;
+                const prev = window._bfTpsByModel[r.model];
+                if (!prev || ((r.tps || 0) > (prev.tps || 0))) window._bfTpsByModel[r.model] = r;
+            });
+        }
 
         async function refreshSystemStats() {
             try {
                 const s = await fetch('/api/system-stats').then(r => r.json());
                 // Same payload carries the throughput table; fill the shared cache
-                // here as well as in the header poll, so the providers table has
+                // here as well as in the header poll, so the endpoint table has
                 // numbers on the FIRST Diagnostics render instead of dashes until
                 // the 5s header poll happens to land.
-                (((s || {}).llm || {}).tps_by_model || []).forEach(r => { window._bfTps[r.model] = r; });
+                _bfIndexPerf((((s || {}).llm || {}).perf_by_key));
                 bfAnnotateModelSelects();
                 const cpu = s.cpu || {}, mem = s.memory || {}, disk = s.disk || {}, up = s.uptime || {};
                 const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
@@ -3252,30 +3268,27 @@
                     banner.classList.add('hidden');
                 }
 
-                // Providers table
+                // Endpoints table — keyed by ModelKey (provider · model), no
+                // slot number. Exhausted endpoints (credit/rate cooldown, dead
+                // model) stay visible with a reason instead of vanishing.
                 const body = document.getElementById('diag-providers-body');
                 const rows = (d.providers || []).map(p => {
-                    const lr = p.last_result || {};
-                    const lastTxt = lr.status ? lr.status + (lr.reason ? ' — ' + lr.reason : '') : '—';
-                    const cd = p.cooldown_active
-                        ? (p.cooldown_cause === 'rate_limit' ? 'RL ' : '⏱ ') + Math.round(p.cooldown_remaining_min || 0) + 'm'
-                        : '—';
+                    const status = p.exhausted
+                        ? _diagPill(false, (p.exhausted_reason || 'exhausted').replace(/_/g, ' '))
+                        : _diagPill(true, 'available');
+                    const lat = p.latency_ms != null ? Math.round(p.latency_ms) + ' ms' : '—';
                     return '<tr class="border-t border-slate-100">'
-                        + '<td class="py-2 pr-3 font-bold text-slate-700">P' + p.n + '</td>'
                         + '<td class="py-2 pr-3 text-slate-700">' + (p.provider || '—') + '</td>'
                         + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + (p.model || '—') + '</td>'
-                        + '<td class="py-2 pr-3">' + _diagPill(p.configured, p.configured ? 'on' : 'off') + '</td>'
-                        + '<td class="py-2 pr-3">' + _diagPill(p.online, p.online ? 'up' : 'down') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + cd + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + lastTxt + '</td>'
-                        // Throughput for THIS slot's model. Keyed by model rather
-                        // than slot because that is how it is measured — two slots
-                        // pointed at the same model share one figure, which is
-                        // correct: the speed is a property of the model on this
-                        // box, not of the slot. '—' when never measured, never 0.
-                        + '<td class="py-2 pr-3 text-xs tabular-nums ' + (_tpsFor(p.model) ? 'font-semibold text-slate-700' : 'text-slate-400') + '">'
-                          + (_tpsFor(p.model) || '—') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.rpm || 0) + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-500">' + (p.tier || '—') + '</td>'
+                        // Throughput for THIS endpoint, keyed by ModelKey — the
+                        // same (provider, base_url, model) reachable two ways is
+                        // one figure. '—' when never measured, never 0.
+                        + '<td class="py-2 pr-3 text-xs tabular-nums ' + (_tpsFor(p.key) ? 'font-semibold text-slate-700' : 'text-slate-400') + '">'
+                          + (_tpsFor(p.key) || '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + lat + '</td>'
+                        + '<td class="py-2 pr-3">' + status + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + (p.n || 0) + '</td>'
                         + '</tr>';
                 }).join('');
                 body.innerHTML = rows;
@@ -3514,7 +3527,7 @@
         }
         if (document.getElementById('hub-status-dot')) { refreshHubStatusDot(); setInterval(refreshHubStatusDot, 10000); }
 
-        // Header "AI" indicator: which slot/provider/model is serving calls right
+        // Header "AI" indicator: which provider/model is serving calls right
         // now. Bright while a call is in flight (state stamped within ~90s), dimmed
         // when idle so it reads as "last used" rather than "currently running".
         function refreshActiveLlm() {
@@ -3534,15 +3547,14 @@
                     const t = document.getElementById('hdr-tps'); if (t) t.classList.add('hidden');
                     return;
                 }
-                const slot = llm.active_llm_slot ? ('P' + llm.active_llm_slot) : null;
                 const prov = llm.active_llm_provider || null;
-                el.textContent = [slot, prov, model].filter(Boolean).join(' · ');
+                el.textContent = [prov, model].filter(Boolean).join(' · ');
                 const at = Number(llm.active_llm_at || 0);
                 const live = at && ((Date.now() / 1000) - at) < 90;
                 el.className = 'text-xs font-semibold ' + (live ? 'text-emerald-300' : 'text-white/40');
                 el.title = (live ? 'Serving LLM calls now' : 'Last provider used (idle)') +
                            (at ? ' — ' + new Date(at * 1000).toLocaleTimeString() : '');
-                (llm.tps_by_model || []).forEach(r => { window._bfTps[r.model] = r; });
+                _bfIndexPerf(llm.perf_by_key);
                 bfAnnotateModelSelects();
                 const tpsEl = document.getElementById('hdr-tps');
                 if (tpsEl) {
@@ -3566,11 +3578,12 @@
         // the operator infer it from parameter count. Populated from the same
         // /api/system-stats poll the header already runs; only models that have
         // actually generated something appear.
-        // Bare "N tok/s" for table cells, from the same measured cache the header
-        // and Model Performance panel use — one source, so they cannot disagree.
-        function _tpsFor(model) {
-            const r = (window._bfTps || {})[model];
-            return r ? (r.avg + ' tok/s') : '';
+        // Bare "N tok/s" for endpoint table cells, keyed by ModelKey, from the
+        // same measured cache the header and Model Performance panel use — one
+        // source, so they cannot disagree.
+        function _tpsFor(key) {
+            const r = (window._bfTps || {})[key];
+            return r && r.tps != null ? (r.tps + ' tok/s') : '';
         }
 
         // Re-apply the tok/s suffix to every model dropdown.
@@ -3589,19 +3602,20 @@
                     if (!opt.value) return;
                     if (opt.dataset.baseLabel === undefined) opt.dataset.baseLabel = opt.textContent;
                     opt.textContent = opt.dataset.baseLabel + bfTpsLabel(opt.value);
-                    const r = (window._bfTps || {})[opt.value];
-                    if (r) {
-                        opt.title = `${r.avg} tok/s average over ${r.n} generation(s) ` +
-                                    `(min ${r.min}, max ${r.max}) measured on this box`;
+                    const r = (window._bfTpsByModel || {})[opt.value];
+                    if (r && r.tps != null) {
+                        opt.title = `${r.tps} tok/s median over ${r.n} generation(s)` +
+                                    (r.latency_ms != null ? `, ~${Math.round(r.latency_ms)} ms latency` : '') +
+                                    ` measured on this box`;
                     }
                 });
             });
         }
 
         function bfTpsLabel(model) {
-            const r = (window._bfTps || {})[model];
-            if (!r) return '';
-            return `  ·  ${r.avg} tok/s${r.n > 1 ? ` (avg of ${r.n})` : ''}`;
+            const r = (window._bfTpsByModel || {})[model];
+            if (!r || r.tps == null) return '';
+            return `  ·  ${r.tps} tok/s${r.n > 1 ? ` (n=${r.n})` : ''}`;
         }
 
         // Local HTML escaper — this template has no global one (the only other
@@ -3619,38 +3633,44 @@
             const body = document.getElementById('tps-body');
             if (!body) return;
             fetch('/api/system-stats').then(r => r.json()).then(d => {
-                const rows = ((d && d.llm) || {}).tps_by_model || [];
+                const rows = (((d && d.llm) || {}).perf_by_key || []).filter(r => r.n > 0);
                 if (!rows.length) {
                     body.className = 'text-sm text-slate-500 italic';
-                    body.textContent = 'No generations measured yet — numbers appear as each model does real work.';
+                    body.textContent = 'No generations measured yet — numbers appear as each endpoint does real work.';
                     return;
                 }
                 const active = ((d && d.llm) || {}).active_llm || '';
-                const fastest = rows[0].avg || 0;
+                const activeProv = ((d && d.llm) || {}).active_llm_provider || '';
+                const fastest = rows[0].tps || 0;
                 body.className = '';
                 body.innerHTML =
                     '<div class="overflow-x-auto"><table class="w-full text-sm">' +
                     '<thead><tr class="text-left text-xs uppercase tracking-wider text-slate-400 border-b border-slate-200">' +
-                    '<th class="py-2 pr-3">Model</th><th class="py-2 pr-3 text-right">Avg</th>' +
-                    '<th class="py-2 pr-3 text-right">Min</th><th class="py-2 pr-3 text-right">Max</th>' +
-                    '<th class="py-2 pr-3 text-right">Runs</th><th class="py-2 w-1/3">Relative</th></tr></thead><tbody>' +
+                    '<th class="py-2 pr-3">Endpoint</th><th class="py-2 pr-3">Tier</th><th class="py-2 pr-3 text-right">tok/s</th>' +
+                    '<th class="py-2 pr-3 text-right">Latency</th><th class="py-2 pr-3 text-right">Runs</th>' +
+                    '<th class="py-2 pr-3">Status</th><th class="py-2 w-1/4">Relative</th></tr></thead><tbody>' +
                     rows.map(r => {
-                        const pct = fastest > 0 ? Math.max(2, Math.round(100 * r.avg / fastest)) : 0;
-                        const isActive = r.model === active;
+                        const pct = fastest > 0 && r.tps != null ? Math.max(2, Math.round(100 * r.tps / fastest)) : 0;
+                        const isActive = r.model === active && (!activeProv || r.provider === activeProv);
+                        const lat = r.latency_ms != null ? Math.round(r.latency_ms) + ' ms' : '—';
+                        const status = r.exhausted
+                            ? '<span class="text-[11px] text-rose-600">' + _bfEsc((r.exhausted_reason || 'exhausted').replace(/_/g, ' ')) + '</span>'
+                            : '<span class="text-[11px] text-emerald-600">available</span>';
                         return '<tr class="border-b border-slate-100 last:border-0">' +
                           '<td class="py-2 pr-3 font-mono text-xs ' + (isActive ? 'font-bold text-[#01A982]' : 'text-slate-700') + '">' +
-                            _bfEsc(r.model) + (isActive ? ' <span class="text-[10px] uppercase">active</span>' : '') + '</td>' +
-                          '<td class="py-2 pr-3 text-right tabular-nums font-semibold text-slate-800">' + r.avg + '</td>' +
-                          '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + r.min + '</td>' +
-                          '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + r.max + '</td>' +
+                            _bfEsc(r.provider || '') + ' · ' + _bfEsc(r.model) + (isActive ? ' <span class="text-[10px] uppercase">active</span>' : '') + '</td>' +
+                          '<td class="py-2 pr-3 text-xs text-slate-500">' + _bfEsc(r.tier || '—') + '</td>' +
+                          '<td class="py-2 pr-3 text-right tabular-nums font-semibold text-slate-800">' + (r.tps != null ? r.tps : '—') + '</td>' +
+                          '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + lat + '</td>' +
                           '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + r.n + '</td>' +
+                          '<td class="py-2 pr-3">' + status + '</td>' +
                           '<td class="py-2"><div class="h-2 rounded bg-slate-100 overflow-hidden">' +
                             '<div class="h-2 rounded bg-[#01A982]" style="width:' + pct + '%"></div></div></td>' +
                         '</tr>';
                     }).join('') +
                     '</tbody></table>' +
-                    '<p class="text-[11px] text-slate-400 mt-3">Averaged over completed generations only, so idle time between ' +
-                    'calls is excluded. Min/max show whether a model is steady or erratic — an average alone hides that.</p></div>';
+                    '<p class="text-[11px] text-slate-400 mt-3">Median tok/s and wire latency over completed generations only, so idle time ' +
+                    'between calls is excluded. Endpoints are keyed by provider · model — the same model on two boxes is two rows.</p></div>';
             }).catch(() => { /* keep the last render on a transient fetch failure */ });
         }
         if (document.getElementById('tps-body')) { refreshTpsPanel(); setInterval(refreshTpsPanel, 10000); }
@@ -4733,9 +4753,10 @@
                         opt.value = m.name;
                         const base = m.details ? `${m.name} — ${m.details}` : m.name;
                         opt.textContent = base + bfTpsLabel(m.name);
-                        const _r = (window._bfTps || {})[m.name];
-                        if (_r) opt.title = `${_r.avg} tok/s average over ${_r.n} generation(s) ` +
-                                            `(min ${_r.min}, max ${_r.max}) measured on this box`;
+                        const _r = (window._bfTpsByModel || {})[m.name];
+                        if (_r && _r.tps != null) opt.title = `${_r.tps} tok/s median over ${_r.n} generation(s)` +
+                                            (_r.latency_ms != null ? `, ~${Math.round(_r.latency_ms)} ms latency` : '') +
+                                            ` measured on this box`;
                         if (m.name === prevVal) { opt.selected = true; found = true; }
                         select.appendChild(opt);
                     });

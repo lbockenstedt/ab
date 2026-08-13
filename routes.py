@@ -627,6 +627,44 @@ def _hub_connection_diag():
         return {"available": False, "error": str(e)}
 
 
+def _endpoint_perf_rows(config):
+    """Per-endpoint perf + availability for the Diagnostics providers table and
+    the Settings "Model Performance" panel, keyed by ModelKey
+    (provider|base_url|model) rather than slot number — the picker ranks
+    endpoints, not slots, and the same model on two boxes is two rows. Sourced
+    from llm_perf.py's ModelKey-keyed snapshot (median tok/s + wire latency)
+    joined against the live candidate enumeration, so credit/rate/dead-model
+    exhaustion shows up as an explicit column instead of a silent skip. Never
+    raises — a stats field must never 500 the page."""
+    try:
+        import llm_client
+        cands = llm_client._enumerate_candidates(config)
+        perf = llm_client.get_llm_perf_snapshot()  # {(provider, base_url, model): {n, tps, latency_ms}}
+    except Exception:
+        return []
+    rows = []
+    for c in cands:
+        p = perf.get(c.get("key")) or {}
+        tps = p.get("tps")
+        latency = p.get("latency_ms")
+        rows.append({
+            "key": "|".join((c.get("provider") or "", c.get("base_url") or "", c.get("model") or "")),
+            "provider": c.get("provider"),
+            "model": c.get("model"),
+            "base_url": c.get("base_url"),
+            "tier": (c.get("caps") or {}).get("cost_tier"),
+            "n": p.get("n") or 0,
+            "tps": round(tps, 1) if tps is not None else None,
+            "latency_ms": round(latency, 1) if latency is not None else None,
+            "available": bool(c.get("available")),
+            "exhausted": not c.get("available"),
+            "exhausted_reason": c.get("unavailable_reason"),
+        })
+    # Fastest first; unmeasured endpoints sink to the bottom.
+    rows.sort(key=lambda r: (r["tps"] is None, -(r["tps"] or 0.0)))
+    return rows
+
+
 def _llm_tps_table():
     """Per-model generation throughput, fastest first.
 
@@ -750,50 +788,37 @@ def _system_stats():
         except Exception:
             pass
 
-    # LLM slots — provider/model + live online + cooldown, compact for the page.
+    # LLM endpoints — provider/model + availability + throughput, keyed by
+    # ModelKey (the picker ranks endpoints, not slots). Exhausted endpoints
+    # (credit/rate cooldown, dead model) stay visible with a reason rather
+    # than silently vanishing.
     try:
         cfg = load_config()
-        slots = []
-        # Includes the dedicated pools — log (5-6) and review (7-8) — so their
-        # health is visible alongside the code slots. A pool that is silently
-        # failing should not be invisible just because it serves one task family.
-        for n in _ALL_SLOTS:
-            provider, key, model, base_url = _get_provider_config(n, cfg)
-            cb = (state.get("provider_credit_cb") or {}).get(n) or {}
-            slots.append({
-                "slot": n,
-                "tier": "P1 (CPU)" if n == 1 else f"P{n} (external)",
-                "provider": provider,
-                "model": model,
-                "configured": _provider_configured(provider, key, model),
-                "online": state.get(f"provider_{n}_online", False),
-                "cooldown_active": bool(cb.get("active")),
-                "cooldown_remaining_min": cb.get("cooldown_remaining_min"),
-                "rpm": _get_provider_rpm(n, cfg),
-                "last_result": (state.get("provider_last_result") or {}).get(n),
-            })
+        perf_rows = _endpoint_perf_rows(cfg)
+        active_model = state.get("active_llm")
+        active_provider = state.get("active_llm_provider")
+        active_row = next(
+            (r for r in perf_rows
+             if r["model"] == active_model
+             and (active_provider is None or r["provider"] == active_provider)),
+            None,
+        )
         out["llm"] = {
-            "slots": slots,
+            "endpoints": perf_rows,
             "circuit_breaker": state.get("llm_circuit_breaker"),
-            "active_llm": state.get("active_llm"),
-            # Slot + provider alongside the model so the header can say
-            # "P1 · ollama · qwen2.5-coder:14b" instead of a bare model name.
-            "active_llm_slot": state.get("active_llm_slot"),
-            "active_llm_provider": state.get("active_llm_provider"),
+            "active_llm": active_model,
+            "active_llm_provider": active_provider,
             "active_llm_at": state.get("active_llm_at"),
             "daily_fixes_count": state.get("daily_fixes_count"),
-            # Rolling generation throughput for the model currently/last serving.
-            # Averaged over completed generations only (Ollama's eval_duration
-            # covers generation time), so it reads as "tok/s while busy" and is
-            # not diluted by idle time between calls.
-            "tps_avg": _llm_tps_avg(state.get("active_llm")),
-            "tps_samples": len((state.get("llm_tps") or {}).get(
-                str(state.get("active_llm") or ""), [])),
-            # EVERY model measured so far, fastest first — the point is comparing
-            # models against each other on this box, which a single active-model
-            # figure cannot answer. min/max come along because an average alone
-            # hides a model that is erratic rather than merely slower.
-            "tps_by_model": _llm_tps_table(),
+            # Rolling generation throughput for the endpoint currently/last
+            # serving, from the ModelKey-keyed perf snapshot (median tok/s over
+            # completed generations only, so idle time never dilutes it).
+            "tps_avg": (active_row or {}).get("tps"),
+            "tps_samples": (active_row or {}).get("n") or 0,
+            # EVERY configured endpoint, fastest first — the point is comparing
+            # endpoints against each other on this box, which a single
+            # active-endpoint figure cannot answer.
+            "perf_by_key": perf_rows,
         }
     except Exception:
         pass
@@ -920,22 +945,7 @@ async def diagnostics():
         except Exception:
             lkg_version = None
 
-    providers = []
-    for n in _ALL_SLOTS:
-        provider, key, model, _ = _get_provider_config(n, config)
-        cb = (state.get("provider_credit_cb") or {}).get(n) or {}
-        providers.append({
-            "n": n,
-            "provider": provider,
-            "model": model,
-            "configured": _provider_configured(provider, key, model),
-            "online": state.get(f"provider_{n}_online", False),
-            "cooldown_active": bool(cb.get("active")),
-            "cooldown_remaining_min": cb.get("cooldown_remaining_min"),
-            "cooldown_cause": cb.get("cause"),
-            "last_result": (state.get("provider_last_result") or {}).get(n),
-            "rpm": _get_provider_rpm(n, config),
-        })
+    providers = _endpoint_perf_rows(config)
 
     return {
         "versions": {
