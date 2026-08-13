@@ -1920,7 +1920,23 @@ def _qa_service_verify(repo_name, config, timeout=120):
                 summary = f"QA: {passed}/{total} passed"
                 if failed_names:
                     summary += f" — failed: {', '.join(failed_names[:5])}"
-                return status == "COMPLETED" and passed == total, summary
+                if status != "COMPLETED":
+                    # FAILED/IDLE never counts as a pass regardless of what
+                    # (possibly stale) `results` happens to hold.
+                    return False, summary or f"QA service ended in status {status!r} without completing"
+                if total == 0:
+                    # COMPLETED with zero results means nothing was actually
+                    # tested (module name mismatch, no test suite registered
+                    # for it, etc.) -- "0/0 passed" must NOT be treated as a
+                    # pass: `passed == total` is vacuously True for 0 == 0,
+                    # which previously let a fix that ran zero tests report
+                    # "Tests passed successfully" (see bugfixer PR #817: a
+                    # commit with an actual IndentationError was marked
+                    # verified). Returning None (inconclusive) lets the
+                    # caller fall back to local tests instead of rubber-
+                    # stamping an unverified fix.
+                    return None, f"QA service completed with 0 results for module {module!r} — treating as unverified"
+                return passed == total, summary
 
         return None, f"QA service timed out after {timeout}s"
     except Exception as e:
