@@ -169,7 +169,10 @@ def classify(issue_title, issue_body, config):
             title=issue_title or "", body=issue_body or "", fix_context=fix_context,
             boundaries=boundaries_block, skills=skills_block,
         )
-        raw = call_llm(prompt, system_prompt=_CLASSIFY_SYSTEM, task_kind="review",
+        from model_selection import LlmRequirements
+        reqs = LlmRequirements(complexity="small", needs_structured_output=True,
+                               min_context_tokens=len(prompt) // 4)
+        raw = call_llm(prompt, system_prompt=_CLASSIFY_SYSTEM, requirements=reqs,
                        json_schema=_CLASSIFY_JSON_SCHEMA)
         data = _robust_json_loads(raw)
         if not isinstance(data, dict):

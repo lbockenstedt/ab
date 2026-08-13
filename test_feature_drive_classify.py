@@ -183,6 +183,28 @@ def main():
     ok &= _check("confidence is normalized to 0.0-1.0",
                 abs(result["confidence"] - 0.92) < 1e-6)
 
+    # ── classify(): LLM Selection Redesign Phase 5 site #13 — requirements= wiring ──
+    captured = {}
+    ns["_config_holder"]["config"] = {"feature_boundaries": []}
+
+    def _capturing_call_llm(prompt, **kwargs):
+        captured["kwargs"] = kwargs
+        return '{"verdict": "build", "skill": "add-webui-control", "reason": "ok", "confidence": 0.8}'
+
+    ns["_llm_holder"]["fn"] = _capturing_call_llm
+    ns["classify"]("x", "y", ns["load_config"]())
+    kw = captured.get("kwargs", {})
+    ok &= _check("classify(): call_llm invoked with requirements= (not task_kind=)",
+                "requirements" in kw and "task_kind" not in kw)
+    reqs = kw.get("requirements")
+    ok &= _check("classify(): requirements.complexity == 'small'",
+                reqs is not None and reqs.complexity == "small")
+    ok &= _check("classify(): requirements.needs_structured_output is True",
+                reqs is not None and reqs.needs_structured_output is True)
+    ok &= _check("classify(): json_schema= is still passed through unchanged",
+                kw.get("json_schema") is not None)
+
+
     # ── classify(): LLM names a skill that isn't actually loaded ────────────
     ns["skills_loader"]._loaded = {}
     ns["_llm_holder"]["fn"] = lambda *a, **k: (
