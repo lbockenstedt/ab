@@ -413,28 +413,6 @@ def _mark_routed_model_dead(provider, model) -> None:
         _ROUTED_404.add(((provider or "").lower().strip(), model))
 
 
-def _slots_for_task(task_kind, config):
-    """Ordered provider slots that should serve *task_kind*.
-
-    Log tasks use the log pool (5-6) and review tasks the review pool (7-8),
-    when at least one slot in that pool is configured; otherwise they fall back
-    to the code pool, so an install that has not set up those providers behaves
-    exactly as before. Code tasks always use 1-4 and can never be routed into a
-    dedicated pool.
-    """
-    if task_kind in _LOG_TASK_KINDS:
-        pool = tuple(n for n in _LOG_SLOTS
-                     if _provider_configured(*_get_provider_config(n, config)[:3]))
-        if pool:
-            return pool
-    if task_kind in _REVIEW_TASK_KINDS:
-        pool = tuple(n for n in _REVIEW_SLOTS
-                     if _provider_configured(*_get_provider_config(n, config)[:3]))
-        if pool:
-            return pool
-    return _CODE_SLOTS
-
-
 def _get_provider_config(n, config):
     """Return (provider, api_key, model, base_url) for slot n.
 
@@ -477,28 +455,6 @@ def _get_provider_rpm(n, config):
             if e.get("id") == entry_id:
                 return int(e.get("rpm") or 0)
     return int(config.get(f"LLM_RPM_{n}") or 0)
-
-
-def _get_escalation_models(n, config):
-    """Ordered list of models the BUILDER escalates through ON slot n before the run
-    moves to the next slot — e.g. a CPU slot that ratchets 7b -> 14b -> 32b. Read
-    from the entry's ``escalation_models`` (comma-string or list); falls back to the
-    slot's single model. Returns at least one element (the model, or None = slot
-    default)."""
-    _p, _k, model, _u = _get_provider_config(n, config)
-    em = None
-    entry_id = (config.get("llm_slots") or {}).get(str(n))
-    if entry_id:
-        for e in (config.get("llm_entries") or []):
-            if e.get("id") == entry_id:
-                em = e.get("escalation_models")
-                break
-    lst = []
-    if isinstance(em, str):
-        lst = [x.strip() for x in em.split(",") if x.strip()]
-    elif isinstance(em, list):
-        lst = [str(x).strip() for x in em if str(x).strip()]
-    return lst or ([model] if model else [None])
 
 
 def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
@@ -888,50 +844,6 @@ def _provider_credit_cb_snapshot():
     return result
 
 
-_PROVIDER_RL_LOCK = threading.Lock()
-_PROVIDER_REQUEST_TIMES = {n: collections.deque() for n in _ALL_SLOTS}
-# Tracks when each provider slot last emitted an RPM-throttle log line.
-# Prevents duplicate log pairs when two threads throttle on the same provider.
-_PROVIDER_RPM_LAST_LOG: dict = {}
-
-def _provider_rate_limit_wait(n, rpm, provider_name):
-    """Block the calling thread until provider n is under its RPM limit.
-
-    Uses a 60-second sliding window. rpm=0 means unlimited.
-    Releases the lock before sleeping so other providers are never blocked.
-    """
-    if not rpm or rpm <= 0:
-        return
-    window = 60.0
-    while True:
-        now = time.time()
-        with _PROVIDER_RL_LOCK:
-            dq = _PROVIDER_REQUEST_TIMES[n]
-            while dq and now - dq[0] >= window:
-                dq.popleft()
-            if len(dq) < rpm:
-                dq.append(now)
-                return  # Under limit — stamp and proceed.
-            wait_s = dq[0] + window - now
-        # Sleep outside the lock so other providers are not blocked.
-        # Log at most once per 30 s per provider so concurrent threads sharing
-        # the same slot don't each emit their own "waiting Xs" line.
-        if wait_s > 0:
-            now2 = time.time()
-            last_log = _PROVIDER_RPM_LAST_LOG.get(n, 0)
-            if now2 - last_log >= 30:
-                logger.info(
-                    f"Provider {n} ({provider_name}) RPM throttle ({rpm}/min) — "
-                    f"waiting {wait_s:.1f}s before next request."
-                )
-                _PROVIDER_RPM_LAST_LOG[n] = now2
-            elapsed = 0.0
-            chunk = 5.0
-            while elapsed < wait_s:
-                time.sleep(min(chunk, wait_s - elapsed))
-                elapsed += chunk
-
-
 def _any_provider_available(config):
     """Return (available: bool, soonest_free_s: float).
 
@@ -1086,16 +998,6 @@ def _llm_cb_snapshot():
             "last_trip_time": _LLM_CB["last_trip_time"],
         }
 
-#: Per-slot exclusivity: a single provider slot (1-8) may run only ONE job at a
-#: time. call_llm's failover loop try-acquires (non-blocking) each slot in a
-#: pool in turn — a busy slot is skipped in favor of the next one, exactly like
-#: an existing not_configured/cooldown skip, just for a different reason. A
-#: PINNED slot (force_provider — no failover partner to fall back to) instead
-#: blocking-acquires: waiting on that one slot IS the "queued" behavior there.
-#: Held for the full duration of _try_provider (including its own internal
-#: retries), not per HTTP attempt, so "busy" means "this slot has a job on it
-#: right now," not "one HTTP request is in flight."
-_SLOT_LOCKS = {n: threading.Lock() for n in _ALL_SLOTS}
 
 #: Per-CATEGORY (CODE / LOG / REVIEW) concurrency cap, sized from
 #: LLM_MAX_CONCURRENT — this used to be ONE global limiter; now each pool gets
@@ -1105,16 +1007,6 @@ _SLOT_LOCKS = {n: threading.Lock() for n in _ALL_SLOTS}
 #: free slot — call_llm's busy-wait-and-rescan loop covers that case.
 _CATEGORY_SEMAPHORES = {}
 _CATEGORY_SEM_LOCK = threading.Lock()
-
-
-def _pool_category_name(pool):
-    """CODE / LOG / REVIEW label for a slot tuple from _slots_for_task — the key
-    the per-category semaphore is keyed on."""
-    if pool is _LOG_SLOTS:
-        return "LOG"
-    if pool is _REVIEW_SLOTS:
-        return "REVIEW"
-    return "CODE"
 
 
 def _get_category_semaphore(pool_name):
@@ -1579,7 +1471,6 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
     if tools:
         return {"text": text, "tool_calls": tool_calls or None}
     return text
-
 
 
 #: How many recent generations feed the rolling tok/s average, per model. Small
@@ -2383,38 +2274,25 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
 
 
 # Shared LLM Utility
-def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None, task_kind=None,
+def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=None, messages=None, tools=None, stream=None,
              repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None, profile="readonly",
              extra_add_dirs=None, requirements=None, batch_kind=None, batch_context=None, used_model_out=None):
-    """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
+    """Generic LLM caller. Routing is capability/cost-aware: the required
+    ``requirements=<LlmRequirements>`` describes what the call needs (complexity,
+    context size, structured output, restrict/exclude, escalation) and
+    model_selection.select_model picks the cheapest capable candidate, with
+    per-endpoint credit / per-model rate-limit awareness and identity-keyed
+    failover — see _call_llm_with_requirements.
 
-    Routing priority:
-      requirements=<LlmRequirements>  — the new capability/cost-aware picker
-                                        (model_selection.select_model). When
-                                        given, EVERY OTHER routing param below
-                                        (force_provider/force_cloud/task_kind/
-                                        model_override/url_override) is
-                                        ignored — see _call_llm_with_requirements.
-                                        This is the LLM Selection Redesign's
-                                        migration path: task_kind-based
-                                        routing below is unchanged and still
-                                        used by every call site that hasn't
-                                        converted yet.
       batch_kind=/batch_context=      — only consulted when requirements.batch_ok
                                         is True (see _call_llm_with_requirements):
                                         routes the call through batch.py's
                                         fire-and-forget enqueue()/
                                         register_handler(batch_kind, fn) path
                                         instead of a synchronous call, returning
-                                        "" immediately. Ignored entirely when
-                                        requirements= is not given.
-      used_model_out=                — only consulted when requirements= is
-                                        given (see _call_llm_with_requirements);
-                                        ignored otherwise.
-      force_provider=N (int 1/2/3/4) — use that provider slot directly (no failover).
-      force_cloud=True               — start at Provider 2, fall to 1 then 3 then 4.
-      force_cloud=False              — Provider 1 only, no failover.
-      force_cloud=None (default)     — Provider 1 → 2 → 3 → 4 in order.
+                                        "" immediately.
+      used_model_out=                — when given a dict, is populated in place
+                                        with the winning candidate's identity.
 
     ``repo_checkout_path``/``json_schema``/``enable_native_tools``/``search_model``
     are claude_cli-specific (see _request_claude_cli's docstring) — every other
@@ -2422,436 +2300,21 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     (an OpenAI-style function-schema every OTHER provider consumes; claude_cli
     has no such API param).
 
-    Providers in a 1-hour credit-exhaustion cooldown are skipped automatically.
-
-    Concurrency: LLM_MAX_CONCURRENT gates PER CATEGORY (CODE/LOG/REVIEW), not
-    globally — this call blocks (queues) on that category's semaphore for the
-    duration of the whole invocation. Within the category, each provider SLOT
-    may run only one job at a time: the failover loop skips a busy slot in
-    favor of the next one in the pool (same as an existing not_configured/
-    cooldown skip); a pinned force_provider slot has no failover partner, so it
-    blocking-waits on that one slot instead. If every slot in the pool is busy
-    at once, the call waits and re-scans rather than failing — see the busy-
-    wait loop below (bounded so a leaked lock can't hang forever).
+    Endpoints in a 1-hour credit-exhaustion cooldown are skipped automatically.
+    Concurrency: LLM_MAX_CONCURRENT gates per selection category; a per-model
+    lock serialises jobs against the same model.
     """
     config = load_config()
-    if requirements is not None:
-        return _call_llm_with_requirements(requirements, prompt, system_prompt, messages, tools, stream, task_id,
-                                           config, repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                           enable_native_tools=enable_native_tools, search_model=search_model,
-                                           profile=profile, extra_add_dirs=extra_add_dirs,
-                                           batch_kind=batch_kind, batch_context=batch_context,
-                                           used_model_out=used_model_out)
-    # Which pool serves this call: code slots (1-4), the dedicated log slots
-    # (5-6), or the review slots (7-8). A task only reaches a dedicated pool when
-    # one of its slots is actually configured, so existing installs are
-    # unaffected.
-    _pool = _slots_for_task(task_kind, config)
-    _pool_name = _pool_category_name(_pool)
-    _cfg_rows = {n: _get_provider_config(n, config) for n in _pool}
-    if model_override:
-        _cfg_rows = {n: (pv, k, model_override, u) for n, (pv, k, _m, u) in _cfg_rows.items()}
-    if url_override:
-        _cfg_rows = {n: (pv, k, m, url_override) for n, (pv, k, m, _u) in _cfg_rows.items()}
-    if _pool is not _CODE_SLOTS:
-        _pool_name = "LOG" if task_kind in _LOG_TASK_KINDS else "REVIEW"
-        logger.debug("task_kind=%s routed to the %s provider pool %s",
-                     task_kind, _pool_name, list(_pool))
-
-    effective_stream = True if stream is None else bool(stream)
-
-    if messages is None:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
-
-    # Build an ordered list of providers to try.
-    all_providers = [
-        (n, _cfg_rows[n][0], _cfg_rows[n][2], _cfg_rows[n][1], _cfg_rows[n][3])
-        for n in _pool
-    ]
-
-    # Smart router: for a given task_kind, swap each CLOUD slot's model for the
-    # task-appropriate tier (small/medium/large) so we don't burn a large model on
-    # a summary. Local slots (ollama/lmstudio/claude_cli) keep their configured
-    # model. An explicit model_override still wins (routing skipped).
-    # Slots whose model the router REPLACED: {slot_n: configured_model}. The router's
-    # tier defaults are best-effort model IDs that "depend on your API access"
-    # (model_router docstring) — an ID the account cannot reach 404s on EVERY
-    # small-tier task, silently disabling an otherwise working cloud slot for most
-    # of BugFixer's work. Keeping the configured model lets a 404 fall back to it
-    # instead of abandoning the provider.
-    _routed_from = {}
-    if task_kind and not model_override:
-        try:
-            from model_router import pick_model as _router_pick
-            _routed = []
-            for (n, prov, mdl, k, u) in all_providers:
-                picked = _router_pick(task_kind, prov, config, default=mdl)
-                # Do not route to a model this provider cannot serve. Two
-                # checks, cheapest first:
-                #   1. already 404'd this process — skip, no call needed.
-                #   2. not in the provider's LIVE model list — skip before the
-                #      first 404 rather than learning from it. The router's tier
-                #      defaults are hardcoded guesses at model IDs; whether an
-                #      account can reach them is account-specific, so asking the
-                #      provider is the only reliable answer.
-                # A lookup that fails returns None and is treated as "unknown",
-                # which routes as before and falls back on 404 as it always did.
-                if picked and picked != mdl:
-                    if _routed_model_dead(prov, picked):
-                        picked = mdl
-                    else:
-                        _avail = _live_models(prov, k, u)
-                        if _avail is not None and picked not in _avail:
-                            logger.info(
-                                "Provider %s (%s): routed model %r is not in this "
-                                "account's model list — keeping configured %r.",
-                                n, prov, picked, mdl)
-                            _mark_routed_model_dead(prov, picked)
-                            picked = mdl
-                if picked and mdl and picked != mdl:
-                    _routed_from[n] = mdl
-                _routed.append((n, prov, picked, k, u))
-            all_providers = _routed
-        except Exception as _re:
-            logger.debug(f"model_router skipped for task_kind={task_kind!r}: {_re}")
-
-    def _try_provider(n, provider, model, key, url):
-        # claude_cli (Claude Code session), LM Studio and SELF-HOSTED Ollama
-        # (local/remote servers) need no API key — only a model must be configured
-        # for them to be usable, so a no-key local ollama is genuinely tried in
-        # failover. Ollama Cloud is the exception: it authenticates with a Bearer
-        # key, so a key-less cloud slot is skipped as not_configured here instead
-        # of being tried and 401ing every call.
-        if _provider_is_nokey(provider):
-            if not model:
-                return None, "not_configured"
-        elif not (key and model):
-            return None, "not_configured"
-        rem = _provider_credit_cb_remaining(n, provider)
-        if rem > 0:
-            with _PROVIDER_CREDIT_CB_LOCK:
-                cause = _PROVIDER_CREDIT_CB[n].get("cause", "credit")
-            label = "rate-limit" if cause == "rate_limit" else "credit"
-            trip_reason = (_PROVIDER_CREDIT_CB[n].get("reason") or "")[:120]
-            logger.warning(
-                f"Provider {n} ({provider}) skipped — {label} cooldown "
-                f"{rem/60:.0f} min remaining"
-                + (f" (tripped by: {trip_reason})" if trip_reason else "") + "."
-            )
-            return None, "credit_cooldown"
-        try:
-            # Honour per-provider RPM cap (0 = unlimited).
-            _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
-            # Which model is running RIGHT NOW. The bare model name alone is
-            # ambiguous once several slots can serve the same family (and once the
-            # router substitutes a model the operator never configured), so record
-            # the slot + provider with it — the header renders "P1 · ollama · <model>"
-            # so "which AI is actually answering" needs no log-reading.
-            main.state["active_llm"] = model
-            main.state["active_llm_slot"] = n
-            main.state["active_llm_provider"] = provider
-            main.state["active_llm_at"] = time.time()
-            # Batch routing: for a CLOUD, non-streaming, non-tool call, route through
-            # the batch API when batch_enabled (async, ~50% off; slower — acceptable
-            # for this side-project). Falls back to the sync call if batch returns
-            # None (submit/poll failed, timed out, or no API key).
-            _bp = (provider or "").lower().strip()
-            result = None
-            if (config.get("batch_enabled", False) and _bp in ("anthropic", "google", "gemini")
-                    and not tools and not effective_stream):
-                try:
-                    from batch import run_batched as _run_batched
-                    _sys = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
-                    _usr = "\n".join(m.get("content", "") for m in messages
-                                     if m.get("role") == "user" and isinstance(m.get("content"), str))
-                    result = _run_batched(_bp, model, _sys, _usr, config)
-                except Exception as _bex:  # noqa: BLE001
-                    logger.debug(f"batch route skipped: {_bex}")
-                    result = None
-            if result is None:
-                result = _call_provider_timed(provider, model, key, url, messages, tools, effective_stream, task_id, config,
-                                              repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                              enable_native_tools=enable_native_tools, search_model=search_model,
-                                              profile=profile, extra_add_dirs=extra_add_dirs)
-            # Successful call: clear any rate-limit cooldown for this provider.
-            with _PROVIDER_CREDIT_CB_LOCK:
-                if _PROVIDER_CREDIT_CB[n].get("cause") == "rate_limit":
-                    _PROVIDER_CREDIT_CB[n].update({"cooldown_until": 0.0, "tripped_at": None, "reason": None, "cause": None})
-            return result, None
-        except LLMCreditExhausted as ce:
-            _provider_credit_cb_trip(n, str(ce), cause="credit", provider=provider)
-            main.state["provider_credit_cb"] = _provider_credit_cb_snapshot()
-            return None, "credit_exhausted"
-        except Exception as e:
-            err_str = str(e)
-            # claude_cli session limit — authenticated but per-session quota hit.
-            # Apply a short rate-limit cooldown (15 min) and fall through so the
-            # next provider is tried without logging a spurious auth warning.
-            if err_str.startswith("claude_cli_rate_limit:"):
-                reason = err_str[len("claude_cli_rate_limit:"):]
-                logger.warning(f"Provider {n} ({provider}) session limit — applying 15-min cooldown. ({reason})")
-                _provider_credit_cb_trip(n, reason, duration_s=900, cause="rate_limit", provider=provider)
-                main.state["provider_credit_cb"] = _provider_credit_cb_snapshot()
-                return None, "rate_limited"
-            # Some models (e.g. certain Groq models) reject tool-calling with a 400.
-            # Retry the same provider without tools before giving up.
-            if tools and "400" in err_str and "tool" in err_str.lower() and "not supported" in err_str.lower():
-                logger.warning(
-                    f"Provider {n} ({provider}) model does not support tool calling — retrying without tools."
-                )
-                try:
-                    _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
-                    result = _call_provider_timed(provider, model, key, url, messages, None, effective_stream, task_id, config,
-                                                  repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                                  enable_native_tools=enable_native_tools, search_model=search_model,
-                                                  profile=profile, extra_add_dirs=extra_add_dirs)
-                    return result, None
-                except Exception as retry_e:
-                    err_str = str(retry_e)
-                    e = retry_e
-            # A ROUTED model that 404s = the router's tier default is not reachable
-            # on this account (e.g. google/small defaulting to a gemini id the key
-            # cannot use). The slot itself is fine, so retry once on its CONFIGURED
-            # model rather than burning the provider and failing over. Logged at
-            # warning with the fix, since the durable answer is a router_models
-            # override in config.
-            if ("404" in err_str and n in _routed_from
-                    and _routed_from[n] and _routed_from[n] != model):
-                _cfg_model = _routed_from[n]
-                _mark_routed_model_dead(provider, model)
-                logger.warning(
-                    "Provider %s (%s) routed model %r is unavailable (404) — retrying on the "
-                    "configured model %r. Set config[\"router_models\"][%r][<tier>] to a model "
-                    "this account can reach to avoid the wasted call.",
-                    n, provider, model, _cfg_model, (provider or "").lower().strip())
-                try:
-                    _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
-                    main.state["active_llm"] = _cfg_model
-                    main.state["active_llm_slot"] = n
-                    main.state["active_llm_provider"] = provider
-                    main.state["active_llm_at"] = time.time()
-                    result = _call_provider_timed(provider, _cfg_model, key, url, messages, tools,
-                                                  effective_stream, task_id, config,
-                                                  repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                                  enable_native_tools=enable_native_tools, search_model=search_model,
-                                                  profile=profile, extra_add_dirs=extra_add_dirs)
-                    return result, None
-                except Exception as retry_e:  # noqa: BLE001 — fall through to normal handling
-                    err_str = str(retry_e)
-                    e = retry_e
-            # If the provider exhausted all retries with 429s, apply a short
-            # rate-limit cooldown so it stops poisoning the global circuit breaker.
-            if "429" in err_str:
-                _provider_credit_cb_trip(n, f"Rate-limited: {err_str[:120]}",
-                                         duration_s=_RATELIMIT_COOLDOWN_SECONDS,
-                                         cause="rate_limit", provider=provider)
-                main.state["provider_credit_cb"] = _provider_credit_cb_snapshot()
-                return None, "rate_limited"
-            # Ollama returns 404 from /api/chat when the requested model isn't pulled.
-            # Replace the opaque "404 Not Found for .../api/chat" with the actual fix.
-            if _is_ollama(provider) and "404" in err_str:
-                body = ""
-                _r = getattr(e, "response", None)
-                if _r is not None:
-                    try:
-                        body = (_r.text or "")[:200]
-                    except Exception:
-                        body = ""
-                if "/api/chat" in err_str or ("model" in body.lower() and "not found" in body.lower()):
-                    msg = (f"Ollama model '{model}' not pulled on {_ollama_base_url(provider, url)} "
-                           f"— pull it (Settings → Local LLM Setup, or `ollama pull {model}`).")
-                    return None, msg
-            # 401/403 from an Ollama endpoint: the server answered and REFUSED. The
-            # bare status line ("403 Client Error: Forbidden for url: .../api/chat")
-            # says nothing actionable, while the body carries Ollama's actual reason.
-            # Matters most for Ollama Cloud, where /api/tags can answer happily (so
-            # the connectivity probe reports the slot online) while /api/chat is
-            # forbidden — key not entitled, model not on the plan, and so on.
-            if _is_ollama(provider) and ("403" in err_str or "401" in err_str):
-                body = ""
-                _r = getattr(e, "response", None)
-                if _r is not None:
-                    try:
-                        body = " ".join((_r.text or "").split())[:300]
-                    except Exception:  # noqa: BLE001
-                        body = ""
-                _code = "403" if "403" in err_str else "401"
-                msg = (f"Ollama endpoint {_ollama_base_url(provider, url)} refused the request "
-                       f"({_code}) for model '{model}'"
-                       + (f": {body}" if body else " (no reason in the response body)")
-                       + ". The API key is being sent but is not accepted for this model/endpoint "
-                         "— check the key and that the account can reach this model.")
-                return None, msg
-            return None, e
-
-    # LLM_MAX_CONCURRENT gates PER CATEGORY now: held for this whole call so at
-    # most N calls are simultaneously routing/running in this pool, independent
-    # of the other two pools' traffic.
-    _cat_sem = _get_category_semaphore(_pool_name)
-    _cat_sem.acquire()
-    try:
-        try:
-            # Bind for the except handler on EVERY path: the force_provider (reviewer)
-            # and force_cloud=False paths return/raise before the failover loop assigns
-            # last_err, so without this the handler hit "cannot access local variable
-            # 'last_err'" (UnboundLocalError), which crashed reviewers and masked the
-            # real provider error.
-            last_err = None
-            # Order follows the ACTIVE pool. force_cloud's "second slot first" swap is a
-            # code-pool convention (P1 local, P2 cloud) and is meaningless for the log
-            # pool, so it only applies there. Computed BEFORE the pinned-slot branches
-            # below — force_cloud=False references order[0] and previously did so
-            # before `order` was ever assigned (UnboundLocalError on that path).
-            order = list(_pool)
-            if force_cloud is True and _pool is _CODE_SLOTS and len(order) > 1:
-                order[0], order[1] = order[1], order[0]
-            pmap = {n: row for n, *row in [(r[0], *r[1:]) for r in all_providers]}
-
-            # force_provider=N: use that slot only, no failover. A pinned slot has no
-            # failover partner, so "busy" means WAIT for it (blocking acquire), not
-            # skip to a different slot.
-            if force_provider in _ALL_SLOTS:
-                # Look up by SLOT NUMBER. This indexed all_providers[n-1], which is only
-                # correct while the pool is exactly (1,2,3,4) — with the log pool (5,6)
-                # that arithmetic runs off the end or picks the wrong provider.
-                _row = next((r for r in all_providers if r[0] == force_provider), None)
-                if _row is None:
-                    # Pinned a slot outside the pool serving this task (e.g. a code slot
-                    # for a log call). Honour the pin explicitly rather than silently
-                    # using someone else.
-                    _p, _k, _m, _u = _get_provider_config(force_provider, config)
-                    _row = (force_provider, _p, _m, _k, _u)
-                _lock = _SLOT_LOCKS[force_provider]
-                _lock.acquire()
-                try:
-                    result, err = _try_provider(*_row)
-                finally:
-                    _lock.release()
-                if result is not None:
-                    _record_provider_result(force_provider, "ok")
-                    return result
-                _record_provider_result(force_provider, err if isinstance(err, str) else "failed", err)
-                raise Exception(f"Provider {force_provider} unavailable: {err}")
-
-            # force_cloud=False: Provider 1 only, no failover — same pinned-slot
-            # reasoning as force_provider above.
-            if force_cloud is False:
-                _first = order[0] if order else 1
-                _r0 = next((r for r in all_providers if r[0] == _first), None)
-                if _r0 is None:
-                    _p, _k, _m, _u = _get_provider_config(_first, config)
-                    _r0 = (_first, _p, _m, _k, _u)
-                _lock = _SLOT_LOCKS[_first]
-                _lock.acquire()
-                try:
-                    result, err = _try_provider(*_r0)
-                finally:
-                    _lock.release()
-                if result is not None:
-                    _record_provider_result(_first, "ok")
-                    return result
-                _record_provider_result(_first, err if isinstance(err, str) else "failed", err)
-                raise Exception(f"Provider {_first} (force-only) unavailable: {err}")
-
-            # General failover: try each slot in the pool in turn. A slot already
-            # running another job is SKIPPED (non-blocking try-lock) in favor of the
-            # next one — the same idea as the not_configured/cooldown skips below,
-            # just a different reason. If EVERY slot in the pool is busy on a given
-            # pass, wait briefly and re-scan instead of declaring failure — bounded
-            # so a stuck lock (a bug, not normal operation) can't hang a caller
-            # forever.
-            _wait_deadline = time.time() + max(60, 2 * int(config.get("LLM_TIMEOUT", 900)))
-            while True:
-                # Two independent signals per pass, NOT the same thing:
-                #   any_real_attempt — a CONFIGURED slot was tried and produced a
-                #     definitive outcome (success/failure/cooldown/empty). This is
-                #     the existing terminal condition: if the pass produced one of
-                #     these, we're done retrying regardless of what else happened.
-                #   any_busy — a slot was skipped because another job holds it
-                #     RIGHT NOW. A not_configured slot is neither: it does not
-                #     exist for this call, so it must not count as "genuinely
-                #     tried" (that would let 3 unconfigured slots + 1 busy real
-                #     slot masquerade as "the pool is exhausted" instead of
-                #     "the one real slot is just busy — wait for it").
-                any_real_attempt = False
-                any_busy = False
-                for n in order:
-                    provider, model, key, url = pmap[n]
-                    _lock = _SLOT_LOCKS[n]
-                    if not _lock.acquire(blocking=False):
-                        logger.debug(f"Provider {n} ({provider}) slot busy — trying next slot in the {_pool_name} pool.")
-                        any_busy = True
-                        continue
-                    try:
-                        result, err = _try_provider(n, provider, model, key, url)
-                    finally:
-                        _lock.release()
-                    if result is not None and str(result).strip():
-                        _record_provider_result(n, "ok")
-                        return result
-                    if result is not None and not str(result).strip():
-                        # Provider returned an empty body — treat as a transient failure so we
-                        # fall through to the next provider instead of passing "" to the caller.
-                        logger.warning(f"Provider {n} ({provider}) returned empty response. Trying next provider...")
-                        _record_provider_result(n, "empty_response", "provider returned an empty body")
-                        last_err = "empty_response"
-                        any_real_attempt = True
-                        continue
-                    if err == "not_configured":
-                        # Previously a silent continue — log it so a skipped provider (e.g. a
-                        # no-key LM Studio with no model, or a missing API key) is visible.
-                        # Does NOT set any_real_attempt: this slot doesn't exist for this
-                        # call, distinct from one that exists but is busy or failed.
-                        reason = "no model configured" if not model else "no API key configured"
-                        logger.info(f"Provider {n} ({provider}) skipped — not configured ({reason}).")
-                        _record_provider_result(n, "not_configured", reason)
-                        continue
-                    if err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
-                        _record_provider_result(n, err, "cooldown active")
-                        last_err = err
-                        any_real_attempt = True
-                        continue
-                    # Real failure — log and keep trying remaining providers.
-                    logger.warning(f"Provider {n} ({provider}) failed: {err}. Trying next provider...")
-                    _record_provider_result(n, "failed", err)
-                    last_err = err
-                    any_real_attempt = True
-                if any_real_attempt or not any_busy:
-                    # Either something definitive happened (fall through to the
-                    # terminal "all failed" raise below), or NOTHING in the pool
-                    # is even busy (every slot is simply unconfigured) — waiting
-                    # would never help, so fail the same way an all-unconfigured
-                    # pool always has.
-                    break
-                # At least one slot is a real, configured slot that's just busy
-                # right now (and nothing else in the pool produced a definitive
-                # outcome) — wait for it rather than declaring failure.
-                if time.time() >= _wait_deadline:
-                    raise Exception(
-                        f"All slots in the {_pool_name} pool are busy and none freed "
-                        f"within the wait budget — a slot lock may be stuck."
-                    )
-                logger.info(f"All {_pool_name} pool slots busy — waiting for one to free…")
-                time.sleep(random.uniform(0.5, 1.5))
-
-            raise Exception(
-                f"All configured LLM providers failed or are unavailable. "
-                f"Last status: {last_err}. Check billing and API keys in settings."
-            )
-        except Exception as e:
-            # A cooldown/rate-limit on every provider is an EXPECTED transient state
-            # (credits will refill / the window resets), not a fault to alarm on — log
-            # it as a warning. A genuine failure (bad key, real error) stays ERROR.
-            if last_err in ("credit_cooldown", "credit_exhausted", "rate_limited"):
-                logger.warning(f"LLM request deferred — all providers cooling down: {e}")
-            else:
-                logger.error(f"LLM request failed after all providers: {e}")
-            raise
-    finally:
-        _cat_sem.release()
+    if requirements is None:
+        raise ValueError("call_llm requires a requirements=LlmRequirements (the "
+                         "capability/cost-aware picker path); legacy slot routing "
+                         "was retired in the LLM Selection Redesign.")
+    return _call_llm_with_requirements(requirements, prompt, system_prompt, messages, tools, stream, task_id,
+                                       config, repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                       enable_native_tools=enable_native_tools, search_model=search_model,
+                                       profile=profile, extra_add_dirs=extra_add_dirs,
+                                       batch_kind=batch_kind, batch_context=batch_context,
+                                       used_model_out=used_model_out)
 
 
 def is_llm_cooldown_error(e) -> bool:
@@ -2924,7 +2387,6 @@ def parse_log_verdict(text):
     verdict = m.group(1).lower() if m else "none"
     cleaned = _LOG_VERDICT_RE.sub("", s, count=1).strip() if m else s.strip()
     return verdict, cleaned
-
 
 
 def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
