@@ -476,7 +476,7 @@ def _render_state_panel(review):
                 "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
                 ""]
     verdict = str(review.get("verdict") or "—")
-    crit = str(review.get("critique") or "").strip()
+    crit = review.get("critique", "").strip()
     try:
         from fix_engine import _norm_confidence
     except Exception:  # noqa: BLE001
@@ -511,7 +511,7 @@ def _render_panel(review):
                 "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
                 ""]
     verdict = str(review.get("verdict") or "—")
-    crit = str(review.get("critique") or "").strip()
+    crit = review.get("critique", "").strip()
     # Normalize defensively: review_fix already clamps to 0.0-1.0, but this value
     # crosses a module boundary and rendering "confidence 9500%" on a public PR
     # comment is the most visible way the scale bug can surface. Imported lazily —
