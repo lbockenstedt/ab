@@ -679,26 +679,6 @@ def _confirm_fix_marker(descriptor):
     )
 
 
-def _chat_force_provider(config):
-    """Which provider slot the Chat uses. Pinning a dedicated fast slot (e.g. the
-    M4 GPU) keeps chat snappy independent of the fix-builder ladder — whose P1 may
-    be a slow CPU. Returns an int 1-4, or None to use the normal failover chain.
-
-    UNUSED as of the LLM Selection Redesign Phase 5 (all 4 chat.py call sites
-    now use requirements=LlmRequirements(latency_sensitive=True) instead of
-    force_provider=_chat_force_provider(config) — see the plan's retirement
-    map: "latency_sensitive=True does the ranking work" replaces the hard
-    chat_slot pin, until Phase 7's chat_pin gives operators an explicit
-    ModelKey pin if they want one). Left defined (not deleted) since Phase 6
-    is deletion-only, done after every Phase 5 site converts."""
-    v = config.get("chat_slot")
-    try:
-        v = int(v)
-    except (TypeError, ValueError):
-        return None
-    return v if v in (1, 2, 3, 4) else None
-
-
 _TOOLCALL_TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 
 

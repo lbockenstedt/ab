@@ -325,6 +325,15 @@ from app_state import *  # noqa: E402,F401,F403
 write_startup_stamp()
 
 try:
+    import llm_migrate
+    _cfg, _migrated = llm_migrate.migrate(load_config())
+    if _migrated:
+        save_config(_cfg)
+        logger.info("LLM config migrated to schema v2 and persisted.")
+except Exception as me:
+    logger.warning(f"LLM config migration skipped (non-fatal): {me}")
+
+try:
     validate_llm_config_on_startup()
 except Exception as ve:
     logger.warning(f"Startup LLM validation failed (non-fatal): {ve}")
