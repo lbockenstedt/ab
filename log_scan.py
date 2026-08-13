@@ -263,6 +263,10 @@ def analyze_logs_for_errors(logs):
     authoritative key for routing an issue to the correct repository — see
     resolve_module_repo(). The LLM may also suggest a 'repo', but it is treated
     as a hint only and is not required.
+
+    Routed via requirements=LlmRequirements(complexity="small",
+    needs_structured_output=True) (LLM Selection Redesign Phase 5, site #14)
+    rather than the old task_kind="log_review" pool pin.
     """
     if not logs: return []
 
@@ -280,7 +284,11 @@ def analyze_logs_for_errors(logs):
         "The 'module' MUST be copied verbatim from the source log entry's module field."
     )
     try:
-        res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.", task_kind="log_review")
+        from model_selection import LlmRequirements
+        reqs = LlmRequirements(complexity="small", needs_structured_output=True,
+                               min_context_tokens=len(prompt) // 4)
+        res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.",
+                       requirements=reqs)
         import re
         match = re.search(r'\[.*\]', res, re.DOTALL)
         if match:
