@@ -2259,13 +2259,29 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
 
 def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, stream, task_id, config,
                                 repo_checkout_path=None, json_schema=None, enable_native_tools=False,
-                                search_model=None, profile="readonly", extra_add_dirs=None):
+                                search_model=None, profile="readonly", extra_add_dirs=None,
+                                batch_kind=None, batch_context=None):
     """call_llm's requirements= branch. select_model() ranks every candidate;
     on failure the caller walks the Selection's `alternatives` (the rest of
     that ranked list — no re-invoking the picker mid-failover), then falls
     to the rule-based safety floor, before giving up. Fully independent of
-    the slot/task_kind machinery in call_llm proper."""
+    the slot/task_kind machinery in call_llm proper.
+
+    batch_kind/batch_context: consumed here (not by model_selection —
+    LlmRequirements.batch_ok is deliberately just a hint field, per its own
+    docstring) when reqs.batch_ok is set. Routes the winning candidate through
+    batch.py's fire-and-forget enqueue()/register_handler() path instead of a
+    synchronous call — the caller gets "" back immediately (same contract as
+    "the LLM yielded nothing"), and whatever register_handler(batch_kind, fn)
+    was registered runs later, whenever the batch worker's poll picks up the
+    result (minutes to hours). Only pr_summary (the one call site with
+    batch_ok=True today) is genuinely fire-and-forget/discardable; every other
+    batch-ELIGIBLE call site stays synchronous on purpose (parking a worker
+    thread for up to batch_sync_max_wait_s, today's OTHER batch integration in
+    _try_provider via batch.run_batched, is a real availability cost most
+    callers can't absorb)."""
     effective_stream = True if stream is None else bool(stream)
+    _explicit_messages = messages is not None
     if messages is None:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -2300,6 +2316,25 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
     if not chain:
         raise Exception("No LLM providers configured")
 
+    # Fire-and-forget batch routing (see docstring). Only attempted when the
+    # caller both asked for it (reqs.batch_ok) and gave us somewhere to send
+    # the eventual result (batch_kind) — never for a bare messages=[...] call,
+    # since batch.enqueue needs a plain system/user string pair, not an
+    # arbitrary message list.
+    if (reqs.batch_ok and batch_kind and not _explicit_messages and not tools
+            and config.get("batch_enabled", False)):
+        top = chain[0]
+        if (top.get("provider") or "").lower().strip() in ("anthropic", "google", "gemini"):
+            try:
+                from batch import enqueue as _batch_enqueue
+                _batch_enqueue(batch_kind, batch_context or {}, top["provider"], top["model"],
+                               system_prompt, prompt)
+                logger.info("call_llm: queued %s via batch API (provider=%s model=%s)",
+                           batch_kind, top["provider"], top["model"])
+                return ""
+            except Exception as e:  # noqa: BLE001
+                logger.debug("call_llm: batch enqueue failed (%s) — falling back to a synchronous call", e)
+
     kwargs = dict(repo_checkout_path=repo_checkout_path, json_schema=json_schema,
                   enable_native_tools=enable_native_tools, search_model=search_model,
                   profile=profile, extra_add_dirs=extra_add_dirs)
@@ -2321,7 +2356,7 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None, task_kind=None,
              repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None, profile="readonly",
-             extra_add_dirs=None, requirements=None):
+             extra_add_dirs=None, requirements=None, batch_kind=None, batch_context=None):
     """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
 
     Routing priority:
@@ -2336,6 +2371,14 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                                         routing below is unchanged and still
                                         used by every call site that hasn't
                                         converted yet.
+      batch_kind=/batch_context=      — only consulted when requirements.batch_ok
+                                        is True (see _call_llm_with_requirements):
+                                        routes the call through batch.py's
+                                        fire-and-forget enqueue()/
+                                        register_handler(batch_kind, fn) path
+                                        instead of a synchronous call, returning
+                                        "" immediately. Ignored entirely when
+                                        requirements= is not given.
       force_provider=N (int 1/2/3/4) — use that provider slot directly (no failover).
       force_cloud=True               — start at Provider 2, fall to 1 then 3 then 4.
       force_cloud=False              — Provider 1 only, no failover.
@@ -2364,7 +2407,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
         return _call_llm_with_requirements(requirements, prompt, system_prompt, messages, tools, stream, task_id,
                                            config, repo_checkout_path=repo_checkout_path, json_schema=json_schema,
                                            enable_native_tools=enable_native_tools, search_model=search_model,
-                                           profile=profile, extra_add_dirs=extra_add_dirs)
+                                           profile=profile, extra_add_dirs=extra_add_dirs,
+                                           batch_kind=batch_kind, batch_context=batch_context)
     # Which pool serves this call: code slots (1-4), the dedicated log slots
     # (5-6), or the review slots (7-8). A task only reaches a dedicated pool when
     # one of its slots is actually configured, so existing installs are
