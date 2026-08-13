@@ -1923,6 +1923,11 @@ async def settings_page(request: Request):
     # should promote to curated. See Phase 7c / plan §8.
     import model_registry as _registry
     _curated = config.get("model_registry") or _registry.DEFAULT_MODEL_RULES
+    # Lazy top-up: an existing config frozen before ollama2 (or any local/free
+    # provider) gained a DEFAULT rule gets the missing rule appended here so it
+    # shows in the JSON editor + preview and round-trips into persistence on the
+    # next save. Idempotent, append-only — never reorders the operator's rules.
+    _curated, _mr_added = _registry.upgrade_local_free_rules(_curated)
     _registry_rules_json = json.dumps(_curated, indent=2)
     _auto = config.get("model_registry_auto") or []
     _registry_preview = (
@@ -2309,6 +2314,14 @@ async def save_settings(request: Request):
             config_data["model_registry"] = _mr_parsed
         except Exception as _mre:
             _save_warnings.append(f"model_registry JSON was invalid ({_mre}) — kept the previous rules")
+        else:
+            # Belt-and-suspenders top-up on save too: if a save arrives whose
+            # rules predate a local/free default (e.g. ollama2), append the
+            # missing local/free rule so the persisted list is complete.
+            # Idempotent + append-only. Mirrors the settings_page read top-up.
+            import model_registry as _registry_save
+            config_data["model_registry"], _ = _registry_save.upgrade_local_free_rules(
+                config_data["model_registry"])
 
     config_data["feature_build_timeout_s"] = int(data.get("feature_build_timeout_s")) \
         if str(data.get("feature_build_timeout_s") or "").strip().isdigit() else 1800

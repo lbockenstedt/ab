@@ -174,6 +174,55 @@ def main():
     ok &= _check("a model dict missing 'name' is skipped, not a crash",
                 reg.local_models_for_preload([{"size": 1}], {}) == [])
 
+    # --- upgrade_local_free_rules (idempotent local/free top-up) -------------
+
+    # A config frozen before ollama2 got a default rule: has ollama-local but
+    # no ollama2 rule at all.
+    frozen = [dict(r) for r in reg.DEFAULT_MODEL_RULES if r["id"] != "ollama2-local"]
+    n_before = len(frozen)
+    topped, added = reg.upgrade_local_free_rules(frozen)
+    ok &= _check("top-up appends exactly one ollama2 free rule when it's missing",
+                added == ["ollama2-local"])
+    o2 = [r for r in topped if r.get("provider") == "ollama2"]
+    ok &= _check("the appended ollama2 rule is cost_tier free, match '*'",
+                len(o2) == 1 and o2[0]["cost_tier"] == "free" and o2[0]["match"] == "*")
+    ok &= _check("top-up only appends (length grows by exactly one)",
+                len(topped) == n_before + 1)
+    ok &= _check("top-up never mutates the caller's list in place",
+                len(frozen) == n_before)
+    ok &= _check("existing rules are preserved in order (append-only, no reorder)",
+                [r["id"] for r in topped[:n_before]] == [r["id"] for r in frozen])
+
+    # Idempotent: a second run adds nothing.
+    topped2, added2 = reg.upgrade_local_free_rules(topped)
+    ok &= _check("top-up is idempotent — a second run adds nothing",
+                added2 == [] and len(topped2) == len(topped))
+
+    # Conservative: an operator who already has their OWN ollama2 rule (even a
+    # non-default id / non-free tier) is left untouched — provider present.
+    custom = [{"id": "my-gpu", "provider": "ollama2", "match": "*", "cost_tier": "cheap",
+               "max_complexity": "large", "enabled": True}]
+    topped3, added3 = reg.upgrade_local_free_rules(custom)
+    ok &= _check("top-up never overrides an operator's existing ollama2 rule",
+                "ollama2-local" not in added3 and topped3[0]["cost_tier"] == "cheap")
+
+    # A brand-new config (no ollama2, and no ollama either) gets both local/free
+    # providers, but a paid provider like anthropic is never injected.
+    empty_top, empty_added = reg.upgrade_local_free_rules([])
+    ok &= _check("a paid provider (anthropic) is never injected by the local-free top-up",
+                all(r["provider"] != "anthropic" for r in empty_top))
+    ok &= _check("all injected top-up rules are cost_tier free",
+                all(r["cost_tier"] == "free" for r in empty_top))
+
+    # The shipped DEFAULT_MODEL_RULES already contains ollama2 → top-up is a no-op.
+    default_top, default_added = reg.upgrade_local_free_rules(reg.DEFAULT_MODEL_RULES)
+    ok &= _check("DEFAULT_MODEL_RULES already ships ollama2 — top-up is a no-op on it",
+                default_added == [])
+
+    # And resolve() now classifies an ollama2 model as free by default.
+    ok &= _check("resolve() classifies an ollama2 model as free with the shipped defaults",
+                reg.resolve("ollama2", "qwen2.5-coder:14b", {})["cost_tier"] == "free")
+
     print()
     if ok:
         print("ALL CASES PASSED")

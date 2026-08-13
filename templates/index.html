@@ -1210,6 +1210,57 @@
                             <textarea id="model_registry_json" name="model_registry_json" rows="10" spellcheck="false" class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">{{ registry_rules_json }}</textarea>
                             <p class="text-[11px] text-slate-400 mt-1">A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span>, <span class="font-mono">match</span> (a glob). Invalid JSON is rejected on save and the previous value is kept.</p>
 
+                            <!-- Opt-in friendly per-rule editor ("editable if the user chooses") -->
+                            <div class="mt-2">
+                                <a href="javascript:void(0)" onclick="toggleRegistryEditor()" id="registry-editor-toggle" class="text-xs font-bold text-[#01A982] hover:underline">✎ Edit rules visually</a>
+                            </div>
+                            <div id="registry-editor" hidden class="mt-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
+                                <p class="text-xs text-slate-500 mb-3">Set a provider's cost tier without hand-editing JSON. This writes into the JSON above; click <b>Save</b> below to persist. Rules are matched (and updated) by <span class="font-mono">provider</span> + <span class="font-mono">match</span>.</p>
+                                <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                    <div class="space-y-1">
+                                        <label class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Provider</label>
+                                        <select id="registry-form-provider" class="w-full p-2 rounded border border-slate-300 text-xs font-mono outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <option value="google">google</option>
+                                            <option value="anthropic">anthropic</option>
+                                            <option value="openai">openai</option>
+                                            <option value="groq">groq</option>
+                                            <option value="openrouter">openrouter</option>
+                                            <option value="ollama">ollama</option>
+                                            <option value="ollama2">ollama2</option>
+                                            <option value="ollama_cloud">ollama_cloud</option>
+                                            <option value="lmstudio">lmstudio</option>
+                                            <option value="claude_cli">claude_cli</option>
+                                            <option value="copilot">copilot</option>
+                                        </select>
+                                    </div>
+                                    <div class="space-y-1">
+                                        <label class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Match glob</label>
+                                        <input id="registry-form-match" type="text" value="*" spellcheck="false" class="w-full p-2 rounded border border-slate-300 text-xs font-mono outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    </div>
+                                    <div class="space-y-1">
+                                        <label class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Cost tier</label>
+                                        <select id="registry-form-cost" class="w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <option value="free">free</option>
+                                            <option value="cheap">cheap</option>
+                                            <option value="frontier">frontier</option>
+                                        </select>
+                                    </div>
+                                    <div class="space-y-1">
+                                        <label class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Max complexity</label>
+                                        <select id="registry-form-complexity" class="w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <option value="trivial">trivial</option>
+                                            <option value="small">small</option>
+                                            <option value="medium" selected>medium</option>
+                                            <option value="large">large</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="flex flex-wrap items-center gap-2 mt-3">
+                                    <button type="button" onclick="registryUpsertRule()" title="Add a new rule (or update the existing rule with this provider + match glob) in the JSON above" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]">Add / update rule</button>
+                                    <button type="button" onclick="registrySetLocalFree()" title="Upsert free-tier rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Set local providers (ollama, ollama2, lmstudio) to free</button>
+                                </div>
+                            </div>
+
                             <!-- Effective merged registry (read-only) -->
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mt-4 mb-2">Effective registry (preview)</p>
                             <div class="overflow-x-auto border border-slate-200 rounded-lg">
@@ -4430,6 +4481,79 @@
             ta.value = JSON.stringify(rules, null, 2);
             ta.scrollIntoView({behavior: 'smooth', block: 'center'});
             showToast('Rule added to the editor — review and Save.', 'success');
+        }
+
+        function toggleRegistryEditor() {
+            // Opt-in ("editable if the user chooses") reveal of the friendly
+            // per-rule editor. Does not touch the JSON textarea itself.
+            const box = document.getElementById('registry-editor');
+            const link = document.getElementById('registry-editor-toggle');
+            if (!box) return;
+            const showing = box.hasAttribute('hidden');
+            if (showing) { box.removeAttribute('hidden'); if (link) link.textContent = '✕ Hide visual editor'; }
+            else { box.setAttribute('hidden', ''); if (link) link.textContent = '✎ Edit rules visually'; }
+        }
+
+        function _registryUpsert(rules, provider, match, costTier, maxComplexity) {
+            // Upsert one rule into the parsed `rules` array, matched on
+            // provider+match. Returns 'added' or 'updated'. Reuses the same
+            // capability defaults as promoteRegistryStub so preview columns
+            // aren't blank for a brand-new rule. Pure array mutation — the
+            // caller writes it back to the textarea.
+            provider = (provider || '').trim();
+            match = (match || '*').trim() || '*';
+            const existing = rules.find(r => r && (r.provider || '') === provider && (r.match || '') === match);
+            if (existing) {
+                existing.cost_tier = costTier;
+                existing.max_complexity = maxComplexity;
+                return 'updated';
+            }
+            const safeId = (provider + '-' + match).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+            let id = safeId || provider;
+            let n = 2;
+            while (rules.some(r => r && r.id === id)) { id = safeId + '-' + n; n++; }
+            rules.push({
+                id: id, provider: provider, match: match, label: provider + ' ' + match,
+                cost_tier: costTier, max_complexity: maxComplexity, context_window: 32768,
+                supports_tools: false, native_agentic_tools: false, supports_mutating_agent: false,
+                supports_structured_output: false, supports_batch: false, supports_streaming: true,
+                enabled: true, notes: 'added via visual editor — review capabilities'
+            });
+            return 'added';
+        }
+
+        function registryUpsertRule() {
+            // Read the visual-editor form, upsert one rule into the JSON
+            // textarea, and let the operator Save. Never submits on its own.
+            const ta = document.getElementById('model_registry_json');
+            if (!ta) return;
+            let rules;
+            try { rules = JSON.parse(ta.value || '[]'); }
+            catch (e) { showToast('Registry JSON is invalid — fix it before editing visually.', 'error'); return; }
+            if (!Array.isArray(rules)) rules = [];
+            const provider = (document.getElementById('registry-form-provider') || {}).value || '';
+            const match = (document.getElementById('registry-form-match') || {}).value || '*';
+            const cost = (document.getElementById('registry-form-cost') || {}).value || 'free';
+            const complexity = (document.getElementById('registry-form-complexity') || {}).value || 'medium';
+            const what = _registryUpsert(rules, provider, match, cost, complexity);
+            ta.value = JSON.stringify(rules, null, 2);
+            showToast('Rule ' + what + ' for ' + provider + ' (' + match + ') — review and Save.', 'success');
+        }
+
+        function registrySetLocalFree() {
+            // One-click convenience: set the self-hosted providers (ollama =
+            // typical CPU box, ollama2 = 2nd/GPU box, lmstudio) to cost tier
+            // free with a "*" match. Directly answers "set my CPU and GPU to
+            // free". Upserts into the JSON textarea; operator clicks Save.
+            const ta = document.getElementById('model_registry_json');
+            if (!ta) return;
+            let rules;
+            try { rules = JSON.parse(ta.value || '[]'); }
+            catch (e) { showToast('Registry JSON is invalid — fix it before editing visually.', 'error'); return; }
+            if (!Array.isArray(rules)) rules = [];
+            ['ollama', 'ollama2', 'lmstudio'].forEach(p => _registryUpsert(rules, p, '*', 'free', 'medium'));
+            ta.value = JSON.stringify(rules, null, 2);
+            showToast('Local providers (ollama, ollama2, lmstudio) set to free — review and Save.', 'success');
         }
         // ── End LLM Vault UI ──────────────────────────────────────────────────
 
