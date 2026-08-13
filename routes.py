@@ -2620,9 +2620,40 @@ def _close_issue_on_github(issue_id: str):
     return True, f"Issue #{issue_num} labelled '{label_name}' (was already closed)."
 
 
+_DISMISS_MAX_RETRIES = 5
+
+
+def _close_issue_on_github_with_retry(issue_id: str):
+    """Runs _close_issue_on_github with up to _DISMISS_MAX_RETRIES attempts
+    (short exponential backoff between tries), recording the outcome in
+    state["dismiss_jobs"][issue_id] so the WebUI can poll for completion and
+    toast the result instead of blocking the request on the GitHub round trip."""
+    global state
+    last_err = None
+    for attempt in range(1, _DISMISS_MAX_RETRIES + 1):
+        try:
+            ok, msg = _close_issue_on_github(issue_id)
+            state["dismiss_jobs"][issue_id] = {"status": "done", "message": msg}
+            logger.info(f"Dismissed issue {issue_id} on GitHub (attempt {attempt}): {msg}")
+            return
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Dismiss {issue_id}: GitHub close attempt {attempt}/{_DISMISS_MAX_RETRIES} failed: {e}")
+            if attempt < _DISMISS_MAX_RETRIES:
+                time.sleep(min(2 ** (attempt - 1), 10))
+    state["dismiss_jobs"][issue_id] = {
+        "status": "error",
+        "message": f"GitHub close failed after {_DISMISS_MAX_RETRIES} attempts: {last_err}",
+    }
+    logger.error(f"Dismiss {issue_id}: gave up after {_DISMISS_MAX_RETRIES} attempts: {last_err}")
+
+
 @router.post("/delete_issue")
 async def delete_issue(request: Request):
-    """Remove an issue from local history and close it on GitHub."""
+    """Remove an issue from local history immediately; close it on GitHub in a
+    background thread (retried up to _DISMISS_MAX_RETRIES times) so the button
+    doesn't block on the GitHub round trip. The WebUI polls /dismiss_status/
+    to toast the real outcome once the background job finishes."""
     global state
     data = await request.json()
     issue_id = data.get("issue_id", "").strip()
@@ -2644,22 +2675,27 @@ async def delete_issue(request: Request):
         save_processed(processed)
         recompute_issue_counters(processed)
 
-    # Close the issue on GitHub. Offloaded like the pr_review actions —
-    # _close_issue_on_github is synchronous (PyGithub), so calling it inline
-    # here blocked the whole app for however long GitHub took to respond.
-    github_msg = ""
-    try:
-        _ok, github_msg = await asyncio.get_event_loop().run_in_executor(
-            None, _close_issue_on_github, issue_id)
-        logger.info(f"Dismissed issue {issue_id}: removed from history, {github_msg}")
-    except Exception as e:
-        github_msg = f"GitHub close failed: {e}"
-        logger.warning(f"Could not close {issue_id} on GitHub: {e}")
+    state["dismiss_jobs"][issue_id] = {"status": "pending", "message": ""}
+    threading.Thread(target=_close_issue_on_github_with_retry, args=(issue_id,), daemon=True).start()
 
     return {
         "status": "success",
-        "message": f"{'Removed from history. ' if was_in_history else ''}{github_msg}",
+        "message": f"{'Removed from history. ' if was_in_history else ''}Closing on GitHub in the background…",
+        "issue_id": issue_id,
+        "background": True,
     }
+
+
+@router.get("/dismiss_status")
+async def dismiss_status(issue_id: str):
+    """Polled by the WebUI after a Dismiss click to learn when the background
+    GitHub close (with retry) has finished, so it can toast the real result.
+    issue_id (e.g. "owner/repo:123") comes in as a query param, not a path
+    segment, since it contains a "/" that path routing would mangle."""
+    job = state["dismiss_jobs"].get(issue_id)
+    if job is None:
+        return {"status": "unknown"}
+    return job
 
 
 @router.post("/delete_all_issues")
@@ -3220,6 +3256,7 @@ __all__ = [
     'local_llm_status',
     'clear_history',
     'delete_issue',
+    'dismiss_status',
     'delete_all_issues',
     'resolve_issue',
     'update_now',

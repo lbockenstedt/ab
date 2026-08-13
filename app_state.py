@@ -229,6 +229,12 @@ state = {
     # happens to run again.
     "llm_tps": load_llm_tps(),
     "active_tasks": {}, "pr_reviews": load_pr_reviews(), "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
+    # Background-dismiss job status, keyed by issue_id, polled by the WebUI so the
+    # Dismiss button can return instantly and toast once the GitHub retry loop
+    # (delete_issue in routes.py) actually finishes. {"status": "pending"|"done"|
+    # "error", "message": str}. Entries are transient — overwritten per dismiss,
+    # never persisted to disk.
+    "dismiss_jobs": {},
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "pending_verification_count": pending_verification_count,
     "non_actionable_count": non_actionable_count,

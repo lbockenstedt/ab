@@ -493,7 +493,7 @@
                                 <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap">Retry</button>
                                 <button onclick="reopenIssue('{{ issue_id }}')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
                                 <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
-                                <button onclick="deleteIssue('{{ issue_id }}')" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                                 <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                             </div>
                         </td>
@@ -4371,7 +4371,7 @@
         }
         // ── End Manage Ollama Models ───────────────────────────────────────────
 
-        async function deleteIssue(issueId) {
+        async function deleteIssue(issueId, btn) {
             try {
                 const resp = await fetch('/delete_issue', {
                     method: 'POST',
@@ -4379,12 +4379,47 @@
                     body: JSON.stringify({ issue_id: issueId })
                 });
                 const data = await resp.json();
-                if (data.status === 'success') {
-                    reloadWithToast(data.message || 'Issue dismissed.', 'success');
-                } else {
+                if (data.status !== 'success') {
                     showToast(data.message || 'Error dismissing issue.', 'error');
+                    return;
+                }
+                if (data.background) {
+                    // Already removed from local history server-side — drop the row
+                    // now instead of waiting on a reload. The GitHub close (retried
+                    // up to 5x) keeps running server-side; poll it and toast the
+                    // real outcome once it lands, without blocking this click.
+                    const row = btn && btn.closest ? btn.closest('tr') : null;
+                    if (row) row.remove();
+                    showToast(data.message || 'Dismissing…', 'info');
+                    pollDismissStatus(issueId);
+                } else {
+                    reloadWithToast(data.message || 'Issue dismissed.', 'success');
                 }
             } catch (e) { showToast('Request failed: ' + e, 'error'); }
+        }
+
+        // Polls /dismiss_status?issue_id=<issueId> after a background Dismiss
+        // until the GitHub close (routes.py's retry loop, up to 5 attempts)
+        // finishes, then toasts the real outcome.
+        function pollDismissStatus(issueId, elapsedMs) {
+            elapsedMs = elapsedMs || 0;
+            const timeoutMs = 120000;
+            setTimeout(async () => {
+                try {
+                    const r = await fetch('/dismiss_status?issue_id=' + encodeURIComponent(issueId));
+                    const job = await r.json();
+                    if (job.status === 'done') {
+                        showToast(job.message || 'Dismissed on GitHub.', 'success');
+                        return;
+                    }
+                    if (job.status === 'error') {
+                        showToast(job.message || 'Failed to close on GitHub.', 'error');
+                        return;
+                    }
+                } catch (e) { /* transient — keep polling until timeout */ }
+                if (elapsedMs + 2000 >= timeoutMs) return;
+                pollDismissStatus(issueId, elapsedMs + 2000);
+            }, 2000);
         }
 
         async function reopenIssue(issueId) {

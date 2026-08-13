@@ -64,9 +64,16 @@ def _load_ns():
     def _close_issue_on_github(issue_id):
         return True, f"stub-closed {issue_id}"
 
+    def _close_issue_on_github_with_retry(issue_id):
+        # delete_issue backgrounds the real GitHub retry loop (routes.py) in a
+        # thread; this test is about counter bookkeeping, not retry behavior,
+        # so the stub just mirrors the single-attempt outcome synchronously.
+        ok, msg = _close_issue_on_github(issue_id)
+        state["dismiss_jobs"][issue_id] = {"status": "done" if ok else "error", "message": msg}
+
     state = {"processed": {}, "success_count": 0, "failure_count": 0,
               "closed_count": 0, "pending_verification_count": 0,
-              "non_actionable_count": 0}
+              "non_actionable_count": 0, "dismiss_jobs": {}}
 
     class _FakeRequest:
         def __init__(self, payload):
@@ -83,6 +90,7 @@ def _load_ns():
         "logger": _NoLog(), "state": state,
         "load_processed": load_processed, "save_processed": save_processed,
         "_close_issue_on_github": _close_issue_on_github,
+        "_close_issue_on_github_with_retry": _close_issue_on_github_with_retry,
         "threading": threading, "JSONResponse": _JSONResponse,
         "Request": _FakeRequest,
     }
