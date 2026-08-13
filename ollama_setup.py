@@ -278,24 +278,18 @@ def _gb(b):
     return f"{b / 1024 ** 3:.1f}GB"
 
 
-def run_local_llm_setup(model, num_ctx, cores, slot=4):
+def run_local_llm_setup(model, num_ctx, cores):
     """Background pipeline for the one-click local (CPU-only) LLM setup.
 
     Stages: install Ollama → ensure service → pull model → create context-tuned
-    derived model → write systemd override + restart → configure the chosen
-    provider slot → verify. Each stage is idempotent. Progress is streamed via
+    derived model → write systemd override + restart → register the model as an
+    enabled endpoint → verify. Each stage is idempotent. Progress is streamed via
     _llm_setup_log() into state['active_tasks']['LocalLLMSetup'].
 
-    slot: which BugFixer provider slot (1-4) to assign the local model to. The
-    caller's choice is honored; falls back to 4 only if it's missing/invalid.
+    The model is added as an enabled llm_entries endpoint (no slot to pick) —
+    routing is capability/cost-aware over the enabled endpoint set now.
     """
     task_id = "LocalLLMSetup"
-    try:
-        slot = int(slot)
-    except (TypeError, ValueError):
-        slot = 4
-    if slot not in (1, 2, 3, 4):
-        slot = 4
     update_task_state(task_id, "Local LLM Setup", action="start")
     base_url = OLLAMA_BASE_URL
     derived_tag = model
@@ -461,8 +455,8 @@ def run_local_llm_setup(model, num_ctx, cores, slot=4):
             )
         _llm_setup_log("✓ systemd override confirmed (read-only)")
 
-        # ---- Stage 6: configure the chosen BugFixer provider slot ----
-        _llm_setup_log(f"▶ Stage 6/7 — Configuring BugFixer provider slot {slot} (P{slot})…")
+        # ---- Stage 6: register the model as an enabled endpoint ----
+        _llm_setup_log("▶ Stage 6/7 — Registering the local model as an enabled endpoint…")
         config = load_config()
         config.setdefault("llm_credentials", {})["ollama"] = {"api_key": "", "base_url": base_url}
         entries = config.setdefault("llm_entries", [])
@@ -474,25 +468,26 @@ def run_local_llm_setup(model, num_ctx, cores, slot=4):
                 "provider": "ollama",
                 "model": derived_tag,
                 "rpm": 0,
+                "enabled": True,
             }
             entries.append(entry)
         else:
             entry["label"] = "Local Ollama (CPU)"
             entry["model"] = derived_tag
-        config.setdefault("llm_slots", {})[str(slot)] = entry["id"]
+            entry["enabled"] = True
         save_config(config)
-        _llm_setup_log(f"✓ Slot {slot} → {entry['label']} / {derived_tag}")
+        _llm_setup_log(f"✓ Endpoint enabled → {entry['label']} / {derived_tag}")
 
         # ---- Stage 7: verify ----
         _llm_setup_log("▶ Stage 7/7 — Verifying Ollama responds with the model…")
         names = _ollama_tags(base_url)
         if derived_tag in names:
             _llm_setup_log(f"✓ Verified — {len(names)} model(s) available, {derived_tag} present")
-            _llm_setup_log(f"\n✅ Setup complete. Slot 4 = {derived_tag} @ {base_url}")
+            _llm_setup_log(f"\n✅ Setup complete. Enabled endpoint {derived_tag} @ {base_url}")
             summary = {"state": "complete", "model": derived_tag, "base_url": base_url, "message": "Setup complete"}
         else:
-            _llm_setup_log(f"⚠ Verify: {derived_tag} not yet in ollama list ({len(names)} models); slot 4 still configured.")
-            _llm_setup_log(f"\n✅ Setup complete with a warning. Slot 4 = {derived_tag} @ {base_url}")
+            _llm_setup_log(f"⚠ Verify: {derived_tag} not yet in ollama list ({len(names)} models); endpoint still configured.")
+            _llm_setup_log(f"\n✅ Setup complete with a warning. Enabled endpoint {derived_tag} @ {base_url}")
             summary = {"state": "warning", "model": derived_tag, "base_url": base_url, "message": "Configured but model not yet listed"}
     except Exception as e:
         logger.exception("Local LLM setup failed")

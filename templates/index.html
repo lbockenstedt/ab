@@ -1109,7 +1109,10 @@
                                     <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <input type="text" id="new-entry-baseurl" placeholder="Base URL (optional — e.g. http://gpu-box:11434)" title="Per-entry endpoint. Overrides the shared credential — lets 3 ollama entries target local CPU / LAN GPU / cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <input type="text" id="new-entry-apikey" placeholder="API key (optional — overrides shared)" title="Per-entry key. Set only for a cloud endpoint that needs one." class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <input type="text" id="new-entry-escalation" placeholder="Ratchet models (optional — 7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every model installed on this ollama endpoint. Blank = just the model above." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <label class="col-span-2 md:col-span-1 flex items-center gap-2 p-2 text-sm text-slate-600" title="Enabled endpoints are ranked by the capability/cost picker for every call. Disable to keep the credential configured but exclude it from routing.">
+                                        <input type="checkbox" id="new-entry-enabled" checked class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+                                        Enabled (available to the picker)
+                                    </label>
                                 </div>
                                 <div class="flex gap-2">
                                     <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs btn-primary rounded font-bold">Add</button>
@@ -1123,9 +1126,13 @@
                                 <div class="bg-slate-50 border border-slate-200 rounded-lg text-sm" id="entry-row-{{ entry.id }}">
                                     <!-- Summary row -->
                                     <div class="flex items-center gap-2 p-2" id="entry-view-{{ entry.id }}">
-                                        <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}</span>
+                                        <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}{% if entry.enabled == False %} <span class="text-[10px] bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded align-middle">disabled</span>{% endif %}</span>
                                         <span class="text-xs text-slate-400">{{ entry.provider }} / {{ entry.model }}</span>
                                         {% if entry.rpm %}<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{{ entry.rpm }} RPM</span>{% endif %}
+                                        <label class="flex items-center gap-1 text-[11px] text-slate-500" title="Enabled endpoints are ranked by the picker for every call.">
+                                            <input type="checkbox" onchange="toggleEntryEnabled('{{ entry.id }}', this.checked)" {{ 'checked' if entry.enabled != False else '' }} class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+                                            on
+                                        </label>
                                         <button type="button" onclick="editEntry('{{ entry.id }}')" class="text-slate-400 hover:text-slate-700 text-xs px-1" title="Edit">✏</button>
                                         <button type="button" onclick="deleteEntry('{{ entry.id }}')" class="text-red-400 hover:text-red-600 text-xs font-bold px-1">✕</button>
                                     </div>
@@ -1152,7 +1159,6 @@
                                             <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-baseurl-{{ entry.id }}" value="{{ entry.base_url or '' }}" placeholder="Base URL (e.g. http://localhost:11434)" title="Per-entry endpoint. Overrides the shared credential — set localhost for a local CPU ollama, a LAN IP for a GPU box, or https://ollama.com for cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-apikey-{{ entry.id }}" value="" data-touched="0" oninput="this.dataset.touched='1'" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if entry.has_key else 'API key (optional — overrides shared)' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <input type="text" id="edit-escalation-{{ entry.id }}" value="{{ entry.escalation_models or '' }}" placeholder="Ratchet models (7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every installed model on this endpoint." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         </div>
                                         <div class="flex gap-2">
                                             <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs btn-primary rounded font-bold">Save</button>
@@ -1166,80 +1172,51 @@
                             </div>
                         </div>
 
-                        <!-- Step C: Slot Assignment -->
+                        <!-- Step C: Model Registry (capability & cost rules) -->
                         <div class="mb-6">
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 3 — Code Slots (P1 → P2 → P3 → P4 failover order — fixes, reviews, triage)</p>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {% for slot_n, slot_label, slot_color in [
-                                    (1, 'P1 — Primary', 'text-[#01A982]'),
-                                    (2, 'P2 — First Failover', 'text-indigo-500'),
-                                    (3, 'P3 — Second Failover', 'text-purple-500'),
-                                    (4, 'P4 — Third Failover', 'text-orange-500')
-                                ] %}
-                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
-                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="">— Not configured —</option>
-                                        {% for entry in settings.llm_entries or [] %}
-                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
-                                            {{ entry.label or entry.model }} ({{ entry.provider }})
-                                        </option>
-                                        {% endfor %}
-                                    </select>
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3 — Model Registry (capability &amp; cost rules)</p>
+                            <p class="text-xs text-slate-400 mb-3">Routing is capability/cost-aware now — the 8 fixed provider slots are gone. Each <b>enabled</b> endpoint above is ranked per call by the rules here: which model can do how hard a job, at what cost tier, with which capabilities. Edit the curated rules as JSON (most-specific <span class="font-mono">match</span> wins). A save from any tab round-trips this unchanged.</p>
+                            {% if registry_unclassified %}
+                            <div class="mb-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+                                <b>{{ registry_unclassified|length }} unclassified model(s)</b> were auto-discovered but match no curated rule (cost tier <span class="font-mono">unknown</span> — admitted only as a last resort). Promote each to a curated rule to control how it is used:
+                                <div class="mt-2 flex flex-wrap gap-2">
+                                    {% for u in registry_unclassified %}
+                                    <button type="button" onclick="promoteRegistryStub('{{ u.provider }}', '{{ u.model }}')" class="px-2 py-1 rounded bg-white border border-amber-300 hover:bg-amber-100 font-mono text-[11px]">+ {{ u.provider }} / {{ u.model }}</button>
+                                    {% endfor %}
                                 </div>
-                                {% endfor %}
                             </div>
-                        </div>
-                        <!-- Step C2: dedicated LOG pool. Reading noisy operational text is a
-                             different job from writing a patch, so these slots are used ONLY
-                             for log analysis and are never pulled into code work. -->
-                        <div class="mb-6">
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3b — Log Slots (P5 → P6 — log analysis only)</p>
-                            <p class="text-xs text-slate-400 mb-3">Used <b>only</b> for log analysis and hub log review, so you can pick a model suited to reading operational text rather than writing patches. These are never used for fixes or code review. Leave both unset to fall back to the code slots (previous behaviour).</p>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {% for slot_n, slot_label, slot_color in [
-                                    (5, 'P5 — Log Primary', 'text-sky-500'),
-                                    (6, 'P6 — Log Failover', 'text-teal-500')
-                                ] %}
-                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
-                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="">— Not configured —</option>
-                                        {% for entry in settings.llm_entries or [] %}
-                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
-                                            {{ entry.label or entry.model }} ({{ entry.provider }})
-                                        </option>
-                                        {% endfor %}
-                                    </select>
-                                </div>
-                                {% endfor %}
-                            </div>
-                        </div>
+                            {% endif %}
+                            <textarea id="model_registry_json" name="model_registry_json" rows="10" spellcheck="false" class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">{{ registry_rules_json }}</textarea>
+                            <p class="text-[11px] text-slate-400 mt-1">A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span>, <span class="font-mono">match</span> (a glob). Invalid JSON is rejected on save and the previous value is kept.</p>
 
-                        <!-- Step C3: dedicated REVIEW pool. Judging a fix is worth the strongest
-                             model available, but a strong model on a code slot also gets spent
-                             on triage and file identification. Its own pool makes it
-                             structurally unreachable from that work. -->
-                        <div class="mb-6">
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3c — Review Slots (P7 → P8 — fix review and PR confidence only)</p>
-                            <p class="text-xs text-slate-400 mb-3">Used <b>only</b> to judge a generated fix and assess PR confidence — never for building, triage, file identification or PR summaries. Put your strongest models here without paying for them on minor work. Leave unset to review on the code slots as before. These are never used for fixes or code review. Leave both unset to fall back to the code slots (previous behaviour).</p>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {% for slot_n, slot_label, slot_color in [
-                                    (7, 'P7 — Review Primary', 'text-rose-500'),
-                                    (8, 'P8 — Review Failover', 'text-amber-500')
-                                ] %}
-                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
-                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="">— Not configured —</option>
-                                        {% for entry in settings.llm_entries or [] %}
-                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
-                                            {{ entry.label or entry.model }} ({{ entry.provider }})
-                                        </option>
+                            <!-- Effective merged registry (read-only) -->
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mt-4 mb-2">Effective registry (preview)</p>
+                            <div class="overflow-x-auto border border-slate-200 rounded-lg">
+                                <table class="w-full text-xs">
+                                    <thead class="bg-slate-50 text-slate-500 uppercase"><tr>
+                                        <th class="px-2 py-1 text-left">Provider</th><th class="px-2 py-1 text-left">Match</th>
+                                        <th class="px-2 py-1 text-left">Cost</th><th class="px-2 py-1 text-left">Max</th>
+                                        <th class="px-2 py-1 text-right">Context</th><th class="px-2 py-1 text-center">Tools</th>
+                                        <th class="px-2 py-1 text-center">Agentic</th><th class="px-2 py-1 text-center">Struct</th>
+                                        <th class="px-2 py-1 text-center">Batch</th><th class="px-2 py-1 text-left">Source</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        {% for r in registry_preview %}
+                                        <tr class="border-t border-slate-100 {{ 'opacity-40' if r.enabled == False else '' }}">
+                                            <td class="px-2 py-1 text-slate-600">{{ r.provider }}</td>
+                                            <td class="px-2 py-1 font-mono text-slate-500">{{ r.match }}</td>
+                                            <td class="px-2 py-1">{{ r.cost_tier }}</td>
+                                            <td class="px-2 py-1">{{ r.max_complexity }}</td>
+                                            <td class="px-2 py-1 text-right">{{ r.context_window }}</td>
+                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_tools else '' }}</td>
+                                            <td class="px-2 py-1 text-center">{{ '✓' if r.native_agentic_tools else '' }}</td>
+                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_structured_output else '' }}</td>
+                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_batch else '' }}</td>
+                                            <td class="px-2 py-1"><span class="text-[10px] px-1.5 py-0.5 rounded {{ 'bg-emerald-100 text-emerald-700' if r.source == 'curated' else 'bg-slate-100 text-slate-500' }}">{{ r.source }}</span></td>
+                                        </tr>
                                         {% endfor %}
-                                    </select>
-                                </div>
-                                {% endfor %}
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
 
@@ -1287,15 +1264,10 @@
                                 <span class="text-xs text-slate-400">Detected {{ state.cpu_count }} cores.</span>
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Provider slot</label>
-                                <select id="local-llm-slot"
-                                        class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
-                                    <option value="1">P1</option>
-                                    <option value="2">P2</option>
-                                    <option value="3">P3</option>
-                                    <option value="4" selected>P4</option>
-                                </select>
-                                <span class="text-xs text-slate-400">Which slot to assign this model to.</span>
+                                <label class="text-sm font-medium text-slate-600">Availability</label>
+                                <div class="w-full p-2 rounded-lg border border-slate-200 text-xs text-slate-500 bg-slate-50">
+                                    Added as an <b>enabled</b> endpoint and ranked by the Model Registry — no slot to pick.
+                                </div>
                             </div>
                         </div>
                         <div class="flex items-center gap-3">
@@ -1661,13 +1633,14 @@
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Chat provider</label>
-                                <select name="chat_slot" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="" {{ 'selected' if not settings.chat_slot else '' }}>Auto (failover — P1 first)</option>
-                                    {% for n in [1, 2, 3, 4] %}
-                                    <option value="{{ n }}" {{ 'selected' if settings.chat_slot|string == n|string else '' }}>P{{ n }}{% set _eid = (settings.llm_slots or {}).get(n|string) %}{% if _eid %}{% for _e in (settings.llm_entries or []) %}{% if _e.id == _eid %} — {{ _e.label or _e.model }}{% endif %}{% endfor %}{% endif %}</option>
+                                <select name="chat_pin" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="" {{ 'selected' if not settings.chat_pin else '' }}>Auto (capability/cost picker — latency-favoured)</option>
+                                    {% for e in settings.llm_entries or [] %}
+                                    {% set _pin = e.provider ~ '|' ~ (e.base_url or '') ~ '|' ~ e.model %}
+                                    <option value="{{ _pin }}" {{ 'selected' if settings.chat_pin == _pin else '' }}>{{ e.label or e.model }} ({{ e.provider }}){{ ' — disabled' if e.enabled == False else '' }}</option>
                                     {% endfor %}
                                 </select>
-                                <span class="text-xs text-slate-400">Pin chat to a specific slot — e.g. a cloud provider that's always online — so a slow local builder (P1) doesn't make chat slow. Auto uses the normal failover order.</span>
+                                <span class="text-xs text-slate-400">Hard-pin chat to one endpoint — e.g. a cloud provider that's always online — so a slow local builder doesn't make chat slow. Auto lets the picker rank by capability/cost (latency-favoured for chat).</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Tool Iterations per Turn</label>
@@ -2049,39 +2022,43 @@
                     <i class="fas fa-copy"></i> <span id="diag-copy-label">Copy raw data</span>
                 </button>
             </div>
-            <!-- LLM Reachability — a REAL call per slot, not a reachability probe.
-                 The connectivity worker pings a cheap endpoint (/api/tags, /models),
-                 which answers a different question: an Ollama Cloud slot serves
-                 /api/tags while /api/chat 403s, so the provider shows online and
-                 every real request fails. This asks each slot to actually answer. -->
+            <!-- LLM Picker (dry run) — routing is capability/cost-aware over the
+                 enumerated endpoint set (the 8 provider slots are gone), so the
+                 useful diagnostic is no longer "can slot N answer a prompt" but
+                 "for requirement set X, which endpoint does the picker choose,
+                 and why is every other one an alternative or excluded". This is
+                 computed purely (model_selection.explain_selection) — no network,
+                 no tokens spent — so it is free to run and makes routing legible. -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-lg font-bold text-[#263040]">LLM Reachability</h3>
-                    <i class="fas fa-plug text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-[#263040]">LLM Picker (dry run)</h3>
+                    <i class="fas fa-route text-[#01A982]"></i>
                 </div>
-                <p class="text-xs text-slate-500 mb-3">Sends a real one-word prompt to every configured slot and reports what came back — latency, reply, or the provider's own error text. Costs a few tokens per cloud slot. Pick a task kind to also test the model the <b>router substitutes</b> for that task (how a routed-model 404 shows up).</p>
+                <p class="text-xs text-slate-500 mb-3">Runs the real model picker for each requirement preset used across the pipeline (triage, log scan, fix, review, chat, feature build, batch) and shows the ranked resolution: which endpoint <b>wins</b>, which are capable <b>alternatives</b>, and why every other is <b>excluded</b>. Pure and free — no prompt is sent and no tokens are spent.</p>
                 <div class="flex flex-wrap items-end gap-2 mb-3">
-                    <label class="text-xs text-slate-500">Task kind
-                        <select id="llmdiag-task" class="mt-1 block p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                            <option value="">— configured model (no routing) —</option>
-                            <option value="log_analysis">log_analysis (small)</option>
-                            <option value="triage">triage (small)</option>
-                            <option value="pr_summary">pr_summary (small)</option>
-                            <option value="review">review (medium)</option>
-                            <option value="fix">fix (large)</option>
+                    <label class="text-xs text-slate-500">Preset
+                        <select id="llmdiag-preset" class="mt-1 block p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                            <option value="">— all presets —</option>
+                            <option value="triage">triage</option>
+                            <option value="log_scan">log_scan</option>
+                            <option value="fix_small">fix_small</option>
+                            <option value="fix_large">fix_large</option>
+                            <option value="review">review</option>
+                            <option value="chat">chat</option>
+                            <option value="chat_tools">chat_tools</option>
+                            <option value="feature_build">feature_build</option>
+                            <option value="batch_summary">batch_summary</option>
                         </select></label>
-                    <label class="text-xs text-slate-500">Timeout (s)
-                        <input type="number" id="llmdiag-timeout" value="30" min="5" max="120" class="mt-1 block w-24 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]"></label>
-                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded font-bold text-xs">Test all (code + log) slots</button>
+                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded font-bold text-xs">Run dry-run picker</button>
                     <span id="llmdiag-summary" class="text-xs text-slate-500"></span>
                 </div>
-                <div id="llmdiag-body" class="text-sm text-slate-500 italic">Not run yet — nothing is called until you click Test.</div>
+                <div id="llmdiag-body" class="text-sm text-slate-500 italic">Not run yet — click Run. This is a free, read-only computation.</div>
             </div>
 
             <!-- Model Performance: measured generation throughput, per model.
                  Sits beside LLM Reachability because they answer adjacent
                  questions — "can I reach it" and "how fast is it once reached".
-                 Populated from /api/system-stats (llm.tps_by_model); no button,
+                 Populated from /api/system-stats (llm.perf_by_key); no button,
                  because these are numbers already collected from real work
                  rather than a benchmark this panel runs. -->
             <div class="hpe-card p-5">
@@ -2239,13 +2216,13 @@
             <!-- Providers table -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">LLM Providers</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">LLM Endpoints</h3>
                     <button onclick="refreshDiagnostics()" class="text-xs text-slate-500 hover:text-slate-700"><i class="fas fa-sync-alt"></i> refresh</button>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead class="text-left text-xs text-slate-500 uppercase tracking-wider">
-                            <tr><th class="py-2 pr-3">Slot</th><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3">Configured</th><th class="py-2 pr-3">Online</th><th class="py-2 pr-3">Cooldown</th><th class="py-2 pr-3">Last result</th><th class="py-2 pr-3" title="Measured generation speed for this slot's model — averaged over completed generations, so idle time is excluded">tok/s</th><th class="py-2 pr-3">RPM</th></tr>
+                            <tr><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3" title="Cost tier resolved from the Model Registry">Tier</th><th class="py-2 pr-3" title="Measured generation speed for this endpoint — median over completed generations, so idle time is excluded">tok/s</th><th class="py-2 pr-3" title="Median successful-call wire latency">Latency</th><th class="py-2 pr-3" title="Available, or the reason it is currently skipped (credit/rate cooldown, dead model)">Status</th><th class="py-2 pr-3" title="Number of measured generations">Runs</th></tr>
                         </thead>
                         <tbody id="diag-providers-body"></tbody>
                     </table>
@@ -3196,15 +3173,31 @@
         // refreshDiagnostics() runs well before the poller that fills it, and
         // a later declaration left it undefined on the first render.
         window._bfTps = window._bfTps || {};
+        window._bfTpsByModel = window._bfTpsByModel || {};
+
+        // Index the per-endpoint perf rows (routes.py _endpoint_perf_rows) two
+        // ways: by full ModelKey (provider|base_url|model) for the endpoint
+        // tables/chat pin, and by bare model name (fastest measured row wins)
+        // for the per-entry model dropdowns whose option value is just a model
+        // name and can't carry an endpoint identity.
+        function _bfIndexPerf(rows) {
+            window._bfTps = {};
+            window._bfTpsByModel = {};
+            (rows || []).forEach(r => {
+                window._bfTps[r.key] = r;
+                const prev = window._bfTpsByModel[r.model];
+                if (!prev || ((r.tps || 0) > (prev.tps || 0))) window._bfTpsByModel[r.model] = r;
+            });
+        }
 
         async function refreshSystemStats() {
             try {
                 const s = await fetch('/api/system-stats').then(r => r.json());
                 // Same payload carries the throughput table; fill the shared cache
-                // here as well as in the header poll, so the providers table has
+                // here as well as in the header poll, so the endpoint table has
                 // numbers on the FIRST Diagnostics render instead of dashes until
                 // the 5s header poll happens to land.
-                (((s || {}).llm || {}).tps_by_model || []).forEach(r => { window._bfTps[r.model] = r; });
+                _bfIndexPerf((((s || {}).llm || {}).perf_by_key));
                 bfAnnotateModelSelects();
                 const cpu = s.cpu || {}, mem = s.memory || {}, disk = s.disk || {}, up = s.uptime || {};
                 const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
@@ -3275,30 +3268,27 @@
                     banner.classList.add('hidden');
                 }
 
-                // Providers table
+                // Endpoints table — keyed by ModelKey (provider · model), no
+                // slot number. Exhausted endpoints (credit/rate cooldown, dead
+                // model) stay visible with a reason instead of vanishing.
                 const body = document.getElementById('diag-providers-body');
                 const rows = (d.providers || []).map(p => {
-                    const lr = p.last_result || {};
-                    const lastTxt = lr.status ? lr.status + (lr.reason ? ' — ' + lr.reason : '') : '—';
-                    const cd = p.cooldown_active
-                        ? (p.cooldown_cause === 'rate_limit' ? 'RL ' : '⏱ ') + Math.round(p.cooldown_remaining_min || 0) + 'm'
-                        : '—';
+                    const status = p.exhausted
+                        ? _diagPill(false, (p.exhausted_reason || 'exhausted').replace(/_/g, ' '))
+                        : _diagPill(true, 'available');
+                    const lat = p.latency_ms != null ? Math.round(p.latency_ms) + ' ms' : '—';
                     return '<tr class="border-t border-slate-100">'
-                        + '<td class="py-2 pr-3 font-bold text-slate-700">P' + p.n + '</td>'
                         + '<td class="py-2 pr-3 text-slate-700">' + (p.provider || '—') + '</td>'
                         + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + (p.model || '—') + '</td>'
-                        + '<td class="py-2 pr-3">' + _diagPill(p.configured, p.configured ? 'on' : 'off') + '</td>'
-                        + '<td class="py-2 pr-3">' + _diagPill(p.online, p.online ? 'up' : 'down') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + cd + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + lastTxt + '</td>'
-                        // Throughput for THIS slot's model. Keyed by model rather
-                        // than slot because that is how it is measured — two slots
-                        // pointed at the same model share one figure, which is
-                        // correct: the speed is a property of the model on this
-                        // box, not of the slot. '—' when never measured, never 0.
-                        + '<td class="py-2 pr-3 text-xs tabular-nums ' + (_tpsFor(p.model) ? 'font-semibold text-slate-700' : 'text-slate-400') + '">'
-                          + (_tpsFor(p.model) || '—') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.rpm || 0) + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-500">' + (p.tier || '—') + '</td>'
+                        // Throughput for THIS endpoint, keyed by ModelKey — the
+                        // same (provider, base_url, model) reachable two ways is
+                        // one figure. '—' when never measured, never 0.
+                        + '<td class="py-2 pr-3 text-xs tabular-nums ' + (_tpsFor(p.key) ? 'font-semibold text-slate-700' : 'text-slate-400') + '">'
+                          + (_tpsFor(p.key) || '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + lat + '</td>'
+                        + '<td class="py-2 pr-3">' + status + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + (p.n || 0) + '</td>'
                         + '</tr>';
                 }).join('');
                 body.innerHTML = rows;
@@ -3537,7 +3527,7 @@
         }
         if (document.getElementById('hub-status-dot')) { refreshHubStatusDot(); setInterval(refreshHubStatusDot, 10000); }
 
-        // Header "AI" indicator: which slot/provider/model is serving calls right
+        // Header "AI" indicator: which provider/model is serving calls right
         // now. Bright while a call is in flight (state stamped within ~90s), dimmed
         // when idle so it reads as "last used" rather than "currently running".
         function refreshActiveLlm() {
@@ -3557,15 +3547,14 @@
                     const t = document.getElementById('hdr-tps'); if (t) t.classList.add('hidden');
                     return;
                 }
-                const slot = llm.active_llm_slot ? ('P' + llm.active_llm_slot) : null;
                 const prov = llm.active_llm_provider || null;
-                el.textContent = [slot, prov, model].filter(Boolean).join(' · ');
+                el.textContent = [prov, model].filter(Boolean).join(' · ');
                 const at = Number(llm.active_llm_at || 0);
                 const live = at && ((Date.now() / 1000) - at) < 90;
                 el.className = 'text-xs font-semibold ' + (live ? 'text-emerald-300' : 'text-white/40');
                 el.title = (live ? 'Serving LLM calls now' : 'Last provider used (idle)') +
                            (at ? ' — ' + new Date(at * 1000).toLocaleTimeString() : '');
-                (llm.tps_by_model || []).forEach(r => { window._bfTps[r.model] = r; });
+                _bfIndexPerf(llm.perf_by_key);
                 bfAnnotateModelSelects();
                 const tpsEl = document.getElementById('hdr-tps');
                 if (tpsEl) {
@@ -3589,11 +3578,12 @@
         // the operator infer it from parameter count. Populated from the same
         // /api/system-stats poll the header already runs; only models that have
         // actually generated something appear.
-        // Bare "N tok/s" for table cells, from the same measured cache the header
-        // and Model Performance panel use — one source, so they cannot disagree.
-        function _tpsFor(model) {
-            const r = (window._bfTps || {})[model];
-            return r ? (r.avg + ' tok/s') : '';
+        // Bare "N tok/s" for endpoint table cells, keyed by ModelKey, from the
+        // same measured cache the header and Model Performance panel use — one
+        // source, so they cannot disagree.
+        function _tpsFor(key) {
+            const r = (window._bfTps || {})[key];
+            return r && r.tps != null ? (r.tps + ' tok/s') : '';
         }
 
         // Re-apply the tok/s suffix to every model dropdown.
@@ -3612,19 +3602,20 @@
                     if (!opt.value) return;
                     if (opt.dataset.baseLabel === undefined) opt.dataset.baseLabel = opt.textContent;
                     opt.textContent = opt.dataset.baseLabel + bfTpsLabel(opt.value);
-                    const r = (window._bfTps || {})[opt.value];
-                    if (r) {
-                        opt.title = `${r.avg} tok/s average over ${r.n} generation(s) ` +
-                                    `(min ${r.min}, max ${r.max}) measured on this box`;
+                    const r = (window._bfTpsByModel || {})[opt.value];
+                    if (r && r.tps != null) {
+                        opt.title = `${r.tps} tok/s median over ${r.n} generation(s)` +
+                                    (r.latency_ms != null ? `, ~${Math.round(r.latency_ms)} ms latency` : '') +
+                                    ` measured on this box`;
                     }
                 });
             });
         }
 
         function bfTpsLabel(model) {
-            const r = (window._bfTps || {})[model];
-            if (!r) return '';
-            return `  ·  ${r.avg} tok/s${r.n > 1 ? ` (avg of ${r.n})` : ''}`;
+            const r = (window._bfTpsByModel || {})[model];
+            if (!r || r.tps == null) return '';
+            return `  ·  ${r.tps} tok/s${r.n > 1 ? ` (n=${r.n})` : ''}`;
         }
 
         // Local HTML escaper — this template has no global one (the only other
@@ -3642,38 +3633,44 @@
             const body = document.getElementById('tps-body');
             if (!body) return;
             fetch('/api/system-stats').then(r => r.json()).then(d => {
-                const rows = ((d && d.llm) || {}).tps_by_model || [];
+                const rows = (((d && d.llm) || {}).perf_by_key || []).filter(r => r.n > 0);
                 if (!rows.length) {
                     body.className = 'text-sm text-slate-500 italic';
-                    body.textContent = 'No generations measured yet — numbers appear as each model does real work.';
+                    body.textContent = 'No generations measured yet — numbers appear as each endpoint does real work.';
                     return;
                 }
                 const active = ((d && d.llm) || {}).active_llm || '';
-                const fastest = rows[0].avg || 0;
+                const activeProv = ((d && d.llm) || {}).active_llm_provider || '';
+                const fastest = rows[0].tps || 0;
                 body.className = '';
                 body.innerHTML =
                     '<div class="overflow-x-auto"><table class="w-full text-sm">' +
                     '<thead><tr class="text-left text-xs uppercase tracking-wider text-slate-400 border-b border-slate-200">' +
-                    '<th class="py-2 pr-3">Model</th><th class="py-2 pr-3 text-right">Avg</th>' +
-                    '<th class="py-2 pr-3 text-right">Min</th><th class="py-2 pr-3 text-right">Max</th>' +
-                    '<th class="py-2 pr-3 text-right">Runs</th><th class="py-2 w-1/3">Relative</th></tr></thead><tbody>' +
+                    '<th class="py-2 pr-3">Endpoint</th><th class="py-2 pr-3">Tier</th><th class="py-2 pr-3 text-right">tok/s</th>' +
+                    '<th class="py-2 pr-3 text-right">Latency</th><th class="py-2 pr-3 text-right">Runs</th>' +
+                    '<th class="py-2 pr-3">Status</th><th class="py-2 w-1/4">Relative</th></tr></thead><tbody>' +
                     rows.map(r => {
-                        const pct = fastest > 0 ? Math.max(2, Math.round(100 * r.avg / fastest)) : 0;
-                        const isActive = r.model === active;
+                        const pct = fastest > 0 && r.tps != null ? Math.max(2, Math.round(100 * r.tps / fastest)) : 0;
+                        const isActive = r.model === active && (!activeProv || r.provider === activeProv);
+                        const lat = r.latency_ms != null ? Math.round(r.latency_ms) + ' ms' : '—';
+                        const status = r.exhausted
+                            ? '<span class="text-[11px] text-rose-600">' + _bfEsc((r.exhausted_reason || 'exhausted').replace(/_/g, ' ')) + '</span>'
+                            : '<span class="text-[11px] text-emerald-600">available</span>';
                         return '<tr class="border-b border-slate-100 last:border-0">' +
                           '<td class="py-2 pr-3 font-mono text-xs ' + (isActive ? 'font-bold text-[#01A982]' : 'text-slate-700') + '">' +
-                            _bfEsc(r.model) + (isActive ? ' <span class="text-[10px] uppercase">active</span>' : '') + '</td>' +
-                          '<td class="py-2 pr-3 text-right tabular-nums font-semibold text-slate-800">' + r.avg + '</td>' +
-                          '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + r.min + '</td>' +
-                          '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + r.max + '</td>' +
+                            _bfEsc(r.provider || '') + ' · ' + _bfEsc(r.model) + (isActive ? ' <span class="text-[10px] uppercase">active</span>' : '') + '</td>' +
+                          '<td class="py-2 pr-3 text-xs text-slate-500">' + _bfEsc(r.tier || '—') + '</td>' +
+                          '<td class="py-2 pr-3 text-right tabular-nums font-semibold text-slate-800">' + (r.tps != null ? r.tps : '—') + '</td>' +
+                          '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + lat + '</td>' +
                           '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + r.n + '</td>' +
+                          '<td class="py-2 pr-3">' + status + '</td>' +
                           '<td class="py-2"><div class="h-2 rounded bg-slate-100 overflow-hidden">' +
                             '<div class="h-2 rounded bg-[#01A982]" style="width:' + pct + '%"></div></div></td>' +
                         '</tr>';
                     }).join('') +
                     '</tbody></table>' +
-                    '<p class="text-[11px] text-slate-400 mt-3">Averaged over completed generations only, so idle time between ' +
-                    'calls is excluded. Min/max show whether a model is steady or erratic — an average alone hides that.</p></div>';
+                    '<p class="text-[11px] text-slate-400 mt-3">Median tok/s and wire latency over completed generations only, so idle time ' +
+                    'between calls is excluded. Endpoints are keyed by provider · model — the same model on two boxes is two rows.</p></div>';
             }).catch(() => { /* keep the last render on a transient fetch failure */ });
         }
         if (document.getElementById('tps-body')) { refreshTpsPanel(); setInterval(refreshTpsPanel, 10000); }
@@ -3774,66 +3771,71 @@
             const btn = document.getElementById('llmdiag-btn');
             const summary = document.getElementById('llmdiag-summary');
             if (!body) return;
-            const taskKind = (document.getElementById('llmdiag-task') || {}).value || null;
-            const timeoutS = Number((document.getElementById('llmdiag-timeout') || {}).value) || 30;
-            if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
-            body.innerHTML = '<span class="text-slate-400 italic">Calling each configured slot…</span>';
+            const preset = (document.getElementById('llmdiag-preset') || {}).value || null;
+            if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+            body.innerHTML = '<span class="text-slate-400 italic">Running the picker over the current endpoints…</span>';
             if (summary) summary.textContent = '';
             try {
                 const r = await fetch('/api/llm/diag', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({task_kind: taskKind, timeout_s: timeoutS}),
+                    body: JSON.stringify({preset: preset}),
                 });
                 const d = await r.json();
                 if (d.error) { body.innerHTML = '<span class="text-red-600">' + _bfEsc(d.error) + '</span>'; return; }
-                const rows = (d.results || []).map(x => {
-                    // SKIPPED is amber, not red: the model is unreachable but
-                    // routing already declines to use it, so nothing is broken.
-                    const pill = !x.configured
-                        ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">NOT CONFIGURED</span>'
-                        : (x.skipped ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700">SKIPPED</span>'
-                        : (x.ok ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">OK</span>'
-                                : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">FAILED</span>'));
-                    // A substituted model is called out explicitly — that swap is
-                    // invisible in the vault UI and is exactly what 404s.
-                    const routed = x.routed_from
-                        ? '<div class="text-[11px] text-amber-700">slot is set to <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> — router uses <span class="font-mono">' + _bfEsc(x.model || '') + '</span> for this task tier</div>'
-                        : '';
-                    const detail = x.ok
-                        ? '<span class="text-slate-500">replied “' + _bfEsc(String(x.reply || '').slice(0, 60)) + '”</span>'
-                        : '<span class="text-red-600">' + _bfEsc(x.error || 'no response') + '</span>';
-                    return '<tr class="border-b border-slate-100 align-top">' +
-                        '<td class="px-3 py-2 font-bold text-slate-700">P' + x.slot +
-                            // Pool label: slots 5-6 serve log analysis only and are
-                            // usually a different provider/host from the code slots,
-                            // so "P5 failed" needs to read as a LOG failure, not just
-                            // another slot. Consequences differ — code slots stop
-                            // fixes, log slots stop analysis silently.
-                            (x.pool === 'log'
-                              ? '<div class="text-[10px] font-normal text-indigo-600 uppercase tracking-wider">log</div>'
-                              : x.pool === 'review'
-                              ? '<div class="text-[10px] font-normal text-rose-600 uppercase tracking-wider">review</div>'
-                              : '<div class="text-[10px] font-normal text-slate-400 uppercase tracking-wider">code</div>')
-                            + '</td>' +
-                        '<td class="px-3 py-2 text-slate-600">' + _bfEsc(x.provider || '—') +
-                            '<div class="font-mono text-[11px] text-slate-500">' + _bfEsc(x.model || '—') + '</div>' + routed + '</td>' +
-                        '<td class="px-3 py-2">' + pill + '</td>' +
-                        '<td class="px-3 py-2 text-center text-slate-600">' + (x.latency_ms != null ? x.latency_ms + ' ms' : '—') + '</td>' +
-                        '<td class="px-3 py-2 text-xs break-words">' + detail + '</td></tr>';
+                const presets = d.presets || [];
+                if (!presets.length) {
+                    body.innerHTML = '<span class="text-slate-400 italic">No presets returned.</span>';
+                    return;
+                }
+                const statusPill = (st) => st === 'selected'
+                    ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">SELECTED</span>'
+                    : (st === 'alternative'
+                        ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-sky-100 text-sky-700">ALT</span>'
+                        : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">EXCLUDED</span>');
+                const perfCell = (row) => {
+                    if (!row.n) return '<span class="text-slate-400">no samples</span>';
+                    const tps = row.tps != null ? row.tps.toFixed(1) + ' tok/s' : '—';
+                    const lat = row.latency_ms != null ? Math.round(row.latency_ms) + ' ms' : '—';
+                    return '<span class="text-slate-600">' + tps + ' · ' + lat + '</span> <span class="text-slate-400">(n=' + row.n + ')</span>';
+                };
+                const blocks = presets.map(p => {
+                    const rows = (p.rows || []).map(row =>
+                        '<tr class="border-b border-slate-100 align-top">' +
+                        '<td class="px-3 py-2">' + statusPill(row.status) + '</td>' +
+                        '<td class="px-3 py-2 text-slate-600">' + _bfEsc(row.provider || '—') +
+                            '<div class="font-mono text-[11px] text-slate-500">' + _bfEsc(row.model || '—') + '</div></td>' +
+                        '<td class="px-3 py-2 text-center text-slate-600">' + _bfEsc(row.tier || '—') + '</td>' +
+                        '<td class="px-3 py-2 text-xs">' + perfCell(row) + '</td>' +
+                        '<td class="px-3 py-2 text-xs text-slate-500 break-words">' + _bfEsc(row.reason || '') + '</td></tr>'
+                    ).join('');
+                    const win = p.error
+                        ? '<span class="text-red-600 text-xs">' + _bfEsc(p.error) + '</span>'
+                        : (p.selected
+                            ? '<span class="text-green-700 font-mono text-xs">' + _bfEsc(p.selected.provider || '') + ' · ' + _bfEsc(p.selected.model || '') + '</span>'
+                                + (p.permissive ? ' <span class="text-amber-600 text-[11px]">(permissive pass — unclassified admitted)</span>' : '')
+                            : '<span class="text-red-600 text-xs font-bold">no model resolves → awaiting_human</span>');
+                    const tbl = (p.rows && p.rows.length)
+                        ? '<div class="overflow-x-auto border border-slate-200 rounded-lg mt-2"><table class="w-full text-sm">' +
+                            '<thead class="bg-slate-50 text-slate-500 uppercase text-xs"><tr>' +
+                            '<th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Provider / model</th>' +
+                            '<th class="px-3 py-2 text-center">Tier</th><th class="px-3 py-2 text-left">Perf</th>' +
+                            '<th class="px-3 py-2 text-left">Reason</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+                        : '<div class="text-xs text-slate-400 italic mt-1">No candidates enumerated.</div>';
+                    return '<div class="mb-4">' +
+                        '<div class="flex items-baseline justify-between gap-2">' +
+                        '<div><span class="font-bold text-slate-700 font-mono">' + _bfEsc(p.label) + '</span>' +
+                        '<span class="text-xs text-slate-400 ml-2">' + _bfEsc(p.description || '') + '</span></div>' +
+                        '<div>→ ' + win + '</div></div>' + tbl + '</div>';
                 }).join('');
-                body.innerHTML = '<div class="overflow-x-auto border border-slate-200 rounded-lg"><table class="w-full text-sm">' +
-                    '<thead class="bg-slate-50 text-slate-500 uppercase text-xs"><tr>' +
-                    '<th class="px-3 py-2 text-left">Slot</th><th class="px-3 py-2 text-left">Provider / model</th>' +
-                    '<th class="px-3 py-2 text-left">Result</th><th class="px-3 py-2 text-center">Latency</th>' +
-                    '<th class="px-3 py-2 text-left">Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+                body.innerHTML = blocks;
                 const s = d.summary || {};
-                if (summary) summary.textContent = s.ok + '/' + s.configured + ' model check(s) passed across ' +
-                    (s.slots != null ? s.slots + ' slot(s)' : 'all slots') +
-                    (s.elapsed_ms != null ? ' · ' + (s.elapsed_ms / 1000).toFixed(1) + 's' : '');
+                if (summary) summary.textContent = (s.resolved != null ? s.resolved + '/' + s.total + ' preset(s) resolve' : '') +
+                    (s.candidates != null ? ' · ' + s.candidates + ' endpoint(s)' : '') +
+                    (s.elapsed_ms != null ? ' · ' + s.elapsed_ms + 'ms' : '');
             } catch (e) {
                 body.innerHTML = '<span class="text-red-600">Diag request failed: ' + _bfEsc(String(e && e.message || e)) + '</span>';
             } finally {
-                if (btn) { btn.disabled = false; btn.textContent = 'Test all slots'; }
+                if (btn) { btn.disabled = false; btn.textContent = 'Run dry-run picker'; }
             }
         }
 
@@ -4238,12 +4240,12 @@
             const rpm = parseInt(document.getElementById('new-entry-rpm')?.value || '0');
             const base_url = document.getElementById('new-entry-baseurl')?.value.trim() || '';
             const api_key = document.getElementById('new-entry-apikey')?.value.trim() || '';
-            const escalation_models = document.getElementById('new-entry-escalation')?.value.trim() || '';
+            const enabled = document.getElementById('new-entry-enabled')?.checked !== false;
             if (!model) { showToast('Please select a model.', 'warn'); return; }
             const resp = await fetch('/api/llm/entries', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, base_url, api_key, escalation_models})
+                body: JSON.stringify({label: label || model, provider, model, rpm, base_url, api_key, enabled})
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to add entry.', 'error');
@@ -4316,9 +4318,8 @@
             const model = document.getElementById(`edit-model-${id}`)?.value;
             const rpm = parseInt(document.getElementById(`edit-rpm-${id}`)?.value || '0');
             const base_url = document.getElementById(`edit-baseurl-${id}`)?.value.trim() || '';
-            const escalation_models = document.getElementById(`edit-escalation-${id}`)?.value.trim() || '';
             if (!model) { showToast('Please select a model.', 'warn'); return; }
-            const body = {label: label || model, provider, model, rpm, base_url, escalation_models};
+            const body = {label: label || model, provider, model, rpm, base_url};
             // The key field never carries the real stored value (only a
             // "•••• already set" placeholder — see settings_page's
             // redaction), so only include api_key when the operator actually
@@ -4343,19 +4344,44 @@
             else showToast('Failed to delete entry.', 'error');
         }
 
-        async function saveSlots() {
-            const slots = {};
-            // 1-4 code, 5-6 log, 7-8 review. Omitting a slot here silently drops
-            // its assignment on every save, since the endpoint REPLACES the map.
-            [1,2,3,4,5,6,7,8].forEach(n => {
-                const sel = document.getElementById(`slot-${n}`);
-                if (sel) slots[n] = sel.value || null;
+        async function toggleEntryEnabled(id, enabled) {
+            // Enabled endpoints are ranked by the picker; disabled ones stay
+            // configured but out of routing. PUT only the enabled flag —
+            // update_llm_entry leaves every other field untouched.
+            try {
+                const resp = await fetch(`/api/llm/entries/${id}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: !!enabled})
+                });
+                if ((await resp.json()).status !== 'ok') { showToast('Failed to update endpoint.', 'error'); return; }
+                location.reload();
+            } catch (e) { showToast('Failed to update endpoint: ' + e, 'error'); }
+        }
+
+        function promoteRegistryStub(provider, model) {
+            // Append a prefilled curated rule for an unclassified auto-discovered
+            // model to the Model Registry textarea so the operator can tune its
+            // cost tier / capabilities, then Save. Non-destructive: it edits the
+            // textarea in place and never submits on its own.
+            const ta = document.getElementById('model_registry_json');
+            if (!ta) return;
+            let rules;
+            try { rules = JSON.parse(ta.value || '[]'); }
+            catch (e) { showToast('Registry JSON is invalid — fix it before promoting.', 'error'); return; }
+            if (!Array.isArray(rules)) rules = [];
+            const safeId = (provider + '-' + model).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+            if (rules.some(r => r && r.id === safeId)) { showToast('Already added — edit it below.', 'warn'); return; }
+            rules.push({
+                id: safeId, provider: provider, match: model, label: model,
+                cost_tier: 'cheap', max_complexity: 'medium', context_window: 32768,
+                supports_tools: false, native_agentic_tools: false, supports_mutating_agent: false,
+                supports_structured_output: false, supports_batch: false, supports_streaming: true,
+                enabled: true, notes: 'promoted from auto-discovery — review cost tier & capabilities'
             });
-            await fetch('/api/llm/slots', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(slots)
-            });
+            ta.value = JSON.stringify(rules, null, 2);
+            ta.scrollIntoView({behavior: 'smooth', block: 'center'});
+            showToast('Rule added to the editor — review and Save.', 'success');
         }
         // ── End LLM Vault UI ──────────────────────────────────────────────────
 
@@ -4409,7 +4435,6 @@
             const model = (document.getElementById('local-llm-model')?.value || 'qwen2.5-coder:14b').trim();
             const num_ctx = parseInt(document.getElementById('local-llm-ctx')?.value || '32768', 10) || 0;
             const cores = parseInt(document.getElementById('local-llm-cores')?.value || '1', 10) || 1;
-            const slot = parseInt(document.getElementById('local-llm-slot')?.value || '4', 10) || 4;
 
             if (!confirm(
                 `This will:\n` +
@@ -4417,7 +4442,7 @@
                 `  • pull ${model} (~20 GB download, several minutes)\n` +
                 `  • create a context-tuned model (num_ctx=${num_ctx || 'default'})\n` +
                 `  • write a systemd override + restart the ollama service\n` +
-                `  • configure BugFixer slot P${slot} → ${model}\n\n` +
+                `  • add ${model} as an enabled endpoint (ranked by the Model Registry)\n\n` +
                 `Continue?`
             )) return;
 
@@ -4436,7 +4461,7 @@
                 const resp = await fetch('/api/local-llm/setup', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model, num_ctx, cores, slot })
+                    body: JSON.stringify({ model, num_ctx, cores })
                 });
                 const data = await resp.json();
                 if (!resp.ok || data.status === 'busy') {
@@ -4728,9 +4753,10 @@
                         opt.value = m.name;
                         const base = m.details ? `${m.name} — ${m.details}` : m.name;
                         opt.textContent = base + bfTpsLabel(m.name);
-                        const _r = (window._bfTps || {})[m.name];
-                        if (_r) opt.title = `${_r.avg} tok/s average over ${_r.n} generation(s) ` +
-                                            `(min ${_r.min}, max ${_r.max}) measured on this box`;
+                        const _r = (window._bfTpsByModel || {})[m.name];
+                        if (_r && _r.tps != null) opt.title = `${_r.tps} tok/s median over ${_r.n} generation(s)` +
+                                            (_r.latency_ms != null ? `, ~${Math.round(_r.latency_ms)} ms latency` : '') +
+                                            ` measured on this box`;
                         if (m.name === prevVal) { opt.selected = true; found = true; }
                         select.appendChild(opt);
                     });

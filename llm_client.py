@@ -2389,172 +2389,91 @@ def parse_log_verdict(text):
     return verdict, cleaned
 
 
-def llm_diag(slot=None, task_kind=None, timeout_s=30, config=None):
-    """Prove each provider slot can actually COMPLETE a chat call, end to end.
+# Named requirement presets for the dry-run picker — grounded in the real
+# LlmRequirements built at the pipeline's call sites (feature_build, fix_engine,
+# chat, log_scan, github_ops, pr_review) so the diagnostic audits the routing
+# operators actually get, not a synthetic one. Each is (label, description, kwargs).
+_DIAG_PRESETS = [
+    ("triage", "Issue triage / file identification (trivial, structured JSON)",
+     dict(complexity="trivial", needs_structured_output=True)),
+    ("log_scan", "Log / hub-log analysis (small, structured JSON)",
+     dict(complexity="small", needs_structured_output=True)),
+    ("fix_small", "Build a small fix (small, structured JSON)",
+     dict(complexity="small", needs_structured_output=True)),
+    ("fix_large", "Build a hard fix (large, structured JSON)",
+     dict(complexity="large", needs_structured_output=True)),
+    ("review", "Skeptical fix-review panel (medium, structured JSON)",
+     dict(complexity="medium", needs_structured_output=True)),
+    ("chat", "Dashboard chat reply (small, latency-sensitive)",
+     dict(complexity="small", latency_sensitive=True)),
+    ("chat_tools", "Chat with tool calling (medium, tools, latency-sensitive)",
+     dict(complexity="medium", needs_tools=True, latency_sensitive=True)),
+    ("feature_build", "Feature auto-build (large, mutating agent)",
+     dict(complexity="large", needs_mutating_agent=True)),
+    ("batch_summary", "PR-summary batch route (trivial, batch-eligible)",
+     dict(complexity="trivial", batch_ok=True)),
+]
 
-    The existing connectivity_worker probes a cheap reachability endpoint
-    (``/api/tags``, ``/models``). That is not the same question: an Ollama Cloud
-    slot answers ``/api/tags`` happily while ``/api/chat`` returns 403, so the
-    dashboard reports the provider online and every real request fails. Likewise
-    a slot whose ROUTED model does not exist on the account 404s on every
-    small-tier task while its configured model is fine. Both were only visible by
-    reading logs.
 
-    So this sends a real (tiny) prompt and reports what came back. Notes:
+def _diag_reqs(kwargs, overrides=None):
+    """Build an LlmRequirements from a preset's kwargs, applying any UI
+    overrides (only known field names, coerced to the field's type)."""
+    merged = dict(kwargs)
+    for k, v in (overrides or {}).items():
+        if not hasattr(model_selection.LlmRequirements, k):
+            continue
+        if k in ("complexity", "restrict"):
+            merged[k] = v or None if k == "restrict" else (v or "small")
+        elif k in ("min_context_tokens",):
+            try:
+                merged[k] = int(v)
+            except (TypeError, ValueError):
+                pass
+        else:  # boolean capability flags
+            merged[k] = bool(v)
+    return model_selection.LlmRequirements(**merged)
 
-    * ``_call_provider`` is called DIRECTLY — no failover, no provider circuit
-      breaker — so each slot is judged on its own behaviour rather than masked by
-      the next one in the chain.
-    * A short per-call timeout and zero retries are forced. The deployed
-      ``LLM_TIMEOUT`` can be 1800s; a wedged local model must not hang the page.
-    * ``task_kind`` reports what model_router would SUBSTITUTE for that task, and
-      tests that model. Passing the task kind is how you catch a routed-model 404
-      that the configured model would not show.
 
-    Returns ``[{slot, provider, model, configured, ok, latency_ms, error, reply}]``,
-    one entry per slot, ordered by slot. Never raises: a slot that blows up is
-    reported as ``ok: False`` with the error text.
+def llm_diag(preset=None, overrides=None, config=None):
+    """Dry-run the model picker for one or every requirement preset and report
+    the ranked resolution — WITHOUT spending a token.
+
+    The old llm_diag sent a real prompt to each of the 8 provider *slots*. Slots
+    are gone: routing is now capability/cost-aware over the enumerated endpoint
+    set (model_selection.select_model). So the useful diagnostic is no longer
+    "can slot N answer" but "for requirement set X, which endpoint does the
+    picker choose, and why is every other one an alternative or excluded". That
+    is exactly what model_selection.explain_selection computes — purely, over the
+    same _enumerate_candidates()/get_llm_perf_snapshot() inputs the live path
+    uses — so this makes REAL routing legible and auditable at zero cost.
+
+    Args:
+        preset:     restrict the report to a single preset label; None = all.
+        overrides:  optional dict of LlmRequirements field overrides applied to
+                    every preset run (lets the UI build a custom requirement set).
+        config:     config override (defaults to load_config()).
+
+    Returns ``{"candidate_count": int, "presets": [{label, description,
+    selected, permissive, rows:[...]}, ...]}``. Never raises: a preset that
+    blows up is reported with an ``error`` field instead of a resolution.
     """
     config = config or load_config()
-    # _ALL_SLOTS, not a hardcoded 1-4: the log-analysis pool (5-6) was excluded
-    # from this probe entirely, so a log slot with a bad key, an unreachable host
-    # or a model that 404s reported nothing here and only surfaced as log analysis
-    # quietly producing nothing. Those slots are exactly the ones a reachability
-    # check should cover — they are usually a DIFFERENT provider/host from the
-    # code slots, so the code slots passing says nothing about them.
-    slots = [int(slot)] if slot else list(_ALL_SLOTS)
-    # Small but not empty: some providers reject a zero-token turn, and a fixed
-    # expected answer makes a garbled/echoing model obvious at a glance.
-    messages = [{"role": "user", "content": "Reply with the single word: OK"}]
-    # Force a bounded call: deployed LLM_TIMEOUT is often 1800s and retries would
-    # multiply it. A diagnostic must fail fast and say so.
-    probe_cfg = dict(config)
-    probe_cfg["LLM_TIMEOUT"] = max(5, int(timeout_s or 30))
-    probe_cfg["LLM_MAX_RETRIES"] = 0
-    probe_cfg["LLM_5XX_MAX_RETRIES"] = 0
-    probe_cfg["batch_enabled"] = False          # never route a probe through the batch API
-
-    def _probe_one(n, provider, key, url, model, routed_from, pool):
-        """One real call against ONE model. Returns a result entry."""
-        e = {"slot": n, "pool": pool, "provider": provider, "model": model,
-             "routed_from": routed_from, "configured": True, "ok": False,
-             "latency_ms": None, "error": None, "reply": None}
-        t0 = time.time()
-        try:
-            res = _call_provider(provider, model, key, url, messages,
-                                 None, False, None, probe_cfg)
-            e["latency_ms"] = int((time.time() - t0) * 1000)
-            text = res.get("text") if isinstance(res, dict) else res
-            e["reply"] = (str(text or "").strip()[:200]) or None
-            # An empty body is a failure: the call "succeeded" but the model
-            # returned nothing usable, which downstream code treats as an error.
-            e["ok"] = bool(e["reply"])
-            if not e["ok"]:
-                e["error"] = "provider returned an empty response"
-        except Exception as ex:  # noqa: BLE001 — the error IS the result here
-            e["latency_ms"] = int((time.time() - t0) * 1000)
-            e["error"] = str(ex)[:400]
-        return e
-
+    candidates = _enumerate_candidates(config)
+    perf = get_llm_perf_snapshot()
+    wanted = [p for p in _DIAG_PRESETS if not preset or p[0] == preset]
     out = []
-    for n in slots:
-        # Which pool this slot belongs to, so the UI can group them and an
-        # operator can tell at a glance that a failure is log-side rather than
-        # code-side — the two have very different consequences.
-        entry = {"slot": n,
-                 "pool": ("log" if n in _LOG_SLOTS
-                          else "review" if n in _REVIEW_SLOTS else "code"),
-                 "provider": None, "model": None, "routed_from": None,
-                 "configured": False, "ok": False, "latency_ms": None,
-                 "error": None, "reply": None}
+    for label, description, kwargs in wanted:
+        entry = {"label": label, "description": description}
         try:
-            provider, key, model, url = _get_provider_config(n, config)
-            entry["provider"] = provider
-            entry["model"] = model
-            entry["configured"] = _provider_configured(provider, key, model)
-            if not entry["configured"]:
-                entry["error"] = ("no model configured" if not model
-                                  else "no API key (this provider requires one)")
-                out.append(entry)
-                continue
-            pool = entry["pool"]
-            # A slot can serve TWO different models: the one configured on it,
-            # and the one model_router SUBSTITUTES for a task tier (cloud slots
-            # only — local providers keep their configured model). Testing just
-            # one proves nothing about the other: a configured model that answers
-            # fine says nothing about a routed model that 404s on the account,
-            # which is exactly the failure the router introduces and the reason
-            # this probe reports routed_from at all.
-            #
-            # So probe the configured model, then the routed model when routing
-            # actually resolves to something different. Each becomes its own row.
-            # Collect EVERY distinct model this slot can actually serve.
-            # (model, role) pairs. `seen` is hoisted OUT of the try below so a
-            # failed router import cannot leave it undefined.
-            extra_models = []
-            seen = {model}
-            try:
-                from model_router import pick_model as _rp
-                # A specific task_kind probes just that tier; otherwise sweep all
-                # three so the default "Test all" covers every model the router
-                # can substitute, not only the small one.
-                for _tk in ([task_kind] if task_kind else ("triage", "review", "fix")):
-                    picked = _rp(_tk, provider, config, default=model)
-                    if picked and picked not in seen:
-                        seen.add(picked)
-                        extra_models.append((picked, "routed"))
-            except Exception as e:  # noqa: BLE001 — routing is advisory here
-                logger.debug("llm_diag: router lookup failed for slot %s: %s", n, e)
-
-            # Which of those the account can actually serve. Routing now skips a
-            # model that is not in the live catalogue (see the routing block in
-            # call_llm), so probing it anyway would spend a call on a 404 and
-            # report a red FAILED for a model the runtime will never use — an
-            # alarm about something already handled. Report it as SKIPPED
-            # instead, which still surfaces that the tier default is wrong.
-            _avail = _live_models(provider, key, url)
-
-            # Configured model first, then each routed one, as separate rows.
-            # Local providers (ollama / lmstudio / claude_cli) keep their
-            # configured model, so routed_models is empty for them and this stays
-            # one call per slot -- the extra calls land only on cloud slots,
-            # which is where a routed-model failure can actually happen.
-            # Same treatment for the CONFIGURED model. Nothing substitutes for
-            # this one -- it is what the operator set -- so a bad ID here means
-            # EVERY task on the slot 404s, and each probe adds another error to
-            # the provider's dashboard. Naming the models the account can serve
-            # turns "404 Not Found" into an instruction.
-            if _avail is not None and model not in _avail:
-                _hint = ", ".join(sorted(_avail)[:6]) or "(account lists none)"
-                out.append({
-                    "slot": n, "pool": pool, "provider": provider, "model": model,
-                    "routed_from": None, "configured": True, "ok": False,
-                    "latency_ms": None, "reply": None,
-                    "error": ("this account does not offer this model — every task on "
-                              "this slot will fail until it is changed. Available: "
-                              + _hint),
-                })
-            else:
-                out.append(_probe_one(n, provider, key, url, model, None, pool))
-            for rm, role in extra_models:
-                if _avail is not None and rm not in _avail:
-                    out.append({
-                        "slot": n, "pool": pool, "provider": provider, "model": rm,
-                        "routed_from": model, "role": role, "configured": True,
-                        "ok": False, "skipped": True,
-                        "latency_ms": None, "reply": None,
-                        "error": ("not offered by this account — routing keeps the "
-                                  "configured model, so nothing calls it"),
-                    })
-                    continue
-                e = _probe_one(n, provider, key, url, rm, model, pool)
-                e["role"] = role
-                out.append(e)
-            continue
-        except Exception as e:  # noqa: BLE001 — one bad slot never sinks the report
-            entry["error"] = f"diag failed for slot {n}: {str(e)[:300]}"
+            reqs = _diag_reqs(kwargs, overrides)
+            res = model_selection.explain_selection(reqs, candidates, perf)
+            entry.update(res)
+        except Exception as ex:  # noqa: BLE001 — one bad preset never sinks the report
+            entry["error"] = str(ex)[:400]
+            entry["selected"] = None
+            entry["rows"] = []
         out.append(entry)
-    return out
+    return {"candidate_count": len(candidates), "presets": out}
 
 
 # Re-export every name this module defines (public + underscore) so
