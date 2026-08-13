@@ -1906,10 +1906,47 @@ async def settings_page(request: Request):
         for e in (config.get("llm_entries") or [])
     ]
 
+    # Model Registry editor data — the curated rules as editable JSON (always
+    # re-rendered from current config so a save from any tab round-trips it),
+    # a read-only preview of the effective merged registry (curated rules +
+    # auto-discovered stubs), and the unclassified auto stubs an operator
+    # should promote to curated. See Phase 7c / plan §8.
+    import model_registry as _registry
+    _curated = config.get("model_registry") or _registry.DEFAULT_MODEL_RULES
+    _registry_rules_json = json.dumps(_curated, indent=2)
+    _auto = config.get("model_registry_auto") or []
+    _registry_preview = (
+        [{"provider": r.get("provider"), "match": r.get("match"),
+          "cost_tier": r.get("cost_tier"), "max_complexity": r.get("max_complexity"),
+          "context_window": r.get("context_window"),
+          "supports_tools": r.get("supports_tools"),
+          "native_agentic_tools": r.get("native_agentic_tools"),
+          "supports_structured_output": r.get("supports_structured_output"),
+          "supports_batch": r.get("supports_batch"),
+          "source": "curated", "enabled": r.get("enabled", True)}
+         for r in _curated] +
+        [{"provider": r.get("provider"), "match": r.get("model"),
+          "cost_tier": r.get("cost_tier"), "max_complexity": r.get("max_complexity"),
+          "context_window": r.get("context_window"),
+          "supports_tools": r.get("supports_tools"),
+          "native_agentic_tools": r.get("native_agentic_tools"),
+          "supports_structured_output": r.get("supports_structured_output"),
+          "supports_batch": r.get("supports_batch"),
+          "source": "auto", "enabled": True}
+         for r in _auto]
+    )
+    _registry_unclassified = [
+        {"provider": r.get("provider"), "model": r.get("model")}
+        for r in _auto if (r.get("cost_tier") or "unknown") == "unknown"
+    ]
+
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
         "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"],
                      "llm_credentials": _safe_llm_credentials, "llm_entries": _safe_llm_entries},
+        "registry_rules_json": _registry_rules_json,
+        "registry_preview": _registry_preview,
+        "registry_unclassified": _registry_unclassified,
         "available_labels": state.get("available_labels", []),
         "repo_options": repo_options,
         "monitored_set": monitored_set,
@@ -2242,6 +2279,27 @@ async def save_settings(request: Request):
         except Exception as _fbe:
             _save_warnings.append(f"feature_boundaries JSON was invalid ({_fbe}) — kept the previous value")
 
+    # Model Registry — the curated capability/cost rules, a JSON textarea always
+    # re-rendered from current config (settings_page: registry_rules_json) so a
+    # save from any OTHER tab round-trips it unchanged. Same boundary discipline
+    # as feature_boundaries above: validate HERE in the imperative block (never
+    # the `updates` table, which also writes .env), and on any failure leave
+    # config_data["model_registry"] untouched so the previous rules survive.
+    if "model_registry_json" in data:
+        _mr_raw = data.get("model_registry_json") or "[]"
+        try:
+            _mr_parsed = json.loads(_mr_raw)
+            if not isinstance(_mr_parsed, list):
+                raise ValueError("must be a JSON array")
+            for _r in _mr_parsed:
+                if not isinstance(_r, dict) or not _r.get("id"):
+                    raise ValueError("every rule needs at least an \"id\"")
+                if not _r.get("provider") or not _r.get("match"):
+                    raise ValueError("every rule needs a \"provider\" and a \"match\" glob")
+            config_data["model_registry"] = _mr_parsed
+        except Exception as _mre:
+            _save_warnings.append(f"model_registry JSON was invalid ({_mre}) — kept the previous rules")
+
     config_data["feature_build_timeout_s"] = int(data.get("feature_build_timeout_s")) \
         if str(data.get("feature_build_timeout_s") or "").strip().isdigit() else 1800
     config_data["feature_require_docs"] = data.get("feature_require_docs") == "on"
@@ -2286,8 +2344,9 @@ async def save_settings(request: Request):
     # turn OFF to stop BugFixer from monitoring/filing its own logs.
     config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
-    _cs = str(data.get("chat_slot") or "").strip()
-    config_data["chat_slot"] = int(_cs) if _cs in ("1", "2", "3", "4") else ""
+    # chat_pin: a hard ModelKey pin (provider|base_url|model) for chat, or ""
+    # for the auto picker. Replaces the old int chat_slot; stored verbatim.
+    config_data["chat_pin"] = str(data.get("chat_pin") or "").strip()
     config_data["SCHEDULER_ENABLED"] = data.get("SCHEDULER_ENABLED") == "on"
     config_data["SCHEDULER_WEEKEND_FULL"] = data.get("SCHEDULER_WEEKEND_FULL") == "on"
     config_data["TRIAGE_ONLY_MODE"] = data.get("TRIAGE_ONLY_MODE") == "on"
@@ -2497,9 +2556,10 @@ async def create_llm_entry(request: Request):
         # (http://localhost:11434), a remote-GPU box on the LAN, and Ollama Cloud.
         "base_url": (data.get("base_url") or "").strip(),
         "api_key": (data.get("api_key") or "").strip(),
-        # Build-ratchet models for THIS slot: comma-separated (e.g. 7b,14b,32b) or
-        # "*" = every model installed on this ollama endpoint, ramped smallest-first.
-        "escalation_models": (data.get("escalation_models") or "").strip(),
+        # Enabled endpoints are ranked by the capability/cost picker for every
+        # call; a disabled entry stays configured but out of routing. Missing =
+        # enabled (the default for a freshly added endpoint).
+        "enabled": bool(data.get("enabled", True)),
     }
     if not entry["model"]:
         return JSONResponse(status_code=400, content={"error": "model required"})
@@ -2535,8 +2595,8 @@ async def update_llm_entry(entry_id: str, request: Request):
                 e["base_url"] = (data.get("base_url") or "").strip()
             if "api_key" in data:
                 e["api_key"] = (data.get("api_key") or "").strip()
-            if "escalation_models" in data:
-                e["escalation_models"] = (data.get("escalation_models") or "").strip()
+            if "enabled" in data:
+                e["enabled"] = bool(data.get("enabled"))
             save_config(config)
             return {"status": "ok", "entry": e}
     return JSONResponse(status_code=404, content={"error": "entry not found"})
@@ -2544,31 +2604,16 @@ async def update_llm_entry(entry_id: str, request: Request):
 
 @router.delete("/api/llm/entries/{entry_id}")
 async def delete_llm_entry(entry_id: str):
-    """Delete a named entry and clear it from any slot assignments."""
+    """Delete a named endpoint entry."""
     config = load_config()
     config["llm_entries"] = [e for e in (config.get("llm_entries") or []) if e.get("id") != entry_id]
-    slots = config.get("llm_slots") or {}
-    for k in list(slots.keys()):
-        if slots[k] == entry_id:
-            slots[k] = None
-    config["llm_slots"] = slots
-    save_config(config)
-    return {"status": "ok"}
-
-
-@router.post("/api/llm/slots")
-async def update_llm_slots(request: Request):
-    """Update the slot→entry_id assignment for P1-P4."""
-    data = await request.json()  # {"1": "entry_id_or_null", ...}
-    config = load_config()
-    config["llm_slots"] = {str(k): (v or None) for k, v in data.items()}
     save_config(config)
     return {"status": "ok"}
 
 
 @router.get("/api/llm/config")
 async def get_llm_config():
-    """Return current vault credentials (keys redacted), entries (keys redacted), and slot assignments."""
+    """Return current vault credentials (keys redacted) and entries (keys redacted)."""
     config = load_config()
     creds = config.get("llm_credentials") or {}
     safe_creds = {p: {"configured": bool(v.get("api_key")), "base_url": v.get("base_url", "")}
@@ -2580,7 +2625,6 @@ async def get_llm_config():
     return {
         "credentials": safe_creds,
         "entries": safe_entries,
-        "slots": config.get("llm_slots") or {},
     }
 
 
@@ -2588,9 +2632,9 @@ async def get_llm_config():
 async def local_llm_setup(request: Request):
     """Kick off the one-click local (CPU-only) LLM setup in the background.
 
-    Body (all optional, defaults applied): {model, num_ctx, cores, slot}.
-    slot (1-4) is the provider slot to assign the local model to; honored as given.
-    Returns immediately with the task_id the UI polls via /api/task-details.
+    Body (all optional, defaults applied): {model, num_ctx, cores}. The model is
+    registered as an enabled endpoint (routing is capability/cost-aware now — no
+    slot to assign). Returns immediately with the task_id the UI polls.
     """
     try:
         data = await request.json()
@@ -2605,15 +2649,9 @@ async def local_llm_setup(request: Request):
         cores = int(data.get("cores") or state.get("cpu_count") or os.cpu_count() or 4)
     except (TypeError, ValueError):
         cores = os.cpu_count() or 4
-    try:
-        slot = int(data.get("slot") or 4)
-    except (TypeError, ValueError):
-        slot = 4
-    if slot not in (1, 2, 3, 4):
-        slot = 4
     if "LocalLLMSetup" in state.get("active_tasks", {}):
         return JSONResponse(status_code=409, content={"status": "busy", "message": "A local LLM setup is already running."})
-    threading.Thread(target=run_local_llm_setup, args=(model, num_ctx, cores, slot), daemon=True).start()
+    threading.Thread(target=run_local_llm_setup, args=(model, num_ctx, cores), daemon=True).start()
     return {"status": "started", "task_id": "LocalLLMSetup"}
 
 
@@ -3357,7 +3395,7 @@ __all__ = [
     'create_llm_entry',
     'update_llm_entry',
     'delete_llm_entry',
-    'update_llm_slots',
+
     'get_llm_config',
     'local_llm_setup',
     'local_llm_status',

@@ -106,6 +106,18 @@ def main():
     res = sel.explain_selection(R(), None)
     ok &= _check("None candidate pool -> no crash", res["selected"] is None and res["rows"] == [])
 
+    # --- chat_pin (pin_key): only the pinned key is eligible ----------------
+    pinned = _cand("local|u|small", cost_tier="free")
+    other = _cand("cloud|u|big", cost_tier="cheap", complexity="large")
+    res = sel.explain_selection(R(pin_key="local|u|small"), [pinned, other])
+    ok &= _check("pin_key selects the pinned candidate",
+                 (res["selected"] or {}).get("key") == "local|u|small")
+    ok &= _check("pin_key excludes non-pinned candidates with a pin reason",
+                 _row(res, "cloud|u|big")["status"] == "excluded"
+                 and "pinned" in _row(res, "cloud|u|big")["reason"])
+    ok &= _check("pin_key to a missing key yields no selection",
+                 sel.explain_selection(R(pin_key="nope|u|x"), [pinned, other])["selected"] is None)
+
     print()
     if ok:
         print("ALL CASES PASSED")

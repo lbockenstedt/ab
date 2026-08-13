@@ -1109,7 +1109,10 @@
                                     <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <input type="text" id="new-entry-baseurl" placeholder="Base URL (optional — e.g. http://gpu-box:11434)" title="Per-entry endpoint. Overrides the shared credential — lets 3 ollama entries target local CPU / LAN GPU / cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <input type="text" id="new-entry-apikey" placeholder="API key (optional — overrides shared)" title="Per-entry key. Set only for a cloud endpoint that needs one." class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <input type="text" id="new-entry-escalation" placeholder="Ratchet models (optional — 7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every model installed on this ollama endpoint. Blank = just the model above." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <label class="col-span-2 md:col-span-1 flex items-center gap-2 p-2 text-sm text-slate-600" title="Enabled endpoints are ranked by the capability/cost picker for every call. Disable to keep the credential configured but exclude it from routing.">
+                                        <input type="checkbox" id="new-entry-enabled" checked class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+                                        Enabled (available to the picker)
+                                    </label>
                                 </div>
                                 <div class="flex gap-2">
                                     <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs btn-primary rounded font-bold">Add</button>
@@ -1123,9 +1126,13 @@
                                 <div class="bg-slate-50 border border-slate-200 rounded-lg text-sm" id="entry-row-{{ entry.id }}">
                                     <!-- Summary row -->
                                     <div class="flex items-center gap-2 p-2" id="entry-view-{{ entry.id }}">
-                                        <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}</span>
+                                        <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}{% if entry.enabled == False %} <span class="text-[10px] bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded align-middle">disabled</span>{% endif %}</span>
                                         <span class="text-xs text-slate-400">{{ entry.provider }} / {{ entry.model }}</span>
                                         {% if entry.rpm %}<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{{ entry.rpm }} RPM</span>{% endif %}
+                                        <label class="flex items-center gap-1 text-[11px] text-slate-500" title="Enabled endpoints are ranked by the picker for every call.">
+                                            <input type="checkbox" onchange="toggleEntryEnabled('{{ entry.id }}', this.checked)" {{ 'checked' if entry.enabled != False else '' }} class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+                                            on
+                                        </label>
                                         <button type="button" onclick="editEntry('{{ entry.id }}')" class="text-slate-400 hover:text-slate-700 text-xs px-1" title="Edit">✏</button>
                                         <button type="button" onclick="deleteEntry('{{ entry.id }}')" class="text-red-400 hover:text-red-600 text-xs font-bold px-1">✕</button>
                                     </div>
@@ -1152,7 +1159,6 @@
                                             <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-baseurl-{{ entry.id }}" value="{{ entry.base_url or '' }}" placeholder="Base URL (e.g. http://localhost:11434)" title="Per-entry endpoint. Overrides the shared credential — set localhost for a local CPU ollama, a LAN IP for a GPU box, or https://ollama.com for cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <input type="text" id="edit-apikey-{{ entry.id }}" value="" data-touched="0" oninput="this.dataset.touched='1'" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if entry.has_key else 'API key (optional — overrides shared)' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <input type="text" id="edit-escalation-{{ entry.id }}" value="{{ entry.escalation_models or '' }}" placeholder="Ratchet models (7b,14b,32b or *)" title="Build ratchet for this slot: comma-separated models tried smallest→largest, or * = every installed model on this endpoint." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
                                         </div>
                                         <div class="flex gap-2">
                                             <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs btn-primary rounded font-bold">Save</button>
@@ -1166,80 +1172,51 @@
                             </div>
                         </div>
 
-                        <!-- Step C: Slot Assignment -->
+                        <!-- Step C: Model Registry (capability & cost rules) -->
                         <div class="mb-6">
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Step 3 — Code Slots (P1 → P2 → P3 → P4 failover order — fixes, reviews, triage)</p>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {% for slot_n, slot_label, slot_color in [
-                                    (1, 'P1 — Primary', 'text-[#01A982]'),
-                                    (2, 'P2 — First Failover', 'text-indigo-500'),
-                                    (3, 'P3 — Second Failover', 'text-purple-500'),
-                                    (4, 'P4 — Third Failover', 'text-orange-500')
-                                ] %}
-                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
-                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="">— Not configured —</option>
-                                        {% for entry in settings.llm_entries or [] %}
-                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
-                                            {{ entry.label or entry.model }} ({{ entry.provider }})
-                                        </option>
-                                        {% endfor %}
-                                    </select>
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3 — Model Registry (capability &amp; cost rules)</p>
+                            <p class="text-xs text-slate-400 mb-3">Routing is capability/cost-aware now — the 8 fixed provider slots are gone. Each <b>enabled</b> endpoint above is ranked per call by the rules here: which model can do how hard a job, at what cost tier, with which capabilities. Edit the curated rules as JSON (most-specific <span class="font-mono">match</span> wins). A save from any tab round-trips this unchanged.</p>
+                            {% if registry_unclassified %}
+                            <div class="mb-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+                                <b>{{ registry_unclassified|length }} unclassified model(s)</b> were auto-discovered but match no curated rule (cost tier <span class="font-mono">unknown</span> — admitted only as a last resort). Promote each to a curated rule to control how it is used:
+                                <div class="mt-2 flex flex-wrap gap-2">
+                                    {% for u in registry_unclassified %}
+                                    <button type="button" onclick="promoteRegistryStub('{{ u.provider }}', '{{ u.model }}')" class="px-2 py-1 rounded bg-white border border-amber-300 hover:bg-amber-100 font-mono text-[11px]">+ {{ u.provider }} / {{ u.model }}</button>
+                                    {% endfor %}
                                 </div>
-                                {% endfor %}
                             </div>
-                        </div>
-                        <!-- Step C2: dedicated LOG pool. Reading noisy operational text is a
-                             different job from writing a patch, so these slots are used ONLY
-                             for log analysis and are never pulled into code work. -->
-                        <div class="mb-6">
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3b — Log Slots (P5 → P6 — log analysis only)</p>
-                            <p class="text-xs text-slate-400 mb-3">Used <b>only</b> for log analysis and hub log review, so you can pick a model suited to reading operational text rather than writing patches. These are never used for fixes or code review. Leave both unset to fall back to the code slots (previous behaviour).</p>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {% for slot_n, slot_label, slot_color in [
-                                    (5, 'P5 — Log Primary', 'text-sky-500'),
-                                    (6, 'P6 — Log Failover', 'text-teal-500')
-                                ] %}
-                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
-                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="">— Not configured —</option>
-                                        {% for entry in settings.llm_entries or [] %}
-                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
-                                            {{ entry.label or entry.model }} ({{ entry.provider }})
-                                        </option>
-                                        {% endfor %}
-                                    </select>
-                                </div>
-                                {% endfor %}
-                            </div>
-                        </div>
+                            {% endif %}
+                            <textarea id="model_registry_json" name="model_registry_json" rows="10" spellcheck="false" class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">{{ registry_rules_json }}</textarea>
+                            <p class="text-[11px] text-slate-400 mt-1">A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span>, <span class="font-mono">match</span> (a glob). Invalid JSON is rejected on save and the previous value is kept.</p>
 
-                        <!-- Step C3: dedicated REVIEW pool. Judging a fix is worth the strongest
-                             model available, but a strong model on a code slot also gets spent
-                             on triage and file identification. Its own pool makes it
-                             structurally unreachable from that work. -->
-                        <div class="mb-6">
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3c — Review Slots (P7 → P8 — fix review and PR confidence only)</p>
-                            <p class="text-xs text-slate-400 mb-3">Used <b>only</b> to judge a generated fix and assess PR confidence — never for building, triage, file identification or PR summaries. Put your strongest models here without paying for them on minor work. Leave unset to review on the code slots as before. These are never used for fixes or code review. Leave both unset to fall back to the code slots (previous behaviour).</p>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                {% for slot_n, slot_label, slot_color in [
-                                    (7, 'P7 — Review Primary', 'text-rose-500'),
-                                    (8, 'P8 — Review Failover', 'text-amber-500')
-                                ] %}
-                                <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                                    <label class="text-xs font-bold {{ slot_color }} uppercase tracking-wider block mb-2">{{ slot_label }}</label>
-                                    <select id="slot-{{ slot_n }}" onchange="saveSlots()" class="w-full p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                        <option value="">— Not configured —</option>
-                                        {% for entry in settings.llm_entries or [] %}
-                                        <option value="{{ entry.id }}" {{ 'selected' if (settings.llm_slots or {}).get(slot_n|string) == entry.id else '' }}>
-                                            {{ entry.label or entry.model }} ({{ entry.provider }})
-                                        </option>
+                            <!-- Effective merged registry (read-only) -->
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mt-4 mb-2">Effective registry (preview)</p>
+                            <div class="overflow-x-auto border border-slate-200 rounded-lg">
+                                <table class="w-full text-xs">
+                                    <thead class="bg-slate-50 text-slate-500 uppercase"><tr>
+                                        <th class="px-2 py-1 text-left">Provider</th><th class="px-2 py-1 text-left">Match</th>
+                                        <th class="px-2 py-1 text-left">Cost</th><th class="px-2 py-1 text-left">Max</th>
+                                        <th class="px-2 py-1 text-right">Context</th><th class="px-2 py-1 text-center">Tools</th>
+                                        <th class="px-2 py-1 text-center">Agentic</th><th class="px-2 py-1 text-center">Struct</th>
+                                        <th class="px-2 py-1 text-center">Batch</th><th class="px-2 py-1 text-left">Source</th>
+                                    </tr></thead>
+                                    <tbody>
+                                        {% for r in registry_preview %}
+                                        <tr class="border-t border-slate-100 {{ 'opacity-40' if r.enabled == False else '' }}">
+                                            <td class="px-2 py-1 text-slate-600">{{ r.provider }}</td>
+                                            <td class="px-2 py-1 font-mono text-slate-500">{{ r.match }}</td>
+                                            <td class="px-2 py-1">{{ r.cost_tier }}</td>
+                                            <td class="px-2 py-1">{{ r.max_complexity }}</td>
+                                            <td class="px-2 py-1 text-right">{{ r.context_window }}</td>
+                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_tools else '' }}</td>
+                                            <td class="px-2 py-1 text-center">{{ '✓' if r.native_agentic_tools else '' }}</td>
+                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_structured_output else '' }}</td>
+                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_batch else '' }}</td>
+                                            <td class="px-2 py-1"><span class="text-[10px] px-1.5 py-0.5 rounded {{ 'bg-emerald-100 text-emerald-700' if r.source == 'curated' else 'bg-slate-100 text-slate-500' }}">{{ r.source }}</span></td>
+                                        </tr>
                                         {% endfor %}
-                                    </select>
-                                </div>
-                                {% endfor %}
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
 
@@ -1287,15 +1264,10 @@
                                 <span class="text-xs text-slate-400">Detected {{ state.cpu_count }} cores.</span>
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Provider slot</label>
-                                <select id="local-llm-slot"
-                                        class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
-                                    <option value="1">P1</option>
-                                    <option value="2">P2</option>
-                                    <option value="3">P3</option>
-                                    <option value="4" selected>P4</option>
-                                </select>
-                                <span class="text-xs text-slate-400">Which slot to assign this model to.</span>
+                                <label class="text-sm font-medium text-slate-600">Availability</label>
+                                <div class="w-full p-2 rounded-lg border border-slate-200 text-xs text-slate-500 bg-slate-50">
+                                    Added as an <b>enabled</b> endpoint and ranked by the Model Registry — no slot to pick.
+                                </div>
                             </div>
                         </div>
                         <div class="flex items-center gap-3">
@@ -1661,13 +1633,14 @@
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Chat provider</label>
-                                <select name="chat_slot" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <option value="" {{ 'selected' if not settings.chat_slot else '' }}>Auto (failover — P1 first)</option>
-                                    {% for n in [1, 2, 3, 4] %}
-                                    <option value="{{ n }}" {{ 'selected' if settings.chat_slot|string == n|string else '' }}>P{{ n }}{% set _eid = (settings.llm_slots or {}).get(n|string) %}{% if _eid %}{% for _e in (settings.llm_entries or []) %}{% if _e.id == _eid %} — {{ _e.label or _e.model }}{% endif %}{% endfor %}{% endif %}</option>
+                                <select name="chat_pin" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="" {{ 'selected' if not settings.chat_pin else '' }}>Auto (capability/cost picker — latency-favoured)</option>
+                                    {% for e in settings.llm_entries or [] %}
+                                    {% set _pin = e.provider ~ '|' ~ (e.base_url or '') ~ '|' ~ e.model %}
+                                    <option value="{{ _pin }}" {{ 'selected' if settings.chat_pin == _pin else '' }}>{{ e.label or e.model }} ({{ e.provider }}){{ ' — disabled' if e.enabled == False else '' }}</option>
                                     {% endfor %}
                                 </select>
-                                <span class="text-xs text-slate-400">Pin chat to a specific slot — e.g. a cloud provider that's always online — so a slow local builder (P1) doesn't make chat slow. Auto uses the normal failover order.</span>
+                                <span class="text-xs text-slate-400">Hard-pin chat to one endpoint — e.g. a cloud provider that's always online — so a slow local builder doesn't make chat slow. Auto lets the picker rank by capability/cost (latency-favoured for chat).</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Tool Iterations per Turn</label>
@@ -4247,12 +4220,12 @@
             const rpm = parseInt(document.getElementById('new-entry-rpm')?.value || '0');
             const base_url = document.getElementById('new-entry-baseurl')?.value.trim() || '';
             const api_key = document.getElementById('new-entry-apikey')?.value.trim() || '';
-            const escalation_models = document.getElementById('new-entry-escalation')?.value.trim() || '';
+            const enabled = document.getElementById('new-entry-enabled')?.checked !== false;
             if (!model) { showToast('Please select a model.', 'warn'); return; }
             const resp = await fetch('/api/llm/entries', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({label: label || model, provider, model, rpm, base_url, api_key, escalation_models})
+                body: JSON.stringify({label: label || model, provider, model, rpm, base_url, api_key, enabled})
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to add entry.', 'error');
@@ -4325,9 +4298,8 @@
             const model = document.getElementById(`edit-model-${id}`)?.value;
             const rpm = parseInt(document.getElementById(`edit-rpm-${id}`)?.value || '0');
             const base_url = document.getElementById(`edit-baseurl-${id}`)?.value.trim() || '';
-            const escalation_models = document.getElementById(`edit-escalation-${id}`)?.value.trim() || '';
             if (!model) { showToast('Please select a model.', 'warn'); return; }
-            const body = {label: label || model, provider, model, rpm, base_url, escalation_models};
+            const body = {label: label || model, provider, model, rpm, base_url};
             // The key field never carries the real stored value (only a
             // "•••• already set" placeholder — see settings_page's
             // redaction), so only include api_key when the operator actually
@@ -4352,19 +4324,44 @@
             else showToast('Failed to delete entry.', 'error');
         }
 
-        async function saveSlots() {
-            const slots = {};
-            // 1-4 code, 5-6 log, 7-8 review. Omitting a slot here silently drops
-            // its assignment on every save, since the endpoint REPLACES the map.
-            [1,2,3,4,5,6,7,8].forEach(n => {
-                const sel = document.getElementById(`slot-${n}`);
-                if (sel) slots[n] = sel.value || null;
+        async function toggleEntryEnabled(id, enabled) {
+            // Enabled endpoints are ranked by the picker; disabled ones stay
+            // configured but out of routing. PUT only the enabled flag —
+            // update_llm_entry leaves every other field untouched.
+            try {
+                const resp = await fetch(`/api/llm/entries/${id}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: !!enabled})
+                });
+                if ((await resp.json()).status !== 'ok') { showToast('Failed to update endpoint.', 'error'); return; }
+                location.reload();
+            } catch (e) { showToast('Failed to update endpoint: ' + e, 'error'); }
+        }
+
+        function promoteRegistryStub(provider, model) {
+            // Append a prefilled curated rule for an unclassified auto-discovered
+            // model to the Model Registry textarea so the operator can tune its
+            // cost tier / capabilities, then Save. Non-destructive: it edits the
+            // textarea in place and never submits on its own.
+            const ta = document.getElementById('model_registry_json');
+            if (!ta) return;
+            let rules;
+            try { rules = JSON.parse(ta.value || '[]'); }
+            catch (e) { showToast('Registry JSON is invalid — fix it before promoting.', 'error'); return; }
+            if (!Array.isArray(rules)) rules = [];
+            const safeId = (provider + '-' + model).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+            if (rules.some(r => r && r.id === safeId)) { showToast('Already added — edit it below.', 'warn'); return; }
+            rules.push({
+                id: safeId, provider: provider, match: model, label: model,
+                cost_tier: 'cheap', max_complexity: 'medium', context_window: 32768,
+                supports_tools: false, native_agentic_tools: false, supports_mutating_agent: false,
+                supports_structured_output: false, supports_batch: false, supports_streaming: true,
+                enabled: true, notes: 'promoted from auto-discovery — review cost tier & capabilities'
             });
-            await fetch('/api/llm/slots', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(slots)
-            });
+            ta.value = JSON.stringify(rules, null, 2);
+            ta.scrollIntoView({behavior: 'smooth', block: 'center'});
+            showToast('Rule added to the editor — review and Save.', 'success');
         }
         // ── End LLM Vault UI ──────────────────────────────────────────────────
 
@@ -4418,7 +4415,6 @@
             const model = (document.getElementById('local-llm-model')?.value || 'qwen2.5-coder:14b').trim();
             const num_ctx = parseInt(document.getElementById('local-llm-ctx')?.value || '32768', 10) || 0;
             const cores = parseInt(document.getElementById('local-llm-cores')?.value || '1', 10) || 1;
-            const slot = parseInt(document.getElementById('local-llm-slot')?.value || '4', 10) || 4;
 
             if (!confirm(
                 `This will:\n` +
@@ -4426,7 +4422,7 @@
                 `  • pull ${model} (~20 GB download, several minutes)\n` +
                 `  • create a context-tuned model (num_ctx=${num_ctx || 'default'})\n` +
                 `  • write a systemd override + restart the ollama service\n` +
-                `  • configure BugFixer slot P${slot} → ${model}\n\n` +
+                `  • add ${model} as an enabled endpoint (ranked by the Model Registry)\n\n` +
                 `Continue?`
             )) return;
 
@@ -4445,7 +4441,7 @@
                 const resp = await fetch('/api/local-llm/setup', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model, num_ctx, cores, slot })
+                    body: JSON.stringify({ model, num_ctx, cores })
                 });
                 const data = await resp.json();
                 if (!resp.ok || data.status === 'busy') {

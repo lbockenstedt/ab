@@ -35,6 +35,7 @@ class LlmRequirements:
     latency_sensitive: bool = False            # informational; ranking already favors low latency
     must_escalate_to_human: bool = False       # consumed by the caller when select_model returns None
     restrict: str | None = None                # "local"|"cloud"|"claude" — HARD filter
+    pin_key: str | None = None                 # exact ModelKey "provider|base_url|model" — HARD pin (chat_pin)
     exclude_models: tuple = ()                 # ModelKeys already burned this run
 
 
@@ -165,6 +166,8 @@ def _select_pass(reqs, candidates, perf, slow_factor, min_samples, allow_unknown
             continue
         if c.get("key") in (reqs.exclude_models or ()):
             continue
+        if reqs.pin_key and c.get("key") != reqs.pin_key:
+            continue
         if not _passes_restriction(c, reqs.restrict):
             continue
         caps = c.get("caps") or {}
@@ -242,6 +245,8 @@ def _exclusion_reason(c, reqs, allow_unknown):
         return "unavailable: " + str(c.get("unavailable_reason") or "cooldown")
     if c.get("key") in (reqs.exclude_models or ()):
         return "excluded this run (already tried/burned)"
+    if reqs.pin_key and c.get("key") != reqs.pin_key:
+        return "not the pinned endpoint (chat_pin)"
     if not _passes_restriction(c, reqs.restrict):
         return "restrict=" + str(reqs.restrict)
     caps = c.get("caps") or {}

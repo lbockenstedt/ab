@@ -719,7 +719,7 @@ def _run_chat_reply_simple(chat_id, config):
         messages = conv.get("messages", [])
         window = [{"role": "system", "content": system_prompt}] + messages[-window_size:]
         from model_selection import LlmRequirements
-        reqs = LlmRequirements(complexity="small", latency_sensitive=True)
+        reqs = LlmRequirements(complexity="small", latency_sensitive=True, pin_key=(config.get("chat_pin") or None))
         reply = call_llm("", messages=window, task_id=chat_id, requirements=reqs)
         if reply and reply.strip():
             append_chat_message(chat_id, {
@@ -778,7 +778,7 @@ def run_chat_reply(chat_id):
         if gh is None:
             _set_chat_stream_status(chat_id, "Thinking…")
             from model_selection import LlmRequirements
-            reqs = LlmRequirements(complexity="small", latency_sensitive=True)
+            reqs = LlmRequirements(complexity="small", latency_sensitive=True, pin_key=(config.get("chat_pin") or None))
             reply = call_llm("", messages=messages, task_id=chat_id, requirements=reqs)  # streaming string
             if reply and reply.strip():
                 append_chat_message(chat_id, {
@@ -805,7 +805,7 @@ def run_chat_reply(chat_id):
                 logger.warning(f"Chat tool turn {iteration} failed ({e}); degrading to index-only answer.")
                 try:
                     from model_selection import LlmRequirements
-                    _fallback_reqs = LlmRequirements(complexity="small", latency_sensitive=True)
+                    _fallback_reqs = LlmRequirements(complexity="small", latency_sensitive=True, pin_key=(config.get("chat_pin") or None))
                     reply = call_llm("", messages=messages[:], task_id=chat_id, requirements=_fallback_reqs)
                     final_text = reply or ""
                 except Exception as ee:
