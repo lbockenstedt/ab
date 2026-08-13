@@ -108,6 +108,22 @@ def main():
     ok &= _check("min_context_tokens carried through unchanged", r.min_context_tokens == 500)
     ok &= _check("must_escalate_to_human carried through unchanged", r.must_escalate_to_human is True)
 
+    # ---- every failure branch resets the working tree before the next attempt ----
+    # Regression guard (Phase 8): attempt N+1 must build against a pristine tree,
+    # not attempt N's rejected edits. Each failure kind's branch in the retry loop
+    # must issue a `reset("--hard", "HEAD")` before its next_attempt_requirements
+    # call. qa_failed and invalid_json were the two that silently skipped it.
+    src = open("fix_engine.py").read()
+    for kind in ("invalid_json", "review_rejected", "low_confidence", "qa_failed", "error"):
+        anchor = f'"kind": "{kind}"'
+        idx = src.find(anchor)
+        found = False
+        if idx != -1:
+            nxt = src.find("next_attempt_requirements", idx)
+            window = src[idx:nxt] if nxt != -1 else src[idx:idx + 1200]
+            found = 'reset("--hard", "HEAD")' in window
+        ok &= _check(f"{kind}: working tree reset before the next attempt", found)
+
     print("\nALL CASES PASSED" if ok else "\nSOME CASES FAILED")
     return 0 if ok else 1
 

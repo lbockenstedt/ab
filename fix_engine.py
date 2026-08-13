@@ -2101,6 +2101,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         failure_msg = "AI generated invalid JSON format"
                         last_failure = {"kind": "invalid_json", "detail": failure_msg}
                         error_context = failure_msg
+                        # parse_and_apply can apply some edits before hitting the
+                        # malformed tail, so reset to a pristine tree before the
+                        # next attempt (same discipline as the other failure paths).
+                        try:
+                            repo_git.git.reset("--hard", "HEAD")
+                            repo_git.git.clean("-fd")
+                        except Exception:  # noqa: BLE001
+                            pass
                         reqs = next_attempt_requirements(reqs, last_failure["kind"], built_key, config)
                     else:
                         critique = ""
@@ -2191,6 +2199,18 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             error_context = failure_msg
                             last_failure = {"kind": "qa_failed",
                                             "detail": str(failure_msg or "").strip()}
+                            # Reset the working tree so attempt N+1 builds against
+                            # the ORIGINAL source, not attempt N's failed edits.
+                            # Every other failure path (review_rejected,
+                            # low_confidence, error) already does this; QA-fail was
+                            # the one that silently let the next attempt inherit the
+                            # rejected diff and "re-solve" a file that was no longer
+                            # pristine.
+                            try:
+                                repo_git.git.reset("--hard", "HEAD")
+                                repo_git.git.clean("-fd")
+                            except Exception:  # noqa: BLE001
+                                pass
                             reqs = next_attempt_requirements(reqs, last_failure["kind"], built_key, config)
                 except llm_client.LlmHumanEscalationNeeded as _human_esc:
                     logger.warning(f"{issue_id}: no candidate meets the fix-generation requirements "

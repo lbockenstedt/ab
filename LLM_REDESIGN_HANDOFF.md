@@ -203,32 +203,101 @@ plan's §2 table, remove the old param usage at that call site only. Test each
 site individually before moving to the next — don't batch multiple sites into
 one commit given the risk profile the plan itself calls out (R9).
 
-### Phase 6 — deletion only
-Only after Phase 5 removes every reader: `model_router.py` (whole file), the
-ladder in `fix_engine.py` (~lines 2162-2195, 2292-2424 per the plan — re-verify),
-the CPU ensemble (`_crosscheck_review`, `_run_cpu_ensemble`), 8 slot constants +
-`_slots_for_task` + `_get_provider_config`/`_get_provider_rpm`/
-`_get_escalation_models`/`_find_claude_cli_slot`, `_chat_force_provider`,
-`task_kind`/`force_provider`/`force_cloud`/`model_override` params on
-`call_llm`. Also delete the now-superseded slot-keyed `_PROVIDER_CREDIT_CB` /
-`_SLOT_LOCKS` in favor of the identity-keyed ones from Phase 4. Also: delete
-`_record_ollama_tps` + the `llm_tps.json` path, now that Phase 5 will have
-proven `llm_perf.json` in real traffic.
+### Phase 6 — deletion (DONE, commits `2b18d62`, `6d4a4e2`)
+- **CPU ensemble retired** (`2b18d62`): deleted `_crosscheck_review`,
+  `_run_cpu_ensemble`, `_filter_ensemble_models`, `_model_param_b` and the
+  `local_ensemble` caller block in `process_single_issue`. The standard
+  requirements= retry loop + the `review_fix` multi-reviewer panel (Phase 5,
+  site #10) already provide capability/cost-aware building and N-model review,
+  so the duplicate orchestrator retires entirely. `apply_ai_fix` dropped
+  `force_cloud`/`force_provider`/`model_override`/`task_kind` (builds a default
+  `large`/structured `LlmRequirements` when none given); the Default Reviewer
+  fallback in `_run_reviewer_turn` now uses `requirements=medium`; workers'
+  `preload_ollama_models` uses `model_registry.local_models_for_preload`. The
+  dead ensemble config surface (`local_ensemble`,
+  `ensemble_skip_external_at_full`, `EXTERNAL_MIN_CONFIDENCE`,
+  `CPU_CROSSCHECK_TARGET`, `ensemble_min_model_b`) was removed from the Settings
+  UI, `save_settings`, and the status endpoint.
+- **`call_llm` is requirements-only** (`6d4a4e2`): the entire legacy body (slot
+  pool, Provider 1→4 failover, busy-wait loop) and the
+  `force_cloud`/`force_provider`/`task_kind`/`model_override`/`url_override`
+  params are gone; `call_llm` now requires a `requirements=LlmRequirements` and
+  delegates to `_call_llm_with_requirements`. Deleted the now-dead
+  `_slots_for_task`, `_pool_category_name`, `_get_escalation_models`,
+  `_provider_rate_limit_wait` (+ `_PROVIDER_REQUEST_TIMES`), and `_SLOT_LOCKS`.
+  Removed `test_llm_concurrency.py` (regression guard for the deleted slot-pool
+  concurrency model); added `test_llm_client_call_llm_wrapper.py`.
+- **Still present, intentionally deferred to the Phase 7 diagnostics rework**
+  (they still have live readers): `model_router.py`, the 8 slot constants
+  (`_CODE_SLOTS`/`_LOG_SLOTS`/`_REVIEW_SLOTS`/`_ALL_SLOTS`),
+  `_get_provider_config`/`_get_provider_rpm`/`_find_claude_cli_slot`, the
+  slot-keyed `_PROVIDER_CREDIT_CB`, and `_record_ollama_tps`/`llm_tps.json`.
+  Their only remaining consumers are `llm_diag` and the `routes.py`/`workers.py`
+  per-slot Diagnostics tables — retiring those consumers **is** the Phase 7c
+  Settings-UI work below, so the constants come out with it rather than being
+  stranded mid-rework.
 
 ### Phase 7 — migration + Settings UI
-`llm_migrate.py` (new, not yet written — see plan §7): idempotent one-shot
-`llm_slots`/`escalation_models` cleanup, `chat_slot`→`chat_pin`. Settings UI:
-Model Registry editor (JSON textarea + preview table, reuse the
-`feature_boundary.py` pattern), retire the 3 slot sections into one Endpoints
-list, reshape the Model Performance panel onto `llm_perf.json`
-(provider|base_url|model keying — rekey the JS/header-chip consumers too, per
-plan §8), `llm_diag` becomes a dry-run picker.
+- **Security (DONE, `f408f81`)**: `GET /api/llm/config` and the Settings render
+  path already redact `api_key` to a `has_key`/`configured` presence flag (a
+  prior commit). Fixed the follow-on display bug where three template checks
+  still tested `cred.get('api_key')` (always falsy post-redaction), so the
+  "Saved"/"Connected" badges and Copilot sign-out button never rendered.
+- **Migration (DONE, `8264790`)**: `llm_migrate.migrate(config)` — idempotent,
+  guarded by `llm_config_version==2`, called once at startup. Adds `enabled`
+  flags to `llm_entries` (True if slotted), drops `escalation_models`, deletes
+  `llm_slots`, converts `chat_slot`→`chat_pin`, seeds `model_registry_auto`
+  stubs for unmatched endpoints. `test_llm_migrate.py`.
+- **Settings UI reshape (NOT DONE — deferred)**: the Model Registry editor +
+  preview table, retiring the 3 slot sections into one Endpoints list, the
+  Model Performance panel rekey (`provider|base_url|model`), and `llm_diag`
+  becoming a dry-run picker. This is the large, template/JS-heavy piece the
+  Python `test_*.py` suite can't cover; it is coupled to the Phase 6 deferrals
+  above (deleting `model_router.py` + the slot constants). It should be done as
+  its own focused change with manual UI verification, not folded into the
+  deletion commits.
 
-### Phase 8 — behavior-change wiring
-`awaiting_human` re-trigger on `must_escalate_to_human` + `select_model() is
-None`; the two `fix_engine.py` quirk fixes called out in the plan's retirement
-map (QA-fail tree reset, invalid-JSON `error_context`) — both are intentional
-behavior changes, call them out in release notes per the plan.
+### Phase 8 — behavior-change wiring (DONE, `2b18d62`/`bf59f2b`/this branch)
+All three intentional behavior changes are wired and covered:
+- **`awaiting_human` re-trigger** on `must_escalate_to_human=True` +
+  `select_model()` returning None — `LlmHumanEscalationNeeded` raised in
+  `llm_client._call_llm_with_requirements`, caught in `process_single_issue`,
+  which resets the tree, labels `bugfixer-needs-human`, and marks the issue
+  `awaiting_human` (no silent safety-floor fallback).
+- **Invalid-JSON sets `error_context`** — the `invalid_json` failure kind feeds
+  the reviewer/parse failure back into the next attempt's prompt.
+- **QA-fail (and invalid-JSON) tree reset** — every failure branch in the retry
+  loop (`review_rejected`/`low_confidence`/`error` already did;
+  `qa_failed`/`invalid_json` were the two gaps now fixed) does
+  `git reset --hard HEAD && git clean -fd` before the next attempt, so
+  attempt N+1 builds against pristine source instead of inheriting attempt N's
+  rejected edits. Guarded by `test_fix_engine_retry_triggers.py`.
+
+## Release notes — intentional behavior changes (Phases 6–8)
+
+Operator-facing changes to call out in the next release:
+
+- **The CPU ensemble is removed.** The `local_ensemble` opt-in and its knobs
+  (`ensemble_skip_external_at_full`, `EXTERNAL_MIN_CONFIDENCE`,
+  `CPU_CROSSCHECK_TARGET`, `ensemble_min_model_b`) no longer exist. Fixes are
+  now built and reviewed by the capability/cost-aware picker + multi-reviewer
+  panel for every issue, not just when the ensemble was enabled. These settings
+  are dropped on first save; no action needed.
+- **Model routing is capability/cost-aware, not slot-ordered.** The old
+  Provider 1→2→3→4 slot order and per-task slot pools (Code/Log/Review) are
+  gone. Endpoints are ranked by capability and cost tier per call. On first
+  boot the config is migrated to v2: entries that were assigned to a slot stay
+  enabled; entries that were configured but never slotted are **disabled** and
+  must be re-enabled in Settings if wanted (this matches their old behavior —
+  an unslotted entry was never used).
+- **Issues can now be held for human review at selection time.** If no
+  configured model meets a fix's requirements, the issue is labeled
+  `bugfixer-needs-human` and marked `awaiting_human` instead of silently
+  falling back — surfaced in the dashboard.
+- **Retries always start from a clean working tree.** A fix attempt that fails
+  QA (or returns invalid JSON) no longer leaves its rejected edits in the tree
+  for the next attempt to build on top of.
+
 
 ## Before resuming
 
