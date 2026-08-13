@@ -733,22 +733,92 @@ def _run_chat_reply_simple(chat_id, config):
         _set_chat_stream_error(chat_id, f"LLM error: {e}")
 
 
+def _run_chat_reply_orchestrated(chat_id, config):
+    """Multi-agent chat path (ORCHESTRATOR_ENABLED): decompose the latest user
+    message into a sub-task DAG, run the independent parts CONCURRENTLY each on
+    the best available LLM, then merge. Interim status names which model is
+    handling each part so /api/chat/stream shows the fan-out live. Returns True
+    on success; returns False (without finalizing) to signal the caller should
+    fall back to the normal path."""
+    try:
+        store = load_chats()
+        conv = get_conversation(store, chat_id)
+        if conv is None:
+            _set_chat_stream_error(chat_id, "Conversation not found")
+            return True
+        history = conv.get("messages", [])
+        user_msgs = [m for m in history if m.get("role") == "user"]
+        request_text = (user_msgs[-1].get("content") if user_msgs else "") or ""
+        if not request_text.strip():
+            _finalize_chat_stream(chat_id, "")
+            return True
+
+        import agent_orchestrator
+        progress = {"parts": []}
+
+        def _progress(ev):
+            kind = ev.get("event")
+            if kind == "planned":
+                n = ev.get("task_count", 1)
+                _set_chat_stream_status(
+                    chat_id,
+                    f"🧠 Planning — split into {n} parallel agents…" if n > 1 else "Thinking…",
+                )
+            elif kind == "agent_done":
+                progress["parts"].append(
+                    f"• {ev.get('task_id')} → {ev.get('model') or '?'}"
+                    + ("" if ev.get("ok") else " (failed)")
+                )
+                _set_chat_stream_status(chat_id, "Agents working…\n" + "\n".join(progress["parts"]))
+            elif kind == "merged":
+                _set_chat_stream_status(chat_id, "Merging results…")
+
+        result = agent_orchestrator.orchestrate(
+            request_text, config, progress_cb=_progress, task_id=chat_id,
+        )
+        final = result.final_text or ""
+        # Only annotate when the request actually fanned out, so single-agent
+        # answers read exactly like a normal chat reply.
+        if result.planned and result.results:
+            roster = ", ".join(f"{r.task_id}→{r.model_label or '?'}" for r in result.results)
+            final = f"{final}\n\n---\n🧠 *Handled by {len(result.results)} agents: {roster}*"
+        if final.strip():
+            append_chat_message(chat_id, {
+                "role": "assistant",
+                "content": final,
+                "ts": datetime.now().isoformat(),
+            })
+        _finalize_chat_stream(chat_id, final)
+        return True
+    except Exception as e:
+        # Never dead-end chat: log and let the caller run the normal path.
+        logger.error(f"_run_chat_reply_orchestrated failed for {chat_id}: {e}\n{traceback.format_exc()}")
+        return False
+
+
 def run_chat_reply(chat_id):
     """Background worker that produces an LLM reply for one conversation turn.
 
-    With CHAT_TOOLS_ENABLED (default), runs an agent loop: the system prompt
-    carries a compact repo/issue index (build_chat_context_index) and the model
-    may call read-only tools (CHAT_TOOLS) to drill in. propose_fix does not
-    mutate; it emits a :::confirm_fix block the UI renders as a Confirm button,
-    and the real fix run only happens via /api/chat/confirm_fix after the user
-    clicks. Without a GitHub token, tools are disabled but the index still gives
-    the assistant repo/issue awareness. Tool turns are non-streaming so
-    message.tool_calls parse cleanly; interim status is written to
-    state["chat_streams"][chat_id] / active_tasks so /api/chat/stream shows
-    progress. Completion/error is tracked in state["chat_streams"][chat_id].
+    With ORCHESTRATOR_ENABLED, the turn is first attempted as a multi-agent
+    orchestration (_run_chat_reply_orchestrated); on any failure it falls
+    through to the normal path below. With CHAT_TOOLS_ENABLED (default), runs
+    an agent loop: the system prompt carries a compact repo/issue index
+    (build_chat_context_index) and the model may call read-only tools
+    (CHAT_TOOLS) to drill in. propose_fix does not mutate; it emits a
+    :::confirm_fix block the UI renders as a Confirm button, and the real fix
+    run only happens via /api/chat/confirm_fix after the user clicks. Without a
+    GitHub token, tools are disabled but the index still gives the assistant
+    repo/issue awareness. Tool turns are non-streaming so message.tool_calls
+    parse cleanly; interim status is written to state["chat_streams"][chat_id]
+    / active_tasks so /api/chat/stream shows progress. Completion/error is
+    tracked in state["chat_streams"][chat_id].
     """
     try:
         config = load_config()
+        if config.get("ORCHESTRATOR_ENABLED", False):
+            if _run_chat_reply_orchestrated(chat_id, config):
+                return
+            logger.warning("orchestrated chat turn failed; falling back to the standard path")
         if not config.get("CHAT_TOOLS_ENABLED", True):
             return _run_chat_reply_simple(chat_id, config)
 

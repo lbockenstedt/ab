@@ -2378,6 +2378,14 @@ async def save_settings(request: Request):
     # turn OFF to stop BugFixer from monitoring/filing its own logs.
     config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
+    # Multi-agent orchestration (default off): a chat request is planned into a
+    # sub-task DAG whose independent parts run in parallel across distinct
+    # endpoints, then merged. The two bounds are clamped to >=1.
+    config_data["ORCHESTRATOR_ENABLED"] = data.get("ORCHESTRATOR_ENABLED") == "on"
+    config_data["ORCHESTRATOR_MAX_PARALLEL"] = max(1, int(data.get("ORCHESTRATOR_MAX_PARALLEL"))) \
+        if str(data.get("ORCHESTRATOR_MAX_PARALLEL") or "").strip().isdigit() else 3
+    config_data["ORCHESTRATOR_MAX_TASKS"] = max(1, int(data.get("ORCHESTRATOR_MAX_TASKS"))) \
+        if str(data.get("ORCHESTRATOR_MAX_TASKS") or "").strip().isdigit() else 5
     # chat_pin: a hard ModelKey pin (provider|base_url|model) for chat, or ""
     # for the auto picker. Replaces the old int chat_slot; stored verbatim.
     config_data["chat_pin"] = str(data.get("chat_pin") or "").strip()

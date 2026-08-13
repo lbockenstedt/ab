@@ -1707,6 +1707,23 @@
                                 </div>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
+                                <div class="flex items-center gap-2">
+                                    <input type="checkbox" name="ORCHESTRATOR_ENABLED" id="ORCHESTRATOR_ENABLED" {{ 'checked' if settings.ORCHESTRATOR_ENABLED else '' }} title="When on, a chat request is planned into a small DAG of sub-tasks and the independent parts run at the SAME TIME, each on the best available LLM (your CPU box, GPU box, and cloud working in parallel), then merged. Off = one model answers the whole request." class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <label for="ORCHESTRATOR_ENABLED" class="text-xs font-medium text-slate-700">
+                                        🧠 Multi-agent orchestration (split a request across LLMs in parallel, then merge)
+                                    </label>
+                                </div>
+                                <span class="text-xs text-slate-400">Experimental. Best with two or more endpoints (e.g. a local CPU box + GPU box + a cloud provider) so agents run concurrently instead of queuing on one server. Falls back to the normal single-model chat on any failure.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max Parallel Agents</label>
+                                <input type="number" min="1" name="ORCHESTRATOR_MAX_PARALLEL" value="{{ settings.ORCHESTRATOR_MAX_PARALLEL or 3 }}" title="Upper bound on how many sub-task agents run at once. Keep at or below your number of usable LLM endpoints." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max Agents per Request</label>
+                                <input type="number" min="1" name="ORCHESTRATOR_MAX_TASKS" value="{{ settings.ORCHESTRATOR_MAX_TASKS or 5 }}" title="Upper bound on how many sub-tasks the planner may split a request into." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Chat provider</label>
                                 <select name="chat_pin" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                     <option value="" {{ 'selected' if not settings.chat_pin else '' }}>Auto (capability/cost picker — latency-favoured)</option>
