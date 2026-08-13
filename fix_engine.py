@@ -1060,38 +1060,65 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
 
     votes = []
     failed_reviewers = []
+
+    def _review_one(r):
+        """Run ONE reviewer turn. Returns (vote_dict|None, failed_name|None).
+
+        Read-only: a reviewer only reads the diff and emits a JSON verdict, so
+        the panel is safe to run CONCURRENTLY — distinct models review in true
+        parallel; calls that land on the same model are serialised by
+        call_llm's per-model lock. No shared state is mutated here (results are
+        returned and collected by the caller in panel order)."""
+        res = None
+        try:
+            logger.info(f"{r['name']} analyzing fix...")
+            res = _run_reviewer_turn(
+                prompt,
+                "You are a skeptical senior engineer. Be critical. Only return JSON.",
+                r.get("candidate"), task_id, repo, head_sha,
+                repo_checkout_path=checkout_path,
+            )
+            match = re.search(r'\{.*\}', res, re.DOTALL)
+            if match:
+                _v = _robust_json_loads(match.group())
+                _v["confidence"] = _norm_confidence(_v.get("confidence"))
+                return ({**_v, "reviewer": r["name"]}, None)
+            # Parseable-JSON-less but non-erroring response: neither a vote nor a
+            # counted failure, exactly as the prior sequential loop treated it.
+            return (None, None)
+        except Exception as e:
+            if is_llm_cooldown_error(e):
+                logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
+            elif isinstance(e, json.JSONDecodeError) and res is not None:
+                # _robust_json_loads only repairs one specific, confirmed-recurring
+                # pattern (a stray backslash) and re-raises anything else
+                # unchanged. A bare exception message ("Expecting value: line 1
+                # column 30") gives no way to root-cause or repair the NEXT
+                # occurrence of a different pattern — unlike parse_and_apply's
+                # last_failures for edit misses, there was nothing to go on here.
+                # Truncated: this is a raw LLM response, not something to log
+                # unbounded.
+                logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
+            else:
+                logger.error(f"{r['name']} failed: {e}")
+            return (None, r["name"])
+
     try:
-        for r in reviewers:
-            res = None
-            try:
-                logger.info(f"{r['name']} analyzing fix...")
-                res = _run_reviewer_turn(
-                    prompt,
-                    "You are a skeptical senior engineer. Be critical. Only return JSON.",
-                    r.get("candidate"), task_id, repo, head_sha,
-                    repo_checkout_path=checkout_path,
-                )
-                match = re.search(r'\{.*\}', res, re.DOTALL)
-                if match:
-                    _v = _robust_json_loads(match.group())
-                    _v["confidence"] = _norm_confidence(_v.get("confidence"))
-                    votes.append({**_v, "reviewer": r["name"]})
-            except Exception as e:
-                if is_llm_cooldown_error(e):
-                    logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
-                elif isinstance(e, json.JSONDecodeError) and res is not None:
-                    # _robust_json_loads only repairs one specific, confirmed-recurring
-                    # pattern (a stray backslash) and re-raises anything else
-                    # unchanged. A bare exception message ("Expecting value: line 1
-                    # column 30") gives no way to root-cause or repair the NEXT
-                    # occurrence of a different pattern — unlike parse_and_apply's
-                    # last_failures for edit misses, there was nothing to go on here.
-                    # Truncated: this is a raw LLM response, not something to log
-                    # unbounded.
-                    logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
-                else:
-                    logger.error(f"{r['name']} failed: {e}")
-                failed_reviewers.append(r["name"])
+        # Fan the panel out: reviewers are independent + read-only, so run them
+        # at once (distinct LLMs working in parallel) instead of one at a time.
+        # ex.map preserves panel order, so votes/critiques aggregate identically
+        # to the old sequential loop — this is a pure latency win.
+        if len(reviewers) <= 1:
+            results = [_review_one(r) for r in reviewers]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=len(reviewers)) as ex:
+                results = list(ex.map(_review_one, reviewers))
+        for vote, failed in results:
+            if vote is not None:
+                votes.append(vote)
+            if failed is not None:
+                failed_reviewers.append(failed)
     finally:
         if checkout_is_temp and checkout_path:
             import shutil
