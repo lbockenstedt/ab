@@ -1896,9 +1896,30 @@ async def settings_page(request: Request):
     extra_am_repos = [r for r in feature_automerge_repos if r not in set(github_repos)]
     feature_automerge_repo_options = list(github_repos) + extra_am_repos
 
+    # SECURITY: llm_credentials/llm_entries carry plaintext api_key values.
+    # They used to flow into the template raw via the **config merge below,
+    # which embedded every configured key directly in the served HTML
+    # (readable via view-source, cached by any proxy, no JS required) — the
+    # same class of leak GET /api/llm/config already guards against for API
+    # consumers via safe_creds. Redact api_key to a presence flag here too;
+    # the edit forms show a "•••• already set" placeholder instead of the
+    # real value, and only send a NEW key back on save when the operator
+    # actually types into the field (see saveCredential/saveEntry JS +
+    # save_llm_credential/update_llm_entry's "only overwrite if present in
+    # the payload" handling).
+    _safe_llm_credentials = {
+        p: {"base_url": v.get("base_url", ""), "has_key": bool(v.get("api_key"))}
+        for p, v in (config.get("llm_credentials") or {}).items()
+    }
+    _safe_llm_entries = [
+        {**e, "api_key": "", "has_key": bool(e.get("api_key"))}
+        for e in (config.get("llm_entries") or [])
+    ]
+
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
-        "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"]},
+        "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"],
+                     "llm_credentials": _safe_llm_credentials, "llm_entries": _safe_llm_entries},
         "available_labels": state.get("available_labels", []),
         "repo_options": repo_options,
         "monitored_set": monitored_set,
@@ -2357,8 +2378,15 @@ async def save_llm_credential(request: Request):
         return JSONResponse(status_code=400, content={"error": "provider required"})
     config = load_config()
     creds = config.setdefault("llm_credentials", {})
+    existing = creds.get(provider) or {}
+    # api_key is only present in the payload when the operator actually typed
+    # into the (never-populated-with-the-real-value) key field on the
+    # Settings page — see settings_page's redaction + saveCredential's JS.
+    # Absent means "leave the stored key alone", not "clear it"; an empty
+    # string IS a legitimate value here (an explicit clear when the operator
+    # types into the field then deletes it).
     creds[provider] = {
-        "api_key": (data.get("api_key") or "").strip(),
+        "api_key": (data.get("api_key") if "api_key" in data else existing.get("api_key")) or "",
         "base_url": (data.get("base_url") or "").strip(),
     }
     save_config(config)
@@ -2573,14 +2601,18 @@ async def update_llm_slots(request: Request):
 
 @router.get("/api/llm/config")
 async def get_llm_config():
-    """Return current vault credentials (keys redacted), entries, and slot assignments."""
+    """Return current vault credentials (keys redacted), entries (keys redacted), and slot assignments."""
     config = load_config()
     creds = config.get("llm_credentials") or {}
     safe_creds = {p: {"configured": bool(v.get("api_key")), "base_url": v.get("base_url", "")}
                   for p, v in creds.items()}
+    # SECURITY: entries carry a per-entry plaintext api_key override — never
+    # return it. Mirrors safe_creds' configured-flag treatment above.
+    safe_entries = [{**e, "api_key": "", "has_key": bool(e.get("api_key"))}
+                    for e in (config.get("llm_entries") or [])]
     return {
         "credentials": safe_creds,
-        "entries": config.get("llm_entries") or [],
+        "entries": safe_entries,
         "slots": config.get("llm_slots") or {},
     }
 
