@@ -1646,7 +1646,8 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
 
 
 def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=None,
-                        json_schema=None, enable_native_tools=False, search_model=None):
+                        json_schema=None, enable_native_tools=False, search_model=None,
+                        profile="readonly", extra_add_dirs=None):
     """Call the local `claude` CLI in non-interactive print mode.
 
     Uses the Claude Code session auth — no API key required. The claude binary
@@ -1668,6 +1669,11 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
     file-hunting legwork so the (usually pricier) top-level `model` only
     spends tokens on judgment, not searching — mirrors how this session
     itself delegates exploration to lightweight agents.
+    ``profile`` (default "readonly") selects WHICH allow/deny lists back
+    ``enable_native_tools`` — see claude_cli_native_tools's module docstring.
+    "build" adds Edit/Write/Skill and is used by exactly one caller,
+    feature_build.py's agentic feature builder; every other caller must
+    leave this at its default so the read-only reviewer guarantee holds.
     --permission-mode bypassPermissions is required for headless operation
     (no human to answer a tool-approval prompt); the allow/deny lists above
     are what actually keeps this safe, not the permission mode.
@@ -1704,7 +1710,7 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
     cmd = claude_cli_native_tools.build_command(
         claude_bin_or_raise(config), model=model, repo_checkout_path=repo_checkout_path,
         json_schema=json_schema, enable_native_tools=enable_native_tools,
-        search_model=search_model)
+        search_model=search_model, profile=profile, extra_add_dirs=extra_add_dirs)
 
     timeout_val = int(config.get("LLM_TIMEOUT", 900))
     try:
@@ -1827,8 +1833,9 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
 
 
 def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                   repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None):
-    """Dispatch to the correct provider implementation. The last 4 kwargs are
+                   repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None,
+                   profile="readonly", extra_add_dirs=None):
+    """Dispatch to the correct provider implementation. The last 6 kwargs are
     claude_cli-specific (see _request_claude_cli's docstring) — every other
     provider ignores them; they are not the generic `tools=` param."""
     p = (provider or "openai").lower().strip()
@@ -1855,13 +1862,15 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     if p == "claude_cli":
         return _request_claude_cli(model, messages, task_id, config,
                                    repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                   enable_native_tools=enable_native_tools, search_model=search_model)
+                                   enable_native_tools=enable_native_tools, search_model=search_model,
+                                   profile=profile, extra_add_dirs=extra_add_dirs)
     return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config)
 
 
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None, task_kind=None,
-             repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None):
+             repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None, profile="readonly",
+             extra_add_dirs=None):
     """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
 
     Routing priority:
@@ -2021,7 +2030,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
             if result is None:
                 result = _call_provider(provider, model, key, url, messages, tools, effective_stream, task_id, config,
                                         repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                        enable_native_tools=enable_native_tools, search_model=search_model)
+                                        enable_native_tools=enable_native_tools, search_model=search_model,
+                                        profile=profile, extra_add_dirs=extra_add_dirs)
             # Successful call: clear any rate-limit cooldown for this provider.
             with _PROVIDER_CREDIT_CB_LOCK:
                 if _PROVIDER_CREDIT_CB[n].get("cause") == "rate_limit":
@@ -2052,7 +2062,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     _provider_rate_limit_wait(n, _get_provider_rpm(n, config), provider)
                     result = _call_provider(provider, model, key, url, messages, None, effective_stream, task_id, config,
                                             repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                            enable_native_tools=enable_native_tools, search_model=search_model)
+                                            enable_native_tools=enable_native_tools, search_model=search_model,
+                                            profile=profile, extra_add_dirs=extra_add_dirs)
                     return result, None
                 except Exception as retry_e:
                     err_str = str(retry_e)
@@ -2081,7 +2092,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                     result = _call_provider(provider, _cfg_model, key, url, messages, tools,
                                             effective_stream, task_id, config,
                                             repo_checkout_path=repo_checkout_path, json_schema=json_schema,
-                                            enable_native_tools=enable_native_tools, search_model=search_model)
+                                            enable_native_tools=enable_native_tools, search_model=search_model,
+                                            profile=profile, extra_add_dirs=extra_add_dirs)
                     return result, None
                 except Exception as retry_e:  # noqa: BLE001 — fall through to normal handling
                     err_str = str(retry_e)

@@ -7,6 +7,7 @@ from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from github import Github
 from app_state import mark_pr_approved, update_pr_review
+from pr_actions import approve_pr, merge_pr
 from fastapi import APIRouter
 
 router = APIRouter()
@@ -322,8 +323,10 @@ async def toggle_blackout():
 async def pr_review_approve(request: Request):
     """Human 'Approve' for a pre-reviewed PR (from the PRs Reviewed list). Adds a
     'bugfixer-approved' label + an approval comment and flags it in state. Does
-    NOT merge — the human merges/pulls after. Only this endpoint (a human click)
-    approves; BugFixer never auto-approves."""
+    NOT merge — the human merges/pulls after. This is the human-click path;
+    the ONLY other caller of approve_pr is feature auto-drive's own narrow,
+    opt-in auto-merge exception (pr_review._maybe_auto_merge — see that
+    module's docstring), which never touches human-authored PRs."""
     try:
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
@@ -336,25 +339,10 @@ async def pr_review_approve(request: Request):
         return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
 
     def _do_approve():
-        gh = Github(token)
-        repo = gh.get_repo(repo_name)
-        pr = repo.get_pull(number)
-        label = "bugfixer-approved"
-        try:
-            repo.get_label(label)
-        except Exception:
-            try:
-                repo.create_label(label, "0E8A16")
-            except Exception:
-                pass
-        try:
-            pr.add_to_labels(label)
-        except Exception:
-            pass
-        try:
-            pr.create_issue_comment("✅ **Approved** via BugFixer (human review). Cleared to merge/pull.")
-        except Exception:
-            pass
+        # Shared with feature auto-drive's auto-merge path (pr_review.py) —
+        # see pr_actions.py's module docstring for why there is exactly one
+        # approve implementation, not two.
+        approve_pr(Github(token), repo_name, number, actor="human")
 
     try:
         # PyGithub is synchronous — every call in _do_approve is a blocking
@@ -376,8 +364,12 @@ async def pr_review_approve(request: Request):
 @router.post("/api/pr-review/merge")
 async def pr_review_merge(request: Request):
     """Human 'Merge to Main' for a reviewed PR — merges it on GitHub now (the
-    human's explicit action from the UI; BugFixer never auto-merges). Returns the
-    GitHub error if the PR isn't mergeable (conflicts / required checks)."""
+    human's explicit action from the UI). This is the human-click path; the
+    ONLY other caller of merge_pr is feature auto-drive's own narrow, opt-in
+    auto-merge exception (pr_review._maybe_auto_merge — see that module's
+    docstring), which never touches human-authored PRs and still goes
+    through this SAME "must be Approved first" guard, not around it. Returns
+    the GitHub error if the PR isn't mergeable (conflicts / required checks)."""
     try:
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
@@ -390,31 +382,8 @@ async def pr_review_merge(request: Request):
         return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
 
     def _do_merge():
-        gh = Github(token)
-        repo = gh.get_repo(repo_name)
-        pr = repo.get_pull(number)
-        if pr.merged:
-            update_pr_review(repo_name, number, merged=True)
-            return 200, {"status": "success", "message": "already merged"}
-        # Closed without a merge (e.g. superseded by another PR). Don't attempt the
-        # merge — GitHub would 405 "not mergeable". Reconcile the record to CLOSED so
-        # the row stops offering Merge, and tell the user plainly.
-        if (pr.state or "").lower() == "closed":
-            update_pr_review(repo_name, number, closed=True)
-            return 409, {"status": "error", "closed": True,
-                "message": f"PR #{number} is closed on GitHub (not merged) — its changes may have merged under another PR. Marked CLOSED."}
-        # Approve gates Merge: a human must Approve first. The UI only offers Merge
-        # once approved; this backstops the gate so a direct API call can't bypass it.
-        rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, number)) or {}
-        if not rec.get("approved"):
-            return 409, {"status": "error", "needs_approval": True,
-                "message": f"PR #{number} must be Approved before it can be merged."}
-        res = pr.merge()  # default merge commit; raises if not mergeable
-        # Keep the record, flag it MERGED (stays listed with a badge).
-        update_pr_review(repo_name, number, merged=True)
-        logger.info("pr_review: %s #%s MERGED via UI", repo_name, number)
-        return 200, {"status": "success", "merged": bool(getattr(res, "merged", True)),
-                     "message": getattr(res, "message", "merged")}
+        # Shared with feature auto-drive's auto-merge path — see pr_actions.py.
+        return merge_pr(Github(token), repo_name, number)
 
     try:
         # See pr_review_approve's identical note: PyGithub is synchronous, so
@@ -1824,6 +1793,10 @@ async def settings_page(request: Request):
     settings["gate_scans_on_model_preload"] = config.get("gate_scans_on_model_preload", True)
     settings["model_gate_max_wait_s"] = config.get("model_gate_max_wait_s", 3600)
     settings["EXTERNAL_MIN_CONFIDENCE"] = config.get("EXTERNAL_MIN_CONFIDENCE", 0.90)
+    # Pretty-printed for the textarea editor; save_settings re-parses it back
+    # to a list on save (feature_boundaries itself, not this string, is the
+    # value everything else reads).
+    settings["feature_boundaries_json"] = json.dumps(config.get("feature_boundaries") or [], indent=2)
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
@@ -1840,6 +1813,39 @@ async def settings_page(request: Request):
     config.setdefault("bug_reports_enabled", True)
     config.setdefault("feature_requests_enabled", True)
     config.setdefault("fix_logdetected_enabled", False)
+    # Project skills (skills_loader.py) — repo-committed recipes (add-simulation,
+    # dual-copy-guard, ...) BugFixer follows for fix/build work. Feature
+    # auto-drive's build stage depends entirely on these loading; previously
+    # configurable only by editing config.json directly.
+    config.setdefault("skills_enabled", True)
+    config.setdefault("skills_repo", "lbockenstedt/lm")
+    config.setdefault("skills_path", ".claude/skills")
+    config.setdefault("skills_ttl_s", 3600)
+    # Feature auto-drive (feature_drive.py / feature_build.py / pr_review.py's
+    # _automerge_decision). Off by default; feature_boundaries seeds from
+    # feature_boundary.DEFAULT_BOUNDARIES on first save (see save_settings)
+    # rather than here, so an install that never opens this tab still gets a
+    # sane starting list the moment it's turned on.
+    config.setdefault("feature_drive_enabled", False)
+    config.setdefault("feature_drive_label", "enhancement")
+    config.setdefault("feature_drive_require_marker", True)
+    config.setdefault("feature_drive_repos", [])
+    config.setdefault("feature_drive_max_per_cycle", 1)
+    config.setdefault("feature_build_timeout_s", 1800)
+    config.setdefault("feature_require_docs", True)
+    if "feature_boundaries" not in config:
+        from feature_boundary import DEFAULT_BOUNDARIES
+        config["feature_boundaries"] = DEFAULT_BOUNDARIES
+    # Auto-merge — the deliberate, narrowly-scoped invariant exception (see
+    # pr_review.py's module docstring + _automerge_decision). TWO independent
+    # kill switches (this toggle AND the per-repo allowlist below, which
+    # defaults to empty) plus a threshold that defaults to 1.0 — effectively
+    # OFF until an operator deliberately both enables it AND opts a repo in
+    # AND lowers the threshold. Global, not per-repo, to start.
+    config.setdefault("feature_automerge_enabled", False)
+    config.setdefault("feature_automerge_repos", [])
+    config.setdefault("feature_automerge_min_confidence", 1.0)
+    config.setdefault("feature_automerge_require_clean", True)
     config.setdefault("enabled_log_modules", [])
     # Module list for the per-module log-filing grid = the operator's module→repo
     # map keys (a module must map to a repo before its logs can be filed).
@@ -1875,6 +1881,20 @@ async def settings_page(request: Request):
     trusted_set = set(trusted)
     extra_trusted = [r for r in trusted if r not in set(github_repos)]
     trusted_options = list(github_repos) + extra_trusted
+    # feature_drive_repos: empty list means "all monitored repos" (the
+    # classifier's own default), same checkbox treatment as monitored/trusted.
+    feature_drive_repos = list(config.get("feature_drive_repos") or [])
+    feature_drive_repos_set = set(feature_drive_repos)
+    extra_fd_repos = [r for r in feature_drive_repos if r not in set(github_repos)]
+    feature_drive_repo_options = list(github_repos) + extra_fd_repos
+    # feature_automerge_repos: SEPARATE opt-in list from feature_drive_repos —
+    # a repo can build features without ever being allowed to auto-merge them.
+    # Defaults to empty (nothing auto-merges); see routes.py's config.setdefault
+    # above and pr_review._automerge_decision.
+    feature_automerge_repos = list(config.get("feature_automerge_repos") or [])
+    feature_automerge_repos_set = set(feature_automerge_repos)
+    extra_am_repos = [r for r in feature_automerge_repos if r not in set(github_repos)]
+    feature_automerge_repo_options = list(github_repos) + extra_am_repos
 
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
@@ -1884,6 +1904,10 @@ async def settings_page(request: Request):
         "monitored_set": monitored_set,
         "trusted_options": trusted_options,
         "trusted_set": trusted_set,
+        "feature_drive_repo_options": feature_drive_repo_options,
+        "feature_drive_repos_set": feature_drive_repos_set,
+        "feature_automerge_repo_options": feature_automerge_repo_options,
+        "feature_automerge_repos_set": feature_automerge_repos_set,
         "log_module_options": log_module_options,
         "state": state,
     })
@@ -2177,6 +2201,87 @@ async def save_settings(request: Request):
     config_data["bug_reports_enabled"] = data.get("bug_reports_enabled") != "off"
     # Feature Requests from LM (default ON; independently toggleable).
     config_data["feature_requests_enabled"] = data.get("feature_requests_enabled") != "off"
+    # Project skills (skills_loader.py). Default-ON via config.setdefault above
+    # (settings_page), so a genuine uncheck on THIS save is trustworthy — unlike
+    # the != "off" idiom used just above, which needs a hidden "off" companion
+    # input that doesn't exist for this field, so it's read the unambiguous way.
+    config_data["skills_enabled"] = data.get("skills_enabled") == "on"
+    config_data["skills_repo"] = (data.get("skills_repo") or "lbockenstedt/lm").strip()
+    config_data["skills_path"] = (data.get("skills_path") or ".claude/skills").strip()
+    _skills_ttl = str(data.get("skills_ttl_s") or "").strip()
+    config_data["skills_ttl_s"] = int(_skills_ttl) if _skills_ttl.isdigit() else 3600
+
+    # ── Feature auto-drive (Phase 1: classify only) ─────────────────────────
+    _save_warnings = []
+    config_data["feature_drive_enabled"] = data.get("feature_drive_enabled") == "on"
+    config_data["feature_drive_label"] = (data.get("feature_drive_label") or "enhancement").strip()
+    config_data["feature_drive_require_marker"] = data.get("feature_drive_require_marker") == "on"
+    _fdmpc = str(data.get("feature_drive_max_per_cycle") or "").strip()
+    config_data["feature_drive_max_per_cycle"] = int(_fdmpc) if _fdmpc.isdigit() else 1
+    # List-type, same getlist-merge pattern as monitored_repos (routes.py's own
+    # BUGFIX comment above explains why this must live OUTSIDE the `updates`
+    # dict: dict(form_data) collapses repeated values to the last one).
+    if hasattr(form_data, "getlist"):
+        _fd_checked = form_data.getlist("feature_drive_repos")
+    else:
+        _v = data.get("feature_drive_repos")
+        _fd_checked = [_v] if _v else []
+    _fd_extra_raw = data.get("feature_drive_repos_extra", "") or ""
+    _fd_extra = [clean_repo_name(x.strip()) for x in _fd_extra_raw.replace("\n", ",").split(",") if x.strip()]
+    _fd_repos = [clean_repo_name(x) for x in _fd_checked if x and str(x).strip()]
+    for _r in _fd_extra:
+        if _r and _r not in _fd_repos:
+            _fd_repos.append(_r)
+    config_data["feature_drive_repos"] = list(dict.fromkeys(_fd_repos))
+
+    # Boundary list — a JSON textarea, always re-rendered with the CURRENT
+    # value on every page load (settings_page: settings["feature_boundaries_json"]),
+    # so a save from any OTHER tab round-trips it unchanged rather than wiping
+    # it. Bad JSON / wrong shape here is a mistake worth telling the operator
+    # about, but must never silently discard their already-saved list — on any
+    # validation failure this branch simply doesn't touch config_data, so the
+    # value load_config() already put there (a few lines up) survives.
+    if "feature_boundaries_json" in data:
+        _fb_raw = data.get("feature_boundaries_json") or "[]"
+        try:
+            _fb_parsed = json.loads(_fb_raw)
+            if not isinstance(_fb_parsed, list):
+                raise ValueError("must be a JSON array")
+            for _b in _fb_parsed:
+                if not isinstance(_b, dict) or not _b.get("id"):
+                    raise ValueError("every boundary needs at least an \"id\"")
+            config_data["feature_boundaries"] = _fb_parsed
+        except Exception as _fbe:
+            _save_warnings.append(f"feature_boundaries JSON was invalid ({_fbe}) — kept the previous value")
+
+    config_data["feature_build_timeout_s"] = int(data.get("feature_build_timeout_s")) \
+        if str(data.get("feature_build_timeout_s") or "").strip().isdigit() else 1800
+    config_data["feature_require_docs"] = data.get("feature_require_docs") == "on"
+
+    # ── Auto-merge (the deliberate invariant exception — see pr_review.py) ──
+    config_data["feature_automerge_enabled"] = data.get("feature_automerge_enabled") == "on"
+    config_data["feature_automerge_require_clean"] = data.get("feature_automerge_require_clean") == "on"
+    _amc = str(data.get("feature_automerge_min_confidence") or "").strip()
+    try:
+        config_data["feature_automerge_min_confidence"] = max(0.0, min(1.0, float(_amc))) if _amc else 1.0
+    except (TypeError, ValueError):
+        config_data["feature_automerge_min_confidence"] = 1.0
+    # Same list pattern as feature_drive_repos above — a SEPARATE opt-in list,
+    # deliberately not unioned with it (a repo can build without ever being
+    # allowed to auto-merge).
+    if hasattr(form_data, "getlist"):
+        _am_checked = form_data.getlist("feature_automerge_repos")
+    else:
+        _v2 = data.get("feature_automerge_repos")
+        _am_checked = [_v2] if _v2 else []
+    _am_extra_raw = data.get("feature_automerge_repos_extra", "") or ""
+    _am_extra = [clean_repo_name(x.strip()) for x in _am_extra_raw.replace("\n", ",").split(",") if x.strip()]
+    _am_repos = [clean_repo_name(x) for x in _am_checked if x and str(x).strip()]
+    for _r2 in _am_extra:
+        if _r2 and _r2 not in _am_repos:
+            _am_repos.append(_r2)
+    config_data["feature_automerge_repos"] = list(dict.fromkeys(_am_repos))
+
     # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical
     # always fix). Stops the fixer churning on log-scraped issues.
     config_data["fix_logdetected_enabled"] = data.get("fix_logdetected_enabled") == "on"
@@ -2235,8 +2340,11 @@ async def save_settings(request: Request):
 
     # AJAX saves (Settings tabs) request JSON + a toast instead of a full
     # redirect/reload. Honor that when the client signals Accept: application/json.
+    _save_msg = "Settings saved"
+    if _save_warnings:
+        _save_msg += " (" + "; ".join(_save_warnings) + ")"
     if "application/json" in (request.headers.get("accept") or ""):
-        return {"status": "ok", "message": "Settings saved"}
+        return {"status": "ok", "message": _save_msg}
     return RedirectResponse(url="/settings", status_code=303)
 
 
