@@ -2511,7 +2511,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             if version_bumped:
                 commit_msg += f" (Version Bump to {new_v})"
             repo_git.git.add(A=True)  # re-stage so a version bump made after the earlier add(A=True) is included
-            repo_git.index.commit(commit_msg)
+            repo_git.index.commit(f'{commit_msg}')
 
             if can_direct_push and final_verdict == "Approve":
                 try:
