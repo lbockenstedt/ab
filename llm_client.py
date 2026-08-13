@@ -33,6 +33,8 @@ from main import logger, load_config
 import claude_cli_native_tools
 import config_store
 import llm_perf
+import model_registry
+import model_selection
 
 # ============================================================================
 # Multi-Provider LLM Routing
@@ -2065,13 +2067,275 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
     return result
 
 
+# ============================================================================
+# requirements= path (LLM Selection Redesign, Phase 4) — model_selection's
+# select_model() picks ONE candidate; this section is the impure boundary
+# around it (config reads, live env vars, capability resolution, credit/rate
+# cooldowns) plus the identity-keyed circuit breakers/locks that replace the
+# slot-keyed ones for this path specifically. Coexists with the slot/
+# task_kind machinery below during the migration — see the plan's build
+# sequencing: every one of the 18 call sites still uses task_kind today;
+# they convert to requirements= one at a time in a later phase, and only
+# once none remain does the old machinery get deleted.
+# ============================================================================
+
+def _endpoint_key(provider, base_url):
+    return ((provider or "").lower().strip(), (base_url or "").strip().rstrip("/"))
+
+
+# Two identity-keyed cooldown maps, split by scope per the plan: credit
+# exhaustion is ACCOUNT-wide (running out of Anthropic credit kills every
+# Anthropic model on that account — a per-model key would retry 5 models
+# against the same wall), so it's keyed by (provider, base_url). A rate limit
+# can be per-model on some providers, so it's keyed by the full ModelKey.
+# Unlike the slot-keyed _PROVIDER_CREDIT_CB, neither needs "reassignment"
+# invalidation logic — the key IS the identity here, it can't be reassigned.
+_ENDPOINT_CB_LOCK = threading.Lock()
+_ENDPOINT_CREDIT_CB = {}
+_MODEL_RATE_CB = {}
+
+
+def _cb_trip(cb_dict, cb_key, reason, duration_s, cause, provider):
+    if cause == "credit" and provider and _provider_is_nokey(provider):
+        logger.warning(
+            "Ignoring CREDIT cooldown for %s (%s): a local/no-key provider has no "
+            "billing to exhaust. Reason was: %s", cb_key, provider, str(reason)[:160])
+        return
+    secs = duration_s if duration_s is not None else _CREDIT_COOLDOWN_SECONDS
+    cd = time.time() + secs
+    with _ENDPOINT_CB_LOCK:
+        cb_dict[cb_key] = {"cooldown_until": cd, "tripped_at": datetime.now().isoformat(),
+                           "reason": reason, "cause": cause}
+    until_str = datetime.fromtimestamp(cd).strftime("%H:%M:%S")
+    label = "RATE-LIMITED" if cause == "rate_limit" else "CREDIT EXHAUSTED"
+    logger.warning("%s %s — pausing for %s min (until ~%s). Reason: %s",
+                   cb_key, label, secs // 60, until_str, reason)
+
+
+def _cb_remaining(cb_dict, cb_key):
+    with _ENDPOINT_CB_LOCK:
+        entry = cb_dict.get(cb_key)
+        if not entry:
+            return 0.0
+        return max(0.0, entry["cooldown_until"] - time.time())
+
+
+_MODEL_LOCKS_LOCK = threading.Lock()
+_MODEL_LOCKS = {}
+
+
+def _model_lock(key):
+    """Lazily-created per-ModelKey lock — layer 3 of the plan's 3-layer
+    concurrency design (global/per-endpoint semaphore is layer 1/2, reused
+    from the existing per-category semaphore under a dedicated "PICKER"
+    category below rather than building new untested sizing logic for a
+    path with zero real traffic yet)."""
+    with _MODEL_LOCKS_LOCK:
+        lock = _MODEL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _MODEL_LOCKS[key] = lock
+        return lock
+
+
+def _iter_configured_endpoints(config):
+    """Every endpoint BugFixer knows about, read LIVE on every call (never
+    frozen/persisted): config["llm_entries"] (the modern vault) plus the
+    legacy LLM_PROVIDER_N/LLM_API_KEY_N/LLM_MODEL_N/LLM_BASE_URL_N/LLM_RPM_N
+    env-var slots — re-reading live (rather than one-shot converting) means
+    a container configured purely via env vars keeps working after every
+    restart, not just until the first one (confirmed with the user during
+    planning). Yields (entry_id, provider, api_key, model, base_url, rpm)
+    regardless of whether the endpoint is actually usable — callers decide
+    what "usable" means for their purpose (_enumerate_candidates filters to
+    configured+available; _configured_entries filters to configured only,
+    for the safety floor)."""
+    credentials = config.get("llm_credentials") or {}
+    for entry in (config.get("llm_entries") or []):
+        if entry.get("enabled") is False:
+            continue
+        provider = (entry.get("provider") or "openai").lower().strip()
+        model = (entry.get("model") or "").strip()
+        cred = credentials.get(provider) or {}
+        api_key = (entry.get("api_key") or cred.get("api_key") or "").strip()
+        base_url = (entry.get("base_url") or cred.get("base_url") or "").strip()
+        rpm = int(entry.get("rpm") or 0)
+        yield entry.get("id"), provider, api_key, model, base_url, rpm
+
+    for n in _ALL_SLOTS:
+        provider = (config.get(f"LLM_PROVIDER_{n}") or os.getenv(f"LLM_PROVIDER_{n}", "")).lower().strip()
+        if not provider:
+            continue
+        api_key = (config.get(f"LLM_API_KEY_{n}") or os.getenv(f"LLM_API_KEY_{n}", "")).strip()
+        model = (config.get(f"LLM_MODEL_{n}") or os.getenv(f"LLM_MODEL_{n}", "")).strip()
+        base_url = (config.get(f"LLM_BASE_URL_{n}") or os.getenv(f"LLM_BASE_URL_{n}", "")).strip()
+        rpm = int(config.get(f"LLM_RPM_{n}") or os.getenv(f"LLM_RPM_{n}", "0") or 0)
+        yield f"legacy_{n}", provider, api_key, model, base_url, rpm
+
+
+def _enumerate_candidates(config):
+    """Every USABLE endpoint as plain dicts for model_selection.select_model
+    — the impure boundary the redesign plan calls for: config reads, live
+    env vars, capability resolution (model_registry.resolve), and credit/
+    rate/dead-model checks all happen HERE, before the pure selection logic
+    (model_selection.py, no I/O at all) ever runs. Deduplicated by ModelKey
+    — the same (provider, base_url, model) reachable via both an llm_entries
+    row and a legacy env var is one candidate, not two."""
+    candidates = []
+    seen_keys = set()
+    for entry_id, provider, api_key, model, base_url, rpm in _iter_configured_endpoints(config):
+        if not _provider_configured(provider, api_key, model):
+            continue
+        key = _model_key(provider, base_url, model)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        caps = model_registry.resolve(provider, model, config)
+        available, unavailable_reason = True, None
+        if _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url)) > 0:
+            available, unavailable_reason = False, "credit_cooldown"
+        elif _cb_remaining(_MODEL_RATE_CB, key) > 0:
+            available, unavailable_reason = False, "rate_limited"
+        elif _routed_model_dead(provider, model):
+            available, unavailable_reason = False, "dead_model"
+        candidates.append({
+            "key": key, "provider": provider, "model": model, "base_url": base_url,
+            "api_key": api_key, "rpm": rpm, "caps": caps,
+            "available": available, "unavailable_reason": unavailable_reason,
+        })
+    return candidates
+
+
+def _configured_entries(config):
+    """Every configured endpoint, NOT gated by cooldown/capability — feeds
+    model_selection.safety_floor(), the deliberate last resort that's tried
+    even when everything select_model considered has been ruled out (a rule,
+    never a hardcoded model ID — see model_registry.py's module docstring
+    for the incident that makes a pinned ID the wrong answer here)."""
+    return [
+        {"id": entry_id, "provider": provider, "model": model, "api_key": api_key,
+         "base_url": base_url, "rpm": rpm, "_configured": _provider_configured(provider, api_key, model)}
+        for entry_id, provider, api_key, model, base_url, rpm in _iter_configured_endpoints(config)
+    ]
+
+
+def _try_candidate(candidate, messages, tools, effective_stream, task_id, config, **kwargs):
+    """The requirements= path's per-candidate attempt — the identity-keyed
+    counterpart to _try_provider below. Deliberately a conservative subset
+    of _try_provider's error handling for this first phase: credit
+    exhaustion, rate-limit cooldown (incl. claude_cli session limits) are
+    covered (nothing here can leave a dead endpoint retried forever); the
+    provider-specific message-rewriting branches (ollama 404/403 detail,
+    tool-calling-400 retry-without-tools, routed-model retry) stay on the
+    slot-based path for now and can be ported here as a later phase converts
+    call sites that actually need them."""
+    provider, model, base_url, api_key = (candidate["provider"], candidate["model"],
+                                          candidate["base_url"], candidate["api_key"])
+    mk = candidate["key"]
+    with _model_lock(mk):
+        try:
+            main.state["active_llm"] = model
+            main.state["active_llm_slot"] = "picker"
+            main.state["active_llm_provider"] = provider
+            main.state["active_llm_at"] = time.time()
+            result = _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream,
+                                          task_id, config, **kwargs)
+            return result, None
+        except LLMCreditExhausted as ce:
+            _cb_trip(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url), str(ce), None, "credit", provider)
+            return None, "credit_exhausted"
+        except Exception as e:
+            err_str = str(e)
+            if err_str.startswith("claude_cli_rate_limit:"):
+                reason = err_str[len("claude_cli_rate_limit:"):]
+                _cb_trip(_MODEL_RATE_CB, mk, reason, 900, "rate_limit", provider)
+                return None, "rate_limited"
+            if "429" in err_str:
+                _cb_trip(_MODEL_RATE_CB, mk, f"Rate-limited: {err_str[:120]}",
+                         _RATELIMIT_COOLDOWN_SECONDS, "rate_limit", provider)
+                return None, "rate_limited"
+            return None, e
+
+
+def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, stream, task_id, config,
+                                repo_checkout_path=None, json_schema=None, enable_native_tools=False,
+                                search_model=None, profile="readonly", extra_add_dirs=None):
+    """call_llm's requirements= branch. select_model() ranks every candidate;
+    on failure the caller walks the Selection's `alternatives` (the rest of
+    that ranked list — no re-invoking the picker mid-failover), then falls
+    to the rule-based safety floor, before giving up. Fully independent of
+    the slot/task_kind machinery in call_llm proper."""
+    effective_stream = True if stream is None else bool(stream)
+    if messages is None:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+    candidates = _enumerate_candidates(config)
+    perf = get_llm_perf_snapshot()
+    tuning = {}
+    if config.get("model_slow_factor") is not None:
+        tuning["slow_factor"] = config.get("model_slow_factor")
+    if config.get("model_min_samples") is not None:
+        tuning["min_samples"] = config.get("model_min_samples")
+    selection = model_selection.select_model(reqs, candidates, perf, tuning)
+
+    if selection is not None:
+        winning = next((c for c in candidates if c["key"] == selection.key), None)
+        chain = ([winning] if winning else []) + list(selection.alternatives or [])
+    else:
+        floor_entry = model_selection.safety_floor(_configured_entries(config))
+        if floor_entry is None:
+            raise Exception("No LLM providers configured")
+        logger.warning("select_model resolved nothing for this call (reqs=%r) — falling to the safety "
+                       "floor: %s / %s", reqs, floor_entry["provider"], floor_entry["model"])
+        chain = [{
+            "key": _model_key(floor_entry["provider"], floor_entry.get("base_url", ""), floor_entry["model"]),
+            "provider": floor_entry["provider"], "model": floor_entry["model"],
+            "api_key": floor_entry.get("api_key", ""), "base_url": floor_entry.get("base_url", ""),
+            "rpm": floor_entry.get("rpm", 0),
+        }]
+
+    if not chain:
+        raise Exception("No LLM providers configured")
+
+    kwargs = dict(repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                  enable_native_tools=enable_native_tools, search_model=search_model,
+                  profile=profile, extra_add_dirs=extra_add_dirs)
+
+    sem = _get_category_semaphore("PICKER")
+    sem.acquire()
+    try:
+        last_err = None
+        for candidate in chain:
+            result, err = _try_candidate(candidate, messages, tools, effective_stream, task_id, config, **kwargs)
+            if err is None:
+                return result
+            last_err = err
+        raise Exception(f"All LLM candidates failed. Last error: {last_err}")
+    finally:
+        sem.release()
+
+
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None, task_kind=None,
              repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None, profile="readonly",
-             extra_add_dirs=None):
+             extra_add_dirs=None, requirements=None):
     """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
 
     Routing priority:
+      requirements=<LlmRequirements>  — the new capability/cost-aware picker
+                                        (model_selection.select_model). When
+                                        given, EVERY OTHER routing param below
+                                        (force_provider/force_cloud/task_kind/
+                                        model_override/url_override) is
+                                        ignored — see _call_llm_with_requirements.
+                                        This is the LLM Selection Redesign's
+                                        migration path: task_kind-based
+                                        routing below is unchanged and still
+                                        used by every call site that hasn't
+                                        converted yet.
       force_provider=N (int 1/2/3/4) — use that provider slot directly (no failover).
       force_cloud=True               — start at Provider 2, fall to 1 then 3 then 4.
       force_cloud=False              — Provider 1 only, no failover.
@@ -2096,6 +2360,11 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
     wait loop below (bounded so a leaked lock can't hang forever).
     """
     config = load_config()
+    if requirements is not None:
+        return _call_llm_with_requirements(requirements, prompt, system_prompt, messages, tools, stream, task_id,
+                                           config, repo_checkout_path=repo_checkout_path, json_schema=json_schema,
+                                           enable_native_tools=enable_native_tools, search_model=search_model,
+                                           profile=profile, extra_add_dirs=extra_add_dirs)
     # Which pool serves this call: code slots (1-4), the dedicated log slots
     # (5-6), or the review slots (7-8). A task only reaches a dedicated pool when
     # one of its slots is actually configured, so existing installs are
