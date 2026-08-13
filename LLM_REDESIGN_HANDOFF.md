@@ -33,20 +33,19 @@ source of truth for design intent — this file just tracks build status against
    fire-and-forget path into production for the first time (see Phase 5 section
    below for details). New test: `test_pr_summary_batch_routing.py`.
 5. `6a53ccb`/`a36bc1b`/`c8e7e02`/`b99bf91`/`4efca3c`/`b11aa87`/`9cbf515`/
-   `8ff9a73`/`4fbb0e8` — **Phase 5, call sites #2, #3, #4, #5, #6, #7, #8-11,
-   #9, #11** (10 of 12 sites now converted — see the Phase 5 section below
-   for full detail per site). Sites **#10** (reviewer panel) and **#12** (fix
-   generation) remain **blocked** on an unresolved design question: both pin
-   a specific provider via `force_provider` from inside slot-based
-   escalation/panel logic, and `LlmRequirements` has no per-call
-   specific-provider-pin equivalent by design.
+   `8ff9a73`/`4fbb0e8`/`738e259`/`bf59f2b` — **Phase 5, ALL remaining call
+   sites (#2-#12, 12 of 12)** — see the Phase 5 section below for full detail
+   per site. Sites **#10** (reviewer panel) and **#12** (fix generation) were
+   initially left blocked on a design question (no per-call specific-
+   provider-pin field in `LlmRequirements`), then resolved: both convert to
+   picker-driven diversity/escalation instead of a literal pin — see their
+   entries below.
 
 **Verification state**: the full `test_*.py` suite (now 30+ files, growing as
 each site gains/extends a test) passes after every commit
 (`for f in test_*.py; do python3 "$f"; done` — every one prints `ALL CASES
-PASSED`). 10 of 12 remaining call sites now have real `requirements=` callers;
-sites #10 and #12 are still on their original `task_kind`/`force_provider`
-mechanism, unconverted, pending a design decision (see Phase 5 section).
+PASSED`). **All 12 Phase 5 call sites now have real `requirements=` callers.**
+Phase 6 (deletion of the now-dead slot machinery) is unblocked.
 
 ## Known gaps / deliberate scope cuts worth revisiting
 
@@ -129,21 +128,24 @@ will have drifted:
    verified via grep): `complexity="medium", needs_tools=bool(tools),
    latency_sensitive=True`. This site had NO prior task_kind/force_provider —
    purely additive.
-10. ⛔ **BLOCKED** — `fix_engine.py:742/768/785` reviewer (3 sites — the
-    panel, `_run_reviewer_turn`). **Root-cause conflict, not yet resolved**:
-    `review_fix` iterates a slot pool (`_REVIEW_SLOTS`/`_CODE_SLOTS`) to give
-    each reviewer a SPECIFIC, DIFFERENT configured provider (diversity is the
-    point), and pins it via `force_provider=provider_n`. `LlmRequirements` has
-    **no per-call specific-provider-pin field** by design (only `restrict`:
-    local/cloud/claude, + `exclude_models`) — per the plan, `force_provider`
-    is meant to retire with "no equivalent," not a 1:1 replacement. Properly
-    converting this site means redesigning `review_fix`'s reviewer-selection
-    loop into N calls to `select_model()` with growing `exclude_models` (auto-
-    picking N distinct models) instead of iterating operator-configured
-    slots — a materially bigger, riskier architectural change than any other
-    site, changing "operator picks which slots review" into "picker
-    auto-diversifies." **Left unconverted, still on `force_provider=provider_n`
-    — needs explicit user design sign-off before attempting.**
+10. ✅ **DONE** (commit `738e259`) — `fix_engine.py:742/768/785` reviewer (3
+    sites — the panel, `_run_reviewer_turn`). **Initially blocked, then
+    resolved**: `review_fix` used to iterate a slot pool (`_REVIEW_SLOTS`/
+    `_CODE_SLOTS`) to give each reviewer a SPECIFIC, DIFFERENT configured
+    provider, pinned via `force_provider=provider_n`. Since `LlmRequirements`
+    has no per-call specific-provider-pin field by design, the redesign
+    instead makes diversity the PICKER's job: new `_select_review_panel(config,
+    builder_n=None, builder_key=None, max_reviewers=4)` calls
+    `model_selection.select_model()` repeatedly with a growing
+    `exclude_models` set (seeded with the builder's model) to auto-pick up to
+    4 distinct candidates. `_run_reviewer_turn` now takes the exact picked
+    `reviewer_candidate` dict (not `provider_n`/`model`) and dispatches every
+    branch (native claude_cli, tools-blind, tool-calling loop) directly
+    against that ONE fixed candidate via `llm_client._try_candidate` — the
+    picker path's own single-candidate executor, no re-picking mid-review.
+    `review_fix` gained a `builder_key=` param (preferred over the legacy
+    `builder_n=` slot number when given). New test:
+    `test_fix_engine_reviewer_panel.py` (15 cases).
 11. ✅ **DONE** (commit `4fbb0e8`) — `feature_build.py:129` build agent
     (`_run_build_agent`): `complexity="large", needs_mutating_agent=True,
     needs_structured_output=True`. `needs_mutating_agent=True` uniquely
@@ -152,31 +154,48 @@ will have drifted:
     early fast-fail check (before the clone) now calls `select_model()`
     directly against `_enumerate_candidates(config)` instead of
     `_find_claude_cli_slot`.
-12. ⛔ **BLOCKED** — `fix_engine.py:1614` fix generation (`apply_ai_fix`) —
-    **same root-cause conflict as site #10.** `apply_ai_fix` is called from
-    inside a slot-based escalation ladder (`fix_engine.py` ~2126-2330: builds
-    `ladder = [(slot, model), ...]` across configured provider slots +
-    per-slot `escalation_models`, walks it on low-confidence retry, also
-    threads the SAME pinned slot into `review_fix`'s `builder_n` and an
-    opt-in CPU/local ensemble path) via `force_provider=att_fp`. Converting
-    this site for real means building the plan's `next_attempt_requirements
-    (prev_reqs, failure_kind, tried_key, config)` helper (§3: raise
-    `complexity` one rank on `low_confidence`, add the tried `ModelKey` to
-    `exclude_models` on every failure kind) and deleting the entire slot
-    ladder/CPU-ensemble block in favor of it — the single largest, riskiest
-    rewrite in this whole redesign, explicitly called out by the plan as
-    "last" and to attempt only once every other site is converted. **Left
-    unconverted, still on `force_provider`/`task_kind="fix"` — needs explicit
-    user design sign-off (and probably its own dedicated session) before
-    attempting.**
+12. ✅ **DONE** (commit `bf59f2b`) — `fix_engine.py:1614` fix generation
+    (`apply_ai_fix`). **Same root-cause conflict as site #10, resolved the
+    same way, plus the plan's `next_attempt_requirements()` helper.**
+    `process_single_issue`'s retry loop used to build a fixed
+    `ladder = [(slot, model), ...]` across configured provider slots (+
+    per-slot `escalation_models`, including ollama `"*"`-expansion to every
+    installed local model) and walk it with `ladder[(attempt-1) %
+    len(ladder)]` on low-confidence retry, threading the pinned slot into
+    `review_fix`'s `builder_n` and an opt-in CPU/local-ensemble path. That
+    whole ladder-construction block is deleted. New
+    `next_attempt_requirements(prev_reqs, failure_kind, tried_key, config)`
+    (per plan §3) is the entire redesign in one function: every failure kind
+    (`invalid_json`, `review_rejected`, `low_confidence`, `qa_failed`,
+    `error`) excludes the just-tried `ModelKey`; ONLY `low_confidence`
+    additionally raises `complexity` one rank. `llm_preference`
+    ("cloud"/"local"/"claude") now maps straight onto
+    `LlmRequirements.restrict` instead of resolving a slot number up front.
+    `apply_ai_fix` gained `requirements=`/`used_model_out=` params alongside
+    its existing `force_cloud=`/`force_provider=`/`model_override=` (same
+    dual-path convention as `call_llm` itself) — so `_run_cpu_ensemble`'s and
+    `_crosscheck_review`'s still-slot-based calls are untouched; only the
+    normal (non-ensemble) attempt loop converts. `llm_client.py` gained
+    `used_model_out=` (mirrors the existing `usage_out=` convention — lets a
+    caller learn WHICH model actually built a given result, without touching
+    `call_llm`'s return-value contract) and `LlmHumanEscalationNeeded`
+    (raised instead of silently falling to the safety floor when
+    `reqs.must_escalate_to_human` is True and `select_model()` found nothing
+    — only this one call site opts in; every other `requirements=` site is
+    unaffected). Also fixed a small pre-existing gap: the "invalid JSON"
+    parse failure branch never set `last_failure` at all, silently reusing
+    stale failure info on retry — now its own `invalid_json` failure kind.
+    New test: `test_fix_engine_retry_triggers.py` (17 cases); 3 new cases
+    added to `test_llm_client_requirements_path.py` for `used_model_out=`/
+    `must_escalate_to_human=`. The CPU ensemble (`local_ensemble` opt-in) is
+    explicitly out of scope — the plan already marks it retiring entirely in
+    Phase 6 (site #6).
 
-**10 of 12 remaining Phase 5 call sites are now converted** (2, 3, 4, 5, 6, 7,
-8, 9, 11, plus the original site 1). Sites 10 and 12 are blocked on the same
-unresolved design question: how (or whether) to preserve "pin one specific,
-named provider for this call" once `force_provider` retires with no literal
-equivalent. **Phase 6 (deletion) cannot proceed until 10 and 12 resolve** —
-`fix_engine.py`'s ladder, CPU ensemble, and slot helpers are still live readers
-of `force_provider`/`task_kind`.
+**All 12 Phase 5 call sites are now converted.** Phase 6 (deletion) can
+proceed — `fix_engine.py`'s ladder and `_REVIEW_SLOTS`/`_CODE_SLOTS` are gone;
+the CPU ensemble (`_crosscheck_review`, `_run_cpu_ensemble`, still
+slot-based) and 8 slot constants/`_slots_for_task`/etc. are the remaining
+readers of `force_provider`/`task_kind` to clean up in Phase 6.
 
 Each conversion: replace `task_kind=` (and any `force_provider`/`force_cloud`/
 `model_override`) with a `requirements=LlmRequirements(...)` built per the
@@ -220,15 +239,12 @@ behavior changes, call them out in release notes per the plan.
    print `ALL CASES PASSED` before any new work starts.
 3. Re-read the plan file — line numbers in both the plan and this handoff will
    have drifted from any commits landed elsewhere on `main` in the meantime.
-4. **Decide sites #10 and #12 before touching Phase 6.** Both are blocked on
-   the same open design question (see the Phase 5 section above for full
-   detail): `force_provider` pins one specific, named provider for a call, and
-   the new `LlmRequirements` schema deliberately has no equivalent. Options to
-   weigh: (a) do the full redesign — replace `review_fix`'s slot pool and
-   `apply_ai_fix`'s escalation ladder with `select_model()`-driven diversity/
-   escalation (per the plan's `next_attempt_requirements` sketch in §3); (b)
-   leave these two sites permanently on the old `task_kind`/`force_provider`
-   path even after Phase 6, and scope Phase 6's deletion to only what sites
-   1-9/11 made unreachable; (c) some other resolution the plan doesn't
-   currently spell out. This needs a human design call, not another
-   autonomous attempt — get sign-off before proceeding.
+4. **Phase 5 is fully done (all 12 sites).** Phase 6 (deletion of now-dead
+   slot machinery) can proceed: `model_router.py`, 8 slot constants +
+   `_slots_for_task`, `_chat_force_provider`, `task_kind`/`force_provider`/
+   `force_cloud`/`model_override` params on `call_llm` are all safe to
+   delete. The CPU ensemble (`_crosscheck_review`, `_run_cpu_ensemble`,
+   `local_ensemble` config opt-in) is explicitly still slot-based and
+   untouched by Phase 5 — its retirement (site #6: "becomes a
+   `select_panel`-style N-model call inside `review_fix`") is itself part of
+   Phase 6's scope, not a Phase 5 leftover.
