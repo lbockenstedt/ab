@@ -95,7 +95,10 @@ def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-SECRET = "sk-super-secret-plaintext-key-12345"
+# Synthetic, non-credential-shaped sentinel used only to assert this exact
+# string never survives redaction. Deliberately not shaped like a real API
+# key so secret scanners don't flag it as a leaked credential.
+SECRET = "REDACTION-TEST-SENTINEL-not-a-real-key"
 
 
 def main():
