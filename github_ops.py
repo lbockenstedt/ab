@@ -6,6 +6,7 @@ from dedup import _body_signal_match, _body_containment_match
 
 from main import (
     _in_update_cooldown,
+    call_llm,
     load_config,
     logger,
     resolve_self_diagnosis_repo,
@@ -271,6 +272,63 @@ DEDUP_CLOSED_WINDOW_DAYS = 60
 GLOBAL_FALLBACK_JACCARD = 0.8
 
 
+def _llm_confirms_same_issue(new_title, new_body, ex_title, ex_body, ex_number=None):
+    """Ask the LLM whether a new error report describes the SAME underlying
+    problem as an existing issue, as a fallback when dedup.py's fast text-
+    overlap heuristics (_body_signal_match / _body_containment_match) are too
+    strict to catch a same-bug-different-wording recurrence — a differing IP/
+    PID/line-number/timestamp, or an LLM-rephrased title, can defeat those
+    even though a human would obviously call it the same bug. Shared by both
+    call sites that currently gate on those heuristics: reopening a recurring
+    CLOSED issue, and suppressing a re-filing against a bugfixer-dismissed one.
+
+    Returns (bool same_issue, str reason). FAILS CLOSED on any error (no
+    provider available, malformed response, timeout) — returns (False, ...)
+    — so an LLM outage can only ever make the system file MORE issues or
+    reopen/suppress FEWER, never the reverse. Silently treating a genuinely
+    NEW bug as a known recurrence is the one mistake this must never make;
+    one extra duplicate issue is a minor annoyance by comparison.
+
+    Uses the LOG provider pool (task_kind="log_review") — the same pool
+    analyze_logs()/log_scan.py's error-triage already use for reading noisy
+    operational text, not the CODE pool that fix generation competes for."""
+    try:
+        prompt = (
+            "Two error reports from an automated monitoring system. Decide "
+            "whether the SECOND (new) report describes the SAME underlying "
+            "problem as the FIRST (existing), or a DIFFERENT problem that "
+            "merely looks similar.\n\n"
+            f"EXISTING issue{f' #{ex_number}' if ex_number else ''}:\n"
+            f"Title: {ex_title or '(none)'}\n"
+            f"Body:\n{(ex_body or '')[:2000]}\n\n"
+            f"NEW error:\n"
+            f"Title: {new_title or '(none)'}\n"
+            f"Body:\n{(new_body or '')[:2000]}\n\n"
+            "Differences in specific VALUES (IP addresses, PIDs, line numbers, "
+            "timestamps, hostnames, variable names) do NOT make them different "
+            "problems if the underlying cause is the same. A genuinely "
+            "different root cause is a different problem even if the wording "
+            "looks superficially similar.\n\n"
+            'Return ONLY a JSON object: {"same_issue": true or false, "reason": "one short sentence"}'
+        )
+        res = call_llm(
+            prompt,
+            system_prompt="You are a precise bug-triage assistant. Only return a JSON object.",
+            task_kind="log_review",
+        )
+        match = re.search(r'\{.*\}', res or "", re.DOTALL)
+        if not match:
+            return False, "LLM returned no parseable verdict"
+        parsed = json.loads(match.group())
+        if not isinstance(parsed, dict):
+            return False, "LLM verdict was not a JSON object"
+        same = bool(parsed.get("same_issue"))
+        reason = str(parsed.get("reason") or "")[:300]
+        return same, reason
+    except Exception as e:  # noqa: BLE001 — fail CLOSED (treat as a different issue)
+        return False, f"LLM adjudication failed: {e}"
+
+
 def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     """Searches across monitored repositories for an existing issue matching the error.
 
@@ -322,13 +380,30 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
             for issue in issues:
                 # Skip closed issues older than the recurrence window — they are
                 # unlikely to be the same recurrence and would risk stale matches.
+                #
+                # DISMISSED issues (bugfixer-dismissed) are the one exception: the
+                # label's own text promises "will not be reopened", an unconditional
+                # claim, so a fixed window anchored to the ORIGINAL close date would
+                # quietly break that promise for anything dismissed >60 days ago no
+                # matter how often it keeps recurring. Anchor those to updated_at
+                # instead — a ROLLING window that RENEWS each time a suppressed match
+                # posts its "still recurring" comment (see create_automated_issue), so
+                # an issue seen weekly for a year stays suppressed indefinitely, while
+                # one dismissed once and silent for the full window ages out and its
+                # next occurrence surfaces normally, same as before this change.
                 if issue.state == 'closed':
-                    closed_at = getattr(issue, 'closed_at', None) or issue.updated_at
-                    if closed_at is not None and closed_at.tzinfo is None:
+                    is_dismissed = any(
+                        getattr(lbl, 'name', None) == 'bugfixer-dismissed'
+                        for lbl in (issue.labels or []))
+                    if is_dismissed:
+                        anchor = getattr(issue, 'updated_at', None) or getattr(issue, 'closed_at', None)
+                    else:
+                        anchor = getattr(issue, 'closed_at', None) or issue.updated_at
+                    if anchor is not None and anchor.tzinfo is None:
                         # Older PyGithub versions returned naive UTC — coerce so the
                         # subtraction below never raises.
-                        closed_at = closed_at.replace(tzinfo=timezone.utc)
-                    if closed_at and (now - closed_at).days > DEDUP_CLOSED_WINDOW_DAYS:
+                        anchor = anchor.replace(tzinfo=timezone.utc)
+                    if anchor and (now - anchor).days > DEDUP_CLOSED_WINDOW_DAYS:
                         continue
                 issue_body = issue.body or ""
 
@@ -347,8 +422,20 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
                     # BODY-level signal — a title-only match (e.g. a generic
                     # "NameError in X" title) is not enough to resurrect a closed
                     # issue. An OPEN duplicate can still match on title alone.
+                    # The fast heuristic is strict on purpose (containment / high
+                    # Jaccard) and misses a same-bug recurrence that merely varies
+                    # by IP/PID/line-number/wording — ask the LLM as a second
+                    # opinion before giving up on an otherwise-plausible candidate.
                     if is_closed and not _body_signal_match(new_body, issue_body):
-                        continue
+                        same, reason = _llm_confirms_same_issue(
+                            new_title, new_body, issue.title or "", issue_body, issue.number)
+                        if not same:
+                            logger.debug(
+                                f"LLM declined to confirm recurrence for closed "
+                                f"#{issue.number}: {reason}")
+                            continue
+                        logger.info(
+                            f"LLM confirmed recurrence for closed #{issue.number}: {reason}")
                     # Global fallback (non-target repo): require a strong
                     # title-level signal so we don't cross-match unrelated
                     # modules on incidental body-wording overlap.
@@ -473,26 +560,58 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
 
             # If the matching issue still carries the 'bugfixer-dismissed' label,
             # it was intentionally marked as not a real issue. Only suppress when
-            # the NEW error's body is near-identical to the dismissed issue's
-            # (normalized containment) — a mere title/0.7-Jaccard match is too
-            # weak to silence a genuinely-DIFFERENT bug that happens to share a
-            # title or some body wording with a dismissed one. When it is not a
-            # body-near-identical match, we treat the dismissed issue as NOT a
-            # match and fall through to file a fresh issue (and never reopen the
-            # dismissed one). A human removing the label resumes normal handling.
+            # the NEW error is a genuine recurrence of the dismissed one — first
+            # via the fast heuristic (normalized body containment), and if that's
+            # too strict (differs by an IP/PID/line-number/wording but is really
+            # the same bug), the LLM gets a second opinion. A mere title/0.7-
+            # Jaccard match alone is too weak to silence a genuinely-DIFFERENT bug
+            # that happens to share a title or some body wording with a dismissed
+            # one — that's why this is gated on the LLM call, not the looser match
+            # that merely found the candidate. When neither confirms, the dismissed
+            # issue is NOT treated as a match and a fresh issue is filed (never
+            # reopening the dismissed one). A human removing the label resumes
+            # normal handling.
             existing_labels = [lbl.name for lbl in (existing_issue.labels or [])]
             if "bugfixer-dismissed" in existing_labels:
-                if _body_containment_match(body_text, existing_issue.body or ""):
+                _same = _body_containment_match(body_text, existing_issue.body or "")
+                _llm_reason = ""
+                if not _same:
+                    _same, _llm_reason = _llm_confirms_same_issue(
+                        title_text, body_text, existing_issue.title or "",
+                        existing_issue.body or "", existing_issue.number)
+                if _same:
+                    # Post a small comment so the issue's updated_at advances — this
+                    # IS the renewal for the rolling dedup window above: a dismissed
+                    # issue matched again today stays inside the window for another
+                    # DEDUP_CLOSED_WINDOW_DAYS regardless of how long ago it was
+                    # originally closed. Best-effort; the suppression itself must
+                    # not depend on the comment succeeding (a transient GitHub
+                    # write failure here shouldn't cause a duplicate to be filed).
+                    try:
+                        existing_issue.create_comment(
+                            "🤖 **BugFixer**: Still recurring — matched again just now. "
+                            "Remains dismissed (no new issue filed)."
+                        )
+                    except Exception as ce:  # noqa: BLE001
+                        logger.warning(
+                            f"Could not post recurrence comment on dismissed "
+                            f"#{existing_issue.number}: {ce}"
+                        )
                     logger.info(
                         f"Suppressing new issue for #{existing_issue.number} in "
                         f"{duplicate_repo_display} — 'bugfixer-dismissed' label is "
-                        f"still present and the body is near-identical."
+                        f"still present and "
+                        + (f"the LLM confirmed the same issue ({_llm_reason})."
+                           if _llm_reason else "the body is near-identical.")
+                        + f" Posted a recurrence comment to renew the "
+                        f"{DEDUP_CLOSED_WINDOW_DAYS}-day dedup window."
                     )
                     return existing_issue
                 logger.info(
                     f"Dismissed issue #{existing_issue.number} in {duplicate_repo_display} "
-                    f"matched only weakly (no body-level near-identity) — treating as a new "
-                    f"error and filing a fresh issue instead of suppressing."
+                    f"matched only weakly and the LLM declined to confirm it as the same "
+                    f"issue ({_llm_reason or 'no reason given'}) — treating as a new error "
+                    f"and filing a fresh issue instead of suppressing."
                 )
                 existing_issue = None
 
