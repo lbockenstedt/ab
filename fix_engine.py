@@ -3,6 +3,8 @@ import contextlib, git, json, os, re, requests, tempfile, threading, time, trace
 from datetime import datetime
 from github import Github, GithubException
 
+import llm_client
+
 from main import (
     CHAT_CONFIG_DEFAULTS,
     _apply_closed_label,
@@ -684,12 +686,22 @@ def _fetch_repo_file_for_review(repo, head_sha, path):
 _DIFF_FILE_HEADER_RE = re.compile(r'^diff --git a/(\S+) b/\S+', re.MULTILINE)
 
 
-def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, head_sha,
+def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo, head_sha,
                        repo_checkout_path=None):
     """One reviewer's turn. With repo+head_sha AND a provider that can actually
     receive `tools=`, runs a bounded tool-calling loop (fetch_repo_file, up to
     _REVIEW_TOOL_MAX_ITER turns / _REVIEW_TOOL_MAX_FILES files) before
     producing final text.
+
+    reviewer_candidate: the exact candidate dict (llm_client._enumerate_
+    candidates' shape: key/provider/model/base_url/api_key/rpm/caps) that
+    _select_review_panel already picked for this reviewer, dispatched
+    directly via llm_client._try_candidate — no re-picking, no failover to a
+    different model (a reviewer IS that specific model for this turn, by
+    design: diversity across the panel is the picker's job, done once,
+    up front, in _select_review_panel). None only for the "no candidates
+    configured at all" Default Reviewer fallback, which instead runs a
+    plain call_llm (today's normal provider-1-through-4 failover, unpinned).
 
     claude_cli is a special case — not because it can't use tools at all
     (it can, natively, just not via the generic `tools=` API param every
@@ -728,13 +740,25 @@ def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, 
     Returns the reviewer's final text (same plain-string contract call_llm's
     non-tools return already had) so the caller's existing JSON-extraction
     regex needs no changes."""
-    provider = None
-    if provider_n:
-        try:
-            provider = _get_provider_config(provider_n, load_config())[0]
-        except Exception:  # noqa: BLE001
-            provider = None
+    provider = (reviewer_candidate or {}).get("provider")
+    model = (reviewer_candidate or {}).get("model")
     is_claude_cli = (provider or "").lower().strip() == "claude_cli"
+    config = load_config()
+
+    def _dispatch(messages, tools=None, **kwargs):
+        """Run this exact turn: against reviewer_candidate directly (no
+        re-picking/failover — llm_client._try_candidate is the picker path's
+        own single-candidate executor) when one was resolved, or a plain
+        call_llm (unpinned, normal failover) for the no-candidates Default
+        Reviewer case."""
+        if reviewer_candidate is None:
+            return call_llm("", messages=messages, tools=tools, task_id=task_id, **kwargs)
+        result, err = llm_client._try_candidate(reviewer_candidate, messages, tools, True,
+                                                task_id, config, **kwargs)
+        if err is not None:
+            raise err if isinstance(err, Exception) else Exception(str(err))
+        return result
+
     if is_claude_cli and repo_checkout_path:
         native_prompt = prompt + (
             "\n\nYou have real Read/Grep/Glob access to this repo's checkout "
@@ -747,10 +771,10 @@ def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, 
             "('find where X is defined', 'which files reference Y') to the "
             "searcher subagent instead of searching yourself."
         )
-        return call_llm(native_prompt, system_prompt=system_prompt, force_provider=provider_n,
-                        task_id=task_id, model_override=model,
-                        repo_checkout_path=repo_checkout_path, enable_native_tools=True,
-                        json_schema=_REVIEWER_JSON_SCHEMA)
+        messages = [{"role": "system", "content": system_prompt},
+                   {"role": "user", "content": native_prompt}]
+        return _dispatch(messages, repo_checkout_path=repo_checkout_path, enable_native_tools=True,
+                         json_schema=_REVIEWER_JSON_SCHEMA)
     supports_tools = not (repo is None or head_sha is None or is_claude_cli)
     if not supports_tools:
         extra = ""
@@ -773,8 +797,9 @@ def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, 
                     "'unverifiable' when the file below would settle it:\n"
                     + "".join(blocks)
                 )
-        return call_llm(prompt + extra, system_prompt=system_prompt, force_provider=provider_n,
-                        task_id=task_id, model_override=model)
+        messages = [{"role": "system", "content": system_prompt},
+                   {"role": "user", "content": prompt + extra}]
+        return _dispatch(messages)
 
     prompt = prompt + (
         "\n\nThe diff above may be TRUNCATED (large files/diffs are capped). "
@@ -790,8 +815,7 @@ def _run_reviewer_turn(prompt, system_prompt, provider_n, model, task_id, repo, 
     files_fetched = 0
     last_text = ""
     for _ in range(_REVIEW_TOOL_MAX_ITER):
-        result = call_llm("", messages=messages, tools=_REVIEW_TOOLS,
-                          force_provider=provider_n, task_id=task_id, model_override=model)
+        result = _dispatch(messages, tools=_REVIEW_TOOLS)
         if not isinstance(result, dict):
             return str(result or "")
         text = result.get("text") or ""
@@ -862,6 +886,58 @@ def _ensure_review_checkout(repo_path, repo, head_sha, config):
         return None, False
 
 
+_REVIEW_PANEL_MAX = 4  # bounded like the largest configured pool this replaces (4 code slots)
+
+
+def _select_review_panel(config, builder_n=None, max_reviewers=_REVIEW_PANEL_MAX):
+    """Picks up to max_reviewers DISTINCT models for the reviewer panel via
+    model_selection.select_model, replacing the old _REVIEW_SLOTS/_CODE_SLOTS
+    pool iteration (a static, operator-curated list of provider slots).
+    Diversity across the panel is now the picker's job: each successive pick
+    excludes every prior pick (an accumulating exclude_models set), so the
+    panel is naturally made of distinct models rather than requiring an
+    operator to have configured a dedicated review pool.
+
+    builder_n: the (still slot-numbered — this is still fed by fix_engine's
+    slot-based escalation ladder, which has not itself converted yet) provider
+    slot that built the fix, resolved to a ModelKey and excluded up front so
+    the builder never reviews its own work — mirrors the old skip_builder
+    behavior, keyed on model identity rather than a slot number. builder_n
+    of None or 0 excludes nothing (pr_review.py's pre-review callers pass 0:
+    "no builder to exclude, every configured model reviews").
+
+    Returns a list of candidate dicts (llm_client._enumerate_candidates'
+    shape) — empty if nothing at all is configured."""
+    from model_selection import LlmRequirements, select_model
+
+    candidates = llm_client._enumerate_candidates(config)
+    perf = llm_client.get_llm_perf_snapshot()
+
+    excluded = set()
+    if builder_n:
+        try:
+            b_provider, _b_key, b_model, b_url = _get_provider_config(builder_n, config)
+            if b_provider and b_model:
+                excluded.add(llm_client._model_key(b_provider, b_url, b_model))
+        except Exception as e:  # noqa: BLE001 — best-effort; worst case the builder's
+                                 # own model can also be picked as a reviewer.
+            logger.debug(f"_select_review_panel: could not resolve builder slot {builder_n}: {e}")
+
+    panel = []
+    for _ in range(max_reviewers):
+        reqs = LlmRequirements(complexity="medium", needs_structured_output=True,
+                               exclude_models=tuple(excluded))
+        sel = select_model(reqs, candidates, perf)
+        if sel is None:
+            break
+        matched = next((c for c in candidates if c["key"] == sel.key), None)
+        if matched is None:
+            break
+        panel.append(matched)
+        excluded.add(sel.key)
+    return panel
+
+
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
                builder_n=None, diff_override=None, repo=None, head_sha=None):
     """Run a cross-provider reviewer panel on a proposed fix.
@@ -887,59 +963,26 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     logger.info("Running Reviewer Panel pass...")
     config = load_config()
 
-    # Determine which provider built the fix.
+    # Determine which provider built the fix (still slot-numbered — fed by
+    # fix_engine's slot-based escalation ladder, unconverted; see
+    # _select_review_panel's docstring for how this now maps to a ModelKey
+    # exclusion instead of a slot-pool skip).
     if builder_n is None:
         builder_n = 2 if force_cloud is True else 1
 
-    # Build the reviewer panel. The dedicated review pool (7-8) wins when any of
-    # it is configured: those slots exist so a strong judging model is not also
-    # spent on triage and file identification. Nothing is excluded from it for
-    # being the builder -- a review slot never builds, so the conflict the
-    # exclusion guards against cannot arise there.
-    #
-    # With no review slot configured, fall back to the original behaviour: code
-    # slots minus the builder, so an install that has not set up the new pool
-    # behaves exactly as before.
-    review_pool = tuple()
-    try:
-        review_pool = tuple(
-            n for n in _REVIEW_SLOTS
-            if _provider_configured(*_get_provider_config(n, config)[:3])
-        )
-    except Exception as e:
-        logger.warning(f"Error checking review slots configuration: {e}")
-        # Fall back to code slots if there's an error in review slot configuration
-        pass
-
-    # Ensure we always have a valid pool (fallback to _CODE_SLOTS)
-    pool, skip_builder = (review_pool, False) if review_pool else (_CODE_SLOTS, True)
+    # Build the reviewer panel via the capability/cost-aware picker: up to
+    # _REVIEW_PANEL_MAX DISTINCT models, excluding the builder's model.
+    # Replaces the old _REVIEW_SLOTS/_CODE_SLOTS pool iteration (a static,
+    # operator-curated list) — see _select_review_panel's docstring.
+    panel_candidates = _select_review_panel(config, builder_n=builder_n)
 
     reviewers = []
-    for n in pool:
-        if skip_builder and n == builder_n:
-            continue
-        try:
-            provider, key, model, _ = _get_provider_config(n, config)
-            if not _provider_configured(provider, key, model):
-                continue
-            reviewers.append({"name": f"Reviewer {n} ({provider})", "model": model, "provider_n": n})
-        except Exception as e:
-            logger.warning(f"Error configuring reviewer for slot {n}: {e}")
-            # Continue to next reviewer instead of failing completely
-            continue
+    for c in panel_candidates:
+        reviewers.append({"name": f"Reviewer ({c['provider']})", "candidate": c})
 
     if not reviewers:
         logger.warning("No reviewers configured. Falling back to default LLM review.")
-        reviewers = [{"name": "Default Reviewer", "model": None, "provider_n": None}]
-
-    # Check if any provider is online at all.
-    any_provider_online = any(
-        state.get(f"provider_{n}_online", True) for n in pool
-        if not (skip_builder and n == builder_n)
-    )
-    if not any_provider_online:
-        logger.warning("All reviewer LLM providers appear offline. Signaling retry queue.")
-        return {"status": "queue_for_retry", "reason": "all_reviewers_offline"}
+        reviewers = [{"name": "Default Reviewer", "candidate": None}]
 
     # Show reviewers the actual working-tree DIFF (parse_and_apply already wrote
     # the change) rather than dumping full file bodies — a targeted edit to a large
@@ -1001,8 +1044,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     # acquiring (and, if cloned fresh, cleaning up) when a claude_cli
     # reviewer is actually in the panel; every other provider ignores it.
     checkout_path, checkout_is_temp = (None, False)
-    if any((r.get("provider_n") and
-           (_get_provider_config(r["provider_n"], config)[0] or "").lower().strip() == "claude_cli")
+    if any(((r.get("candidate") or {}).get("provider") or "").lower().strip() == "claude_cli"
            for r in reviewers):
         checkout_path, checkout_is_temp = _ensure_review_checkout(repo_path, repo, head_sha, config)
 
@@ -1016,7 +1058,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
                 res = _run_reviewer_turn(
                     prompt,
                     "You are a skeptical senior engineer. Be critical. Only return JSON.",
-                    r["provider_n"], r.get("model"), task_id, repo, head_sha,
+                    r.get("candidate"), task_id, repo, head_sha,
                     repo_checkout_path=checkout_path,
                 )
                 match = re.search(r'\{.*\}', res, re.DOTALL)
