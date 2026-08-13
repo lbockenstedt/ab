@@ -68,7 +68,7 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
 _PR_REVIEWS_MAX = 100
 
 
-def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None):
+def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None, review2=None):
     """Persist a PR pre-review result so the UI can list/filter 'PRs Reviewed'.
     Bounded to the most recent _PR_REVIEWS_MAX. findings = list of {level,...} dicts.
 
@@ -111,6 +111,25 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
         except (TypeError, ValueError):
             panel_confidence = None
 
+    # Second panel (pr_review._state_logic_review) — same flattening, own flat
+    # fields. Previously computed every scan and rendered into the GitHub
+    # comment but never persisted here, so its verdict was invisible in
+    # BugFixer's own UI even for ordinary human PRs. Added when feature
+    # auto-drive's auto-merge gate needed to require BOTH panels to clear
+    # (see pr_review._automerge_decision) — fixes that pre-existing gap for
+    # every PR, not just feature-built ones.
+    _r2 = review2 or {}
+    panel2_status = _r2.get("status") or ""
+    panel2_verdict = "" if panel2_status else str(_r2.get("verdict") or "")
+    panel2_critique = ("" if panel2_status else str(_r2.get("critique") or "").strip())[:4000]
+    panel2_confidence = None
+    if not panel2_status and _r2.get("confidence") is not None:
+        try:
+            _c2 = float(_r2["confidence"])
+            panel2_confidence = max(0.0, min(1.0, _c2 / 100.0 if _c2 > 1.0 else _c2))
+        except (TypeError, ValueError):
+            panel2_confidence = None
+
     key = "%s#%s" % (repo, number)
     try:
         with _task_state_lock:
@@ -134,10 +153,22 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "panel_confidence": panel_confidence,
                 "panel_status": panel_status,
                 "panel_critique": panel_critique,
+                "panel2_verdict": panel2_verdict,
+                "panel2_confidence": panel2_confidence,
+                "panel2_status": panel2_status,
+                "panel2_critique": panel2_critique,
                 # Preserve a human's Approve across re-scans; reset if the head moved.
                 "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
                 # Merged is terminal — keep it so the PR stays listed with its badge.
                 "merged": bool(prev.get("merged")),
+                # Auto-merged (feature auto-drive only — see pr_review._automerge_decision)
+                # follows the MERGED sticky-preservation pattern, not the approved one:
+                # once true, it must survive every later re-scan (a later scan recomputing
+                # panel_confidence must never make the badge disappear from an already-
+                # auto-merged PR — that's the exact bug class this comment exists to avoid).
+                "auto_merged": bool(prev.get("auto_merged")),
+                "auto_merge_score": prev.get("auto_merge_score"),
+                "auto_merge_reason": prev.get("auto_merge_reason"),
                 # Denied does NOT persist here: record_pr_review only runs for OPEN
                 # PRs, and Deny CLOSES the PR — so a still-denied PR is never re-scanned
                 # (its badge persists via the stored record). Reaching this line means
@@ -203,6 +234,12 @@ closed_count = sum(1 for i in processed_init.values() if i.get("status") == "clo
 pending_verification_count = sum(1 for i in processed_init.values() if i.get("status") == "pending_verification")
 # Issues the triage step judged not actionable (not a real bug / can't fix from logs).
 non_actionable_count = sum(1 for i in processed_init.values() if i.get("status") == "non-actionable")
+# Feature auto-drive (feature_drive.py) — three statuses, none of them "resolved":
+# a flagged request needs a human decision; a needs-info request needs a reply;
+# a built one has an open PR still needing review/merge.
+feature_flagged_count = sum(1 for i in processed_init.values() if i.get("status") == "feature_flagged")
+feature_needs_info_count = sum(1 for i in processed_init.values() if i.get("status") == "feature_needs_info")
+feature_built_count = sum(1 for i in processed_init.values() if i.get("status") == "feature_built")
 
 state = {
     "status": "Idle", "active_llm": "Unknown",
@@ -229,6 +266,9 @@ state = {
     # happens to run again.
     "llm_tps": load_llm_tps(),
     "active_tasks": {}, "pr_reviews": load_pr_reviews(), "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
+    "feature_flagged_count": feature_flagged_count,
+    "feature_needs_info_count": feature_needs_info_count,
+    "feature_built_count": feature_built_count,
     # Background-dismiss job status, keyed by issue_id, polled by the WebUI so the
     # Dismiss button can return instantly and toast once the GitHub retry loop
     # (delete_issue in routes.py) actually finishes. {"status": "pending"|"done"|
@@ -278,6 +318,9 @@ def recompute_issue_counters(processed=None):
     state["pending_verification_count"] = sum(1 for i in vals if i.get("status") == "pending_verification")
     state["non_actionable_count"] = sum(1 for i in vals if i.get("status") == "non-actionable")
     state["failure_count"] = sum(1 for i in vals if i.get("status") == "failed")
+    state["feature_flagged_count"] = sum(1 for i in vals if i.get("status") == "feature_flagged")
+    state["feature_needs_info_count"] = sum(1 for i in vals if i.get("status") == "feature_needs_info")
+    state["feature_built_count"] = sum(1 for i in vals if i.get("status") == "feature_built")
     return state
 
 # Explicit __all__ so ``from app_state import *`` in main re-exports the
@@ -292,6 +335,9 @@ __all__ = [
     "closed_count",
     "pending_verification_count",
     "non_actionable_count",
+    "feature_flagged_count",
+    "feature_needs_info_count",
+    "feature_built_count",
     "recompute_issue_counters",
     "update_task_state",
     "_task_state_lock",

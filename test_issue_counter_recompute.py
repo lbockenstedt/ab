@@ -10,7 +10,7 @@ route bodies via ast and execs them with stubbed I/O (_close_issue_on_github,
 save_processed/load_processed, threading).
 
 Regression guard: recompute_issue_counters() (app_state.py) is the single
-source of truth for the five badge counters and its own docstring says to
+source of truth for the badge counters and its own docstring says to
 call it after "close, reopen, dismiss, delete" — but delete_issue,
 clear_history, and delete_all_issues instead hand-decremented/reset only
 success_count/failure_count, so closed_count/pending_verification_count/
@@ -20,6 +20,13 @@ _RESOLVED_STATUSES grew a 4th value after that check was written). The badge
 only ever looked right again after some UNRELATED action (resolve/reopen)
 happened to call recompute_issue_counters, or a source of truth rebuild
 (restart) — not because these three actions ever fixed it themselves.
+
+Extended (feature auto-drive, Phase 1): three more free-form statuses
+(feature_flagged/feature_needs_info/feature_built, feature_drive.py) joined
+the store, each with its OWN counter — widened from a 5-tuple to an 8-tuple
+so a future half-added status (see fix_engine.py's still-uncounted
+"awaiting_human" for a live example of exactly that failure mode) gets
+caught here too.
 """
 import ast
 import asyncio
@@ -73,7 +80,9 @@ def _load_ns():
 
     state = {"processed": {}, "success_count": 0, "failure_count": 0,
               "closed_count": 0, "pending_verification_count": 0,
-              "non_actionable_count": 0, "dismiss_jobs": {}}
+              "non_actionable_count": 0, "dismiss_jobs": {},
+              "feature_flagged_count": 0, "feature_needs_info_count": 0,
+              "feature_built_count": 0}
 
     class _FakeRequest:
         def __init__(self, payload):
@@ -115,22 +124,31 @@ def main():
     state = ns["state"]
     recompute = ns["recompute_issue_counters"]
 
-    # Seed five issues, one per status bucket, then recompute once to get the
-    # baseline right (mirrors what a real running instance would have).
+    # Seed one issue per status bucket (5 original + 3 feature auto-drive),
+    # then recompute once to get the baseline right (mirrors what a real
+    # running instance would have).
     seed = {
         "r/x:1": {"status": "resolved"},
         "r/x:2": {"status": "closed"},
         "r/x:3": {"status": "pending_verification"},
         "r/x:4": {"status": "non-actionable"},
         "r/x:5": {"status": "failed"},
+        "r/x:6": {"status": "feature_flagged"},
+        "r/x:7": {"status": "feature_needs_info"},
+        "r/x:8": {"status": "feature_built"},
     }
+
+    def _counters():
+        return (state["success_count"], state["closed_count"],
+                state["pending_verification_count"], state["non_actionable_count"],
+                state["failure_count"], state["feature_flagged_count"],
+                state["feature_needs_info_count"], state["feature_built_count"])
+
     ns["save_processed"](seed)
     state["processed"] = dict(seed)
     recompute(seed)
-    ok &= _check("baseline: all five buckets populated",
-                 (state["success_count"], state["closed_count"],
-                  state["pending_verification_count"], state["non_actionable_count"],
-                  state["failure_count"]) == (1, 1, 1, 1, 1))
+    ok &= _check("baseline: all eight buckets populated",
+                 _counters() == (1, 1, 1, 1, 1, 1, 1, 1))
 
     # ── delete_issue on a "resolved" issue (missed by the old narrow tuple
     #    check, which only knew about fixed/verified/awaiting_prod_verification)
@@ -143,12 +161,10 @@ def main():
     ok &= _check("delete_issue: dismissing a 'closed' issue decrements closed_count",
                  state["closed_count"] == 0)
 
-    # ── clear_history must reset ALL five buckets, not just success/failure
+    # ── clear_history must reset ALL eight buckets, not just success/failure
     _run(ns["clear_history"]())
     ok &= _check("clear_history: resets every counter to 0",
-                 (state["success_count"], state["closed_count"],
-                  state["pending_verification_count"], state["non_actionable_count"],
-                  state["failure_count"]) == (0, 0, 0, 0, 0))
+                 _counters() == (0, 0, 0, 0, 0, 0, 0, 0))
 
     # ── delete_all_issues: same check, from a fresh non-zero baseline
     ns["save_processed"](seed)
@@ -156,9 +172,7 @@ def main():
     recompute(seed)
     _run(ns["delete_all_issues"](ns["_FakeRequest"]({})))
     ok &= _check("delete_all_issues: resets every counter to 0",
-                 (state["success_count"], state["closed_count"],
-                  state["pending_verification_count"], state["non_actionable_count"],
-                  state["failure_count"]) == (0, 0, 0, 0, 0))
+                 _counters() == (0, 0, 0, 0, 0, 0, 0, 0))
 
     print()
     if ok:

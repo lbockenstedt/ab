@@ -10,6 +10,16 @@ keyed by head SHA so it never spams) plus a NON-required informational
 INVARIANTS (see memory pr-gate-bugfixer-prereview):
   * NEVER approves/denies a PR and NEVER pushes to the branch. It posts findings
     as a comment; only a human approves/denies.
+    ONE DELIBERATE, NARROWLY-SCOPED EXCEPTION (added for feature auto-drive):
+    ``_maybe_auto_merge``/``_automerge_decision`` CAN approve+merge a PR
+    unattended — but ONLY a PR carrying the ``bugfixer-feature-drive`` marker
+    (feature_build.py's own PRs), and only when both review panels Approve
+    above a configurable confidence floor, the diff touches no configured
+    boundary, and the repo is explicitly opted into
+    ``feature_automerge_repos`` (defaults to empty — opt-in, not opt-out). A
+    human-authored PR can NEVER match the marker, so it can never be
+    auto-merged at any confidence. See ``_automerge_decision``'s own
+    docstring for the complete, exhaustive gate list.
   * The status check is informational only (always `success`, count in the
     description). It must stay a NON-required check so it can never block a merge.
   * Tier-1 (zero LLM, always on, three checks — see ``_review_one``):
@@ -52,8 +62,11 @@ import re
 from datetime import timedelta
 
 from github_ops import get_monitored_repos
-from app_state import update_task_state, record_pr_review, update_pr_review, state
+from app_state import update_task_state, record_pr_review, update_pr_review, mark_pr_approved, state
+import feature_boundary
+from pr_actions import approve_pr, merge_pr
 from secrets_scan import check_secrets
+from check_tooltips import find_missing_tooltips_in_files
 from lint_python import check_undefined_names
 from check_unattended_mutation import check_unattended_mutation
 from check_test_regressions import check_test_regressions
@@ -673,6 +686,143 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
     return out
 
 
+_FEATURE_DRIVE_MARKER_RE = re.compile(r"<!--\s*bugfixer-feature-drive:\s*([^\s>]+)#(\d+)\s*-->")
+
+
+def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None):
+    """Pure function — the SINGLE choke point for whether feature auto-drive
+    auto-approves + auto-merges a PR instead of waiting for a human. Returns
+    (should_merge: bool, reason: str).
+
+    THE INVARIANT THIS FUNCTION DELIBERATELY BREAKS: this module's own
+    docstring (top of file) and routes.py's approve/merge routes say
+    "BugFixer never auto-approves"/"never auto-merges". This function is the
+    one narrow, deliberate exception — see pr_meta["is_feature_drive"] below,
+    which is what keeps a human-authored PR structurally ineligible no
+    matter how high its confidence.
+
+    ALL conditions below are required; on ANY missing/ambiguous/unexpected
+    input this returns (False, reason) — it must never accidentally return
+    True. Every condition is independently gate-able (two kill switches:
+    feature_drive_enabled and feature_automerge_enabled; plus paused/
+    blackout; plus a per-repo allowlist that defaults to empty).
+
+    rec: state["pr_reviews"]["repo#num"] — panel_*/panel2_*/errors/warnings/
+         merged/auto_merged.
+    changed_paths: the PR's REAL changed-file list (pr.get_files() filenames)
+                   — the boundary check is against the actual diff, never a
+                   pre-build prediction.
+    config: live config (feature_drive_enabled, feature_automerge_*,
+            feature_boundaries).
+    pr_meta: {"repo": str, "is_feature_drive": bool, "draft": bool,
+              "state": "open"|"closed", "mergeable": bool|None}.
+    state_flags: {"paused": bool, "blackout": bool}.
+    """
+    state_flags = state_flags or {}
+    pr_meta = pr_meta or {}
+
+    if not config.get("feature_drive_enabled", False):
+        return False, "feature_drive_enabled is off"
+    if not config.get("feature_automerge_enabled", False):
+        return False, "feature_automerge_enabled is off"
+    if pr_meta.get("repo") not in (config.get("feature_automerge_repos") or []):
+        return False, "repo is not in feature_automerge_repos (opt-in, defaults to none)"
+    if not pr_meta.get("is_feature_drive"):
+        return False, "PR does not carry the feature-drive marker — human PRs are never auto-merged"
+
+    if rec.get("merged") or rec.get("auto_merged"):
+        return False, "already merged (idempotent no-op)"
+    if pr_meta.get("draft"):
+        return False, "PR is a draft"
+    if (pr_meta.get("state") or "open") != "open":
+        return False, "PR is not open"
+    if pr_meta.get("mergeable") is not True:
+        return False, "PR is not cleanly mergeable (conflicts / required checks / unknown)"
+    if state_flags.get("paused"):
+        return False, "BugFixer is paused"
+    if state_flags.get("blackout"):
+        return False, "BugFixer is in a blackout window"
+
+    if rec.get("panel_status"):
+        return False, "panel 1 (skeptical review) could not run"
+    if rec.get("panel_verdict") != "Approve":
+        return False, "panel 1 (skeptical review) did not Approve"
+    if rec.get("panel2_status"):
+        return False, "panel 2 (state-logic review) could not run"
+    if rec.get("panel2_verdict") != "Approve":
+        return False, "panel 2 (state-logic review) did not Approve"
+
+    threshold = config.get("feature_automerge_min_confidence")
+    try:
+        threshold = float(threshold) if threshold is not None else 1.0
+    except (TypeError, ValueError):
+        threshold = 1.0
+    threshold = max(0.0, min(1.0, threshold))
+
+    conf1 = rec.get("panel_confidence")
+    conf2 = rec.get("panel2_confidence")
+    if conf1 is None or conf1 < threshold:
+        return False, f"panel 1 confidence {conf1} is below the threshold {threshold:.2f}"
+    if conf2 is None or conf2 < threshold:
+        return False, f"panel 2 confidence {conf2} is below the threshold {threshold:.2f}"
+
+    if config.get("feature_automerge_require_clean", True):
+        if (rec.get("errors") or 0) > 0 or (rec.get("warnings") or 0) > 0:
+            return False, "Tier-1 findings present (errors or warnings) — advisories alone are fine"
+
+    hits = feature_boundary.boundary_hits(changed_paths or [], config.get("feature_boundaries") or [])
+    if hits:
+        ids = ", ".join(h.get("id", "?") for h in hits)
+        return False, f"diff touches configured boundary path(s): {ids}"
+
+    score = min(conf1, conf2)
+    return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
+
+
+def _maybe_auto_merge(gh, repo, pr, config):
+    """Called immediately after record_pr_review inside _review_one, so it
+    always sees a fresh record. Evaluates _automerge_decision and, if it
+    clears, performs the SAME approve+merge actions a human clicking the
+    buttons would — via pr_actions.approve_pr/merge_pr, the shared
+    implementation, so the merge_pr's own "must be approved" guard is
+    satisfied honestly rather than bypassed. Best-effort: any error here is
+    logged and swallowed — a failed auto-merge attempt leaves the PR exactly
+    where a normal reviewed-but-not-yet-approved PR would be, safe for a
+    human to pick up."""
+    try:
+        key = "%s#%s" % (repo.full_name, pr.number)
+        rec = (state.get("pr_reviews") or {}).get(key) or {}
+        changed_paths = [f.filename for f in pr.get_files()]
+        marker_match = _FEATURE_DRIVE_MARKER_RE.search(pr.body or "")
+        pr_meta = {
+            "repo": repo.full_name,
+            "is_feature_drive": bool(marker_match),
+            "draft": bool(getattr(pr, "draft", False)),
+            "state": (pr.state or "open"),
+            "mergeable": getattr(pr, "mergeable", None),
+        }
+        state_flags = {"paused": bool(state.get("paused")), "blackout": bool(state.get("blackout"))}
+        should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags)
+        if not should_merge:
+            logger.debug("pr_review: auto-merge skipped for %s (%s)", key, reason)
+            return
+        logger.info("pr_review: auto-merging %s — %s", key, reason)
+        approve_pr(gh, repo.full_name, pr.number, actor="bugfixer-auto")
+        mark_pr_approved(repo.full_name, pr.number, True)
+        update_pr_review(repo.full_name, pr.number, auto_merge_score=min(
+            rec.get("panel_confidence") or 0.0, rec.get("panel2_confidence") or 0.0),
+            auto_merge_reason=reason)
+        status_code, result = merge_pr(gh, repo.full_name, pr.number)
+        if status_code == 200 and result.get("status") == "success":
+            update_pr_review(repo.full_name, pr.number, auto_merged=True)
+            logger.info("pr_review: auto-merge succeeded for %s", key)
+        else:
+            logger.warning("pr_review: auto-merge's own merge_pr call did not succeed for %s: %s",
+                           key, result)
+    except Exception as e:
+        logger.exception("pr_review: auto-merge attempt failed for %s#%s: %s", repo.full_name, pr.number, e)
+
+
 def _review_one(gh, repo, pr, config, force=False):
     """force=True (the "Reprocess" button) bypasses the already-current cache
     check below and regenerates the comment + panel(s) even when the head SHA
@@ -686,6 +836,12 @@ def _review_one(gh, repo, pr, config, force=False):
     # own fix backlog. Signals: title "AI Fix #N" and head branch "ai-fix-issue-N"
     # (fix_engine.create_pull). BugFixer commits under the operator's token, so
     # author can't distinguish it — use the title/branch signal.
+    # DELIBERATELY does not match feature_build.py's PRs ("AI Feature #N" /
+    # "ai-feature-issue-N") — those have NOT been vetted by any panel yet (the
+    # build agent has no reviewer), so they MUST fall through to a real
+    # review here. Do not widen this prefix (e.g. to "AI " or "ai-") without
+    # checking test_pr_review_own_pr_skip.py — a match here silently disables
+    # review for the entire feature auto-drive pipeline, with no error anywhere.
     _title = pr.title or ""
     _head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
     if _title.startswith("AI Fix #") or _head_ref.startswith("ai-fix-issue-"):
@@ -701,6 +857,7 @@ def _review_one(gh, repo, pr, config, force=False):
     findings = check_parity(repo.full_name, changed)
     findings = _resolve_cross_repo_twins(gh, findings, since=getattr(pr, "created_at", None))
     findings += check_secrets(files)
+    findings += find_missing_tooltips_in_files(files)
     findings += check_undefined_names(repo, files, head_sha)
     findings += check_unattended_mutation(files)
     existing = _find_marker_comment(pr)
@@ -729,7 +886,12 @@ def _review_one(gh, repo, pr, config, force=False):
         review = ({"status": _prior["panel_status"]} if _prior.get("panel_status") else
                   {"verdict": _prior.get("panel_verdict"), "confidence": _prior.get("panel_confidence"),
                    "critique": _prior.get("panel_critique")}) if _prior.get("panel_verdict") or _prior.get("panel_status") else None
-        state_review = None  # no separate storage for this yet (see note on record_pr_review below)
+        # Same recovery for the second (state-logic) panel — without this, a
+        # cached re-scan would call record_pr_review with review2=None and
+        # silently wipe the panel2_* fields a real scan had just persisted.
+        state_review = ({"status": _prior["panel2_status"]} if _prior.get("panel2_status") else
+                        {"verdict": _prior.get("panel2_verdict"), "confidence": _prior.get("panel2_confidence"),
+                         "critique": _prior.get("panel2_critique")}) if _prior.get("panel2_verdict") or _prior.get("panel2_status") else None
     else:
         # New/changed head: generate the plain-language change summary (LLM,
         # best-effort) and run the skeptical reviewer panel(s) (the unified
@@ -766,15 +928,23 @@ def _review_one(gh, repo, pr, config, force=False):
     # Always persist for the UI 'PRs Reviewed' filter (survives restarts). The
     # panel result rides along so the advisory verdict/confidence shows in
     # BugFixer's own PR list, not only in the GitHub comment. state_review (the
-    # state-logic panel) is NOT yet persisted here — app_state.record_pr_review
-    # only has flat panel_* fields for ONE panel; it renders in the GitHub
-    # comment via _render's state_review param but doesn't show in BugFixer's
-    # own UI yet. Follow-up if that's wanted.
+    # state-logic panel) is ALSO persisted now (panel2_* fields, app_state.py) —
+    # feature auto-drive's auto-merge gate requires BOTH panels to clear, and
+    # this fixes the pre-existing gap where that panel's verdict was invisible
+    # in BugFixer's own UI for every PR, not just feature-built ones.
     record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha,
-                     summary=summary, review=review)
+                     summary=summary, review=review, review2=state_review)
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                     repo.full_name, pr.number, len(findings), action)
+    # Runs on EVERY scan (not just non-cached ones) — a PR whose panels only
+    # just cleared the confidence bar via the LAST scan's record shouldn't
+    # have to wait for its head to move again before being picked up. Inert
+    # unless feature_drive_enabled AND feature_automerge_enabled AND the repo
+    # is in feature_automerge_repos (see _automerge_decision's own docstring
+    # for the full gate list) — a no-op read+return for every ordinary
+    # human-authored or auto-merge-disabled PR.
+    _maybe_auto_merge(gh, repo, pr, config)
 
 
 def reprocess_one_pr(repo_full_name, number, config=None):
@@ -859,6 +1029,7 @@ def fix_one_pr(repo_full_name, number, config=None):
         findings = check_parity(repo_full_name, changed)
         findings = _resolve_cross_repo_twins(gh, findings, since=getattr(pr, "created_at", None))
         findings += check_secrets(files)
+        findings += find_missing_tooltips_in_files(files)
         findings += check_undefined_names(repo, files, head_sha)
 
         rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}

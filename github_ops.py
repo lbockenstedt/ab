@@ -154,6 +154,10 @@ _LABEL_COLORS = {
     "log-detected": "fbca04",   # yellow
     "critical": "b60205",
     "high-priority": "d93f0b",
+    "enhancement": "a2eeef",           # GitHub's own default enhancement blue
+    "bugfixer-needs-human": "5319e7",  # purple — feature_drive boundary flag
+    "bugfixer-needs-info": "c5def5",   # light blue — feature_drive clarify request
+    "bugfixer-feature-drive": "0e8a16",  # green — marks an auto-built feature PR
 }
 
 

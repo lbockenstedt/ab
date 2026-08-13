@@ -368,16 +368,22 @@
                 <div onclick="goFilter('closed')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Closed"><span class="text-slate-500">Closed</span><span class="font-bold text-slate-600">{{ state.closed_count }}</span></div>
                 <div onclick="goFilter('pending_verification')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Pending Verification"><span class="text-slate-500">Pending Verif.</span><span class="font-bold text-amber-600">{{ state.pending_verification_count }}</span></div>
                 <div onclick="goFilter('non-actionable')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Non-Actionable"><span class="text-slate-500">Non-Actionable</span><span class="font-bold text-orange-600">{{ state.non_actionable_count }}</span></div>
-                {% set _pr_ns = namespace(pending=0, approved=0, merged=0, denied=0) %}
-                {% for _pk, _pr in (state.pr_reviews or {}).items() %}{% if _pr.merged %}{% set _pr_ns.merged = _pr_ns.merged + 1 %}{% elif _pr.denied %}{% set _pr_ns.denied = _pr_ns.denied + 1 %}{% elif _pr.closed %}{# closed-unmerged: shown as CLOSED, not tallied in a sub-bucket #}{% elif _pr.approved %}{% set _pr_ns.approved = _pr_ns.approved + 1 %}{% else %}{% set _pr_ns.pending = _pr_ns.pending + 1 %}{% endif %}{% endfor %}
-                {# PENDING = reviewed and still awaiting a human: NOT approved/merged/denied/closed.
-                   This must be the `else` of the same chain that fills the other buckets — it used
-                   to be the raw pr_reviews length, which counted every terminal PR as pending and
-                   made the four counters sum to more than the PR list. Mirrors the 'reviewed'
-                   data-pr-state on the rows so the count and the filter agree. #}
+                <div onclick="goFilter('feature_flagged')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Feature requests flagged for a human (crosses a boundary)"><span class="text-slate-500">Feature Flagged</span><span class="font-bold text-purple-600">{{ state.feature_flagged_count }}</span></div>
+                <div onclick="goFilter('feature_needs_info')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Feature requests awaiting more detail from the requester"><span class="text-slate-500">Feature Needs Info</span><span class="font-bold text-sky-600">{{ state.feature_needs_info_count }}</span></div>
+                <div onclick="goFilter('feature_built')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Feature requests auto-built, PR open"><span class="text-slate-500">Feature Built</span><span class="font-bold text-teal-600">{{ state.feature_built_count }}</span></div>
+                {% set _pr_ns = namespace(pending=0, approved=0, merged=0, denied=0, auto_merged=0) %}
+                {% for _pk, _pr in (state.pr_reviews or {}).items() %}{% if _pr.auto_merged %}{% set _pr_ns.auto_merged = _pr_ns.auto_merged + 1 %}{% elif _pr.merged %}{% set _pr_ns.merged = _pr_ns.merged + 1 %}{% elif _pr.denied %}{% set _pr_ns.denied = _pr_ns.denied + 1 %}{% elif _pr.closed %}{# closed-unmerged: shown as CLOSED, not tallied in a sub-bucket #}{% elif _pr.approved %}{% set _pr_ns.approved = _pr_ns.approved + 1 %}{% else %}{% set _pr_ns.pending = _pr_ns.pending + 1 %}{% endif %}{% endfor %}
+                {# PENDING = reviewed and still awaiting a human: NOT approved/merged/denied/closed/
+                   auto_merged. This must be the `else` of the same chain that fills the other
+                   buckets — it used to be the raw pr_reviews length, which counted every terminal
+                   PR as pending and made the counters sum to more than the PR list. Mirrors the
+                   data-pr-state on the rows so the count and the filter agree. auto_merged is
+                   checked FIRST (an auto-merged PR is ALSO merged=True) — same ordering rule as
+                   the row's data-pr-state and the badge chain below. #}
                 <div onclick="goFilter('pr_review')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Pending"><span class="text-slate-500">PRs Pending</span><span class="font-bold text-indigo-600">{{ _pr_ns.pending }}</span></div>
                 <div onclick="goFilter('pr_approved')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Approved"><span class="text-slate-500">PRs Approved</span><span class="font-bold text-green-600">{{ _pr_ns.approved }}</span></div>
                 <div onclick="goFilter('pr_merged')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Merged"><span class="text-slate-500">PRs Merged</span><span class="font-bold text-purple-600">{{ _pr_ns.merged }}</span></div>
+                <div onclick="goFilter('pr_auto_merged')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Auto-Merged (feature auto-drive, no human clicked Approve/Merge)"><span class="text-slate-500">PRs Auto-Merged</span><span class="font-bold text-teal-600">{{ _pr_ns.auto_merged }}</span></div>
                 <div onclick="goFilter('pr_denied')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Denied"><span class="text-slate-500">PRs Denied</span><span class="font-bold text-red-600">{{ _pr_ns.denied }}</span></div>
             </div>
             {% if state.skills %}
@@ -460,6 +466,9 @@
                     <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
                     <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
                     <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
+                    <button data-filter="feature_flagged" onclick="filterActivity('feature_flagged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests crossing a boundary — need a human decision">Feature Flagged</button>
+                    <button data-filter="feature_needs_info" onclick="filterActivity('feature_needs_info')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests awaiting more detail from the requester">Feature Needs Info</button>
+                    <button data-filter="feature_built" onclick="filterActivity('feature_built')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests auto-built — PR open">Feature Built</button>
                     </div>
                     <!-- PR filters on their own row: they are a different object
                          (pull requests, not issues) and wrapping them into the issue
@@ -467,7 +476,8 @@
                     <div class="flex items-center flex-nowrap gap-2 mt-1">
                     <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs BugFixer has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PR Pending</button>
                     <button data-filter="pr_approved" onclick="filterActivity('pr_approved')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Approved"><i class="fas fa-code-branch mr-1"></i>PR Approved</button>
-                    <button data-filter="pr_merged" onclick="filterActivity('pr_merged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs that were Merged"><i class="fas fa-code-branch mr-1"></i>PR Merged</button>
+                    <button data-filter="pr_merged" onclick="filterActivity('pr_merged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human Merged"><i class="fas fa-code-branch mr-1"></i>PR Merged</button>
+                    <button data-filter="pr_auto_merged" onclick="filterActivity('pr_auto_merged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature-drive PRs auto-merged unattended — no human clicked Approve/Merge"><i class="fas fa-robot mr-1"></i>PR Auto-Merged</button>
                     <button data-filter="pr_denied" onclick="filterActivity('pr_denied')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Denied"><i class="fas fa-code-branch mr-1"></i>PR Denied</button>
                     <button data-filter="pr_closed" onclick="filterActivity('pr_closed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs closed without merging (e.g. superseded). Reachable only here — they are not a System Health sub-bucket."><i class="fas fa-code-branch mr-1"></i>PR Closed</button>
                     <i class="fas fa-history text-slate-400 ml-2"></i>
@@ -486,15 +496,30 @@
                     <tr class="hover:bg-slate-50 transition-colors" data-status="{{ info.status }}">
                         <td class="px-6 py-3 font-mono text-[#01A982] align-middle">{{ issue_id }}</td>
                         <td class="px-6 py-3 text-right align-middle">
-                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
+                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% elif info.status == 'feature_flagged' %}text-purple-700 bg-purple-100{% elif info.status == 'feature_needs_info' %}text-sky-700 bg-sky-100{% elif info.status == 'feature_built' %}text-teal-700 bg-teal-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
                         <td class="px-6 py-3 align-middle">
                             <div class="flex flex-wrap gap-1.5 justify-end items-center">
+                                {% if info.status in ('feature_flagged', 'feature_needs_info') %}
+                                <!-- No Retry/Claude/Reopen here — those trigger a code fix attempt,
+                                     but a boundary-flag or a clarify request has no code to fix; the
+                                     next automatic classify pass (on a reply or a re-run) is what
+                                     re-evaluates it, not a manual retry. -->
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                                {% elif info.status == 'feature_built' %}
+                                {% if info.pr_url %}
+                                <a href="{{ info.pr_url }}" target="_blank" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-teal-100 hover:bg-teal-200 text-teal-700 border border-teal-200 transition-colors">View PR</a>
+                                {% endif %}
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                                {% else %}
                                 <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap">Retry</button>
                                 <button onclick="reopenIssue('{{ issue_id }}')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
                                 <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
                                 <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                                 <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                                {% endif %}
                             </div>
                         </td>
                     </tr>
@@ -512,6 +537,9 @@
                                     {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
                                     {% elif info.status == 'non-actionable' %}Non-actionable: {{ (info.reason or '')[:80] }}
                                     {% elif info.status == 'failed' %}Failed: {{ (info.error or '')[:80] }}
+                                    {% elif info.status == 'feature_flagged' %}🚧 Flagged for a human — crosses boundary: {{ (info.boundary_ids or [])|join(', ') or (info.reason or '')[:80] }}
+                                    {% elif info.status == 'feature_needs_info' %}❓ Needs more detail — {{ (info.questions or [])|length }} question(s) posted on the issue, awaiting a reply
+                                    {% elif info.status == 'feature_built' %}✅ Auto-built — PR {{ info.pr_url or 'open' }}, awaiting review
                                     {% else %}{{ info.status }}{% endif %}
                                 </div>
                                 <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-[10px] italic">
@@ -561,7 +589,7 @@
                     </tr>
                     {% endfor %}
                     {% for _k, pr in sorted_pr_reviews %}
-                    <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" data-pr-state="{% if pr.merged %}merged{% elif pr.denied %}denied{% elif pr.closed %}closed{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
+                    <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" data-pr-state="{% if pr.auto_merged %}auto_merged{% elif pr.merged %}merged{% elif pr.denied %}denied{% elif pr.closed %}closed{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
                         <td class="px-3 py-2 font-mono align-middle truncate">
                             <a href="{{ pr.url }}" target="_blank" class="text-indigo-600 hover:underline"><i class="fas fa-code-branch mr-1"></i>{{ pr.repo }} #{{ pr.number }}</a>
                         </td>
@@ -580,12 +608,20 @@
                             {% elif pr.panel_verdict %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {{ 'text-green-700 bg-green-100' if pr.panel_verdict == 'Approve' else 'text-red-700 bg-red-100' }}" title="Advisory cross-provider panel verdict — a human is still the sole approver. Confidence is a fraction rendered as a percentage.">ADVISORY {{ pr.panel_verdict|upper }}{% if pr.panel_confidence is not none %} · {{ (pr.panel_confidence * 100)|round|int }}%{% endif %}</span>
                             {% endif %}
+                            {% if pr.auto_merged %}
+                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-teal-700 bg-teal-100" title="Auto-merged by feature auto-drive — both review panels cleared the configured confidence threshold, no human clicked Approve/Merge. {{ pr.auto_merge_reason or '' }}"><i class="fas fa-robot mr-1"></i>AUTO-MERGED{% if pr.auto_merge_score is not none %} · {{ (pr.auto_merge_score * 100)|round|int }}%{% endif %}</span>
+                            {% endif %}
                             </div>
                         </td>
                         <td class="px-3 py-2 align-middle">
                             <div class="flex flex-nowrap gap-1 justify-end items-center">
                                 <a href="{{ pr.url }}" target="_blank" class="btn-sec text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap">View PR</a>
-                                {% if pr.merged %}
+                                {% if pr.auto_merged %}
+                                {# No Approve/Merge/Deny here — there is nothing left for a human to
+                                   click. The AUTO-MERGED badge above already communicates the score;
+                                   this just states the outcome plainly. #}
+                                <span class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-teal-100 text-teal-700 border border-teal-300"><i class="fas fa-robot mr-1"></i>AUTO-MERGED</span>
+                                {% elif pr.merged %}
                                 <span class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
                                 {% elif pr.denied %}
                                 <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
@@ -808,6 +844,7 @@
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-system" onclick="settingsTab('sec-system')">System</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-feature-drive" onclick="settingsTab('sec-feature-drive')">Feature Auto-Drive</button>
             </div>
 
             <div class="hpe-card p-5">
@@ -1499,6 +1536,33 @@
                                 The session key is exchanged automatically after approval — zero-touch.
                             </p>
                         </div>
+        <!-- Project skills (skills_loader.py) — the repo-committed recipes
+             (add-simulation, dual-copy-guard, ...) BugFixer follows for fix/
+             build work. Feature auto-drive's build stage depends entirely on
+             these loading; previously configurable only by hand-editing
+             config.json. -->
+                        <div class="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                            <div class="flex items-center gap-3 mb-3">
+                                <input type="checkbox" name="skills_enabled" id="skills_enabled" {{ 'checked' if settings.get('skills_enabled', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="skills_enabled" class="text-sm font-semibold text-slate-700" title="Load repo-committed Skill recipes (add-simulation, dual-copy-guard, ...) so fix/build work follows the same boundaries a human invoking the skill would. On by default.">
+                                    Project Skills <span class="text-slate-400 font-normal">(recipes BugFixer follows for fix/build work)</span>
+                                </label>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div class="space-y-2">
+                                    <label class="text-xs font-medium text-slate-600">Skills Repo</label>
+                                    <input type="text" name="skills_repo" value="{{ settings.get('skills_repo', 'lbockenstedt/lm') }}" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="lbockenstedt/lm">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs font-medium text-slate-600">Skills Path</label>
+                                    <input type="text" name="skills_path" value="{{ settings.get('skills_path', '.claude/skills') }}" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder=".claude/skills">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs font-medium text-slate-600" title="How long a fetched skill list is cached before re-fetching from GitHub.">Cache TTL (seconds)</label>
+                                    <input type="number" name="skills_ttl_s" value="{{ settings.get('skills_ttl_s', 3600) }}" min="60" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                </div>
+                            </div>
+                        </div>
                         <div class="space-y-3 mt-4">
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
                                 <input type="checkbox" name="direct_push_enabled" id="direct_push_enabled" {{ 'checked' if settings.direct_push_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
@@ -1786,6 +1850,144 @@
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
+                    </section>
+
+                    <!-- Feature Auto-Drive (Phase 1: intake + classify — build/flag/clarify).
+                         BugFixer auto-drives small bolt-on FEATURE requests filed+approved
+                         via LM's "File a Bug" flow, while flagging anything that crosses an
+                         operator-defined boundary for a human instead of building it. See
+                         feature_drive.py / feature_boundary.py. -->
+                    <section id="sec-feature-drive" data-settings-section hidden>
+                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                            <i class="fas fa-magic text-slate-400"></i>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Feature Auto-Drive</h4>
+                        </div>
+                        <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200 mb-4">
+                            <input type="checkbox" name="feature_drive_enabled" id="feature_drive_enabled" {{ 'checked' if settings.get('feature_drive_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                            <label for="feature_drive_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, LM feature requests that clear admin-approval are classified as build/flag/clarify each scan cycle. A 'build' verdict runs the mutating agent and opens a PR — it always still needs a human Approve+Merge unless auto-merge is separately enabled below.">
+                                Enable Feature Auto-Drive <span class="text-slate-400 font-normal">(classify + build — always opens a PR, never pushes directly to a branch)</span>
+                            </label>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Intake Label</label>
+                                <input type="text" name="feature_drive_label" value="{{ settings.get('feature_drive_label', 'enhancement') }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="enhancement">
+                                <span class="text-xs text-slate-500">The single GitHub label feature auto-drive queries on — a SEPARATE query from Trigger Labels above, never combined with it (GitHub's label filter is AND, not OR).</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max Classified Per Cycle</label>
+                                <input type="number" name="feature_drive_max_per_cycle" min="1" value="{{ settings.get('feature_drive_max_per_cycle', 1) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-4">
+                            <input type="checkbox" name="feature_drive_require_marker" id="feature_drive_require_marker" {{ 'checked' if settings.get('feature_drive_require_marker', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                            <label for="feature_drive_require_marker" class="text-xs font-medium text-slate-700" title="On (default): only LM-filed, admin-approved feature requests are classified. Off: any open issue carrying the Intake Label in a selected repo is classified, whether or not it came through LM's approval gate.">
+                                Require LM approval marker <span class="text-slate-400 font-normal">(off widens intake beyond LM-approved requests — not recommended until the boundary list is tuned)</span>
+                            </label>
+                        </div>
+                        <div class="space-y-2 mt-4">
+                            <label class="text-sm font-medium text-slate-600">Repositories</label>
+                            {% if feature_drive_repo_options %}
+                            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-40 overflow-y-auto">
+                                {% for repo in feature_drive_repo_options %}
+                                <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982] truncate" title="{{ repo }}">
+                                    <input type="checkbox" name="feature_drive_repos" value="{{ repo }}" {% if repo in feature_drive_repos_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                    <span class="truncate">{{ repo }}</span>
+                                </label>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                            <input type="text" name="feature_drive_repos_extra" placeholder="Additional repos (comma-separated) — leave everything blank/unchecked to use all Monitored Repositories" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                        </div>
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-medium text-slate-600">Boundaries <span class="text-slate-400 font-normal">(things Feature Auto-Drive must never build without you — add/remove/adjust freely)</span></label>
+                            <textarea name="feature_boundaries_json" rows="14" class="w-full p-2 text-xs font-mono rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] bg-slate-50" spellcheck="false">{{ settings.feature_boundaries_json }}</textarea>
+                            <span class="text-xs text-slate-500">
+                                A JSON array. Each entry: <code class="bg-slate-100 px-1 rounded">id</code> (stable slug), <code class="bg-slate-100 px-1 rounded">label</code>, <code class="bg-slate-100 px-1 rounded">rule</code> (quoted verbatim when something is flagged), <code class="bg-slate-100 px-1 rounded">paths</code> (glob list), <code class="bg-slate-100 px-1 rounded">keywords</code>, <code class="bg-slate-100 px-1 rounded">hard</code> (true = flag immediately, no LLM call needed), <code class="bg-slate-100 px-1 rounded">enabled</code>.
+                                Invalid JSON is rejected on save — your previous list is kept and a warning toast explains why.
+                            </span>
+                            {% if settings.get('feature_boundaries') %}
+                            <div class="mt-2 rounded-lg border border-slate-200 overflow-hidden">
+                                <table class="w-full text-left text-xs">
+                                    <thead class="bg-slate-50 text-slate-500 uppercase">
+                                        <tr><th class="px-3 py-2 font-medium">ID</th><th class="px-3 py-2 font-medium">Label</th><th class="px-3 py-2 font-medium">Hard</th><th class="px-3 py-2 font-medium">Enabled</th></tr>
+                                    </thead>
+                                    <tbody class="divide-y divide-slate-100">
+                                        {% for b in settings.feature_boundaries %}
+                                        <tr>
+                                            <td class="px-3 py-1.5 font-mono text-[#01A982]">{{ b.id }}</td>
+                                            <td class="px-3 py-1.5">{{ b.label }}</td>
+                                            <td class="px-3 py-1.5">{{ '🔴 hard' if b.hard else '🔵 soft' }}</td>
+                                            <td class="px-3 py-1.5">{{ '✅' if b.get('enabled', True) else '⏸️ disabled' }}</td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                            {% endif %}
+                        </div>
+
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Build Stage</label>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Build Timeout (seconds)</label>
+                                    <input type="number" name="feature_build_timeout_s" min="60" value="{{ settings.get('feature_build_timeout_s', 1800) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <span class="text-xs text-slate-500">The mutating build agent's own LLM call timeout — needs to be much longer than a normal fix (default 1800s / 30min).</span>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-3 mt-2">
+                                <input type="checkbox" name="feature_require_docs" id="feature_require_docs" {{ 'checked' if settings.get('feature_require_docs', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="feature_require_docs" class="text-xs font-medium text-slate-700" title="On (default): a build that touches source but no docs/*.md file gets one corrective turn, then is flagged for a human instead of shipping undocumented.">
+                                    Require documentation updates
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Auto-Merge <span class="text-red-500 font-normal">(unattended — reviewed by both panels, but no human clicks Approve/Merge)</span></label>
+                            <div class="flex items-center gap-3">
+                                <input type="checkbox" name="feature_automerge_enabled" id="feature_automerge_enabled" {{ 'checked' if settings.get('feature_automerge_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="feature_automerge_enabled" class="text-xs font-medium text-slate-700" title="Off by default. Only ever applies to PRs carrying the feature-drive marker (feature_build.py's own PRs) — a human-authored PR can never be auto-merged, at any confidence.">
+                                    Enable auto-merge for feature-built PRs
+                                </label>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Minimum Confidence (both panels)</label>
+                                    <input type="number" name="feature_automerge_min_confidence" value="{{ settings.get('feature_automerge_min_confidence', 1.0) }}" min="0" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <span class="text-xs text-slate-500">Defaults to 1.0 — effectively off until you deliberately lower it. BOTH review panels must clear this.</span>
+                                </div>
+                                <div class="flex items-center gap-3 pt-6">
+                                    <input type="checkbox" name="feature_automerge_require_clean" id="feature_automerge_require_clean" {{ 'checked' if settings.get('feature_automerge_require_clean', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <label for="feature_automerge_require_clean" class="text-xs font-medium text-slate-700" title="On (default): any Tier-1 finding (secrets/parity/undefined-names/tooltip/etc, error OR warning level) blocks auto-merge. Advisories alone don't block.">
+                                        Require zero Tier-1 errors/warnings
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="space-y-2 mt-2">
+                                <label class="text-sm font-medium text-slate-600">Auto-Merge Repositories <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
+                                <p class="text-xs text-red-600 font-medium">⚠️ A repo added here that restarts a live service on push (e.g. the LM hub) will restart it unattended the moment a feature PR auto-merges. Do not add such a repo casually.</p>
+                                {% if feature_automerge_repo_options %}
+                                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-40 overflow-y-auto">
+                                    {% for repo in feature_automerge_repo_options %}
+                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982] truncate" title="{{ repo }}">
+                                        <input type="checkbox" name="feature_automerge_repos" value="{{ repo }}" {% if repo in feature_automerge_repos_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                        <span class="truncate">{{ repo }}</span>
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                                {% endif %}
+                                <input type="text" name="feature_automerge_repos_extra" placeholder="Additional repos (comma-separated)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                            </div>
+                            {% if settings.get('feature_automerge_enabled') and not (settings.get('pr_review_llm_enabled') and settings.get('pr_review_state_logic_enabled')) %}
+                            <p class="text-xs text-amber-600 font-medium mt-2">⚠️ Auto-merge is on, but one or both review panels (LLM tab → Pre-review) are off — auto-merge can never clear without them, so nothing will happen until you enable both.</p>
+                            {% endif %}
+                        </div>
+
+                        <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
@@ -2868,7 +3070,7 @@
             // EVERY PR row, so "PRs Pending" listed merged and denied PRs too.
             // pr_closed covers closed-unmerged (superseded) PRs, which previously had
             // no chip of their own and were only visible because Pending showed all.
-            const PR_FILTERS = { pr_review: 'reviewed', pr_approved: 'approved', pr_merged: 'merged', pr_denied: 'denied', pr_closed: 'closed' };
+            const PR_FILTERS = { pr_review: 'reviewed', pr_approved: 'approved', pr_merged: 'merged', pr_auto_merged: 'auto_merged', pr_denied: 'denied', pr_closed: 'closed' };
             const isPrFilter = Object.prototype.hasOwnProperty.call(PR_FILTERS, status);
             document.querySelectorAll('tbody tr[data-status]').forEach(row => {
                 const s = (row.dataset.status || '').toLowerCase();

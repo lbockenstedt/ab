@@ -105,6 +105,38 @@ def get_loaded():
     return dict(_CACHE["skills"])
 
 
+def skill_files(name):
+    """The raw {"SKILL.md": ..., "reference.md": ...} for one loaded skill
+    (only the two keys that were actually present are included). Empty dict
+    if the skill isn't loaded — never raises, matching this module's
+    defensive-by-design contract."""
+    s = _CACHE["skills"].get(name)
+    if not s:
+        return {}
+    out = {}
+    if s.get("instructions"):
+        out["SKILL.md"] = s["instructions"]
+    if s.get("reference"):
+        out["reference.md"] = s["reference"]
+    return out
+
+
+def skill_instructions(name, max_chars=40000):
+    """SKILL.md + reference.md concatenated for one skill, for in-prompt
+    injection into a build agent's context (skills_context() above only
+    exposes names+descriptions, which is enough to PICK a skill but not
+    enough to follow its recipe). Empty string if the skill isn't loaded."""
+    files = skill_files(name)
+    if not files:
+        return ""
+    parts = []
+    if "SKILL.md" in files:
+        parts.append(files["SKILL.md"])
+    if "reference.md" in files:
+        parts.append(f"--- reference.md ---\n{files['reference.md']}")
+    return "\n\n".join(parts)[:max_chars]
+
+
 def skills_context(max_chars=4000):
     """Compact 'project skills — follow these' block for injecting into a fix/build
     prompt. Names + descriptions only (keeps the prompt lean); the fixer can be

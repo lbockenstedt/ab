@@ -779,6 +779,15 @@ def scan_repo_issues(gh_current, config, processed):
                             logger.debug(f"Skipping {repo_name}#{issue.number} — 'bugfixer-dismissed' label present.")
                             continue
 
+                        # Skip LM-filed feature requests — feature_drive.py owns these via its
+                        # own single-label query (see that module's docstring for why it can't
+                        # just be added to monitored_labels). Both pipelines key `processed` by
+                        # the same "repo:number" id, so without this guard a feature request
+                        # that also happens to carry a monitored label (e.g. an operator using
+                        # monitored_labels=["ANY"]) could be picked up by BOTH triage loops.
+                        if "<!-- report-type: feature -->" in (issue.body or ""):
+                            continue
+
                         issue_id = f"{repo_name}:{issue.number}"
                         if issue_id in processed:
                             status = processed[issue_id].get("status")
@@ -1265,11 +1274,13 @@ def run_scan_cycle():
 
         state["status"] = "Scanning"
         from pr_review import scan_open_prs  # PR pre-review — gated by pr_review_enabled (default off)
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        from feature_drive import scan_feature_requests  # feature auto-drive — gated by feature_drive_enabled (default off)
+        with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [
                 executor.submit(main.scan_hub_logs, Github(token), config),
                 executor.submit(scan_repo_issues, Github(token), config, processed),
                 executor.submit(scan_open_prs, Github(token), config),
+                executor.submit(scan_feature_requests, Github(token), config),
             ]
             for future in futures:
                 future.result()
