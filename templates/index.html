@@ -1018,13 +1018,13 @@
                                             {% elif pname == 'claude_cli' %}text-violet-600
                                             {% else %}text-purple-500{% endif %}">{{ pname }}</span>
                                         {% if pname == 'claude_cli' %}<span class="text-[10px] text-violet-600 font-bold">● Session Auth</span>
-                                        {% elif pname == 'copilot' and cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Connected</span>
-                                        {% elif cred.get('api_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
+                                        {% elif pname == 'copilot' and cred.get('has_key') %}<span class="text-[10px] text-green-600 font-bold">● Connected</span>
+                                        {% elif cred.get('has_key') %}<span class="text-[10px] text-green-600 font-bold">● Saved</span>{% endif %}
                                     </div>
                                     {% if pname == 'copilot' %}
                                     <div class="space-y-2">
                                         <p class="text-xs text-slate-500">Uses your <strong>GitHub Copilot</strong> subscription via OAuth device flow — no API key to paste. Requires an active Copilot plan.</p>
-                                        {% if cred.get('api_key') %}
+                                        {% if cred.get('has_key') %}
                                         <button type="button" onclick="copilotSignout()" class="w-full py-1 text-xs btn-danger rounded font-bold">Sign out (clear authorization)</button>
                                         <button type="button" onclick="startCopilotAuth()" class="w-full py-1 text-xs btn-sec rounded font-bold">Re-authorize</button>
                                         {% else %}
