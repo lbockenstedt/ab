@@ -560,6 +560,14 @@ def _render(findings, head_sha, summary="", review=None, state_review=None):
         "<!-- head: %s -->" % head_sha,
         "## \U0001F916 BugFixer PR pre-review",
         "",
+        "_Automated pre-review — **informational only**. A human is the sole approver; this bot never approves, denies, or edits the branch._",
+        "",
+    ]
+    lines = [
+        PR_REVIEW_MARKER,
+        "<!-- head: %s -->" % head_sha,
+        "## \U0001F916 BugFixer PR pre-review",
+        "",
         "_Automated pre-review — **informational only**. A human is the sole approver; "
         "this bot never approves, denies, or edits the branch._",
         "",
