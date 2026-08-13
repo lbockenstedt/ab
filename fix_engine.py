@@ -2503,10 +2503,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             # COMMIT the fix (+ any version bump) BEFORE any push. The direct-push
             # path below used to push HEAD *before* this commit ran, so it pushed
-            # the pre-fix base (a no-op) and the fix commit only ever existed
-            # LOCALLY — yet the issue was told "pushed to main / Commit <sha>" and
-            # closed, while nothing landed on origin (the false-fix bug). Commit
-            # first so the push actually carries the fix.
+# the pre-fix base (a no-op) and the fix commit only ever existed
+# LOCALLY — yet the issue was told "pushed to main / Commit <sha>" and
+# closed, while nothing landed on origin (the false-fix bug). Commit
+# first so the push actually carries the fix.
             commit_msg = f"AI Fix #{issue.number}: {issue.title[:50]}..."
             if version_bumped:
                 commit_msg += f" (Version Bump to {new_v})"
