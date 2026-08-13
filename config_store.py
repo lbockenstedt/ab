@@ -62,24 +62,37 @@ CHAT_CONFIG_DEFAULTS = {
 
 
 def save_config(config):
-    """Saves configuration to persistent storage, falling back to local if needed."""
+    """Saves configuration to persistent storage, falling back to local if needed.
+
+    Written via a temp file + os.replace (same pattern as save_llm_tps): a
+    process death mid-write with a direct open(...,"w") truncates the file
+    first and writes second, so a crash/restart in that window leaves an
+    empty/partial CONFIG_FILE. The next load_config() then fails to parse it
+    ("Expecting value: line 1 column 1 (char 0)") and silently falls back to
+    stale/default config, losing whatever was persisted. os.replace is atomic
+    on POSIX, so readers only ever see the fully-written old or new file.
+    """
     try:
         if os.path.exists(CONFIG_DIR) or os.access(CONFIG_DIR, os.W_OK):
             os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(CONFIG_FILE, "w") as f:
+            tmp = CONFIG_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(config, f, indent=2)
             try:
-                os.chmod(CONFIG_FILE, 0o600)
+                os.chmod(tmp, 0o600)
             except Exception:
                 pass
+            os.replace(tmp, CONFIG_FILE)
             logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
         else:
             raise IOError("Persistent config directory not writable")
     except Exception as e:
         logger.warning(f"Could not save to persistent storage ({e}), falling back to local config.json")
         try:
-            with open("config.json", "w") as f:
+            tmp = "config.json.tmp"
+            with open(tmp, "w") as f:
                 json.dump(config, f, indent=2)
+            os.replace(tmp, "config.json")
         except Exception as fe:
             logger.error(f"Critical failure saving config: {fe}")
 
@@ -146,17 +159,26 @@ def load_processed():
     return {}
 
 def save_processed(processed):
-    """Saves processed issues to persistent storage, with fallback to local file."""
+    """Saves processed issues to persistent storage, with fallback to local file.
+
+    Written via a temp file + os.replace (see save_config) so a crash mid-write
+    can't leave a truncated/empty STATE_FILE for the next load_processed() to
+    choke on.
+    """
     try:
         # Primary: Persistent storage
-        with open(STATE_FILE, "w") as f:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(processed, f, indent=2)
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
         logger.error(f"Error saving to persistent state file {STATE_FILE}: {e}")
         try:
             # Fallback: Local directory
-            with open("processed_issues.json", "w") as f:
+            tmp = "processed_issues.json.tmp"
+            with open(tmp, "w") as f:
                 json.dump(processed, f, indent=2)
+            os.replace(tmp, "processed_issues.json")
         except Exception as fe:
             logger.error(f"Critical failure saving processed history to both locations: {fe}")
 
@@ -179,10 +201,16 @@ def load_pr_reviews():
 
 
 def save_pr_reviews(pr_reviews):
-    """Persist the PR pre-review store so merged/denied/approved survive restarts."""
+    """Persist the PR pre-review store so merged/denied/approved survive restarts.
+
+    Written via a temp file + os.replace (see save_config) so a crash mid-write
+    can't leave a truncated/empty PR_REVIEWS_FILE for the next load to choke on.
+    """
     try:
-        with open(PR_REVIEWS_FILE, "w") as f:
+        tmp = PR_REVIEWS_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(pr_reviews, f, indent=2)
+        os.replace(tmp, PR_REVIEWS_FILE)
     except Exception as e:
         logger.error(f"Error saving PR reviews to {PR_REVIEWS_FILE}: {e}")
 
@@ -248,10 +276,18 @@ def load_update_state():
     return {"last_known_good_commit": None, "failed_commits": []}
 
 def save_update_state(state):
-    """Saves the update state for recovery."""
+    """Saves the update state for recovery.
+
+    Written via a temp file + os.replace (see save_config) so a crash mid-write
+    can't leave a truncated/empty UPDATE_STATE_FILE for the next load to choke
+    on -- this file specifically backs update-recovery, so a corrupt read here
+    would defeat the recovery mechanism it exists for.
+    """
     try:
-        with open(UPDATE_STATE_FILE, "w") as f:
+        tmp = UPDATE_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(state, f, indent=2)
+        os.replace(tmp, UPDATE_STATE_FILE)
     except Exception as e:
         logger.error(f"Error saving update state: {e}")
 
