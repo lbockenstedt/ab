@@ -792,8 +792,6 @@ def _system_stats():
             "active_llm_provider": state.get("active_llm_provider"),
             "active_llm_at": state.get("active_llm_at"),
             "daily_fixes_count": state.get("daily_fixes_count"),
-            "local_ensemble": bool(cfg.get("local_ensemble")),
-            "crosscheck_target": cfg.get("CPU_CROSSCHECK_TARGET"),
             # Rolling generation throughput for the model currently/last serving.
             # Averaged over completed generations only (Ollama's eval_duration
             # covers generation time), so it reads as "tok/s while busy" and is
@@ -1795,7 +1793,6 @@ async def settings_page(request: Request):
     settings["ollama_preload_timeout_s"] = config.get("ollama_preload_timeout_s", 3600)
     settings["gate_scans_on_model_preload"] = config.get("gate_scans_on_model_preload", True)
     settings["model_gate_max_wait_s"] = config.get("model_gate_max_wait_s", 3600)
-    settings["EXTERNAL_MIN_CONFIDENCE"] = config.get("EXTERNAL_MIN_CONFIDENCE", 0.90)
     # Pretty-printed for the textarea editor; save_settings re-parses it back
     # to a list on save (feature_boundaries itself, not this string, is the
     # value everything else reads).
@@ -2129,21 +2126,6 @@ async def save_settings(request: Request):
     config_data["bug_report_enabled"] = data.get("bug_report_enabled") != "off"
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
     config_data["skip_review"] = data.get("skip_review") == "on"
-    config_data["local_ensemble"] = data.get("local_ensemble") == "on"
-    config_data["ensemble_skip_external_at_full"] = data.get("ensemble_skip_external_at_full") == "on"
-    # Confidence floor on the EXTERNAL confirmer — the authority that decides
-    # commit. Previously the external stage checked only the verdict word, so an
-    # Approve at any confidence committed. Default 0.90.
-    _emc = str(data.get("EXTERNAL_MIN_CONFIDENCE") or "").strip()
-    try:
-        config_data["EXTERNAL_MIN_CONFIDENCE"] = max(0.0, min(1.0, float(_emc))) if _emc else 0.90
-    except (TypeError, ValueError):
-        config_data["EXTERNAL_MIN_CONFIDENCE"] = 0.90
-    _cct = str(data.get("CPU_CROSSCHECK_TARGET") or "").strip()
-    try:
-        config_data["CPU_CROSSCHECK_TARGET"] = max(0.5, min(1.0, float(_cct))) if _cct else 0.90
-    except (TypeError, ValueError):
-        config_data["CPU_CROSSCHECK_TARGET"] = 0.90
     # Log Analysis window / idle-precompute interval in minutes (default 30). Governs
     # both how far back the LLM looks and how often the idle snapshot refreshes.
     _lai = str(data.get("log_analysis_interval_min") or "").strip()
@@ -2151,14 +2133,6 @@ async def save_settings(request: Request):
         config_data["log_analysis_interval_min"] = max(1, int(_lai)) if _lai else 30
     except (TypeError, ValueError):
         config_data["log_analysis_interval_min"] = 30
-    # Minimum ensemble model size in billions of params (0 = use all). Set e.g. 14 to
-    # skip the 7b/8b rungs that reliably whiff, while those models stay available for
-    # the CPU slot / chat / cross-check elsewhere.
-    _emm = str(data.get("ensemble_min_model_b") or "").strip()
-    try:
-        config_data["ensemble_min_model_b"] = max(0, int(float(_emm))) if _emm else 0
-    except (TypeError, ValueError):
-        config_data["ensemble_min_model_b"] = 0
     # Post-boot grace (seconds) before BugFixer runs LLM/scan work — lets ollama +
     # services finish starting after a reboot so it doesn't 404 on /api/chat. 0 = off.
     _sg = str(data.get("startup_grace_seconds") or "").strip()

@@ -12,11 +12,7 @@ from main import (
     _module_log_fix_context,
     _find_claude_cli_slot,
     _get_provider_config,
-    _is_ollama,
-    _ollama_base_url,
-    _ollama_models_detailed,
     _is_triage_only,
-    _provider_configured,
     _trigger_spoke_updates,
     _trunc,
     _wait_for_spokes_online,
@@ -746,10 +742,13 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
         """Run this exact turn: against reviewer_candidate directly (no
         re-picking/failover — llm_client._try_candidate is the picker path's
         own single-candidate executor) when one was resolved, or a plain
-        call_llm (unpinned, normal failover) for the no-candidates Default
-        Reviewer case."""
+        requirements-based call_llm (the picker chooses a medium-complexity
+        reviewer) for the no-candidates Default Reviewer case."""
         if reviewer_candidate is None:
-            return call_llm("", messages=messages, tools=tools, task_id=task_id, **kwargs)
+            from model_selection import LlmRequirements
+            _reqs = LlmRequirements(complexity="medium", needs_structured_output=True)
+            return call_llm("", messages=messages, tools=tools, task_id=task_id,
+                            requirements=_reqs, **kwargs)
         result, err = llm_client._try_candidate(reviewer_candidate, messages, tools, True,
                                                 task_id, config, **kwargs)
         if err is not None:
@@ -1151,75 +1150,6 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         final_verdict = "Reject"
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques}
 
-
-def _crosscheck_review(repo_path, issue_body, slot, models, exclude_model, config, task_id=None):
-    """CPU ensemble cross-check: run EVERY installed local model (on `slot`) as a
-    reviewer of the working-tree diff, except the one that built it. Returns
-    {confidence, verdict, votes, n} — the CPU-side consensus (majority Approve +
-    average confidence). Confidence >= 90% is treated as implicit approval — reviewers
-    who give high confidence but say "Reject" are contradictory and should not block the fix."""
-    try:
-        diff_text = git.Repo(repo_path).git.diff("HEAD")
-    except Exception:  # noqa: BLE001
-        diff_text = ""
-    if len(diff_text) > 20000:
-        diff_text = diff_text[:20000] + "\n… [diff truncated] …"
-    prompt = (
-        f"Issue Description: {issue_body}\n\n"
-        f"Proposed Fix (working-tree diff vs HEAD):\n{diff_text}\n\n"
-        "You are a pragmatic senior engineer reviewing this diff. APPROVE it if it "
-        "plausibly addresses the described issue and does not introduce a regression — a "
-        "small, targeted change that directly fixes the reported error (e.g. correcting a "
-        "misspelled identifier / typo, or a clear off-by-one) is a GOOD fix and SHOULD be "
-        "approved. You are only shown the diff, not the whole file, so do NOT reject "
-        "merely because you can't see surrounding context — assume referenced symbols "
-        "exist unless the diff itself is clearly wrong. REJECT only if the change is "
-        "clearly incorrect, incomplete, or harmful. "
-        "Return ONLY JSON: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"...\"}\n"
-        "\"confidence\" MUST be a fraction between 0.0 and 1.0 — e.g. 0.95 for 95% confidence. Do NOT return a 0-100 percentage.\n"
-        "IMPORTANT: Your confidence score drives the final decision — if you give >= 0.90 confidence, "
-        "the fix is accepted regardless of verdict, so do NOT give a 'Reject' verdict with high confidence "
-        "(that's contradictory and wastes time). Approve and give >= 0.90 if the fix looks correct."
-    )
-    reviewers = [m for m in models if not (m and m == exclude_model)]
-    logger.info(f"CPU cross-check: reviewing the diff with {len(reviewers)} local model(s) "
-                f"{reviewers} — each is a fresh model load, can be slow on CPU for big models.")
-    votes = []
-    for i, mdl in enumerate(reviewers, 1):
-        logger.info(f"  cross-check reviewer {i}/{len(reviewers)}: {mdl}…")
-        _t0 = time.monotonic()
-        try:
-            res = call_llm(prompt, system_prompt="You are a pragmatic senior code reviewer. Approve correct fixes; reject only real problems. Only return JSON.",
-                           force_provider=slot, model_override=mdl, task_id=task_id)
-            m = re.search(r"\{.*\}", res, re.DOTALL)
-            if m:
-                v = _robust_json_loads(m.group())
-                v["confidence"] = _norm_confidence(v.get("confidence"))
-                v["model"] = mdl
-                votes.append(v)
-                logger.info(f"  ↳ {mdl}: {v.get('verdict')} @ {float(v.get('confidence', 0)):.0%} "
-                            f"({time.monotonic() - _t0:.0f}s)")
-        except Exception as e:  # noqa: BLE001
-            if is_llm_cooldown_error(e):
-                logger.warning(f"cross-check reviewer {mdl} deferred (cooldown): {e}")
-            else:
-                logger.warning(f"cross-check reviewer {mdl} failed ({time.monotonic() - _t0:.0f}s): {e}")
-    if not votes:
-        return {"confidence": 0.0, "verdict": "Reject", "votes": [], "n": 0}
-    approvals = [v for v in votes if v.get("verdict") == "Approve"]
-    avg = sum(v.get("confidence", 0.0) for v in votes) / len(votes)
-    # Confidence >= 90% is implicit approval — avoids kickbacks from high-confidence
-    # contradictory Rejections (same fix applied at _review_votes line ~601).
-    if avg >= 0.90:
-        verdict = "Approve"
-    elif len(approvals) >= (len(votes) / 2 + 0.5):
-        verdict = "Approve"
-    else:
-        verdict = "Reject"
-    logger.info(f"CPU cross-check: {len(approvals)}/{len(votes)} approve, avg confidence {avg:.0%}")
-    return {"confidence": avg, "verdict": verdict, "votes": votes, "n": len(votes)}
-
-
 #: Failure kind -> operator-facing label. The pipeline knows precisely why it
 #: gave up; before this the UI showed a generic sentence and the reason lived
 #: only in the logs.
@@ -1276,185 +1206,6 @@ def _norm_confidence(value):
     if c > 1.0:
         c /= 100.0
     return max(0.0, min(1.0, c))
-
-
-def _model_param_b(name):
-    """Parse a model's parameter count in billions from its name, e.g.
-    'qwen2.5-coder:14b' → 14.0, 'llama3.1:8b' → 8.0, 'deepseek-coder-v2:16b' → 16.0.
-    None if not determinable (then it's never filtered out)."""
-    import re
-    m = re.search(r'(\d+(?:\.\d+)?)b\b', str(name).lower())
-    return float(m.group(1)) if m else None
-
-
-def _filter_ensemble_models(detailed, config):
-    """Drop local models below the configured minimum parameter size
-    (ensemble_min_model_b, default 0 = keep all) — e.g. set 14 to skip 7b/8b that
-    reliably whiff. Models whose size can't be parsed are kept. Never returns empty:
-    if the filter would drop everything, keep the single largest model."""
-    try:
-        min_b = float(config.get("ensemble_min_model_b", 0) or 0)
-    except (TypeError, ValueError):
-        min_b = 0
-    if min_b <= 0:
-        return detailed
-    kept = [d for d in detailed
-            if (_model_param_b(d.get("name")) is None or _model_param_b(d.get("name")) >= min_b)]
-    if not kept and detailed:
-        kept = [max(detailed, key=lambda d: d.get("size", 0))]
-    dropped = len(detailed) - len(kept)
-    if dropped:
-        logger.info(f"Ensemble: skipping {dropped} local model(s) under {min_b:g}B "
-                    f"(ensemble_min_model_b); {len(kept)} remain.")
-    return kept
-
-
-def _run_cpu_ensemble(path, repo_git, repo_name, fix_body, config, task_id,
-                      local_models, external_slots, cpu_target, min_conf):
-    """CPU-first ensemble fixer (P1 = local CPU, anything P2+ = external).
-
-    Per external slot (ramped P2 → P3 → …, i.e. one CPU ratchet cycle each): build
-    with P1's models smallest→largest; cross-check each candidate with EVERY local
-    model; once a candidate clears ``cpu_target`` AND passes QA, confirm it with that
-    cycle's single external slot. Approve → commit. Reject → next external slot (one
-    more CPU ratchet). If every external slot rejects a CPU-confident fix → hold for
-    human review (NO auto-commit).
-
-    Returns (outcome, fixes, confidence):
-      'commit' — working tree holds a cross-checked + externally-confirmed + QA'd fix.
-      'human'  — a CPU-confident fix was externally rejected on every cycle.
-      'fail'   — the CPU ensemble never reached the target (caller may punt to build)."""
-    err = None
-    reached_target_ever = False
-    for cycle, ext_slot in enumerate(external_slots, start=1):
-        logger.info(f"CPU ensemble cycle {cycle}/{len(external_slots)} — external confirmer = P{ext_slot}.")
-        for mdl in local_models:
-            try:
-                repo_git.git.reset("--hard", "HEAD")
-                repo_git.git.clean("-fd")
-            except Exception:  # noqa: BLE001
-                pass
-            # Name the WORK, not just the mechanism. This used to read
-            # "CPU build <model>", which says what the machine is doing but not
-            # what it is doing it TO -- and the dashboard renders only the task
-            # NAME, so an operator watching a multi-minute ensemble had no way to
-            # tell which issue was in flight, or how far through the cycles it
-            # was. task_id already identifies the issue; carry it, plus the file
-            # under edit and the cycle position.
-            # Only name the target when it is actually a FILE. `path` is
-            # sometimes the repo root (the multi-file fix path passes the clone
-            # dir), and basename() on that yields the directory name -- the task
-            # read "· repo", which looks like a filename and tells you nothing.
-            # A directory carries no more information than task_id already does,
-            # so omit the segment entirely rather than print something wrong.
-            _tgt = os.path.basename(path) if (path and os.path.isfile(path)) else ""
-            update_task_state(
-                task_id=task_id,
-                task_name=(f"Fixing {task_id}" + (f" · {_tgt}" if _tgt else "") +
-                           f" — CPU build {mdl} (cycle {cycle}/{len(external_slots)})"),
-                action="start")
-            fix_code = apply_ai_fix(path, fix_body, err, force_provider=1, model_override=mdl, task_id=task_id)
-            ok, fixes, _conf = parse_and_apply(fix_code, path)
-            if not ok:
-                _why = "; ".join(getattr(parse_and_apply, "last_failures", []) or [])
-                if _why:
-                    err = (f"Your previous edits could NOT be applied: {_why}. The \"search\" "
-                           f"value must be copied VERBATIM from the code shown to you. Note the "
-                           f"code is shown as SEPARATE, NON-CONTIGUOUS regions — never build a "
-                           f"snippet that spans two regions or includes a '... (showing lines ...)' "
-                           f"marker, because that text does not exist in the file. Pick a shorter "
-                           f"anchor from INSIDE one region.")
-                else:
-                    err = ("Your previous attempt returned an invalid or empty fix. Return ONLY "
-                           "a JSON object in the required format, with real file paths inside "
-                           "the repository.")
-                logger.info("Build rejected — feeding apply-failure back: %s", (_why or "(no detail)")[:300])
-                continue
-            cross = _crosscheck_review(path, fix_body, 1, local_models, mdl, config, task_id)
-            if cross["verdict"] != "Approve" or cross["confidence"] < cpu_target:
-                # Carry the reviewers' ACTUAL critiques into err, which is passed to
-                # the next apply_ai_fix as error_context ("Previous attempt failed
-                # with error: ..."). This used to be the bare percentage, so each
-                # retry re-solved the same problem blind — six build+review cycles
-                # with no new information, which is why the score sat at an
-                # identical value instead of converging. The external-rejection path
-                # below already threaded its critique; this one dropped it.
-                _crit = "; ".join(
-                    f"[{v.get('model') or 'reviewer'}] {str(v.get('critique', '')).strip()}"
-                    for v in (cross.get("votes") or [])
-                    if str(v.get("critique", "")).strip()
-                )
-                err = (f"Your previous attempt was REJECTED by the local reviewer panel "
-                       f"(confidence {cross['confidence']:.0%} from {cross['n']} reviewer(s), "
-                       f"below the required {cpu_target:.0%}). Reviewer feedback: "
-                       f"{_crit or '(no critique returned)'}. "
-                       f"Address these specific points; do not repeat the same change.")
-                logger.info("CPU cross-check %.0f%% (%d reviewers) below target %.0f%% — "
-                            "ratchet up. Feeding critique forward: %s",
-                            cross['confidence'] * 100, cross['n'], cpu_target * 100,
-                            (_crit or '(none)')[:300])
-                continue
-            reached_target_ever = True
-            if config.get("qa_enabled", True):
-                prepare_environment(path)
-                verified, vmsg = verify_fix(path, repo_name, config)
-                if not verified:
-                    err = f"CPU-confident fix failed tests: {vmsg}"
-                    logger.info(err)
-                    continue
-            # Optional: a UNANIMOUS ~100% CPU consensus can skip the external check
-            # entirely (opt-in). The local ensemble already agreed completely.
-            if (config.get("ensemble_skip_external_at_full")
-                    and cross["verdict"] == "Approve" and cross["confidence"] >= 0.999):
-                logger.info(f"CPU cross-check unanimous ~100% ({cross['n']} reviewers) — "
-                            "skipping external confirmation, auto-commit.")
-                return "commit", fixes, cross["confidence"]
-            # Single external confirmation with THIS cycle's slot. The external slot
-            # is the AUTHORITY: the local pool generates candidates cheaply (a build
-            # sees ~38k chars of windowed source and emits full file edits), while a
-            # review sees only the capped diff and emits a short verdict — so the
-            # paid/GPU provider spends a small fraction of the tokens while holding
-            # the commit decision.
-            ext = _crosscheck_review(path, fix_body, ext_slot, [None], None, config, task_id)
-            _crit = "; ".join(str(v.get("critique", "")).strip()
-                              for v in ext.get("votes", []) if v.get("critique"))
-            # Confidence floor on the AUTHORITY. Until now the external stage checked
-            # only the verdict word: an Approve at 55% committed exactly like one at
-            # 99%, so the local models were held to a strict tunable bar while the
-            # provider that actually decides was trusted unconditionally. Floored on
-            # the external's OWN confidence, deliberately NOT on the blended mean —
-            # blending would make the bar for the paid reviewer depend on how poorly
-            # the local model scored, penalising the wrong side.
-            try:
-                _ext_floor = float(config.get("EXTERNAL_MIN_CONFIDENCE", 0.90) or 0.90)
-            except (TypeError, ValueError):
-                _ext_floor = 0.90
-            _ext_floor = max(0.0, min(1.0, _ext_floor))
-            if ext["verdict"] == "Approve" and ext["confidence"] >= _ext_floor:
-                logger.info(f"External P{ext_slot} APPROVED (conf {ext['confidence']:.0%} "
-                            f">= floor {_ext_floor:.0%}). Auto-commit.")
-                return "commit", fixes, (cross["confidence"] + ext["confidence"]) / 2
-            if ext["verdict"] == "Approve":
-                # Approved, but not confident ENOUGH. Not a rejection — so iterate
-                # with this reviewer's feedback and let the CPU rebuild against it,
-                # keeping the SAME external slot as the judge. This is the loop that
-                # lets the authority raise a candidate to standard instead of the
-                # choice being a bare commit-or-abandon.
-                err = (f"The reviewing model APPROVED your previous attempt but only at "
-                       f"{ext['confidence']:.0%} confidence, below the required "
-                       f"{_ext_floor:.0%}. Its feedback: {_crit or '(none given)'}. "
-                       f"Revise to resolve those concerns so the reviewer can be "
-                       f"confident; do not resubmit the same change.")
-                logger.info("External P%s approved at %.0f%% but below floor %.0f%% — "
-                            "ratcheting with its feedback: %s", ext_slot,
-                            ext["confidence"] * 100, _ext_floor * 100,
-                            (_crit or '(none)')[:300])
-                continue  # next local builder, SAME external judge
-            logger.warning(f"External P{ext_slot} REJECTED (conf {ext['confidence']:.0%}) a CPU-confident fix — "
-                           f"one more CPU ratchet. Reason: {_crit or '(no critique given)'}")
-            err = f"External P{ext_slot} rejected the CPU-confident fix: {_crit}"
-            break  # end this cycle; escalate to the next external slot
-    return ("human" if reached_target_ever else "fail"), None, 0.0
 
 
 def _safe_repo_target(repo_root, filepath):
@@ -1576,7 +1327,7 @@ def _targeted_file_context(content, identifiers, max_chars, window=60, max_hits_
     return "\n".join(parts) if parts else None
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None, model_override=None, files_override=None, requirements=None, used_model_out=None):
+def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None):
     """files_override: skip the identify_files_to_fix guess and target exactly
     these repo-relative paths instead — for callers (pr_review's fix_one_pr)
     that already know precisely which files are at issue (a PR's own changed-
@@ -1584,12 +1335,12 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
     anchor on.
 
     requirements=/used_model_out=: the LLM Selection Redesign's picker path
-    (see call_llm's own docstring) — when requirements is given, it takes over
-    routing and force_cloud/force_provider/model_override below are ignored,
-    same dual-path convention as call_llm itself. used_model_out, when given a
-    dict, is populated in place with the winning candidate's identity so the
-    caller (process_single_issue's retry loop) can exclude it from the next
-    attempt and from the reviewer panel."""
+    (see call_llm's own docstring) — routing is capability/cost-aware. When
+    requirements is None a fix-appropriate default is built here (large,
+    structured output). used_model_out, when given a dict, is populated in
+    place with the winning candidate's identity so the caller
+    (process_single_issue's retry loop) can exclude it from the next attempt
+    and from the reviewer panel."""
     config = load_config()
     max_files = int(config.get("FIX_MAX_FILES", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"])
     max_file_chars = int(config.get("FIX_MAX_FILE_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"])
@@ -1680,11 +1431,13 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
         # with no valid --add-dir would fall back to the subprocess's own cwd
         # (bugfixer's own source tree), not the target repo.
         _native = bool(repo_path and os.path.isdir(repo_path))
-        if requirements is not None:
-            import dataclasses
-            requirements = dataclasses.replace(
-                requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
-        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider, model_override=model_override, task_kind="fix",
+        import dataclasses
+        from model_selection import LlmRequirements
+        if requirements is None:
+            requirements = LlmRequirements(complexity="large", needs_structured_output=True)
+        requirements = dataclasses.replace(
+            requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
+        return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", task_id=task_id,
                         repo_checkout_path=repo_path if _native else None,
                         enable_native_tools=_native,
                         json_schema=_FIX_GENERATION_JSON_SCHEMA,
@@ -2321,58 +2074,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 except Exception as _re:  # noqa: BLE001
                     logger.debug(f"regression triage context skipped for {issue_id}: {_re}")
 
-            # ── CPU-first ensemble (opt-in via local_ensemble) ──────────────────
-            # P1 = local CPU: ratchet its models smallest→largest, cross-check with
-            # EVERY local model to a high bar, then confirm with one external slot
-            # (ramp P2→P3). External-reject on every cycle → human review (no commit).
-            _skip_normal_loop = False
-            if escalate and bool(config.get("local_ensemble")):
-                _p1, _k1, _m1, _u1 = _get_provider_config(1, config)
-                _local_models = []
-                if _provider_configured(_p1, _k1, _m1) and _is_ollama(_p1):
-                    _local_models = [d["name"] for d in _filter_ensemble_models(sorted(
-                        _ollama_models_detailed(_ollama_base_url(_p1, _u1)),
-                        key=lambda d: d.get("size", 0)), config)] or [_m1]
-                _external = [n for n in (2, 3, 4)
-                             if _provider_configured(*_get_provider_config(n, config)[:3])]
-                if _local_models and _external:
-                    cpu_target = float(config.get("CPU_CROSSCHECK_TARGET", 0.90) or 0.90)
-                    logger.info(f"CPU ensemble: {len(_local_models)} local model(s), external P{_external}, target {cpu_target:.0%}.")
-                    _outcome, _ens_fixes, _ens_conf = _run_cpu_ensemble(
-                        path, repo_git, repo_name, fix_body, config, issue_id,
-                        _local_models, _external, cpu_target, min_conf)
-                    if _outcome == "commit":
-                        success, fixes, confidence = True, _ens_fixes, _ens_conf
-                        final_confidence, final_verdict = _ens_conf, "Approve"
-                        state["success_count"] += 1
-                        _skip_normal_loop = True
-                    elif _outcome == "human":
-                        try:
-                            repo_git.git.reset("--hard", "HEAD"); repo_git.git.clean("-fd")
-                        except Exception:  # noqa: BLE001
-                            pass
-                        try:
-                            issue.create_comment(
-                                "🧑‍⚖️ **BugFixer — held for human review**\n\nThe CPU ensemble reached "
-                                f"high confidence on a fix, but every external reviewer (P{_external}) "
-                                "rejected it, so it was NOT auto-committed. A human should review.")
-                            issue.add_to_labels("bugfixer-needs-human")
-                        except Exception as ce:  # noqa: BLE001
-                            logger.warning(f"human-review note failed for {issue_id}: {ce}")
-                        processed = load_processed()
-                        processed[issue_id] = {
-                            "status": "awaiting_human",
-                            "timestamp": datetime.now().isoformat(),
-                            "reason": "external reviewers rejected a CPU-confident fix",
-                            "original_body": issue.body or "",
-                        }
-                        save_processed(processed); state["processed"] = processed
-                        recompute_issue_counters(processed)
-                        update_task_state(task_id=issue_id, action="end")
-                        return False, "Held for human review (external reviewers rejected the fix)"
-                    # _outcome == "fail" → fall through to the normal slot loop.
-
-            for attempt in range(1, (0 if _skip_normal_loop else max_attempts) + 1):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
                     logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")

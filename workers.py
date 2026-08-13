@@ -1330,14 +1330,12 @@ def preload_ollama_models(config):
     N to stay resident at once."""
     from llm_client import _get_provider_config, _is_ollama
     from ollama_setup import _ollama_models_detailed  # lives in ollama_setup, not llm_client
-    from fix_engine import _filter_ensemble_models  # deferred: fix_engine imported after workers
+    import model_registry
     provider, _k, _m, url = _get_provider_config(1, config)
     if not _is_ollama(provider):
         return
     base = _ollama_base_url(provider, url).rstrip("/")
-    detailed = _filter_ensemble_models(
-        sorted(_ollama_models_detailed(base), key=lambda d: d.get("size", 0)), config)
-    names = [d.get("name") for d in detailed if d.get("name")]
+    names = model_registry.local_models_for_preload(_ollama_models_detailed(base), config)
     if not names:
         return
     try:

@@ -1387,36 +1387,10 @@
                                 <label class="text-sm font-medium text-slate-600">Global QA Test Command <span class="text-xs text-slate-400">fallback</span></label>
                                 <input type="text" name="QA_TEST_COMMAND" value="{{ settings.QA_TEST_COMMAND }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. pytest tests/target_repo">
                             </div>
-                            <div class="space-y-2 col-span-1 md:col-span-2 pt-2 border-t border-slate-100">
-                                <div class="flex items-center gap-2">
-                                    <input type="checkbox" name="local_ensemble" id="local_ensemble" {{ 'checked' if settings.local_ensemble else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
-                                    <label for="local_ensemble" class="text-sm font-medium text-slate-700">CPU ensemble (P1 ratchets local models + all-local cross-check → external P2/P3 confirm → human)</label>
-                                </div>
-                                <span class="text-xs text-slate-500">P1 builds with every installed local model smallest→largest, all local models cross-check each fix, and once the CPU consensus hits the target below it's confirmed by one external slot (ramp P2→P3). If every external slot rejects, it's held for human review — never auto-committed. Accuracy over speed.</span>
-                                <div class="flex items-center gap-2 mt-2">
-                                    <input type="checkbox" name="ensemble_skip_external_at_full" id="ensemble_skip_external_at_full" {{ 'checked' if settings.ensemble_skip_external_at_full else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
-                                    <label for="ensemble_skip_external_at_full" class="text-xs font-medium text-slate-700">Skip the external check when the CPU cross-check is unanimous at ~100% (commit directly)</label>
-                                </div>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">External reviewer min confidence</label>
-                                <input type="number" name="EXTERNAL_MIN_CONFIDENCE" value="{{ settings.EXTERNAL_MIN_CONFIDENCE if settings.EXTERNAL_MIN_CONFIDENCE is not none else 0.90 }}" min="0" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <span class="text-xs text-slate-400">The external (cloud/GPU) confirmer is the <b>authority</b> that decides commit. It must Approve <b>and</b> reach this confidence. An Approve below it is not a rejection — its critique is fed back and the local pool rebuilds against it, same reviewer judging. Default 0.90. Floored on the reviewer's own confidence, not the blended average.</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">CPU cross-check target (0–1)</label>
-                                <input type="number" name="CPU_CROSSCHECK_TARGET" value="{{ settings.CPU_CROSSCHECK_TARGET if settings.CPU_CROSSCHECK_TARGET is not none else 0.90 }}" min="0.5" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <span class="text-xs text-slate-400">CPU consensus needed before an external confirmation is spent (default 0.90).</span>
-                            </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Log Analysis interval (minutes)</label>
                                 <input type="number" name="log_analysis_interval_min" value="{{ settings.log_analysis_interval_min if settings.log_analysis_interval_min is not none else 30 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                 <span class="text-xs text-slate-400">How far back Log Analysis looks + how often the idle snapshot refreshes (default 30).</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Min ensemble model size (B params)</label>
-                                <input type="number" name="ensemble_min_model_b" value="{{ settings.ensemble_min_model_b if settings.ensemble_min_model_b is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <span class="text-xs text-slate-400">Skip ensemble rungs below this size (e.g. 14 drops 7b/8b). 0 = use all installed models.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Startup grace (seconds)</label>
