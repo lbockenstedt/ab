@@ -569,8 +569,16 @@ async def get_models():
     config = load_config()
     p1_provider, p1_key, _, p1_url = _get_provider_config(1, config)
     p2_provider, p2_key, _, p2_url = _get_provider_config(2, config)
-    p1 = _fetch_models_for_provider(p1_provider, p1_key, p1_url)
-    p2 = _fetch_models_for_provider(p2_provider, p2_key, p2_url)
+    # _fetch_models_for_provider makes a BLOCKING requests.get to the provider
+    # (up to 10-15s each). Run inline, the two sequential calls froze the whole
+    # single-process/single-event-loop app for up to ~30s — long enough for the
+    # watchdog's 2s health probe to fail (→ rollback/flapping) and for the
+    # browser fetch to time out mid-stall ("TypeError: Load failed"). Offload
+    # both to threads and run them concurrently so the loop stays responsive.
+    p1, p2 = await asyncio.gather(
+        asyncio.to_thread(_fetch_models_for_provider, p1_provider, p1_key, p1_url),
+        asyncio.to_thread(_fetch_models_for_provider, p2_provider, p2_key, p2_url),
+    )
     return {
         "local_models": p1["models"],
         "cloud_models": p2["models"],
@@ -600,7 +608,10 @@ async def fetch_models_live(request: Request):
             api_key = (cred.get("api_key") or "").strip()
             base_url = base_url or (cred.get("base_url") or "").strip()
 
-        result = _fetch_models_for_provider(provider, api_key, base_url)
+        # Blocking requests.get — offload so a slow/unreachable provider can't
+        # freeze the event loop (see get_models' note; that stall surfaced as
+        # "TypeError: Load failed" when enabling an LLM in Settings).
+        result = await asyncio.to_thread(_fetch_models_for_provider, provider, api_key, base_url)
         return {"models": result["models"], "error": result["error"]}
     except Exception as e:
         logger.error(f"fetch-models error: {e}")
@@ -2588,10 +2599,14 @@ async def copilot_models(provider: str = "copilot"):
     if not gh:
         return {"models": [], "error": "not authenticated — sign in with GitHub first"}
     try:
-        tok = _copilot_api_token(gh)
-        r = _rq.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=20)
-        data = r.json()
-        models = sorted({m.get("id") for m in (data.get("data") or []) if m.get("id")})
+        # _copilot_api_token + the models GET are blocking HTTP (up to 20s) —
+        # offload so a slow Copilot response can't freeze the event loop.
+        def _fetch():
+            tok = _copilot_api_token(gh)
+            r = _rq.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=20)
+            data = r.json()
+            return sorted({m.get("id") for m in (data.get("data") or []) if m.get("id")})
+        models = await asyncio.to_thread(_fetch)
         return {"models": models}
     except Exception as e:  # noqa: BLE001
         return {"models": [], "error": str(e)}
@@ -2726,7 +2741,10 @@ async def local_llm_models(base_url: str = ""):
     """List the models on an ollama endpoint (defaults to the local server).
     Pass ?base_url=http://<host>:11434 to manage a remote instance (e.g. the M4)."""
     url = (base_url or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
-    return {"base_url": url, "models": _ollama_models_detailed(url)}
+    # _ollama_models_detailed makes a blocking HTTP call — offload it so a slow
+    # or unreachable ollama endpoint can't stall the whole event loop.
+    models = await asyncio.to_thread(_ollama_models_detailed, url)
+    return {"base_url": url, "models": models}
 
 
 @router.post("/api/local-llm/pull")
