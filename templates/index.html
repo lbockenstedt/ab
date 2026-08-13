@@ -1092,6 +1092,9 @@
                                         <input type="password" id="vault-key-{{ pname }}" title="Leave blank to keep the existing API key; type a new value to replace it" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if cred.get('has_key') else 'API Key' }}" data-touched="0" oninput="this.dataset.touched='1'" value="" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <input type="text" id="vault-url-{{ pname }}" placeholder="{% if pname == 'ollama_cloud' %}Base URL (optional — defaults to https://ollama.com){% else %}Base URL (optional){% endif %}" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
                                         <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs btn-primary rounded font-bold">Save {{ pname }} Credential</button>
+                                        {% if cred.get('has_key') or cred.get('base_url') %}
+                                        <button type="button" onclick="deconfigureCredential('{{ pname }}')" class="w-full py-1 text-xs btn-danger rounded font-bold" title="Remove the stored credential for {{ pname }}. Entries using {{ pname }} stop working until reconfigured (unless they set their own per-entry key).">Deconfigure {{ pname }}</button>
+                                        {% endif %}
                                     </div>
                                     {% endif %}
                                 </div>
@@ -4030,6 +4033,32 @@
             });
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to save credential.', 'error');
+        }
+
+        // Deconfigure a provider: drop its stored credential from the vault. On
+        // reload the card re-hides itself (Step 1 only shows configured/in-use
+        // providers), so the operator is back to a clean "Add a provider" state.
+        async function deconfigureCredential(provider) {
+            if (!confirm(`Remove the stored ${provider} credential?\n\nEntries using ${provider} will stop working until you reconfigure it (unless they set their own per-entry key).`)) return;
+            try {
+                const resp = await fetch('/api/llm/credentials', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({provider})
+                });
+                const d = await resp.json();
+                if (d && d.status === 'ok') {
+                    const warn = d.entries_using
+                        ? ` — ${d.entries_using} entr${d.entries_using === 1 ? 'y' : 'ies'} still reference it`
+                        : '';
+                    if (typeof showToast === 'function') showToast(`${provider} credential removed${warn}`, 'success');
+                    setTimeout(() => location.reload(), 600);
+                } else {
+                    showToast('Failed to remove credential.', 'error');
+                }
+            } catch (e) {
+                showToast('Failed to remove credential: ' + (e.message || e), 'error');
+            }
         }
 
         // ── GitHub Copilot OAuth device flow ──

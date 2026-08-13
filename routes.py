@@ -2429,6 +2429,39 @@ async def save_llm_credential(request: Request):
     return {"status": "ok", "provider": provider}
 
 
+@router.delete("/api/llm/credentials")
+async def delete_llm_credential(request: Request):
+    """Deconfigure a provider: drop its stored credential (api_key + base_url)
+    from the vault. Existing llm_entries that reference the provider are left
+    intact (they may still work via a per-entry key/url) — the response reports
+    how many still point at it so the operator can decide whether to clean them
+    up."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    provider = (data.get("provider") or "").lower().strip()
+    if not provider:
+        return JSONResponse(status_code=400, content={"error": "provider required"})
+    config = load_config()
+    creds = config.get("llm_credentials") or {}
+    removed = provider in creds
+    creds.pop(provider, None)
+    config["llm_credentials"] = creds
+    # Copilot stores an OAuth token, not a pasted key — clear the in-flight
+    # device code + cached API token too so a deconfigure is a full sign-out.
+    if provider == "copilot":
+        config.pop("copilot_device", None)
+        state.pop("copilot_auth", None)
+        state.pop("copilot_device", None)
+    save_config(config)
+    entries_using = sum(1 for e in (config.get("llm_entries") or [])
+                        if (e.get("provider") or "").lower().strip() == provider)
+    logger.info("LLM credential deconfigured for '%s' (removed=%s, %d entr%s still reference it).",
+                provider, removed, entries_using, "y" if entries_using == 1 else "ies")
+    return {"status": "ok", "provider": provider, "removed": removed, "entries_using": entries_using}
+
+
 def _copilot_poll_loop(device_code, interval, provider):
     """SERVER-SIDE device-flow poll: after the user authorizes in GitHub, poll for the
     token here (independent of the browser, so a page reload/restart can't strand it),
