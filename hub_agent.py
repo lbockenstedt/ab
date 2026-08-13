@@ -429,9 +429,14 @@ class HubAgentClient:
         """The LM hub has no LLM of its own, so it delegates Log Analysis to us (we
         own the models + already read hub logs). Run analyze_logs off the event-loop
         thread and reply with the result; correlation_id lets the hub's
-        request_response match the answer. The hub must use a long timeout (LLM)."""
+        request_response match the answer. The hub must use a long timeout (LLM).
+
+        latency_sensitive=False here (unlike routes.py's synchronous Log Analysis
+        panel caller): this runs on a background executor thread with no human
+        blocked on the reply, only the hub's own long request timeout."""
         import asyncio as _aio
         from llm_client import analyze_logs, parse_log_verdict, is_llm_cooldown_error
+        from model_selection import LlmRequirements
         title = str(data.get("title") or "logs")[:200]
         log_text = data.get("logs") or ""
         status, analysis, verdict, error = "ok", "", "none", None
@@ -439,8 +444,10 @@ class HubAgentClient:
             if not str(log_text).strip():
                 status, error = "error", "no logs provided"
             else:
+                reqs = LlmRequirements(complexity="small", latency_sensitive=False,
+                                       min_context_tokens=len(log_text) // 4)
                 raw = await _aio.get_event_loop().run_in_executor(
-                    None, lambda: analyze_logs(log_text, title))
+                    None, lambda: analyze_logs(log_text, title, requirements=reqs))
                 verdict, analysis = parse_log_verdict(raw)
         except Exception as e:  # noqa: BLE001
             status = "error"

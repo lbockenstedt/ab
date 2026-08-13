@@ -2838,12 +2838,20 @@ LOG_ANALYSIS_SYSTEM_PROMPT = (
 _LOG_ANALYSIS_MAX_CHARS = 16000
 
 
-def analyze_logs(log_text, title="logs", task_id=None):
+def analyze_logs(log_text, title="logs", task_id=None, requirements=None):
     """Ask the configured LLM whether anything is wrong in `log_text`, what it means,
     and what to check — the shared brain behind BugFixer's Log Analysis panel AND the
     LM hub's delegated ANALYZE_LOGS request. Returns the analysis string, which BEGINS
     with a machine-parseable `VERDICT: none|watch|escalate` line (see parse_log_verdict).
-    Raises on LLM failure so callers can classify cooldown vs. error. Char-caps the tail."""
+    Raises on LLM failure so callers can classify cooldown vs. error. Char-caps the tail.
+
+    requirements=<LlmRequirements> is caller-supplied (LLM Selection Redesign Phase 5,
+    site #17) rather than a single baked-in profile, because this function's two
+    callers have opposite latency needs: routes.py's Log Analysis panel has a human
+    watching (latency_sensitive=True), while hub_agent.py's delegated ANALYZE_LOGS
+    request runs off the event loop with no one blocking on it. Defaults to a plain
+    complexity="small" profile (latency_sensitive=False) if the caller doesn't pass
+    one, so this never regresses to raising on a missing param."""
     text = log_text or ""
     if len(text) > _LOG_ANALYSIS_MAX_CHARS:
         text = text[-_LOG_ANALYSIS_MAX_CHARS:]
@@ -2863,8 +2871,11 @@ def analyze_logs(log_text, title="logs", task_id=None):
         "not routine warnings. Keep it under ~250 words.\n\n"
         f"----- LOGS -----\n{text}\n----- END LOGS -----"
     )
+    if requirements is None:
+        requirements = model_selection.LlmRequirements(complexity="small",
+                                                        min_context_tokens=len(prompt) // 4)
     result = call_llm(prompt, system_prompt=LOG_ANALYSIS_SYSTEM_PROMPT, task_id=task_id,
-                      task_kind="log_analysis")
+                      requirements=requirements)
     return (result or "").strip() or "VERDICT: none\n(the LLM returned an empty analysis)"
 
 
