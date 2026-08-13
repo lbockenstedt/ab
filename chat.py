@@ -682,7 +682,15 @@ def _confirm_fix_marker(descriptor):
 def _chat_force_provider(config):
     """Which provider slot the Chat uses. Pinning a dedicated fast slot (e.g. the
     M4 GPU) keeps chat snappy independent of the fix-builder ladder — whose P1 may
-    be a slow CPU. Returns an int 1-4, or None to use the normal failover chain."""
+    be a slow CPU. Returns an int 1-4, or None to use the normal failover chain.
+
+    UNUSED as of the LLM Selection Redesign Phase 5 (all 4 chat.py call sites
+    now use requirements=LlmRequirements(latency_sensitive=True) instead of
+    force_provider=_chat_force_provider(config) — see the plan's retirement
+    map: "latency_sensitive=True does the ranking work" replaces the hard
+    chat_slot pin, until Phase 7's chat_pin gives operators an explicit
+    ModelKey pin if they want one). Left defined (not deleted) since Phase 6
+    is deletion-only, done after every Phase 5 site converts."""
     v = config.get("chat_slot")
     try:
         v = int(v)
@@ -730,7 +738,9 @@ def _run_chat_reply_simple(chat_id, config):
             return
         messages = conv.get("messages", [])
         window = [{"role": "system", "content": system_prompt}] + messages[-window_size:]
-        reply = call_llm("", messages=window, task_id=chat_id, force_provider=_chat_force_provider(config))
+        from model_selection import LlmRequirements
+        reqs = LlmRequirements(complexity="small", latency_sensitive=True)
+        reply = call_llm("", messages=window, task_id=chat_id, requirements=reqs)
         if reply and reply.strip():
             append_chat_message(chat_id, {
                 "role": "assistant",
@@ -787,7 +797,9 @@ def run_chat_reply(chat_id):
         # No GitHub token -> no tools, but the index still informs the answer.
         if gh is None:
             _set_chat_stream_status(chat_id, "Thinking…")
-            reply = call_llm("", messages=messages, task_id=chat_id, force_provider=_chat_force_provider(config))  # streaming string
+            from model_selection import LlmRequirements
+            reqs = LlmRequirements(complexity="small", latency_sensitive=True)
+            reply = call_llm("", messages=messages, task_id=chat_id, requirements=reqs)  # streaming string
             if reply and reply.strip():
                 append_chat_message(chat_id, {
                     "role": "assistant",
@@ -804,13 +816,17 @@ def run_chat_reply(chat_id):
         for iteration in range(max_iter):
             _set_chat_stream_status(chat_id, "Thinking…" if iteration == 0 else "Working…")
             try:
-                result = call_llm("", messages=messages, task_id=chat_id, tools=tools, stream=False, force_provider=_chat_force_provider(config))
+                from model_selection import LlmRequirements
+                _tool_reqs = LlmRequirements(complexity="medium", needs_tools=True, latency_sensitive=True)
+                result = call_llm("", messages=messages, task_id=chat_id, tools=tools, stream=False, requirements=_tool_reqs)
             except Exception as e:
                 # Tool-capable /api/chat failed (e.g. cloud without /api/chat tool
                 # support). Degrade to one streaming index-only turn and finish.
                 logger.warning(f"Chat tool turn {iteration} failed ({e}); degrading to index-only answer.")
                 try:
-                    reply = call_llm("", messages=messages[:], task_id=chat_id, force_provider=_chat_force_provider(config))
+                    from model_selection import LlmRequirements
+                    _fallback_reqs = LlmRequirements(complexity="small", latency_sensitive=True)
+                    reply = call_llm("", messages=messages[:], task_id=chat_id, requirements=_fallback_reqs)
                     final_text = reply or ""
                 except Exception as ee:
                     _set_chat_stream_error(chat_id, f"LLM error: {ee}")
