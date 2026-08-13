@@ -715,6 +715,19 @@ class LLMCreditExhausted(Exception):
         super().__init__(f"Provider '{provider}' credit exhausted (HTTP {status_code}): {body[:200]}")
 
 
+class LlmHumanEscalationNeeded(Exception):
+    """Raised by _call_llm_with_requirements instead of silently falling to the
+    rule-based safety floor, when the caller's requirements.must_escalate_to_human
+    is True and select_model() found NOTHING that satisfies them (every tier
+    exhausted). Only one call site opts into this today (fix_engine.py's fix
+    generation, per the LLM Selection Redesign plan's requirement table) — every
+    other requirements= call site still falls through to the safety floor
+    exactly as before. Distinguishes "nothing capable enough exists right now"
+    (terminal, should surface to a human) from "nothing at all is configured"
+    (the existing bare "No LLM providers configured" exception)."""
+    pass
+
+
 _CREDIT_MSG_KEYWORDS = frozenset({
     "credit balance is too low", "credit balance too low",
     "insufficient credits", "insufficient_quota",
@@ -2260,7 +2273,7 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
 def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, stream, task_id, config,
                                 repo_checkout_path=None, json_schema=None, enable_native_tools=False,
                                 search_model=None, profile="readonly", extra_add_dirs=None,
-                                batch_kind=None, batch_context=None):
+                                batch_kind=None, batch_context=None, used_model_out=None):
     """call_llm's requirements= branch. select_model() ranks every candidate;
     on failure the caller walks the Selection's `alternatives` (the rest of
     that ranked list — no re-invoking the picker mid-failover), then falls
@@ -2279,7 +2292,16 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
     batch-ELIGIBLE call site stays synchronous on purpose (parking a worker
     thread for up to batch_sync_max_wait_s, today's OTHER batch integration in
     _try_provider via batch.run_batched, is a real availability cost most
-    callers can't absorb)."""
+    callers can't absorb).
+
+    used_model_out: an optional dict, populated IN PLACE (mirrors the
+    usage_out= convention above) with the winning candidate's identity
+    ({"key", "provider", "model", "base_url"}) once a candidate actually
+    succeeds. Lets a caller that needs to know WHICH model built THIS
+    particular result — e.g. fix_engine's escalation ladder excluding the
+    just-used model from both the next attempt and the reviewer panel —
+    learn that without call_llm's return-value contract changing for every
+    other caller."""
     effective_stream = True if stream is None else bool(stream)
     _explicit_messages = messages is not None
     if messages is None:
@@ -2301,6 +2323,10 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
         winning = next((c for c in candidates if c["key"] == selection.key), None)
         chain = ([winning] if winning else []) + list(selection.alternatives or [])
     else:
+        if reqs.must_escalate_to_human:
+            raise LlmHumanEscalationNeeded(
+                f"No candidate satisfies requirements (reqs={reqs!r}) — the caller opted "
+                "into must_escalate_to_human instead of the rule-based safety floor.")
         floor_entry = model_selection.safety_floor(_configured_entries(config))
         if floor_entry is None:
             raise Exception("No LLM providers configured")
@@ -2346,6 +2372,9 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
         for candidate in chain:
             result, err = _try_candidate(candidate, messages, tools, effective_stream, task_id, config, **kwargs)
             if err is None:
+                if used_model_out is not None:
+                    used_model_out.update({"key": candidate["key"], "provider": candidate["provider"],
+                                           "model": candidate["model"], "base_url": candidate["base_url"]})
                 return result
             last_err = err
         raise Exception(f"All LLM candidates failed. Last error: {last_err}")
@@ -2356,7 +2385,7 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_cloud=None, task_id=None, model_override=None, url_override=None, messages=None, tools=None, stream=None, force_provider=None, task_kind=None,
              repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None, profile="readonly",
-             extra_add_dirs=None, requirements=None, batch_kind=None, batch_context=None):
+             extra_add_dirs=None, requirements=None, batch_kind=None, batch_context=None, used_model_out=None):
     """Generic LLM caller with Provider 1 → 2 → 3 failover and credit-exhaustion awareness.
 
     Routing priority:
@@ -2379,6 +2408,9 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                                         instead of a synchronous call, returning
                                         "" immediately. Ignored entirely when
                                         requirements= is not given.
+      used_model_out=                — only consulted when requirements= is
+                                        given (see _call_llm_with_requirements);
+                                        ignored otherwise.
       force_provider=N (int 1/2/3/4) — use that provider slot directly (no failover).
       force_cloud=True               — start at Provider 2, fall to 1 then 3 then 4.
       force_cloud=False              — Provider 1 only, no failover.
@@ -2408,7 +2440,8 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", force_clou
                                            config, repo_checkout_path=repo_checkout_path, json_schema=json_schema,
                                            enable_native_tools=enable_native_tools, search_model=search_model,
                                            profile=profile, extra_add_dirs=extra_add_dirs,
-                                           batch_kind=batch_kind, batch_context=batch_context)
+                                           batch_kind=batch_kind, batch_context=batch_context,
+                                           used_model_out=used_model_out)
     # Which pool serves this call: code slots (1-4), the dedicated log slots
     # (5-6), or the review slots (7-8). A task only reaches a dedicated pool when
     # one of its slots is actually configured, so existing installs are

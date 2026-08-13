@@ -60,6 +60,9 @@ def _load_ns():
     class LLMCreditExhausted(Exception):
         pass
 
+    class LlmHumanEscalationNeeded(Exception):
+        pass
+
     calls = {"provider_calls": [], "raise_exc": None, "usage": {}}
 
     def _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream, task_id,
@@ -80,6 +83,7 @@ def _load_ns():
         "model_registry": model_registry, "model_selection": model_selection,
         "main": type("M", (), {"state": {}})(),
         "LLMCreditExhausted": LLMCreditExhausted,
+        "LlmHumanEscalationNeeded": LlmHumanEscalationNeeded,
         "_call_provider_timed": _call_provider_timed,
         "llm_perf": type("FakeLlmPerf", (), {
             "snapshot": staticmethod(lambda store: {}),
@@ -238,6 +242,41 @@ def main():
     except Exception as e:
         threw = "No LLM providers configured" in str(e)
     ok &= _check("a fully empty config raises a clear 'No LLM providers configured' error", threw)
+
+    # --- must_escalate_to_human: nothing satisfies -> raises LlmHumanEscalationNeeded,
+    # NOT a silent safety-floor fallback (only opted into by must_escalate_to_human=True) --
+
+    ns["_test_calls"]["raise_exc"] = None
+    human_reqs = model_selection.LlmRequirements(complexity="large", min_context_tokens=10_000_000,
+                                                 must_escalate_to_human=True)
+    threw_human = False
+    try:
+        ns["_call_llm_with_requirements"](human_reqs, "hi", "sys", None, None, None, None, floor_only_cfg)
+    except ns["LlmHumanEscalationNeeded"]:
+        threw_human = True
+    except Exception:
+        threw_human = False
+    ok &= _check("must_escalate_to_human=True + nothing satisfies -> raises "
+                "LlmHumanEscalationNeeded instead of falling to the safety floor", threw_human)
+
+    # A satisfiable requirement with must_escalate_to_human=True still resolves
+    # normally -- the flag only changes behavior on the "nothing satisfies" path.
+    ns["_test_calls"]["raise_exc"] = None
+    result = ns["_call_llm_with_requirements"](
+        model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=True),
+        "hi", "sys", None, None, None, None, e2e_cfg)
+    ok &= _check("must_escalate_to_human=True with a satisfiable requirement resolves normally",
+                result == "ok from ollama/llama3.1:8b")
+
+    # --- used_model_out: populated with the winning candidate's identity -------
+
+    ns["_test_calls"]["raise_exc"] = None
+    used = {}
+    result = ns["_call_llm_with_requirements"](reqs, "hi", "sys", None, None, None, None, e2e_cfg,
+                                               used_model_out=used)
+    ok &= _check("used_model_out is populated with the winning candidate's provider/model",
+                used.get("provider") == "ollama" and used.get("model") == "llama3.1:8b"
+                and used.get("key") is not None)
 
     print()
     if ok:

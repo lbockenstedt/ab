@@ -9,12 +9,9 @@ from main import (
     CHAT_CONFIG_DEFAULTS,
     _apply_closed_label,
     _bug_report_fix_context,
-    _CODE_SLOTS,
-    _REVIEW_SLOTS,
     _module_log_fix_context,
     _find_claude_cli_slot,
     _get_provider_config,
-    _get_escalation_models,
     _is_ollama,
     _ollama_base_url,
     _ollama_models_detailed,
@@ -889,7 +886,7 @@ def _ensure_review_checkout(repo_path, repo, head_sha, config):
 _REVIEW_PANEL_MAX = 4  # bounded like the largest configured pool this replaces (4 code slots)
 
 
-def _select_review_panel(config, builder_n=None, max_reviewers=_REVIEW_PANEL_MAX):
+def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers=_REVIEW_PANEL_MAX):
     """Picks up to max_reviewers DISTINCT models for the reviewer panel via
     model_selection.select_model, replacing the old _REVIEW_SLOTS/_CODE_SLOTS
     pool iteration (a static, operator-curated list of provider slots).
@@ -898,13 +895,18 @@ def _select_review_panel(config, builder_n=None, max_reviewers=_REVIEW_PANEL_MAX
     panel is naturally made of distinct models rather than requiring an
     operator to have configured a dedicated review pool.
 
-    builder_n: the (still slot-numbered — this is still fed by fix_engine's
-    slot-based escalation ladder, which has not itself converted yet) provider
-    slot that built the fix, resolved to a ModelKey and excluded up front so
-    the builder never reviews its own work — mirrors the old skip_builder
-    behavior, keyed on model identity rather than a slot number. builder_n
-    of None or 0 excludes nothing (pr_review.py's pre-review callers pass 0:
-    "no builder to exclude, every configured model reviews").
+    builder_key: the builder's already-resolved ModelKey (e.g. from
+    apply_ai_fix's used_model_out=), excluded up front so the builder never
+    reviews its own work. Preferred over builder_n when given — the picker-
+    based fix-generation call site (process_single_issue) knows the exact
+    model that built the fix directly, with no slot number involved.
+
+    builder_n: legacy fallback — the (still slot-numbered) provider slot that
+    built the fix, resolved to a ModelKey and excluded up front, for callers
+    that haven't converted to the requirements= path yet. Ignored when
+    builder_key is given. builder_n of None or 0 (and no builder_key) excludes
+    nothing (pr_review.py's pre-review callers pass builder_n=0: "no builder
+    to exclude, every configured model reviews").
 
     Returns a list of candidate dicts (llm_client._enumerate_candidates'
     shape) — empty if nothing at all is configured."""
@@ -914,7 +916,9 @@ def _select_review_panel(config, builder_n=None, max_reviewers=_REVIEW_PANEL_MAX
     perf = llm_client.get_llm_perf_snapshot()
 
     excluded = set()
-    if builder_n:
+    if builder_key is not None:
+        excluded.add(builder_key)
+    elif builder_n:
         try:
             b_provider, _b_key, b_model, b_url = _get_provider_config(builder_n, config)
             if b_provider and b_model:
@@ -939,14 +943,21 @@ def _select_review_panel(config, builder_n=None, max_reviewers=_REVIEW_PANEL_MAX
 
 
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
-               builder_n=None, diff_override=None, repo=None, head_sha=None):
+               builder_n=None, builder_key=None, diff_override=None, repo=None, head_sha=None):
     """Run a cross-provider reviewer panel on a proposed fix.
 
-    builder_n: which provider slot (1/2/3) generated the fix being reviewed.
-    Reviewers are all OTHER configured providers — the builder is never asked
-    to review its own work.  If builder_n is None, it's inferred from force_cloud.
-    Pass builder_n=0 when there is no builder to exclude (e.g. a human-authored
-    PR pre-review) so EVERY configured provider reviews.
+    builder_key: the builder's already-resolved ModelKey (e.g. apply_ai_fix's
+    used_model_out=) — the picker-based fix-generation call site's preferred
+    way to identify the builder, with no slot number involved. Preferred over
+    builder_n when given.
+
+    builder_n: legacy fallback — which provider slot (1/2/3) generated the fix
+    being reviewed, for callers that haven't converted to the requirements=
+    path yet. Reviewers are all OTHER configured providers — the builder is
+    never asked to review its own work. If neither builder_key nor builder_n
+    is given, builder_n is inferred from force_cloud. Pass builder_n=0 when
+    there is no builder to exclude (e.g. a human-authored PR pre-review) so
+    EVERY configured provider reviews.
 
     diff_override: a pre-computed diff string to review INSTEAD of computing one
     from ``repo_path``'s working tree. This lets a caller review a diff that is
@@ -963,18 +974,18 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     logger.info("Running Reviewer Panel pass...")
     config = load_config()
 
-    # Determine which provider built the fix (still slot-numbered — fed by
-    # fix_engine's slot-based escalation ladder, unconverted; see
-    # _select_review_panel's docstring for how this now maps to a ModelKey
-    # exclusion instead of a slot-pool skip).
-    if builder_n is None:
+    # Determine which provider built the fix — builder_key (a resolved
+    # ModelKey) is preferred when given; the legacy slot-numbered fallback
+    # below only applies for callers that still pass builder_n/force_cloud
+    # (see _select_review_panel's docstring for how each maps to an exclusion).
+    if builder_key is None and builder_n is None:
         builder_n = 2 if force_cloud is True else 1
 
     # Build the reviewer panel via the capability/cost-aware picker: up to
     # _REVIEW_PANEL_MAX DISTINCT models, excluding the builder's model.
     # Replaces the old _REVIEW_SLOTS/_CODE_SLOTS pool iteration (a static,
     # operator-curated list) — see _select_review_panel's docstring.
-    panel_candidates = _select_review_panel(config, builder_n=builder_n)
+    panel_candidates = _select_review_panel(config, builder_n=builder_n, builder_key=builder_key)
 
     reviewers = []
     for c in panel_candidates:
@@ -1565,12 +1576,20 @@ def _targeted_file_context(content, identifiers, max_chars, window=60, max_hits_
     return "\n".join(parts) if parts else None
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None, model_override=None, files_override=None):
+def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, task_id=None, force_provider=None, model_override=None, files_override=None, requirements=None, used_model_out=None):
     """files_override: skip the identify_files_to_fix guess and target exactly
     these repo-relative paths instead — for callers (pr_review's fix_one_pr)
     that already know precisely which files are at issue (a PR's own changed-
     file set), where the identifier-grep heuristic has nothing reliable to
-    anchor on."""
+    anchor on.
+
+    requirements=/used_model_out=: the LLM Selection Redesign's picker path
+    (see call_llm's own docstring) — when requirements is given, it takes over
+    routing and force_cloud/force_provider/model_override below are ignored,
+    same dual-path convention as call_llm itself. used_model_out, when given a
+    dict, is populated in place with the winning candidate's identity so the
+    caller (process_single_issue's retry loop) can exclude it from the next
+    attempt and from the reviewer panel."""
     config = load_config()
     max_files = int(config.get("FIX_MAX_FILES", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"])
     max_file_chars = int(config.get("FIX_MAX_FILE_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"])
@@ -1661,12 +1680,53 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, force_cloud=None, ta
         # with no valid --add-dir would fall back to the subprocess's own cwd
         # (bugfixer's own source tree), not the target repo.
         _native = bool(repo_path and os.path.isdir(repo_path))
+        if requirements is not None:
+            import dataclasses
+            requirements = dataclasses.replace(
+                requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
         return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", force_cloud=force_cloud, task_id=task_id, force_provider=force_provider, model_override=model_override, task_kind="fix",
                         repo_checkout_path=repo_path if _native else None,
                         enable_native_tools=_native,
-                        json_schema=_FIX_GENERATION_JSON_SCHEMA)
+                        json_schema=_FIX_GENERATION_JSON_SCHEMA,
+                        requirements=requirements, used_model_out=used_model_out)
     except Exception as e:
         raise Exception(f"Fix generation failed: {e}")
+
+
+_COMPLEXITY_RANK_ORDER = ("trivial", "small", "medium", "large")
+
+
+def next_attempt_requirements(prev_reqs, failure_kind, tried_key, config):
+    """Pure per-attempt escalation step for the fix-generation retry loop (site
+    #7 of the LLM Selection Redesign plan) — replaces the old fixed
+    `ladder[(attempt-1) % len(ladder)]` provider-slot ratchet. Every failure
+    kind excludes the just-tried model's ModelKey (a retry can never repeat
+    it — exclusions make the old wraparound unnecessary and `max_attempts` a
+    real bound instead of a modulus); ONLY `low_confidence` additionally
+    raises `complexity` one rank, pushing the picker into a costlier tier —
+    that's the entire meaning of "escalate" now that there's no fixed
+    provider list to walk instead. `config` is accepted for symmetry with
+    every other requirement-building call site and future tuning, but isn't
+    consulted today."""
+    exclude = set(prev_reqs.exclude_models)
+    if tried_key is not None:
+        exclude.add(tried_key)
+    complexity = prev_reqs.complexity
+    if failure_kind == "low_confidence":
+        try:
+            idx = _COMPLEXITY_RANK_ORDER.index(complexity)
+        except ValueError:
+            idx = 0
+        complexity = _COMPLEXITY_RANK_ORDER[min(idx + 1, len(_COMPLEXITY_RANK_ORDER) - 1)]
+    from model_selection import LlmRequirements
+    return LlmRequirements(
+        complexity=complexity,
+        needs_structured_output=prev_reqs.needs_structured_output,
+        min_context_tokens=prev_reqs.min_context_tokens,
+        restrict=prev_reqs.restrict,
+        must_escalate_to_human=prev_reqs.must_escalate_to_human,
+        exclude_models=tuple(exclude),
+    )
 
 
 def _relaxed_edit_span(haystack, needle):
@@ -2164,20 +2224,23 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             update_task_state(task_id=issue_id, action="end")
             return False, f"Non-actionable: {request_msg}"
 
-        force_cloud = None
-        force_provider = None
+        # llm_preference maps straight onto the picker's restrict= hard filter —
+        # "cloud"/"local"/"claude" narrow WHICH tier is eligible, same meaning as
+        # the old force_cloud/force_provider pins, but without needing to resolve
+        # a specific slot number up front (claude_cli's slot is looked up here only
+        # to fail fast with a clear message when none is configured).
+        restrict = None
         if llm_preference == "cloud":
-            force_cloud = True
+            restrict = "cloud"
         elif llm_preference == "local":
-            force_cloud = False
+            restrict = "local"
         elif llm_preference == "claude":
-            slot = _find_claude_cli_slot(config)
-            if slot is None:
+            if _find_claude_cli_slot(config) is None:
                 logger.error("Claude CLI fix requested but no claude_cli provider is configured.")
                 update_task_state(task_id=issue_id, action="end")
                 return False, "Claude CLI is not configured in the LLM Vault."
-            force_provider = slot
-            logger.info(f"Claude CLI fix requested for {issue_id} — using provider slot {slot}")
+            restrict = "claude"
+            logger.info(f"Claude CLI fix requested for {issue_id} — restricting the picker to claude_cli")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = os.path.join(tmp_dir, "repo")
@@ -2194,39 +2257,25 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             repo_git.remotes.origin.set_url(repo_obj.clone_url)
 
             max_attempts = 3
-            # Confidence escalation: when the user hasn't pinned a provider, walk the
-            # configured provider slots in order across attempts (a cheap first pass
-            # → escalate) instead of retrying the SAME model. A fix that verifies but
-            # whose confidence is below MIN_BUILDER_CONFIDENCE is not accepted — we
-            # escalate to the next provider (e.g. CPU → GPU → Cloud). Last provider's
-            # verified fix is accepted even if below the bar (best effort).
+            # Confidence escalation: when the user hasn't pinned a provider, a fix
+            # that verifies but whose confidence is below MIN_BUILDER_CONFIDENCE is
+            # not accepted — the NEXT attempt's requirements exclude the just-used
+            # model and raise complexity one rank (next_attempt_requirements below),
+            # so the picker is pushed toward a different, costlier-tier candidate
+            # instead of the old fixed provider-slot ladder. Last attempt's verified
+            # fix is accepted even if below the bar (best effort). Pinned
+            # (llm_preference set) means "verified is good enough" exactly as
+            # before — no confidence-driven escalation, just this one restricted
+            # tier — but a hard failure (reject/QA/error) still excludes the
+            # just-tried model on retry so attempt 2 isn't a pointless repeat of
+            # attempt 1's already-exhausted chain.
             min_conf = float(config.get("MIN_BUILDER_CONFIDENCE", 0.80) or 0.80)
-            escalate = (force_cloud is None and force_provider is None)
-            # Build ladder: ordered [(slot, model_override)] steps. Each slot expands
-            # to its escalation_models (a manual ratchet like 7b→14b→32b), OR — when a
-            # model entry is "*" on an ollama slot — to EVERY model installed on that
-            # endpoint, sorted ASCENDING by size so it ramps smallest-first (never
-            # starts at 32b). Only after the whole local ratchet fails does it move to
-            # the next (GPU/cloud) slot.
-            ladder = []
-            if escalate:
-                for _n in (1, 2, 3, 4):
-                    _p, _k, _m, _u = _get_provider_config(_n, config)
-                    if not _provider_configured(_p, _k, _m):
-                        continue
-                    _models = _get_escalation_models(_n, config)
-                    if _is_ollama(_p) and any(x == "*" for x in _models):
-                        detailed = sorted(_ollama_models_detailed(_ollama_base_url(_p, _u)),
-                                          key=lambda d: d.get("size", 0))
-                        detailed = _filter_ensemble_models(detailed, config)
-                        _models = [d["name"] for d in detailed] or [_m]
-                        logger.info(f"Slot P{_n}: ramp-by-size across {len(_models)} local model(s): {', '.join(_models)}")
-                    for _mdl in _models:
-                        ladder.append((_n, _mdl))
-                if len(ladder) > 1:
-                    max_attempts = max(max_attempts, len(ladder))
-                else:
-                    escalate = False  # nothing to escalate to
+            escalate = (llm_preference is None)
+            from model_selection import LlmRequirements
+            base_reqs = LlmRequirements(complexity="large", needs_structured_output=True,
+                                        restrict=restrict, must_escalate_to_human=True)
+            reqs = base_reqs
+            built_key = None
             success = False
             error_context = None
             # WHY the last attempt failed, structured. error_context is written for
@@ -2327,15 +2376,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 try:
                     update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
                     logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
-
-                    # Escalation: pick THIS attempt's builder from the ladder (cheap
-                    # first, escalate on low confidence). Pins to the user's choice
-                    # when one was given.
-                    att_fc, att_fp, att_model = force_cloud, force_provider, None
-                    if escalate and ladder:
-                        att_fp, att_model = ladder[(attempt - 1) % len(ladder)]
-                        att_fc = None
-                        logger.info(f"Attempt {attempt}/{max_attempts}: builder = P{att_fp} model={att_model or 'slot default'}.")
+                    logger.info(f"Attempt {attempt}/{max_attempts}: requirements = {reqs!r}.")
+                    used_model_out = {}
 
                     # --- Resume from awaiting_review ---
                     pending_fix = issue_info.get("pending_fix") if attempt == 1 and issue_info.get("status") == "awaiting_review" else None
@@ -2348,12 +2390,16 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             processed[issue_id]["status"] = "processing"
                             save_processed(processed)
                     elif not pending_fix:
-                        fix_code = apply_ai_fix(path, fix_body, error_context, force_cloud=att_fc, task_id=issue_id, force_provider=att_fp, model_override=att_model)
+                        fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out)
                         success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                    built_key = used_model_out.get("key")
 
                     if not success_applied:
                         verified = False
                         failure_msg = "AI generated invalid JSON format"
+                        last_failure = {"kind": "invalid_json", "detail": failure_msg}
+                        error_context = failure_msg
+                        reqs = next_attempt_requirements(reqs, last_failure["kind"], built_key, config)
                     else:
                         critique = ""
                         if config.get("skip_review", False):
@@ -2362,7 +2408,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             review_verdict = "Approve"
                         else:
                             update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
-                            review = review_fix(path, fix_body, fixes, force_cloud=att_fc, task_id=issue_id, builder_n=att_fp)
+                            review = review_fix(path, fix_body, fixes, task_id=issue_id, builder_key=built_key)
 
                             # --- Handle Queue for Retry ---
                             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
@@ -2396,6 +2442,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                     repo_git.git.reset("--hard", "HEAD")
                                     repo_git.git.clean("-fd")
                                 except Exception: pass
+                                reqs = next_attempt_requirements(reqs, last_failure["kind"], built_key, config)
                                 continue
 
                         if config.get("qa_enabled", True):
@@ -2408,10 +2455,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
                         if verified:
                             final_confidence = (confidence + review_conf) / 2
-                            # Low confidence + a stronger provider still untried →
-                            # discard this fix and escalate to the next ladder slot.
+                            # Low confidence + escalation still available →
+                            # discard this fix; next_attempt_requirements excludes
+                            # this model and raises complexity one rank so the
+                            # picker reaches for something stronger.
                             if (escalate and final_confidence < min_conf
-                                    and attempt < max_attempts and attempt < len(ladder)):
+                                    and attempt < max_attempts):
                                 logger.info(
                                     f"Fix verified but confidence {final_confidence:.0%} < "
                                     f"{min_conf:.0%} — escalating to the next provider.")
@@ -2430,6 +2479,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                     repo_git.git.clean("-fd")
                                 except Exception:  # noqa: BLE001
                                     pass
+                                reqs = next_attempt_requirements(reqs, last_failure["kind"], built_key, config)
                                 continue
                             success = True
                             state["success_count"] += 1
@@ -2439,6 +2489,36 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             error_context = failure_msg
                             last_failure = {"kind": "qa_failed",
                                             "detail": str(failure_msg or "").strip()}
+                            reqs = next_attempt_requirements(reqs, last_failure["kind"], built_key, config)
+                except llm_client.LlmHumanEscalationNeeded as _human_esc:
+                    logger.warning(f"{issue_id}: no candidate meets the fix-generation requirements "
+                                   f"({_human_esc}); holding for human review instead of a silent "
+                                   f"safety-floor fallback.")
+                    try:
+                        repo_git.git.reset("--hard", "HEAD")
+                        repo_git.git.clean("-fd")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        issue.create_comment(
+                            "🧑‍⚖️ **BugFixer — held for human review**\n\nNo configured model currently "
+                            "meets this fix's requirements (checked every available tier), so no fix "
+                            "attempt was made. A human should review.")
+                        issue.add_to_labels("bugfixer-needs-human")
+                    except Exception as ce:  # noqa: BLE001
+                        logger.warning(f"human-review note failed for {issue_id}: {ce}")
+                    processed = load_processed()
+                    processed[issue_id] = {
+                        "status": "awaiting_human",
+                        "timestamp": datetime.now().isoformat(),
+                        "reason": "no configured model meets this fix's requirements",
+                        "original_body": issue.body or "",
+                    }
+                    save_processed(processed)
+                    state["processed"] = processed
+                    recompute_issue_counters(processed)
+                    update_task_state(task_id=issue_id, action="end")
+                    return False, "Held for human review (no model meets this fix's requirements)"
                 except Exception as inner_e:
                     if "No LLM providers" in str(inner_e):
                         logger.error(f"No LLM providers configured for issue {issue_id}: {inner_e}")
@@ -2455,6 +2535,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         repo_git.git.clean("-fd")
                     except Exception:  # noqa: BLE001
                         pass
+                    reqs = next_attempt_requirements(reqs, last_failure["kind"], built_key, config)
                     continue
 
             if not success:
