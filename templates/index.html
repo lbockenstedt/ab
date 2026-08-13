@@ -2049,33 +2049,37 @@
                     <i class="fas fa-copy"></i> <span id="diag-copy-label">Copy raw data</span>
                 </button>
             </div>
-            <!-- LLM Reachability — a REAL call per slot, not a reachability probe.
-                 The connectivity worker pings a cheap endpoint (/api/tags, /models),
-                 which answers a different question: an Ollama Cloud slot serves
-                 /api/tags while /api/chat 403s, so the provider shows online and
-                 every real request fails. This asks each slot to actually answer. -->
+            <!-- LLM Picker (dry run) — routing is capability/cost-aware over the
+                 enumerated endpoint set (the 8 provider slots are gone), so the
+                 useful diagnostic is no longer "can slot N answer a prompt" but
+                 "for requirement set X, which endpoint does the picker choose,
+                 and why is every other one an alternative or excluded". This is
+                 computed purely (model_selection.explain_selection) — no network,
+                 no tokens spent — so it is free to run and makes routing legible. -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-lg font-bold text-[#263040]">LLM Reachability</h3>
-                    <i class="fas fa-plug text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-[#263040]">LLM Picker (dry run)</h3>
+                    <i class="fas fa-route text-[#01A982]"></i>
                 </div>
-                <p class="text-xs text-slate-500 mb-3">Sends a real one-word prompt to every configured slot and reports what came back — latency, reply, or the provider's own error text. Costs a few tokens per cloud slot. Pick a task kind to also test the model the <b>router substitutes</b> for that task (how a routed-model 404 shows up).</p>
+                <p class="text-xs text-slate-500 mb-3">Runs the real model picker for each requirement preset used across the pipeline (triage, log scan, fix, review, chat, feature build, batch) and shows the ranked resolution: which endpoint <b>wins</b>, which are capable <b>alternatives</b>, and why every other is <b>excluded</b>. Pure and free — no prompt is sent and no tokens are spent.</p>
                 <div class="flex flex-wrap items-end gap-2 mb-3">
-                    <label class="text-xs text-slate-500">Task kind
-                        <select id="llmdiag-task" class="mt-1 block p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                            <option value="">— configured model (no routing) —</option>
-                            <option value="log_analysis">log_analysis (small)</option>
-                            <option value="triage">triage (small)</option>
-                            <option value="pr_summary">pr_summary (small)</option>
-                            <option value="review">review (medium)</option>
-                            <option value="fix">fix (large)</option>
+                    <label class="text-xs text-slate-500">Preset
+                        <select id="llmdiag-preset" class="mt-1 block p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                            <option value="">— all presets —</option>
+                            <option value="triage">triage</option>
+                            <option value="log_scan">log_scan</option>
+                            <option value="fix_small">fix_small</option>
+                            <option value="fix_large">fix_large</option>
+                            <option value="review">review</option>
+                            <option value="chat">chat</option>
+                            <option value="chat_tools">chat_tools</option>
+                            <option value="feature_build">feature_build</option>
+                            <option value="batch_summary">batch_summary</option>
                         </select></label>
-                    <label class="text-xs text-slate-500">Timeout (s)
-                        <input type="number" id="llmdiag-timeout" value="30" min="5" max="120" class="mt-1 block w-24 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]"></label>
-                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded font-bold text-xs">Test all (code + log) slots</button>
+                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded font-bold text-xs">Run dry-run picker</button>
                     <span id="llmdiag-summary" class="text-xs text-slate-500"></span>
                 </div>
-                <div id="llmdiag-body" class="text-sm text-slate-500 italic">Not run yet — nothing is called until you click Test.</div>
+                <div id="llmdiag-body" class="text-sm text-slate-500 italic">Not run yet — click Run. This is a free, read-only computation.</div>
             </div>
 
             <!-- Model Performance: measured generation throughput, per model.
@@ -3774,66 +3778,71 @@
             const btn = document.getElementById('llmdiag-btn');
             const summary = document.getElementById('llmdiag-summary');
             if (!body) return;
-            const taskKind = (document.getElementById('llmdiag-task') || {}).value || null;
-            const timeoutS = Number((document.getElementById('llmdiag-timeout') || {}).value) || 30;
-            if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
-            body.innerHTML = '<span class="text-slate-400 italic">Calling each configured slot…</span>';
+            const preset = (document.getElementById('llmdiag-preset') || {}).value || null;
+            if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+            body.innerHTML = '<span class="text-slate-400 italic">Running the picker over the current endpoints…</span>';
             if (summary) summary.textContent = '';
             try {
                 const r = await fetch('/api/llm/diag', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({task_kind: taskKind, timeout_s: timeoutS}),
+                    body: JSON.stringify({preset: preset}),
                 });
                 const d = await r.json();
                 if (d.error) { body.innerHTML = '<span class="text-red-600">' + _bfEsc(d.error) + '</span>'; return; }
-                const rows = (d.results || []).map(x => {
-                    // SKIPPED is amber, not red: the model is unreachable but
-                    // routing already declines to use it, so nothing is broken.
-                    const pill = !x.configured
-                        ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">NOT CONFIGURED</span>'
-                        : (x.skipped ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700">SKIPPED</span>'
-                        : (x.ok ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">OK</span>'
-                                : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">FAILED</span>'));
-                    // A substituted model is called out explicitly — that swap is
-                    // invisible in the vault UI and is exactly what 404s.
-                    const routed = x.routed_from
-                        ? '<div class="text-[11px] text-amber-700">slot is set to <span class="font-mono">' + _bfEsc(x.routed_from) + '</span> — router uses <span class="font-mono">' + _bfEsc(x.model || '') + '</span> for this task tier</div>'
-                        : '';
-                    const detail = x.ok
-                        ? '<span class="text-slate-500">replied “' + _bfEsc(String(x.reply || '').slice(0, 60)) + '”</span>'
-                        : '<span class="text-red-600">' + _bfEsc(x.error || 'no response') + '</span>';
-                    return '<tr class="border-b border-slate-100 align-top">' +
-                        '<td class="px-3 py-2 font-bold text-slate-700">P' + x.slot +
-                            // Pool label: slots 5-6 serve log analysis only and are
-                            // usually a different provider/host from the code slots,
-                            // so "P5 failed" needs to read as a LOG failure, not just
-                            // another slot. Consequences differ — code slots stop
-                            // fixes, log slots stop analysis silently.
-                            (x.pool === 'log'
-                              ? '<div class="text-[10px] font-normal text-indigo-600 uppercase tracking-wider">log</div>'
-                              : x.pool === 'review'
-                              ? '<div class="text-[10px] font-normal text-rose-600 uppercase tracking-wider">review</div>'
-                              : '<div class="text-[10px] font-normal text-slate-400 uppercase tracking-wider">code</div>')
-                            + '</td>' +
-                        '<td class="px-3 py-2 text-slate-600">' + _bfEsc(x.provider || '—') +
-                            '<div class="font-mono text-[11px] text-slate-500">' + _bfEsc(x.model || '—') + '</div>' + routed + '</td>' +
-                        '<td class="px-3 py-2">' + pill + '</td>' +
-                        '<td class="px-3 py-2 text-center text-slate-600">' + (x.latency_ms != null ? x.latency_ms + ' ms' : '—') + '</td>' +
-                        '<td class="px-3 py-2 text-xs break-words">' + detail + '</td></tr>';
+                const presets = d.presets || [];
+                if (!presets.length) {
+                    body.innerHTML = '<span class="text-slate-400 italic">No presets returned.</span>';
+                    return;
+                }
+                const statusPill = (st) => st === 'selected'
+                    ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">SELECTED</span>'
+                    : (st === 'alternative'
+                        ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-sky-100 text-sky-700">ALT</span>'
+                        : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">EXCLUDED</span>');
+                const perfCell = (row) => {
+                    if (!row.n) return '<span class="text-slate-400">no samples</span>';
+                    const tps = row.tps != null ? row.tps.toFixed(1) + ' tok/s' : '—';
+                    const lat = row.latency_ms != null ? Math.round(row.latency_ms) + ' ms' : '—';
+                    return '<span class="text-slate-600">' + tps + ' · ' + lat + '</span> <span class="text-slate-400">(n=' + row.n + ')</span>';
+                };
+                const blocks = presets.map(p => {
+                    const rows = (p.rows || []).map(row =>
+                        '<tr class="border-b border-slate-100 align-top">' +
+                        '<td class="px-3 py-2">' + statusPill(row.status) + '</td>' +
+                        '<td class="px-3 py-2 text-slate-600">' + _bfEsc(row.provider || '—') +
+                            '<div class="font-mono text-[11px] text-slate-500">' + _bfEsc(row.model || '—') + '</div></td>' +
+                        '<td class="px-3 py-2 text-center text-slate-600">' + _bfEsc(row.tier || '—') + '</td>' +
+                        '<td class="px-3 py-2 text-xs">' + perfCell(row) + '</td>' +
+                        '<td class="px-3 py-2 text-xs text-slate-500 break-words">' + _bfEsc(row.reason || '') + '</td></tr>'
+                    ).join('');
+                    const win = p.error
+                        ? '<span class="text-red-600 text-xs">' + _bfEsc(p.error) + '</span>'
+                        : (p.selected
+                            ? '<span class="text-green-700 font-mono text-xs">' + _bfEsc(p.selected.provider || '') + ' · ' + _bfEsc(p.selected.model || '') + '</span>'
+                                + (p.permissive ? ' <span class="text-amber-600 text-[11px]">(permissive pass — unclassified admitted)</span>' : '')
+                            : '<span class="text-red-600 text-xs font-bold">no model resolves → awaiting_human</span>');
+                    const tbl = (p.rows && p.rows.length)
+                        ? '<div class="overflow-x-auto border border-slate-200 rounded-lg mt-2"><table class="w-full text-sm">' +
+                            '<thead class="bg-slate-50 text-slate-500 uppercase text-xs"><tr>' +
+                            '<th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Provider / model</th>' +
+                            '<th class="px-3 py-2 text-center">Tier</th><th class="px-3 py-2 text-left">Perf</th>' +
+                            '<th class="px-3 py-2 text-left">Reason</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+                        : '<div class="text-xs text-slate-400 italic mt-1">No candidates enumerated.</div>';
+                    return '<div class="mb-4">' +
+                        '<div class="flex items-baseline justify-between gap-2">' +
+                        '<div><span class="font-bold text-slate-700 font-mono">' + _bfEsc(p.label) + '</span>' +
+                        '<span class="text-xs text-slate-400 ml-2">' + _bfEsc(p.description || '') + '</span></div>' +
+                        '<div>→ ' + win + '</div></div>' + tbl + '</div>';
                 }).join('');
-                body.innerHTML = '<div class="overflow-x-auto border border-slate-200 rounded-lg"><table class="w-full text-sm">' +
-                    '<thead class="bg-slate-50 text-slate-500 uppercase text-xs"><tr>' +
-                    '<th class="px-3 py-2 text-left">Slot</th><th class="px-3 py-2 text-left">Provider / model</th>' +
-                    '<th class="px-3 py-2 text-left">Result</th><th class="px-3 py-2 text-center">Latency</th>' +
-                    '<th class="px-3 py-2 text-left">Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+                body.innerHTML = blocks;
                 const s = d.summary || {};
-                if (summary) summary.textContent = s.ok + '/' + s.configured + ' model check(s) passed across ' +
-                    (s.slots != null ? s.slots + ' slot(s)' : 'all slots') +
-                    (s.elapsed_ms != null ? ' · ' + (s.elapsed_ms / 1000).toFixed(1) + 's' : '');
+                if (summary) summary.textContent = (s.resolved != null ? s.resolved + '/' + s.total + ' preset(s) resolve' : '') +
+                    (s.candidates != null ? ' · ' + s.candidates + ' endpoint(s)' : '') +
+                    (s.elapsed_ms != null ? ' · ' + s.elapsed_ms + 'ms' : '');
             } catch (e) {
                 body.innerHTML = '<span class="text-red-600">Diag request failed: ' + _bfEsc(String(e && e.message || e)) + '</span>';
             } finally {
-                if (btn) { btn.disabled = false; btn.textContent = 'Test all slots'; }
+                if (btn) { btn.disabled = false; btn.textContent = 'Run dry-run picker'; }
             }
         }
 

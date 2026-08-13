@@ -252,57 +252,47 @@ async def health_check():
 
 @router.post("/api/llm/diag")
 async def llm_diag_run(request: Request):
-    """Ask every provider slot to actually answer a prompt, and report what came back.
+    """Dry-run the model picker for every requirement preset and report which
+    endpoint it would choose, and why every other one is an alternative or
+    excluded — WITHOUT spending a token.
 
-    Distinct from the connectivity worker, which probes a cheap reachability
-    endpoint. That answers "is the host up", not "can this slot complete a chat" —
-    and the two disagree in practice (an Ollama Cloud slot serving /api/tags while
-    /api/chat 403s reports online and fails every real request). This runs the real
-    thing.
+    Routing is capability/cost-aware over the enumerated endpoint set (the 8
+    provider slots are gone), so "can slot N answer a prompt" is no longer the
+    useful question. This reports, purely, the ranked resolution the live picker
+    (model_selection.select_model) produces for each preset — the same inputs,
+    no network calls — making real routing legible and auditable for free.
 
-    Body (all optional): ``slot`` (1-4, default all), ``task_kind`` (report + probe
-    the model the router substitutes for that task — how a routed-model 404 is
-    caught), ``timeout_s`` (default 30; the deployed LLM_TIMEOUT can be 1800 and a
-    diagnostic must fail fast).
+    Body (all optional): ``preset`` (restrict to one preset label; default all),
+    ``overrides`` (dict of LlmRequirements field overrides applied to every
+    preset — lets the UI build a custom requirement set).
 
-    Makes REAL calls, so it costs real tokens on cloud slots — the prompt is a few
-    tokens by design. Runs off-thread: call_llm's stack is synchronous and would
-    otherwise block the event loop for the whole probe.
+    Free and fast (the picker is pure), but still run off-thread since
+    _enumerate_candidates reads config/live env.
     """
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 — body is optional
         body = {}
     body = body or {}
-    slot = body.get("slot") or None
-    task_kind = body.get("task_kind") or None
-    try:
-        timeout_s = max(5, min(120, int(body.get("timeout_s") or 30)))
-    except (TypeError, ValueError):
-        timeout_s = 30
+    preset = body.get("preset") or None
+    overrides = body.get("overrides") if isinstance(body.get("overrides"), dict) else None
     try:
         from main import llm_diag  # re-exported from llm_client
         started = time.time()
-        results = await asyncio.to_thread(
-            llm_diag, slot=slot, task_kind=task_kind, timeout_s=timeout_s)
-        # A slot can now yield MORE THAN ONE row (configured model + each model
-        # the router substitutes), so "rows" and "slots" are different numbers
-        # and the summary must not conflate them.
-        ok = sum(1 for r in results if r.get("ok"))
-        configured = sum(1 for r in results if r.get("configured"))
-        slots_seen = len({r.get("slot") for r in results})
+        report = await asyncio.to_thread(llm_diag, preset=preset, overrides=overrides)
+        presets = report.get("presets") or []
+        resolved = sum(1 for p in presets if p.get("selected"))
         return {
-            "results": results,
-            "summary": {"ok": ok, "configured": configured, "total": len(results),
-                        "slots": slots_seen,
+            "presets": presets,
+            "candidate_count": report.get("candidate_count", 0),
+            "summary": {"resolved": resolved, "total": len(presets),
+                        "candidates": report.get("candidate_count", 0),
                         "elapsed_ms": int((time.time() - started) * 1000)},
-            "task_kind": task_kind,
-            "timeout_s": timeout_s,
         }
     except Exception as e:  # noqa: BLE001 — a diag must report, never 500
         logger.error(f"llm_diag failed: {e}")
         return JSONResponse(status_code=200,
-                            content={"results": [], "summary": None, "error": str(e)[:400]})
+                            content={"presets": [], "summary": None, "error": str(e)[:400]})
 
 
 @router.post("/api/toggle-pause")

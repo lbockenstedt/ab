@@ -231,3 +231,88 @@ def safety_floor(entries):
         return None
     local = [e for e in configured if registry.is_nokey_provider(e.get("provider"))]
     return (local or configured)[0]
+
+
+def _exclusion_reason(c, reqs, allow_unknown):
+    """The FIRST gate a candidate fails, in the same order _select_pass
+    applies them, as human-readable text — or None if the candidate passes
+    every filter (i.e. it reached tier ranking). Pure; used by
+    explain_selection to make the dry-run picker legible."""
+    if not c.get("available", True):
+        return "unavailable: " + str(c.get("unavailable_reason") or "cooldown")
+    if c.get("key") in (reqs.exclude_models or ()):
+        return "excluded this run (already tried/burned)"
+    if not _passes_restriction(c, reqs.restrict):
+        return "restrict=" + str(reqs.restrict)
+    caps = c.get("caps") or {}
+    if reqs.needs_tools and not caps.get("supports_tools"):
+        return "no tool support"
+    if reqs.needs_native_agentic_tools and not caps.get("native_agentic_tools"):
+        return "no native agentic tools"
+    if reqs.needs_mutating_agent and not caps.get("supports_mutating_agent"):
+        return "no mutating-agent support"
+    context_window = caps.get("context_window") or 0
+    if context_window < reqs.min_context_tokens * 1.25:
+        return "context %d < required %d" % (context_window, int(reqs.min_context_tokens * 1.25))
+    have = registry.COMPLEXITY_RANK.get(caps.get("max_complexity"), -1)
+    need = registry.COMPLEXITY_RANK.get(reqs.complexity, 0)
+    if have < need:
+        return "max_complexity %s < %s" % (caps.get("max_complexity"), reqs.complexity)
+    if not allow_unknown and caps.get("cost_tier") == "unknown":
+        return "unclassified (unknown cost tier — admitted only if nothing else resolves)"
+    return None
+
+
+def explain_selection(reqs, candidates, perf=None, tuning=None):
+    """Dry-run picker: run select_model over `candidates`, then classify EVERY
+    candidate as selected / alternative / excluded with a reason, so an
+    operator (Diagnostics → LLM picker) can audit the routing for one
+    requirement set without spending a token. Pure — no network, no config
+    reads. Returns:
+
+        {"selected": {key, provider, model, tier, reason}|None,
+         "permissive": bool,        # True if the winner came from the unclassified-admitting pass
+         "rows": [{key, provider, model, tier, status, reason, n, tps, latency_ms}, ...]}
+
+    Rows are ordered selected → alternatives (rank order) → excluded."""
+    perf = perf or {}
+    selection = select_model(reqs, candidates, perf, tuning)
+    permissive = bool(selection and "permissive" in (selection.reason or ""))
+    allow_unknown = permissive or selection is None  # None → both passes failed; explain permissively
+
+    winner_key = selection.key if selection else None
+    alt_order = [a.get("key") for a in (selection.alternatives if selection else [])]
+    alt_rank = {k: i for i, k in enumerate(alt_order)}
+
+    rows = []
+    for c in candidates or []:
+        key = c.get("key")
+        caps = c.get("caps") or {}
+        s = perf.get(key) or {}
+        row = {
+            "key": key, "provider": c.get("provider"), "model": c.get("model"),
+            "tier": caps.get("cost_tier"),
+            "n": s.get("n", 0) or 0, "tps": s.get("tps"), "latency_ms": s.get("latency_ms"),
+        }
+        if key == winner_key:
+            row["status"] = "selected"
+            row["reason"] = selection.reason
+        elif key in alt_rank:
+            row["status"] = "alternative"
+            row["reason"] = "capable fallback (tier=%s)" % (caps.get("cost_tier") or "?")
+        else:
+            row["status"] = "excluded"
+            row["reason"] = (_exclusion_reason(c, reqs, allow_unknown)
+                             or "ranked below the selection in its tier")
+        rows.append(row)
+
+    _order = {"selected": 0, "alternative": 1, "excluded": 2}
+    rows.sort(key=lambda r: (_order[r["status"]],
+                             alt_rank.get(r["key"], 0) if r["status"] == "alternative" else 0))
+
+    selected = None
+    if selection:
+        selected = {"key": selection.key, "provider": selection.provider,
+                    "model": selection.model, "tier": selection.tier,
+                    "reason": selection.reason}
+    return {"selected": selected, "permissive": permissive, "rows": rows}
