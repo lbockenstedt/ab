@@ -1,5 +1,5 @@
 """AI fix pipeline: issue analysis, sandboxed fix generation/application, verification, and per-issue orchestration (extracted from main.py)."""
-import contextlib, git, json, os, re, requests, tempfile, threading, time
+import contextlib, git, json, os, re, requests, tempfile, threading, time, traceback
 from datetime import datetime
 from github import Github, GithubException
 
@@ -2641,7 +2641,25 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             return True, f"Fixed via {commit_type}"
 
     except Exception as e:
-        logger.exception(f"Error in process_single_issue: {e}")
+        # Flatten embedded newlines into the single ERROR line — the self-log
+        # scanner captures single ERROR-level lines verbatim with no
+        # surrounding context, so logger.exception()'s normal multi-line
+        # traceback (still emitted below, for a human reading the log file
+        # directly) is invisible to it. GitPython's GitCommandError.__str__ in
+        # particular spans multiple physical lines (cmdline + full stderr —
+        # confirmed live: "Cmd('git') failed...\n  cmdline: ...\n  stderr:
+        # '...'"), so a bare f"{e}" here loses exactly the git command and
+        # error output a triager needs. Same gap that made #735/#753/#755
+        # recur as "non-actionable, please provide more context" instead of
+        # ever getting fixed. traceback's last frame pinpoints which of the
+        # many git/GitHub calls inside this large function actually raised.
+        _tb_frames = traceback.extract_tb(e.__traceback__)
+        _origin = (f" (at {_tb_frames[-1].filename.split('/')[-1]}:"
+                  f"{_tb_frames[-1].lineno} in {_tb_frames[-1].name})") if _tb_frames else ""
+        _flat = str(e).replace("\r", "").replace("\n", " | ")
+        logger.error(f"Error in process_single_issue for {repo_name}#{issue_num}: "
+                     f"{type(e).__name__}: {_flat}{_origin}")
+        logger.debug("process_single_issue full traceback:", exc_info=True)
         try:
             update_task_state(task_id=issue_id, action="end")
         except Exception as cleanup_err:
