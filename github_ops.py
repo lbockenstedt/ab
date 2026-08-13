@@ -293,9 +293,11 @@ def _llm_confirms_same_issue(new_title, new_body, ex_title, ex_body, ex_number=N
     NEW bug as a known recurrence is the one mistake this must never make;
     one extra duplicate issue is a minor annoyance by comparison.
 
-    Uses the LOG provider pool (task_kind="log_review") — the same pool
-    analyze_logs()/log_scan.py's error-triage already use for reading noisy
-    operational text, not the CODE pool that fix generation competes for."""
+    Routed via requirements=LlmRequirements(complexity="trivial",
+    needs_structured_output=True) (LLM Selection Redesign Phase 5, site #16)
+    rather than the old task_kind="log_review" pool pin — the capability/cost
+    picker now chooses the model itself; "trivial" keeps this from competing
+    for the same tier fix generation needs."""
     try:
         prompt = (
             "Two error reports from an automated monitoring system. Decide "
@@ -315,10 +317,13 @@ def _llm_confirms_same_issue(new_title, new_body, ex_title, ex_body, ex_number=N
             "looks superficially similar.\n\n"
             'Return ONLY a JSON object: {"same_issue": true or false, "reason": "one short sentence"}'
         )
+        from model_selection import LlmRequirements
+        reqs = LlmRequirements(complexity="trivial", needs_structured_output=True,
+                               min_context_tokens=len(prompt) // 4)
         res = call_llm(
             prompt,
             system_prompt="You are a precise bug-triage assistant. Only return a JSON object.",
-            task_kind="log_review",
+            requirements=reqs,
         )
         match = re.search(r'\{.*\}', res or "", re.DOTALL)
         if not match:
