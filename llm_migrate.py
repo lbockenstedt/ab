@@ -136,6 +136,16 @@ def migrate(config):
     # llm_slots is fully consumed now.
     config.pop("llm_slots", None)
 
+    # Local/free registry top-up: a config["model_registry"] frozen before a
+    # local/free provider gained its DEFAULT rule (the `ollama2` GPU-endpoint
+    # gap) would classify that endpoint as `unknown` instead of `free`.
+    # Idempotent + append-only; see model_registry.upgrade_local_free_rules.
+    if isinstance(config.get("model_registry"), list):
+        _topped, _added = model_registry.upgrade_local_free_rules(config["model_registry"])
+        if _added:
+            config["model_registry"] = _topped
+            logger.info("LLM registry: added missing local/free rules %s during migration.", _added)
+
     # 6: capability seeding + one summary line.
     try:
         n_ep, n_class, n_unclass = _seed_registry_stubs(config)

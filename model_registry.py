@@ -86,6 +86,11 @@ DEFAULT_MODEL_RULES = [
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True, "notes": "max_complexity is refined per-model by parameter count in resolve()"},
+    {"id": "ollama2-local", "provider": "ollama2", "match": "*", "label": "Self-hosted Ollama (2nd endpoint / GPU)",
+     "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "second local Ollama endpoint (e.g. a GPU box); free, mirrors ollama-local"},
     {"id": "lmstudio-local", "provider": "lmstudio", "match": "*", "label": "Self-hosted LM Studio",
      "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -158,6 +163,56 @@ DEFAULT_MODEL_RULES = [
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
      "enabled": True, "notes": ""},
 ]
+
+
+# Providers whose DEFAULT rule is a self-hosted / no-per-call-cost "free" tier.
+# A missing default here (the `ollama2` GPU-endpoint gap that classified as
+# `unknown` instead of `free`) can't be back-filled by DEFAULT_MODEL_RULES
+# alone: once an operator saves Settings, config["model_registry"] is frozen
+# WITHOUT any rule added to DEFAULT_MODEL_RULES afterwards. upgrade_local_free_rules
+# tops those frozen configs up idempotently — see routes.py settings_page / save
+# and llm_migrate.migrate().
+
+
+def upgrade_local_free_rules(rules):
+    """Return (new_rules, added_ids): a COPY of the operator's curated `rules`
+    list with any missing local/free DEFAULT_MODEL_RULES appended.
+
+    Conservative by design — it ONLY appends, and only a default whose:
+      * provider is a no-key self-hosted/free provider (ollama*, lmstudio,
+        claude_cli — see is_nokey_provider), AND
+      * cost_tier is "free", AND
+      * `id` is absent from `rules`, AND
+      * `provider` is ENTIRELY absent from `rules` (so we never second-guess an
+        operator who already has their own rule for that provider).
+
+    Existing rules are never modified, removed, or reordered. Idempotent: a
+    second call adds nothing (the provider is now present). This is what makes
+    an operator's GPU `ollama2` endpoint gain its `free` rule on upgrade
+    instead of being stuck at cost tier `unknown`.
+    """
+    rules = list(rules or [])
+    existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
+    existing_providers = {
+        (r.get("provider") or "").lower().strip()
+        for r in rules if isinstance(r, dict)
+    }
+    added_ids = []
+    for default in DEFAULT_MODEL_RULES:
+        provider = (default.get("provider") or "").lower().strip()
+        if not is_nokey_provider(provider):
+            continue
+        if default.get("cost_tier") != "free":
+            continue
+        if default.get("id") in existing_ids:
+            continue
+        if provider in existing_providers:
+            continue
+        rules.append(dict(default))
+        added_ids.append(default.get("id"))
+        existing_ids.add(default.get("id"))
+        existing_providers.add(provider)
+    return rules, added_ids
 
 
 def _model_param_b(name):
