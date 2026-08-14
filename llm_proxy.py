@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -45,6 +46,137 @@ router = APIRouter()
 # use; the proxy ignores it for routing (BugFixer picks the model) and echoes a
 # stable synthetic id back so the client has something coherent to display.
 _PROXY_MODEL_ID = "bugfixer-router"
+
+# Agentic mode: when the client asks for this model id (Claude Code:
+# ANTHROPIC_MODEL=bugfixer-agent), the proxy does NOT do a single passthrough
+# call — it runs BugFixer's OWN server-side agent loop (chat.run_agent_loop)
+# with the same CHAT_TOOLS the dashboard chat uses, so an external client (a
+# curl, the Claude CLI) gets an agent that can list repos, read files, inspect
+# issues, and — when autofix is enabled — trigger the real fix pipeline. This
+# makes the LLM router a third fix/feature intake alongside the UI bug report
+# and the UI feature request, reusing the exact same build/maintain tools.
+_PROXY_AGENT_MODEL_ID = "bugfixer-agent"
+
+
+def _wants_agentic(body: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
+    """True when this request should run the server-side agent loop instead of a
+    single passthrough. Triggered by the requested model id (contains
+    ``bugfixer-agent``, or an operator-configured ``llm_proxy_agent_model_ids``
+    entry) or globally via ``llm_proxy_agentic_default``."""
+    if cfg.get("llm_proxy_agentic_default"):
+        return True
+    model = str(body.get("model") or "").strip().lower()
+    if not model:
+        return False
+    ids = cfg.get("llm_proxy_agent_model_ids") or [_PROXY_AGENT_MODEL_ID]
+    return any(str(i).lower() in model for i in ids)
+
+
+def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
+                        cfg: Dict[str, Any], gh: Any) -> str:
+    """on_fix_proposal handler for the agentic router. propose_fix itself is
+    non-mutating; this decides what the router DOES with a proposal.
+
+    Runs a cheap pre-build boundary PRE-FLIGHT (feature_boundary.prefilter over
+    the issue's title/body) so the caller is told up front when a fix can only
+    ever come back as a human-reviewed PR (core-systems boundary). Then, only
+    when ``llm_proxy_autofix_enabled`` is opted in, triggers the real
+    process_single_issue pipeline (full autonomy) — which clones, fixes, runs
+    tests, and gates the merge through the review panel, with core-systems
+    diffs forced to a human-reviewed PR (never direct-push). Defaults OFF so an
+    open/keyless proxy never mutates without an explicit operator opt-in."""
+    repo = descriptor.get("repo")
+    number = descriptor.get("number")
+    pref = descriptor.get("llm_preference")
+    prefix = (text + "\n\n") if text else ""
+
+    # ── Pre-build boundary pre-flight (informational) ──
+    preflight = ""
+    try:
+        import feature_boundary
+        title = descriptor.get("title") or ""
+        body = ""
+        if gh is not None and repo and number is not None:
+            try:
+                iss = gh.get_repo(repo).get_issue(int(number))
+                title = title or (iss.title or "")
+                body = iss.body or ""
+            except Exception:  # noqa: BLE001 — pre-flight is best-effort
+                pass
+        hits = feature_boundary.prefilter(title, body, cfg.get("feature_boundaries") or [])
+        hard_hits = (hits or {}).get("hits") or []
+        soft_hits = (hits or {}).get("soft_hits") or []
+        if hard_hits:
+            ids = ", ".join(h.get("id", "?") for h in hard_hits)
+            preflight = ("\n\n⚠️ Pre-flight: this issue likely touches core-systems "
+                         f"boundary rule(s) [{ids}], so any fix will come back as a "
+                         "human-reviewed PR — it can never auto-merge or direct-push.")
+        elif soft_hits:
+            ids = ", ".join(h.get("id", "?") for h in soft_hits)
+            preflight = ("\n\n📋 Pre-flight: this issue may relate to boundary rule(s) "
+                         f"[{ids}]; if the actual diff touches them it will be forced "
+                         "to a human-reviewed PR.")
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not cfg.get("llm_proxy_autofix_enabled", False):
+        return (prefix + f"🔧 A fix is warranted for {repo}#{number}, but autonomous "
+                "fixing is DISABLED on this router (set llm_proxy_autofix_enabled to "
+                "enable). Trigger it from the dashboard chat's Confirm button, or "
+                "enable autofix to let the router run it." + preflight)
+
+    # ── Full autonomy (opt-in): trigger the real pipeline in the background ──
+    try:
+        from fix_engine import process_single_issue
+
+        def _run():
+            try:
+                ok, msg = process_single_issue(repo, number, llm_preference=pref)
+                logger.info("Router-triggered fix %s#%s -> ok=%s msg=%s", repo, number, ok, msg)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Router-triggered fix %s#%s failed: %s", repo, number, e)
+
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception as e:  # noqa: BLE001
+        return prefix + f"Tried to trigger the fix for {repo}#{number} but couldn't launch it: {e}"
+
+    return (prefix + f"✅ Triggered the automated fix pipeline for {repo}#{number} "
+            f"(LLM preference: {pref or 'auto'}). It will clone, generate the fix, run "
+            "tests, then the review panel gates the merge — direct-push only when a "
+            "trusted+owned repo is Approved AND the diff doesn't touch a core-systems "
+            "boundary; otherwise it comes back as a human-reviewed PR." + preflight)
+
+
+def _run_agentic(system: Any, a_messages: List[Dict[str, Any]],
+                 cfg: Dict[str, Any]) -> Tuple[str, str]:
+    """Run BugFixer's server-side agent loop for one /v1/messages turn and
+    return (final_text, model_label). Builds the same context index + system
+    prompt the dashboard chat uses so the router agent has repo/issue awareness
+    and the CHAT_TOOLS."""
+    import chat as _chat
+    from github import Github
+
+    token = cfg.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+    gh = Github(token) if token else None
+
+    base_system = cfg.get("CHAT_SYSTEM_PROMPT") or "You are a helpful assistant."
+    client_system = _system_text(system)
+    index_text = _chat.build_chat_context_index(cfg, gh=gh)
+    system_prompt = "\n\n".join(p for p in (base_system, client_system, index_text) if p)
+
+    internal = _to_internal_messages(None, a_messages)  # our own system is prepended below
+    messages = [{"role": "system", "content": system_prompt}] + internal
+    max_iter = int(cfg.get("CHAT_TOOL_MAX_ITERATIONS", 6) or 6)
+    max_result_chars = int(cfg.get("CHAT_TOOL_MAX_TOKENS", 12000) or 12000) * 4
+    task_id = f"proxy-agent-{uuid.uuid4().hex[:8]}"
+
+    final_text = _chat.run_agent_loop(
+        messages, cfg, gh, task_id=task_id,
+        max_iter=max_iter, max_result_chars=max_result_chars,
+        status_cb=lambda s: logger.info("agentic %s: %s", task_id, s),
+        on_fix_proposal=lambda desc, text: _proxy_fix_proposal(desc, text, cfg, gh),
+    )
+    return final_text or "", task_id
 
 
 def _interactive_config() -> Dict[str, Any]:
@@ -353,12 +485,48 @@ async def messages(request: Request):
     except Exception:
         max_tokens = 1024
 
+    icfg = _interactive_config()
+
+    # ── Agentic mode ──────────────────────────────────────────────────────
+    # model=bugfixer-agent (or llm_proxy_agentic_default): run BugFixer's own
+    # server-side agent loop with CHAT_TOOLS instead of a single passthrough, so
+    # the caller gets an agent that can investigate the repo and (with autofix
+    # enabled) trigger the real fix pipeline.
+    if _wants_agentic(body, icfg):
+        try:
+            final_text, task_id = await asyncio.wait_for(
+                asyncio.to_thread(_run_agentic, system, a_messages, icfg),
+                timeout=_proxy_deadline(icfg))
+        except asyncio.TimeoutError:
+            logger.warning("LLM proxy agentic run exceeded %ss deadline", _proxy_deadline(icfg))
+            return JSONResponse(status_code=504, content={
+                "type": "error",
+                "error": {"type": "api_error",
+                          "message": ("Agentic routing timed out before the agent "
+                                      "finished. Increase LLM_PROXY_DEADLINE or narrow "
+                                      "the request.")}})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("LLM proxy agentic run failed")
+            return JSONResponse(status_code=502, content={
+                "type": "error",
+                "error": {"type": "api_error", "message": f"Agentic routing failed: {e}"}})
+
+        blocks = [{"type": "text", "text": final_text}]
+        in_tok = _estimate_tokens(system, a_messages)
+        out_tok = max(1, len(final_text) // 4)
+        model_label = _PROXY_AGENT_MODEL_ID
+        msg_id = f"msg_{uuid.uuid4().hex}"
+        logger.info("LLM proxy: agentic run %s complete (stream=%s)", task_id, want_stream)
+        envelope = _message_envelope(msg_id, model_label, blocks, "end_turn", in_tok, out_tok)
+        if want_stream:
+            return StreamingResponse(_stream_events(envelope), media_type="text/event-stream")
+        return JSONResponse(content=envelope)
+
     internal_msgs = _to_internal_messages(system, a_messages)
     internal_tools = _to_internal_tools(a_tools)
     reqs = _build_requirements(system, a_messages, bool(internal_tools), max_tokens)
 
     used: Dict[str, Any] = {}
-    icfg = _interactive_config()
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(
