@@ -292,6 +292,54 @@ def main():
     ok &= _check("reclassify only touches cost_tier=free — a curated 'cheap' is preserved",
                 op_changed is False and op_out[0]["cost_tier"] == "cheap")
 
+    # --- per-model claude_cli rules: a strength ladder (Haiku<Sonnet<Opus) ----
+    ok &= _check("claude_cli Haiku resolves to small (the light/cheap model)",
+                reg.resolve("claude_cli", "claude-haiku-4-5-20251001", {})["max_complexity"] == "small")
+    ok &= _check("claude_cli Sonnet resolves to medium (balanced)",
+                reg.resolve("claude_cli", "claude-sonnet-4-6", {})["max_complexity"] == "medium")
+    ok &= _check("claude_cli Opus resolves to large (the hardest-work default)",
+                reg.resolve("claude_cli", "claude-opus-5", {})["max_complexity"] == "large")
+    ok &= _check("an unrecognized claude_cli model falls back to the generic rule (large)",
+                reg.resolve("claude_cli", "claude-future-99", {})["max_complexity"] == "large")
+    _h = reg.resolve("claude_cli", "claude-haiku-4-5-20251001", {})
+    ok &= _check("Haiku keeps the agentic caps (mutating agent) while capped at small",
+                _h["supports_mutating_agent"] is True and _h["cost_tier"] == "frontier")
+
+    # feature_build (large + mutating) must escalate to Opus — Haiku (small) and
+    # Sonnet (medium) are both below the large ceiling, so only Opus qualifies.
+    import model_selection as _sel
+    def _cc_cand(m):
+        return {"key": ("claude_cli", "", m), "provider": "claude_cli", "model": m,
+                "caps": reg.resolve("claude_cli", m, {}), "available": True}
+    _cc = [_cc_cand("claude-haiku-4-5-20251001"), _cc_cand("claude-sonnet-4-6"), _cc_cand("claude-opus-5")]
+    _fb = _sel.select_model(_sel.LlmRequirements(complexity="large", needs_mutating_agent=True), _cc)
+    ok &= _check("feature_build (large mutating) resolves to Opus, not Haiku/Sonnet",
+                _fb is not None and _fb.model == "claude-opus-5")
+    _sm = _sel.select_model(_sel.LlmRequirements(complexity="small", needs_mutating_agent=True), _cc)
+    ok &= _check("a small mutating task still uses the cheapest capable Claude (Haiku)",
+                _sm is not None and _sm.model == "claude-haiku-4-5-20251001")
+
+    # upgrade_claude_cli_model_rules injects the per-model rules into a frozen
+    # config that only has the generic claude_cli `*` rule.
+    frozen_generic = [
+        {"id": "claude-cli", "provider": "claude_cli", "match": "*", "cost_tier": "frontier",
+         "max_complexity": "large", "context_window": 200000, "supports_mutating_agent": True,
+         "enabled": True},
+    ]
+    cc_top, cc_added = reg.upgrade_claude_cli_model_rules(frozen_generic)
+    ok &= _check("claude_cli per-model top-up appends Haiku/Sonnet/Opus to a generic-only config",
+                set(cc_added) == {"claude-cli-haiku", "claude-cli-sonnet", "claude-cli-opus"})
+    ok &= _check("after top-up, Haiku resolves to small via the frozen config",
+                reg.resolve("claude_cli", "claude-haiku-4-5-20251001",
+                            {"model_registry": cc_top})["max_complexity"] == "small")
+    _, cc_added2 = reg.upgrade_claude_cli_model_rules(cc_top)
+    ok &= _check("claude_cli per-model top-up is idempotent — a second run adds nothing", cc_added2 == [])
+    cc_own = [{"id": "my-haiku", "provider": "claude_cli", "match": "*haiku*", "cost_tier": "frontier",
+               "max_complexity": "small", "enabled": True}]
+    _, cc_own_added = reg.upgrade_claude_cli_model_rules(cc_own)
+    ok &= _check("claude_cli per-model top-up never overrides an operator's own (provider, match) rule",
+                "claude-cli-haiku" not in cc_own_added)
+
     print()
     if ok:
         print("ALL CASES PASSED")

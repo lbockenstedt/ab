@@ -34,8 +34,12 @@ What it does (see the plan's §7):
   8. (v4) Reclassify a frozen claude_cli rule from free -> frontier: it is
      session-auth (no key) but bills the operator's Anthropic account, so the
      picker must RESERVE it rather than tie it with the truly-free GPU. See
-     model_registry.reclassify_claude_cli_paid. Bumping the version re-triggers
-     these one-shot top-ups on an already-migrated config.
+     model_registry.reclassify_claude_cli_paid.
+  9. (v5) Add per-model claude_cli capability rules (Haiku=medium,
+     Sonnet/Opus=large) so the light/cheap Haiku is not treated like Opus.
+     Append-only/idempotent; see model_registry.upgrade_claude_cli_model_rules.
+     Bumping the version re-triggers these one-shot top-ups on an already-
+     migrated config.
 """
 
 import logging
@@ -44,7 +48,7 @@ import model_registry
 
 logger = logging.getLogger("BugFixer")
 
-CONFIG_VERSION = 4
+CONFIG_VERSION = 5
 
 
 def _slot_entry_id(config, slot):
@@ -163,6 +167,11 @@ def migrate(config):
             config["model_registry"] = _repaired
             logger.info("LLM registry: reclassified claude_cli free -> frontier (bills the "
                         "operator's Anthropic account) during migration.")
+        _topped, _added_cc = model_registry.upgrade_claude_cli_model_rules(config["model_registry"])
+        if _added_cc:
+            config["model_registry"] = _topped
+            logger.info("LLM registry: added per-model claude_cli capability rules %s "
+                        "(Haiku=medium, Sonnet/Opus=large) during migration.", _added_cc)
 
     # 6: capability seeding + one summary line.
     try:

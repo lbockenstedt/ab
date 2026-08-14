@@ -1942,6 +1942,7 @@ async def settings_page(request: Request):
     _curated, _mr_added = _registry.upgrade_local_free_rules(_curated)
     _curated, _mr_added_cap = _registry.upgrade_capable_local_rules(_curated)
     _curated, _mr_claude_paid = _registry.reclassify_claude_cli_paid(_curated)
+    _curated, _mr_claude_models = _registry.upgrade_claude_cli_model_rules(_curated)
     _registry_rules_json = json.dumps(_curated, indent=2)
     _auto = config.get("model_registry_auto") or []
     _registry_preview = (
@@ -2339,6 +2340,8 @@ async def save_settings(request: Request):
             config_data["model_registry"], _ = _registry_save.upgrade_capable_local_rules(
                 config_data["model_registry"])
             config_data["model_registry"], _ = _registry_save.reclassify_claude_cli_paid(
+                config_data["model_registry"])
+            config_data["model_registry"], _ = _registry_save.upgrade_claude_cli_model_rules(
                 config_data["model_registry"])
 
     config_data["feature_build_timeout_s"] = int(data.get("feature_build_timeout_s")) \

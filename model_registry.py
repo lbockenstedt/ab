@@ -105,6 +105,32 @@ DEFAULT_MODEL_RULES = [
               "account — cost_tier=frontier so the picker RESERVES it (free/GPU wins first, "
               "claude_cli is used only when a call needs its native_agentic_tools/"
               "supports_mutating_agent, e.g. feature_build)"},
+    # Per-model capability tiers for the claude_cli roster — same agentic
+    # runtime (native tools + mutating agent), same 200k context, all frontier
+    # (they bill the operator's account), categorized as a strength LADDER so
+    # each model is distinct and the hardest work escalates to Opus: Haiku=small
+    # (light/cheap), Sonnet=medium (balanced), Opus=large (hardest — the default
+    # for feature_build and any large agentic/mutating task). More-specific
+    # match beats the generic `*` above.
+    {"id": "claude-cli-haiku", "provider": "claude_cli", "match": "*haiku*", "label": "Claude Haiku (via CLI)",
+     "cost_tier": "frontier", "max_complexity": "small", "context_window": 200000,
+     "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
+     "enabled": True,
+     "notes": "fastest/cheapest Claude — capped at small so it handles light agentic/tool "
+              "work; medium escalates to Sonnet and large/feature_build to Opus"},
+    {"id": "claude-cli-sonnet", "provider": "claude_cli", "match": "*sonnet*", "label": "Claude Sonnet (via CLI)",
+     "cost_tier": "frontier", "max_complexity": "medium", "context_window": 200000,
+     "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
+     "enabled": True, "notes": "balanced Claude — medium agentic/mutating work; large escalates to Opus"},
+    {"id": "claude-cli-opus", "provider": "claude_cli", "match": "*opus*", "label": "Claude Opus (via CLI)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
+     "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
+     "enabled": True,
+     "notes": "most capable Claude — the ONLY claude_cli model at large complexity, so it is "
+              "the default for feature_build and the hardest large agentic/mutating work"},
     {"id": "ollama-cloud", "provider": "ollama_cloud", "match": "*", "label": "Ollama Cloud",
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -342,6 +368,49 @@ def reclassify_claude_cli_paid(rules):
             changed = True
         out.append(r)
     return out, changed
+
+
+# Per-model claude_cli capability rules (see DEFAULT_MODEL_RULES). Like the
+# capable-local rules, these are appended even when the generic claude_cli `*`
+# rule is present (it almost always is), because they only refine SPECIFIC
+# model families and win by match specificity. Skipped if the operator already
+# curated a rule for that same (provider, match).
+_CLAUDE_CLI_MODEL_RULE_IDS = frozenset({
+    "claude-cli-haiku", "claude-cli-sonnet", "claude-cli-opus",
+})
+
+
+def upgrade_claude_cli_model_rules(rules):
+    """Return (new_rules, added_ids): a COPY of `rules` with any missing
+    per-model claude_cli rules (_CLAUDE_CLI_MODEL_RULE_IDS) appended.
+
+    These categorize the claude_cli roster by model strength so Haiku (capped
+    at medium) is never treated like Opus/Sonnet (large) — the generic `*`
+    claude_cli rule alone gives every model the same large ceiling. Append-only
+    and skipped when the rule id already exists OR the operator already curated
+    a rule for that exact (provider, match). Never reorders or mutates existing
+    rules; the more-specific match wins by specificity (see resolve())."""
+    rules = list(rules or [])
+    existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
+    existing_pairs = {
+        ((r.get("provider") or "").lower().strip(), (r.get("match") or "").lower().strip())
+        for r in rules if isinstance(r, dict)
+    }
+    added_ids = []
+    for default in DEFAULT_MODEL_RULES:
+        if default.get("id") not in _CLAUDE_CLI_MODEL_RULE_IDS:
+            continue
+        if default.get("id") in existing_ids:
+            continue
+        pair = ((default.get("provider") or "").lower().strip(),
+                (default.get("match") or "").lower().strip())
+        if pair in existing_pairs:
+            continue
+        rules.append(dict(default))
+        added_ids.append(default.get("id"))
+        existing_ids.add(default.get("id"))
+        existing_pairs.add(pair)
+    return rules, added_ids
 
 
 def _model_param_b(name):
