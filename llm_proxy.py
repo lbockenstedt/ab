@@ -174,11 +174,29 @@ def _run_agentic(system: Any, a_messages: List[Dict[str, Any]],
     max_result_chars = int(cfg.get("CHAT_TOOL_MAX_TOKENS", 12000) or 12000) * 4
     task_id = f"proxy-agent-{uuid.uuid4().hex[:8]}"
 
+    # Steer the router toward a SMARTER model than the dashboard chat's cost-
+    # first default: agentic diagnosis reasons over code across several tool
+    # turns and must synthesize, so default to complexity=large + prefer_capable
+    # (pick the smartest tier first) and drop latency_sensitive. All knobs are
+    # operator-overridable; llm_proxy_agent_prefer_capable=false reverts to
+    # cost-first, and llm_proxy_agent_pin hard-pins an exact model.
+    complexity = cfg.get("llm_proxy_agent_complexity") or "large"
+    prefer_capable = cfg.get("llm_proxy_agent_prefer_capable", True)
+    restrict = cfg.get("llm_proxy_agent_restrict") or None
+    pin = cfg.get("llm_proxy_agent_pin") or None
+    tool_reqs = LlmRequirements(complexity=complexity, needs_tools=True,
+                                prefer_capable=bool(prefer_capable),
+                                restrict=restrict, pin_key=pin)
+    final_reqs = LlmRequirements(complexity=complexity,
+                                 prefer_capable=bool(prefer_capable),
+                                 restrict=restrict, pin_key=pin)
+
     final_text = _chat.run_agent_loop(
         messages, cfg, gh, task_id=task_id,
         max_iter=max_iter, max_result_chars=max_result_chars,
         status_cb=lambda s: logger.info("agentic %s: %s", task_id, s),
         on_fix_proposal=lambda desc, text: _proxy_fix_proposal(desc, text, cfg, gh),
+        tool_requirements=tool_reqs, final_requirements=final_reqs,
     )
     return final_text or "", task_id
 
