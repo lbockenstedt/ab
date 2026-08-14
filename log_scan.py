@@ -286,6 +286,7 @@ def analyze_logs_for_errors(logs):
     try:
         from model_selection import LlmRequirements
         reqs = LlmRequirements(complexity="small", needs_structured_output=True,
+                               deprioritize_local=True,
                                min_context_tokens=len(prompt) // 4)
         res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.",
                        requirements=reqs)

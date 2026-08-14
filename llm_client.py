@@ -2508,7 +2508,7 @@ _DIAG_PRESETS = [
     ("triage", "Issue triage / file identification (trivial, structured JSON)",
      dict(complexity="trivial", needs_structured_output=True)),
     ("log_scan", "Log / hub-log analysis (small, structured JSON)",
-     dict(complexity="small", needs_structured_output=True)),
+     dict(complexity="small", needs_structured_output=True, deprioritize_local=True)),
     ("fix_small", "Build a small fix (small, structured JSON)",
      dict(complexity="small", needs_structured_output=True)),
     ("fix_large", "Build a hard fix (large, structured JSON)",
@@ -2522,7 +2522,7 @@ _DIAG_PRESETS = [
     ("feature_build", "Feature auto-build (large, mutating agent)",
      dict(complexity="large", needs_mutating_agent=True)),
     ("batch_summary", "PR-summary batch route (trivial, batch-eligible)",
-     dict(complexity="trivial", batch_ok=True)),
+     dict(complexity="trivial", batch_ok=True, deprioritize_local=True)),
 ]
 
 

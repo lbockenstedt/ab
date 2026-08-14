@@ -125,6 +125,38 @@ def main():
     result = sel.select_model(R(prefer_capable=False), [free_p, cheap_p, frontier_p])
     ok &= _check("default (prefer_capable off) still picks the cheapest tier (free)", result.key == "pf" and result.tier == "free")
 
+    # --- deprioritize_local: offloadable work (log review, batch) prefers a
+    # capable FREE CLOUD peer over the local GPU, but the GPU stays a fallback
+    # and paid is reached only when nothing free qualifies --------------------
+    gpu_free = _cand("gpu", provider="ollama", cost_tier="free", complexity="medium")
+    cloud_free = _cand("cloud", provider="openrouter", cost_tier="free", complexity="medium")
+    frontier_paid = _cand("front", provider="anthropic", cost_tier="frontier", complexity="large")
+    result = sel.select_model(R(deprioritize_local=True), [gpu_free, cloud_free])
+    ok &= _check("deprioritize_local prefers the free cloud peer over the local GPU", result.key == "cloud")
+    result = sel.select_model(R(deprioritize_local=False), [gpu_free, cloud_free])
+    # (cold-start: both share the tier-median score, so list order decides — the
+    # point is only that WITHOUT the flag the GPU is not pushed to the bottom.)
+    ok &= _check("without the flag the local GPU is NOT deprioritized (free tier still wins)",
+                 result.tier == "free")
+    result = sel.select_model(R(deprioritize_local=True), [gpu_free])
+    ok &= _check("deprioritize_local never empties a tier — the GPU still wins when it is the only free option",
+                 result is not None and result.key == "gpu")
+    result = sel.select_model(R(deprioritize_local=True), [gpu_free, frontier_paid])
+    ok &= _check("deprioritize_local never promotes a paid tier over a free local GPU",
+                 result.key == "gpu" and result.tier == "free")
+
+    # --- escalation: when the GPU can't serve capably (cooldown/unavailable or
+    # below the complexity ceiling) an offloadable call falls through to a
+    # capable frontier/claude_cli, never getting stuck on the GPU -------------
+    gpu_down = _cand("gpu2", provider="ollama", cost_tier="free", complexity="medium", available=False)
+    result = sel.select_model(R(deprioritize_local=True), [gpu_down, frontier_paid])
+    ok &= _check("an unavailable GPU escalates an offloadable call to the capable frontier",
+                 result is not None and result.key == "front" and result.tier == "frontier")
+    gpu_weak = _cand("gpu3", provider="ollama", cost_tier="free", complexity="small")
+    result = sel.select_model(R(complexity="large", deprioritize_local=True), [gpu_weak, frontier_paid])
+    ok &= _check("a GPU below the complexity ceiling escalates to the capable frontier",
+                 result is not None and result.key == "front" and result.tier == "frontier")
+
     # --- pin_key canonicalisation: a "provider|base_url|model" STRING pin
     # must match a tuple ModelKey candidate (chat_pin / planner pin) ----------
     tk = ("ollama", "http://gpu:11434", "qwen")
