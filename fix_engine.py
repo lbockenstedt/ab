@@ -742,11 +742,12 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
         """Run this exact turn: against reviewer_candidate directly (no
         re-picking/failover — llm_client._try_candidate is the picker path's
         own single-candidate executor) when one was resolved, or a plain
-        requirements-based call_llm (the picker chooses a medium-complexity
-        reviewer) for the no-candidates Default Reviewer case."""
+        requirements-based call_llm (the picker chooses a strong, large-capable
+        reviewer at the lowest available cost) for the no-candidates Default
+        Reviewer case."""
         if reviewer_candidate is None:
             from model_selection import LlmRequirements
-            _reqs = LlmRequirements(complexity="medium", needs_structured_output=True)
+            _reqs = LlmRequirements(complexity="large", needs_structured_output=True)
             return call_llm("", messages=messages, tools=tools, task_id=task_id,
                             requirements=_reqs, **kwargs)
         result, err = llm_client._try_candidate(reviewer_candidate, messages, tools, True,
@@ -928,7 +929,11 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
 
     panel = []
     for _ in range(max_reviewers):
-        reqs = LlmRequirements(complexity="medium", needs_structured_output=True,
+        # Skeptical reviewer: demand a genuinely strong model (large-capability
+        # floor) so weak/small models can't review, but keep the default
+        # cost-first ordering — the cheapest *capable* model wins and we only
+        # ratchet up to a frontier model when nothing cheaper qualifies.
+        reqs = LlmRequirements(complexity="large", needs_structured_output=True,
                                exclude_models=tuple(excluded))
         sel = select_model(reqs, candidates, perf)
         if sel is None:
