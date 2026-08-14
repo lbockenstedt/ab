@@ -149,6 +149,33 @@ def main():
                      reqs_fallback is not None and reqs_fallback.complexity == "small"
                      and reqs_fallback.latency_sensitive is True)
 
+    # ---- run_agent_loop: iteration-cap forces a final tools-free answer ----
+    # A model that keeps calling tools forever must not yield an empty reply;
+    # at the cap the loop makes one tools-free call to force a written answer.
+    ns_loop = _load_ns(
+        {"run_agent_loop"},
+        {
+            "call_llm": None,  # replaced below
+            "CHAT_TOOLS": [{"type": "function", "function": {"name": "noop"}}],
+            "CHAT_TOOL_EXECUTORS": {"noop": lambda gh, config, args: {"ok": 1}},
+            "_sanitize_tool_result": lambda out, config: out,
+            "_trunc": lambda x, n=300: str(x)[:n],
+            "_parse_text_tool_calls": lambda text: (text, []),
+        },
+    )
+
+    def _always_tools_call_llm(prompt, **kwargs):
+        if kwargs.get("tools"):
+            return {"text": "", "tool_calls": [{"id": "c1", "function": {"name": "noop", "arguments": "{}"}}]}
+        return "FINAL ANSWER"
+
+    ns_loop["call_llm"] = _always_tools_call_llm
+    forced_text = ns_loop["run_agent_loop"](
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}],
+        {}, object(), task_id="t", max_iter=2)
+    ok &= _check("run_agent_loop: iteration cap forces a non-empty final answer",
+                 forced_text == "FINAL ANSWER")
+
     print()
     if ok:
         print("ALL CASES PASSED")

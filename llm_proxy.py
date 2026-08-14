@@ -166,7 +166,11 @@ def _run_agentic(system: Any, a_messages: List[Dict[str, Any]],
 
     internal = _to_internal_messages(None, a_messages)  # our own system is prepended below
     messages = [{"role": "system", "content": system_prompt}] + internal
-    max_iter = int(cfg.get("CHAT_TOOL_MAX_ITERATIONS", 6) or 6)
+    # The router agent often reads large source files in several chunked
+    # read_file calls, so give it more headroom than the dashboard default
+    # before the forced final-answer turn kicks in. Dedicated key so it doesn't
+    # inherit a low CHAT_TOOL_MAX_ITERATIONS.
+    max_iter = int(cfg.get("llm_proxy_agent_max_iterations") or 10)
     max_result_chars = int(cfg.get("CHAT_TOOL_MAX_TOKENS", 12000) or 12000) * 4
     task_id = f"proxy-agent-{uuid.uuid4().hex[:8]}"
 
