@@ -23,9 +23,9 @@ def _load():
             getattr(t, "id", "") == "_GEMINI_SCHEMA_DROP_KEYS" for t in node.targets
         ):
             segs.append(ast.get_source_segment(src, node))
-        if isinstance(node, ast.FunctionDef) and node.name == "_sanitize_gemini_schema":
+        if isinstance(node, ast.FunctionDef) and node.name in ("_gemini_type", "_sanitize_gemini_schema"):
             segs.append(ast.get_source_segment(src, node))
-    assert len(segs) == 2, f"expected constant + function, found {len(segs)}"
+    assert len(segs) == 3, f"expected constant + 2 functions, found {len(segs)}"
     ns = {"frozenset": frozenset}
     exec(compile("\n".join(segs), "llm_client.py", "exec"), ns)
     return ns["_sanitize_gemini_schema"]
@@ -87,6 +87,24 @@ def main():
     ok &= _check("oneOf is folded into anyOf", "anyOf" in folded and "oneOf" not in folded)
     allof = sanitize({"allOf": [{"type": "string"}]})
     ok &= _check("allOf is folded into anyOf", "anyOf" in allof and "allOf" not in allof)
+
+    # Numeric validators outside Gemini's subset (exclusiveMinimum/Maximum,
+    # multipleOf) are dropped; minimum/maximum are kept.
+    nums = sanitize({"type": "integer", "minimum": 0, "maximum": 10,
+                     "exclusiveMinimum": 0, "exclusiveMaximum": 11, "multipleOf": 2})
+    ok &= _check("exclusiveMinimum/exclusiveMaximum/multipleOf are dropped",
+                 not ({"exclusiveMinimum", "exclusiveMaximum", "multipleOf"} & set(nums)))
+    ok &= _check("minimum/maximum are preserved", nums.get("minimum") == 0 and nums.get("maximum") == 10)
+
+    # A union `type` list (the "Proto field is not repeating" 400) collapses to
+    # a single string; a "null" member becomes OpenAPI `nullable: true`.
+    union = sanitize({"type": ["string", "null"]})
+    ok &= _check("array-valued type collapses to a single string", union.get("type") == "string")
+    ok &= _check("a null member in the type list becomes nullable=true", union.get("nullable") is True)
+    plain_union = sanitize({"type": ["integer", "string"]})
+    ok &= _check("a non-null union type takes the first member and is not nullable",
+                 plain_union.get("type") == "integer" and "nullable" not in plain_union)
+    ok &= _check("a scalar type is left as-is", sanitize({"type": "string"}).get("type") == "string")
 
     # Idempotent + non-mutating: sanitising the output again is a no-op, and the
     # original input dict is not modified in place.
