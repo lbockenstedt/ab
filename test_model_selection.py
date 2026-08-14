@@ -113,6 +113,30 @@ def main():
     result = sel.select_model(R(), [frontier_c, cheap_c])
     ok &= _check("next-cheapest tier wins when the cheaper tier is absent (cheap)", result.key == "c" and result.tier == "cheap")
 
+    # --- prefer_capable flips tier order (frontier > cheap > free) for the
+    # planner/router turn, while default keeps cost-first ---------------------
+    free_p = _cand("pf", cost_tier="free", complexity="large")
+    cheap_p = _cand("pc", cost_tier="cheap", complexity="large")
+    frontier_p = _cand("pfr", cost_tier="frontier", complexity="large")
+    result = sel.select_model(R(prefer_capable=True), [free_p, cheap_p, frontier_p])
+    ok &= _check("prefer_capable picks the frontier tier when all qualify", result.key == "pfr" and result.tier == "frontier")
+    result = sel.select_model(R(prefer_capable=True), [free_p, cheap_p])
+    ok &= _check("prefer_capable falls to the next-most-capable tier (cheap) when no frontier", result.key == "pc" and result.tier == "cheap")
+    result = sel.select_model(R(prefer_capable=False), [free_p, cheap_p, frontier_p])
+    ok &= _check("default (prefer_capable off) still picks the cheapest tier (free)", result.key == "pf" and result.tier == "free")
+
+    # --- pin_key canonicalisation: a "provider|base_url|model" STRING pin
+    # must match a tuple ModelKey candidate (chat_pin / planner pin) ----------
+    tk = ("ollama", "http://gpu:11434", "qwen")
+    pinned = _cand(tk, provider="Ollama", base_url="http://gpu:11434/", model="qwen", cost_tier="free")
+    other = _cand(("anthropic", "https://api", "claude"), provider="anthropic", cost_tier="frontier", complexity="large")
+    result = sel.select_model(R(pin_key="ollama|http://gpu:11434|qwen"), [pinned, other])
+    ok &= _check("string pin matches its tuple ModelKey candidate", result is not None and result.key == tk)
+    result = sel.select_model(R(pin_key="nope|http://x|y"), [pinned, other])
+    ok &= _check("a string pin that matches nothing selects nothing", result is None)
+    result = sel.select_model(R(pin_key=tk), [pinned, other])
+    ok &= _check("a tuple pin still matches its tuple ModelKey candidate", result is not None and result.key == tk)
+
     # --- within-tier performance ranking --------------------------------------
 
     fast = _cand("fast", cost_tier="free")

@@ -1715,6 +1715,17 @@
                                 </div>
                                 <span class="text-xs text-slate-400">Experimental. Best with two or more endpoints (e.g. a local CPU box + GPU box + a cloud provider) so agents run concurrently instead of queuing on one server. Falls back to the normal single-model chat on any failure.</span>
                             </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <label class="text-sm font-medium text-slate-600">Planner / router model</label>
+                                <select name="ORCHESTRATOR_PLANNER_PIN" title="The 'brain' that reads your request, plans the sub-tasks, and routes them. Auto prefers a capable, low-latency model (smartest tier first, then fastest within it). Pin one endpoint — e.g. a fast cloud model — to make planning consistently fast and smart." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <option value="" {{ 'selected' if not settings.ORCHESTRATOR_PLANNER_PIN else '' }}>Auto (smart + fast — capable tier first, latency-ranked)</option>
+                                    {% for e in settings.llm_entries or [] %}
+                                    {% set _ppin = e.provider ~ '|' ~ (e.base_url or '') ~ '|' ~ e.model %}
+                                    <option value="{{ _ppin }}" {{ 'selected' if settings.ORCHESTRATOR_PLANNER_PIN == _ppin else '' }}>{{ e.label or e.model }} ({{ e.provider }}){{ ' — disabled' if e.enabled == False else '' }}</option>
+                                    {% endfor %}
+                                </select>
+                                <span class="text-xs text-slate-400">Applies to the planning turn only; sub-tasks still route per their own complexity (harder work → more capable models, simpler work → cheaper ones). Falls back to your Chat provider pin, then Auto.</span>
+                            </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Parallel Agents</label>
                                 <input type="number" min="1" name="ORCHESTRATOR_MAX_PARALLEL" value="{{ settings.ORCHESTRATOR_MAX_PARALLEL or 3 }}" title="Upper bound on how many sub-task agents run at once. Keep at or below your number of usable LLM endpoints." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">

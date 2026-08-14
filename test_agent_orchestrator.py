@@ -107,6 +107,31 @@ def main():
     tasks_empty = orch.plan_tasks("req", {}, FakeLLM(plan={"tasks": []}))
     ok &= _check("empty plan degrades to a single task", len(tasks_empty) == 1)
 
+    # Planner turn is fast+smart: capture the LlmRequirements it builds.
+    captured = {}
+    def _capture_llm(prompt, system_prompt="", requirements=None, json_schema=None, **k):
+        captured["reqs"] = requirements
+        return json.dumps({"tasks": []})
+    orch.plan_tasks("req", {}, _capture_llm)
+    _r = captured.get("reqs")
+    ok &= _check("planner requests a capable (smart) model via prefer_capable",
+                 getattr(_r, "prefer_capable", False) is True)
+    ok &= _check("planner requests a fast model via latency_sensitive",
+                 getattr(_r, "latency_sensitive", False) is True)
+    ok &= _check("planner has no pin under default config", getattr(_r, "pin_key", "x") is None)
+
+    # An explicit ORCHESTRATOR_PLANNER_PIN overrides the automatic pick.
+    captured.clear()
+    orch.plan_tasks("req", {"ORCHESTRATOR_PLANNER_PIN": "ollama|http://gpu|q"}, _capture_llm)
+    ok &= _check("ORCHESTRATOR_PLANNER_PIN is honored as the planner pin",
+                 getattr(captured.get("reqs"), "pin_key", None) == "ollama|http://gpu|q")
+
+    # chat_pin is the fallback planner pin when no explicit planner pin is set.
+    captured.clear()
+    orch.plan_tasks("req", {"chat_pin": "anthropic|https://api|claude"}, _capture_llm)
+    ok &= _check("planner falls back to chat_pin when no ORCHESTRATOR_PLANNER_PIN",
+                 getattr(captured.get("reqs"), "pin_key", None) == "anthropic|https://api|claude")
+
     # --- DAG utilities ----------------------------------------------------- #
     waves = orch._topological_waves(tasks)
     ok &= _check("topological_waves orders deps into 2 waves",
