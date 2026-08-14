@@ -835,7 +835,8 @@ def _run_chat_reply_orchestrated(chat_id, config):
 
 
 def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
-                   max_result_chars=48000, status_cb=None, on_fix_proposal=None):
+                   max_result_chars=48000, status_cb=None, on_fix_proposal=None,
+                   tool_requirements=None, final_requirements=None):
     """Core CHAT_TOOLS agent loop, decoupled from the chat store / SSE stream so
     ANY front-end can reuse the exact same agentic pipeline and tools — the
     dashboard chat (run_chat_reply) and the Anthropic-compatible LLM-router
@@ -853,9 +854,16 @@ def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
         returns a :::confirm_fix marker; the router triggers the real fix run.
         When None, the raw descriptor is surfaced as text. Either way the loop
         stops after a proposal. ALL mutation lives in this callback, never here.
+    tool_requirements / final_requirements: optional LlmRequirements the caller
+        supplies to steer model selection for the tool turns and the forced
+        final-answer turn respectively. The dashboard chat leaves these None to
+        stay cost-first (medium, latency-sensitive); the LLM router passes a
+        stronger requirement (large + prefer_capable) so agentic diagnosis gets
+        a smarter model. tool_requirements MUST keep needs_tools=True.
     """
     from model_selection import LlmRequirements
     _status = status_cb or (lambda *_a, **_k: None)
+    _tool_reqs = tool_requirements or LlmRequirements(complexity="medium", needs_tools=True, latency_sensitive=True)
     tools = CHAT_TOOLS
     used_chars = 0
     final_text = None
@@ -863,7 +871,6 @@ def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
     for iteration in range(max_iter):
         _status("Thinking…" if iteration == 0 else "Working…")
         try:
-            _tool_reqs = LlmRequirements(complexity="medium", needs_tools=True, latency_sensitive=True)
             result = call_llm("", messages=messages, task_id=task_id, tools=tools, stream=False, requirements=_tool_reqs)
         except Exception as e:
             # Tool-capable turn failed (e.g. cloud without tool support). Degrade
@@ -945,7 +952,7 @@ def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
             try:
                 _status("Summarizing…")
                 messages.append({"role": "system", "content": "You have gathered enough information from the tools. Do NOT call any more tools. Write your final answer to the user now, in plain text."})
-                _final_reqs = LlmRequirements(complexity="medium", latency_sensitive=True)
+                _final_reqs = final_requirements or LlmRequirements(complexity="medium", latency_sensitive=True)
                 forced = call_llm("", messages=messages, task_id=task_id, requirements=_final_reqs)
                 if isinstance(forced, dict):
                     forced = forced.get("text") or ""

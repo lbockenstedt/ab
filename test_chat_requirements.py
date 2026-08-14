@@ -176,6 +176,44 @@ def main():
     ok &= _check("run_agent_loop: iteration cap forces a non-empty final answer",
                  forced_text == "FINAL ANSWER")
 
+    # ---- run_agent_loop: caller-supplied requirements steer both turns ----
+    # The LLM router passes a stronger (large + prefer_capable) requirement so
+    # agentic diagnosis gets a smarter model; the dashboard chat leaves them
+    # None (cost-first). Verify the custom reqs reach call_llm for BOTH the
+    # tool turn and the forced final-answer turn.
+    from model_selection import LlmRequirements as _LR
+    ns_loop2 = _load_ns(
+        {"run_agent_loop"},
+        {
+            "call_llm": None,
+            "CHAT_TOOLS": [{"type": "function", "function": {"name": "noop"}}],
+            "CHAT_TOOL_EXECUTORS": {"noop": lambda gh, config, args: {"ok": 1}},
+            "_sanitize_tool_result": lambda out, config: out,
+            "_trunc": lambda x, n=300: str(x)[:n],
+            "_parse_text_tool_calls": lambda text: (text, []),
+        },
+    )
+    seen = {"tool": None, "final": None}
+
+    def _reqs_capturing_call_llm(prompt, **kwargs):
+        if kwargs.get("tools"):
+            seen["tool"] = kwargs.get("requirements")
+            return {"text": "", "tool_calls": [{"id": "c1", "function": {"name": "noop", "arguments": "{}"}}]}
+        seen["final"] = kwargs.get("requirements")
+        return "FINAL"
+
+    ns_loop2["call_llm"] = _reqs_capturing_call_llm
+    my_tool = _LR(complexity="large", needs_tools=True, prefer_capable=True)
+    my_final = _LR(complexity="large", prefer_capable=True)
+    ns_loop2["run_agent_loop"](
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}],
+        {}, object(), task_id="t", max_iter=2,
+        tool_requirements=my_tool, final_requirements=my_final)
+    ok &= _check("run_agent_loop: tool_requirements passed through to the tool turn",
+                 seen["tool"] is my_tool)
+    ok &= _check("run_agent_loop: final_requirements passed through to the forced final turn",
+                 seen["final"] is my_final)
+
     print()
     if ok:
         print("ALL CASES PASSED")
