@@ -226,10 +226,20 @@ def _check_entries_online(config):
     can't abort the whole sweep. Deduplicated by (provider, base_url, model).
     """
     try:
-        from llm_client import _iter_configured_endpoints
+        from llm_client import _iter_configured_endpoints, _model_key, get_llm_perf_snapshot
     except Exception as e:  # noqa: BLE001
         logger.debug(f"_check_entries_online: cannot enumerate endpoints: {e}")
         return []
+    # "Being used" signal: llm_perf records one sample per completed generation,
+    # keyed by ModelKey. n > 0 means this endpoint has actually served a call —
+    # the header pills show ONLY these (plus the one serving right now), not
+    # every configured endpoint.
+    try:
+        perf = get_llm_perf_snapshot() or {}
+    except Exception:  # noqa: BLE001
+        perf = {}
+    active_model = (state.get("active_llm") or "").strip()
+    active_provider = state.get("active_llm_provider")
     out, seen = [], set()
     for entry_id, provider, api_key, model, base_url, rpm in _iter_configured_endpoints(config):
         key = ((provider or "").lower().strip(), (base_url or "").strip(), (model or "").strip())
@@ -242,8 +252,16 @@ def _check_entries_online(config):
         except Exception as e:  # noqa: BLE001
             logger.debug(f"_check_entries_online probe failed for {label}: {e}")
             online = None
+        try:
+            runs = int((perf.get(_model_key(provider, base_url, model)) or {}).get("n") or 0)
+        except Exception:  # noqa: BLE001
+            runs = 0
+        is_active = bool(active_model) and (model or "").strip() == active_model and (
+            active_provider is None
+            or (provider or "").lower().strip() == (active_provider or "").lower().strip())
         out.append({"id": entry_id, "provider": provider, "model": model,
-                    "base_url": base_url, "online": bool(online)})
+                    "base_url": base_url, "online": bool(online),
+                    "used": bool(runs > 0 or is_active), "runs": runs})
     return out
 
 

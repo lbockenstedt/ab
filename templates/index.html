@@ -289,15 +289,18 @@
                       title="Average generation speed over recent runs (busy time only)"></span>
             </div>
             <!-- Providers (moved from System Health) -->
-            <div class="hidden sm:flex items-center gap-1.5" title="LLM endpoints — online (green) / offline (red). Reflects the routable Model Registry endpoints the picker ranks per call.">
+            <div class="hidden sm:flex items-center gap-1.5" title="LLM endpoints actively serving calls — online (green) / offline (red). Only endpoints that have handled a call (or are serving right now) are shown, not every configured endpoint.">
                 <span class="text-[10px] uppercase tracking-widest text-white/50">Providers</span>
                 <div class="flex gap-1">
                     {% if state.llm_endpoints_online %}
-                    {# Entry-aware view: one pill per routable endpoint (llm_entries),
-                       matching what the capability/cost picker actually routes over. #}
-                    {% for ep in state.llm_endpoints_online %}
-                    <span class="status-pill {{ 'pill-online' if ep.online else 'pill-offline' }}" title="{{ ep.provider }} · {{ ep.model }}{{ ' — ' ~ ep.base_url if ep.base_url else '' }}">{{ (ep.provider or '?')[:4]|upper }}</span>
+                    {# Entry-aware view: one pill per routable endpoint that is
+                       actually being used (has served a call, or is serving now)
+                       — not every configured endpoint. #}
+                    {% set used_eps = state.llm_endpoints_online | selectattr('used') | list %}
+                    {% for ep in used_eps %}
+                    <span class="status-pill {{ 'pill-online' if ep.online else 'pill-offline' }}" title="{{ ep.provider }} · {{ ep.model }}{{ ' — ' ~ ep.base_url if ep.base_url else '' }}{{ ' · ' ~ ep.runs ~ ' run(s)' if ep.runs else ' · serving now' }}">{{ (ep.provider or '?')[:4]|upper }}</span>
                     {% endfor %}
+                    {% if not used_eps %}<span class="text-[11px] text-white/40" title="No endpoint has served a call yet">—</span>{% endif %}
                     {% else %}
                     {# Fallback: legacy per-slot pills (no routable entries reported yet). #}
                     {% for n in [1, 2, 3, 4] %}
