@@ -31,11 +31,13 @@ def _load_funcs():
     want = {"_safe_repo_target", "_issue_identifiers", "_targeted_file_context",
             "parse_and_apply", "_claim_issue", "_release_issue",
             "_robust_json_loads", "_sanitize_json_string_newlines",
+            "_relax_json_fix_strings",
             "_fetch_repo_file_for_review", "_snippet_language_mismatch_hint",
             "_relaxed_edit_span"}
     want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
                     "_JSON_BAD_ESCAPE_RE", "_JS_ONLY_TOKENS_RE", "_PY_ONLY_TOKENS_RE",
-                    "_JS_EXTS", "_PY_EXTS"}
+                    "_JS_EXTS", "_PY_EXTS",
+                    "_FIX_JSON_KEYS", "_JSON_NEXT_MEMBER_RE", "_FIX_CODE_KEY_RE"}
     segs = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
@@ -163,6 +165,55 @@ def main():
                  nl_ok and "WebUI/main.js" in nl_applied)
     ok &= _check("literal-newline replacement landed correctly",
                  "logAudit();" in nl_result and "ensureLDAPTennants" not in nl_result)
+
+    # Regression guard for the recurring "invalid character '—' (U+2014)" /
+    # "Expecting ',' delimiter" fix failures (blocked lm#210): the model's
+    # search/replace CODE contains its OWN string literals with UNESCAPED
+    # double-quotes (logger.error("…")), so json.loads reads the first inner
+    # quote as the end of the value and everything after it (an em-dash, a
+    # paren) as broken structure — the newline-repair and ast.literal_eval
+    # fallbacks then choke. json.dumps can never produce this, so build the raw
+    # response by hand the way a model's free-text output does: literal newlines
+    # AND unescaped inner quotes AND a non-ASCII em-dash, all inside the value.
+    code_old = ('        logger.error("TLS cert load failed: %s" — e)\n'
+                '        raise')
+    code_new = ('        logger.error("TLS cert load failed")\n'
+                '        _ctx.verify_mode = ssl.CERT_REQUIRED\n'
+                '        raise')
+    srv_src = "def start(self):\n    if self.tls_enabled:\n" + code_old + "\n"
+    srv_file = os.path.join(d, "core", "srv.py")
+    os.makedirs(os.path.dirname(srv_file), exist_ok=True)
+    open(srv_file, "w").write(srv_src)
+    unescaped_quotes_resp = (
+        '{"confidence": 0.95, "edits": [{"file": "core/srv.py", '
+        '"search": "' + code_old + '", '
+        '"replace": "' + code_new + '"}]}'
+    )
+    # It must not parse under strict JSON — otherwise the test proves nothing.
+    strict_failed = False
+    try:
+        json.loads(unescaped_quotes_resp)
+    except json.JSONDecodeError:
+        strict_failed = True
+    ok &= _check("malformed (unescaped-quote) response is NOT valid strict JSON",
+                 strict_failed)
+    uq_ok, uq_applied, _ = ns["parse_and_apply"](unescaped_quotes_resp, d)
+    uq_result = open(srv_file).read()
+    ok &= _check("unescaped-inner-quote+em-dash response parses and applies",
+                 uq_ok and "core/srv.py" in uq_applied)
+    ok &= _check("unescaped-quote replacement landed (code preserved verbatim)",
+                 "_ctx.verify_mode = ssl.CERT_REQUIRED" in uq_result
+                 and '"TLS cert load failed"' in uq_result)
+
+    # The repair must be a NO-OP on already-valid JSON — it must never corrupt a
+    # well-formed response (other keys, arrays of short strings, escaped quotes).
+    relax = ns["_relax_json_fix_strings"]
+    valid_json = '{"a": "b", "c": ["d","e"], "search": "x", "f": {"g":"h"}}'
+    ok &= _check("relax is a no-op on already-valid JSON",
+                 relax(valid_json) == valid_json)
+    already_escaped = '{"search": "a \\"q\\" b", "replace": "c"}'
+    ok &= _check("relax preserves an already-escaped code value",
+                 json.loads(relax(already_escaped))["search"] == 'a "q" b')
 
     # Regression guard for GitHub issue #753 ("Reviewer N (copilot) failed:
     # unsupported encoding: none"): PyGithub's ContentFile.decoded_content
