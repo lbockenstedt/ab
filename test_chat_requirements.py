@@ -81,7 +81,7 @@ def main():
     # ---- run_chat_reply: sites #9/#10/#11 ----
     def _make_run_chat_reply_ns(call_llm_fn, github_token):
         return _load_ns(
-            {"run_chat_reply", "_run_chat_reply_simple"},
+            {"run_chat_reply", "run_agent_loop", "_run_chat_reply_simple"},
             {
                 "load_config": lambda: {"CHAT_TOOLS_ENABLED": True, "CHAT_HISTORY_WINDOW": 20,
                                         "GITHUB_TOKEN": github_token},

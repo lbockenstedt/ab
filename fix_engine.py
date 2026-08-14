@@ -3,6 +3,7 @@ import contextlib, git, json, os, re, requests, tempfile, threading, time, trace
 from datetime import datetime
 from github import Github, GithubException
 
+import feature_boundary
 import llm_client
 
 from main import (
@@ -2384,7 +2385,36 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             direct_push_setting = config.get("direct_push_enabled")
             can_direct_push = direct_push_setting and is_trusted and is_owner
 
-            logger.info(f"Deployment decision for {repo_name}: DirectPushSetting={direct_push_setting}, IsTrusted={is_trusted}, IsOwner={is_owner} -> can_direct_push={can_direct_push}")
+            # Core-systems boundary gate — the SAME feature_boundary check that
+            # pr_review._automerge_decision applies to the feature auto-merge
+            # path, mirrored here onto the direct-push path so "core systems can
+            # never auto-land" holds on BOTH exits. Even a trusted+owned repo
+            # with direct_push_enabled and an Approving panel must degrade to a
+            # human-reviewed PR when the real staged diff touches an operator-
+            # configured boundary path (auth/transport/self-update/RBAC/…). The
+            # check is against the actual staged diff (repo_git.git.add(A=True)
+            # ran above), never a prediction. Fail-closed: any error forcing a
+            # PR is the safe direction for this invariant.
+            boundary_forced_pr = False
+            boundary_pr_reason = ""
+            if can_direct_push:
+                try:
+                    _changed_for_boundary = [p for p in repo_git.git.diff("--cached", "--name-only").splitlines() if p.strip()]
+                    _b_hits = feature_boundary.boundary_hits(_changed_for_boundary, config.get("feature_boundaries") or [])
+                except Exception as be:
+                    _b_hits = None
+                    boundary_forced_pr = True
+                    boundary_pr_reason = f"Core-systems boundary check failed ({type(be).__name__}); human-reviewed PR required"
+                    logger.warning(f"Boundary check failed for {repo_name} ({be}); fail-closed to human-reviewed PR.")
+                if _b_hits:
+                    _b_ids = ", ".join(h.get("id", "?") for h in _b_hits)
+                    boundary_forced_pr = True
+                    boundary_pr_reason = f"Diff touches core-systems boundary path(s): {_b_ids}; human-reviewed PR required"
+                    logger.info(f"Direct push blocked for {repo_name}: {boundary_pr_reason}")
+                if boundary_forced_pr:
+                    can_direct_push = False
+
+            logger.info(f"Deployment decision for {repo_name}: DirectPushSetting={direct_push_setting}, IsTrusted={is_trusted}, IsOwner={is_owner}, BoundaryForcedPR={boundary_forced_pr} -> can_direct_push={can_direct_push}")
 
 
             version_bumped = False
@@ -2443,7 +2473,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 _trigger_spoke_updates(config)
                 _wait_for_spokes_online(config, min_count=1, timeout=90)
             else:
-                reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met")
+                reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (boundary_pr_reason if boundary_forced_pr else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met"))
                 decision_reason = reason
                 logger.info(f"Decision: Pull Request. Reason: {reason}.")
                 target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"

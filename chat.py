@@ -796,6 +796,118 @@ def _run_chat_reply_orchestrated(chat_id, config):
         return False
 
 
+def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
+                   max_result_chars=48000, status_cb=None, on_fix_proposal=None):
+    """Core CHAT_TOOLS agent loop, decoupled from the chat store / SSE stream so
+    ANY front-end can reuse the exact same agentic pipeline and tools — the
+    dashboard chat (run_chat_reply) and the Anthropic-compatible LLM-router
+    proxy (llm_proxy's agentic mode) both call this.
+
+    `messages` MUST already include the system prompt as messages[0]; it is
+    mutated in place as the loop appends assistant/tool turns. Returns the final
+    assistant text (always a string).
+
+    status_cb(str): optional progress reporter. The dashboard writes it to the
+        chat stream; the proxy logs it. Never None-crashes (defaulted below).
+    on_fix_proposal(descriptor, text) -> str: optional handler invoked when the
+        model calls propose_fix (which is itself non-mutating — it only returns
+        a confirm_fix descriptor). The dashboard registers a confirm token and
+        returns a :::confirm_fix marker; the router triggers the real fix run.
+        When None, the raw descriptor is surfaced as text. Either way the loop
+        stops after a proposal. ALL mutation lives in this callback, never here.
+    """
+    from model_selection import LlmRequirements
+    _status = status_cb or (lambda *_a, **_k: None)
+    tools = CHAT_TOOLS
+    used_chars = 0
+    final_text = None
+    last_text = ""
+    for iteration in range(max_iter):
+        _status("Thinking…" if iteration == 0 else "Working…")
+        try:
+            _tool_reqs = LlmRequirements(complexity="medium", needs_tools=True, latency_sensitive=True)
+            result = call_llm("", messages=messages, task_id=task_id, tools=tools, stream=False, requirements=_tool_reqs)
+        except Exception as e:
+            # Tool-capable turn failed (e.g. cloud without tool support). Degrade
+            # to one index-only turn and finish.
+            logger.warning(f"Agent tool turn {iteration} failed ({e}); degrading to index-only answer.")
+            _fallback_reqs = LlmRequirements(complexity="small", latency_sensitive=True, pin_key=(config.get("chat_pin") or None))
+            reply = call_llm("", messages=messages[:], task_id=task_id, requirements=_fallback_reqs)
+            final_text = reply or ""
+            break
+
+        if not isinstance(result, dict):
+            final_text = str(result)
+            break
+        text = result.get("text") or ""
+        tool_calls = result.get("tool_calls") or []
+        # Fallback: model emitted tool calls as <tool_call>{…}</tool_call> text
+        # rather than structured tool_calls — parse + execute them, and strip the
+        # tags so the raw JSON never shows in the answer.
+        if not tool_calls:
+            text, tool_calls = _parse_text_tool_calls(text)
+        last_text = text
+        if not tool_calls:
+            final_text = text
+            break
+
+        # Echo the assistant turn (with tool_calls) back for the next round.
+        messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+
+        hit_proposal = False
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name") or tc.get("name")
+            args_raw = fn.get("arguments") if fn else tc.get("arguments")
+            if isinstance(args_raw, str):
+                try:
+                    args = json.loads(args_raw) if args_raw else {}
+                except Exception:
+                    args = {}
+            elif isinstance(args_raw, dict):
+                args = args_raw
+            else:
+                args = {}
+
+            if not name or name not in CHAT_TOOL_EXECUTORS:
+                out = {"error": f"unknown tool: {name}"}
+            else:
+                _status(f"[calling tool: {name} …]")
+                try:
+                    out = CHAT_TOOL_EXECUTORS[name](gh, config, args)
+                except Exception as ee:
+                    out = {"error": f"{type(ee).__name__}: {_trunc(ee, 300)}"}
+            out = _sanitize_tool_result(out, config)
+            out_str = json.dumps(out)
+            if used_chars + len(out_str) > max_result_chars:
+                out_str = json.dumps({"error": "tool result budget exceeded; narrow your query", "truncated": True})
+            used_chars += len(out_str)
+            tool_call_id = tc.get("id") or f"call_{name}_{iteration}"
+            messages.append({"role": "tool", "name": name or "unknown", "content": out_str, "tool_call_id": tool_call_id})
+
+            # propose_fix is non-mutating: hand the descriptor to the front-end's
+            # handler (confirm button, or a real fix trigger) and stop.
+            if name == "propose_fix" and isinstance(out, dict) and out.get("kind") == "confirm_fix":
+                if on_fix_proposal is not None:
+                    final_text = on_fix_proposal(out, text)
+                else:
+                    final_text = (text + "\n\n" + json.dumps(out)).strip() if text else json.dumps(out)
+                hit_proposal = True
+                break
+        if hit_proposal:
+            break
+    else:
+        # Iteration cap reached without a no-tool_calls turn; return last text.
+        final_text = last_text or ""
+
+    if final_text is None:
+        final_text = last_text or ""
+    # Defense in depth: strip any residual <tool_call> tags before returning.
+    if final_text and "<tool_call>" in final_text:
+        final_text, _ = _parse_text_tool_calls(final_text)
+    return final_text
+
+
 def run_chat_reply(chat_id):
     """Background worker that produces an LLM reply for one conversation turn.
 
@@ -859,95 +971,23 @@ def run_chat_reply(chat_id):
             _finalize_chat_stream(chat_id, reply or "")
             return
 
-        tools = CHAT_TOOLS
-        used_chars = 0
-        final_text = None
-        last_text = ""
-        for iteration in range(max_iter):
-            _set_chat_stream_status(chat_id, "Thinking…" if iteration == 0 else "Working…")
-            try:
-                from model_selection import LlmRequirements
-                _tool_reqs = LlmRequirements(complexity="medium", needs_tools=True, latency_sensitive=True)
-                result = call_llm("", messages=messages, task_id=chat_id, tools=tools, stream=False, requirements=_tool_reqs)
-            except Exception as e:
-                # Tool-capable /api/chat failed (e.g. cloud without /api/chat tool
-                # support). Degrade to one streaming index-only turn and finish.
-                logger.warning(f"Chat tool turn {iteration} failed ({e}); degrading to index-only answer.")
-                try:
-                    from model_selection import LlmRequirements
-                    _fallback_reqs = LlmRequirements(complexity="small", latency_sensitive=True, pin_key=(config.get("chat_pin") or None))
-                    reply = call_llm("", messages=messages[:], task_id=chat_id, requirements=_fallback_reqs)
-                    final_text = reply or ""
-                except Exception as ee:
-                    _set_chat_stream_error(chat_id, f"LLM error: {ee}")
-                    return
-                break
+        def _chat_on_fix_proposal(descriptor, text):
+            # Dashboard front-end: register a single-use confirm token and render
+            # a Confirm button (:::confirm_fix marker). Non-mutating — the real
+            # fix only runs when the user POSTs /api/chat/confirm_fix.
+            _register_fix_proposal(chat_id, descriptor, config)
+            marker = _confirm_fix_marker(descriptor)
+            return (text + "\n\n" + marker).strip() if text else marker
 
-            if not isinstance(result, dict):
-                final_text = str(result)
-                break
-            text = result.get("text") or ""
-            tool_calls = result.get("tool_calls") or []
-            # Fallback: model emitted tool calls as <tool_call>{…}</tool_call> text
-            # rather than structured tool_calls — parse + execute them, and strip the
-            # tags so the raw JSON never shows in the answer.
-            if not tool_calls:
-                text, tool_calls = _parse_text_tool_calls(text)
-            last_text = text
-            if not tool_calls:
-                final_text = text
-                break
-
-            # Echo the assistant turn (with tool_calls) back for the next round.
-            messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
-
-            hit_proposal = False
-            for tc in tool_calls:
-                fn = tc.get("function") or {}
-                name = fn.get("name") or tc.get("name")
-                args_raw = fn.get("arguments") if fn else tc.get("arguments")
-                if isinstance(args_raw, str):
-                    try:
-                        args = json.loads(args_raw) if args_raw else {}
-                    except Exception:
-                        args = {}
-                elif isinstance(args_raw, dict):
-                    args = args_raw
-                else:
-                    args = {}
-
-                if not name or name not in CHAT_TOOL_EXECUTORS:
-                    out = {"error": f"unknown tool: {name}"}
-                else:
-                    _set_chat_stream_status(chat_id, f"[calling tool: {name} …]")
-                    try:
-                        out = CHAT_TOOL_EXECUTORS[name](gh, config, args)
-                    except Exception as ee:
-                        out = {"error": f"{type(ee).__name__}: {_trunc(ee, 300)}"}
-                out = _sanitize_tool_result(out, config)
-                out_str = json.dumps(out)
-                if used_chars + len(out_str) > max_result_chars:
-                    out_str = json.dumps({"error": "tool result budget exceeded; narrow your query", "truncated": True})
-                used_chars += len(out_str)
-                tool_call_id = tc.get("id") or f"call_{name}_{iteration}"
-                messages.append({"role": "tool", "name": name or "unknown", "content": out_str, "tool_call_id": tool_call_id})
-
-                # propose_fix is non-mutating: surface a Confirm button and stop.
-                if name == "propose_fix" and isinstance(out, dict) and out.get("kind") == "confirm_fix":
-                    _register_fix_proposal(chat_id, out, config)
-                    marker = _confirm_fix_marker(out)
-                    messages.append({"role": "system", "content": "A confirmation button has been shown to the user for this fix. Stop calling tools this turn and tell the user to click Confirm to run the fix."})
-                    final_text = (text + "\n\n" + marker).strip() if text else marker
-                    hit_proposal = True
-                    break
-            if hit_proposal:
-                break
-        else:
-            # Iteration cap reached without a no-tool_calls turn; return last text.
-            final_text = last_text or ""
+        final_text = run_agent_loop(
+            messages, config, gh,
+            task_id=chat_id, max_iter=max_iter, max_result_chars=max_result_chars,
+            status_cb=lambda s: _set_chat_stream_status(chat_id, s),
+            on_fix_proposal=_chat_on_fix_proposal,
+        )
 
         if final_text is None:
-            final_text = last_text or ""
+            final_text = ""
         # Defense in depth: strip any residual <tool_call> tags before display.
         if final_text and "<tool_call>" in final_text:
             final_text, _ = _parse_text_tool_calls(final_text)
@@ -997,6 +1037,7 @@ __all__ = [
     '_register_fix_proposal',
     '_confirm_fix_marker',
     '_run_chat_reply_simple',
+    'run_agent_loop',
     'run_chat_reply',
     '_CHAT_INDEX_CACHE',
     '_CHAT_INDEX_LOCK',
