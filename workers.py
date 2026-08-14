@@ -1597,6 +1597,7 @@ def _fetch_models_for_provider(provider, api_key, base_url):
     # claude_cli needs no API key — return the current Claude model roster.
     if p == "claude_cli":
         return {"models": [
+            {"name": "claude-opus-5",             "details": "Claude Opus 5"},
             {"name": "claude-sonnet-4-6",         "details": "Claude Sonnet 4.6"},
             {"name": "claude-opus-4-8",            "details": "Claude Opus 4.8"},
             {"name": "claude-haiku-4-5-20251001",  "details": "Claude Haiku 4.5"},
