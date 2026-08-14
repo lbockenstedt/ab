@@ -2166,6 +2166,12 @@ async def save_settings(request: Request):
                 config_data[key] = transform(val)
 
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
+    # Agentic LLM router (/v1/messages) toggles. agentic_default (OFF): route
+    # every proxy request through BugFixer's agent loop, not just model=
+    # bugfixer-agent. autofix_enabled (OFF, safe for an open/keyless proxy):
+    # let the agentic router trigger real fixes — still panel + boundary gated.
+    config_data["llm_proxy_agentic_default"] = data.get("llm_proxy_agentic_default") == "on"
+    config_data["llm_proxy_autofix_enabled"] = data.get("llm_proxy_autofix_enabled") == "on"
     # PR pre-review toggle (default OFF): comment parity/drift findings on open PRs.
     config_data["pr_review_enabled"] = data.get("pr_review_enabled") == "on"
     # Advisory skeptical-panel sub-option (unifies PR review with the AI-fix reviewer).
