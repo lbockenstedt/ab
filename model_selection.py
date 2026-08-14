@@ -6,8 +6,10 @@ snapshot (from llm_perf.py), decides which model to use for one call.
 
 Pipeline: availability -> restriction -> capability filter -> group by cost
 tier (free < cheap < frontier < unknown) -> within-tier performance ranking
-(cold-start neutral) -> relative-exhaustion check (never empties a tier) ->
-first surviving tier's best candidate wins. Two-pass: a strict pass excludes
+(cold-start neutral; reqs.deprioritize_local pushes local/no-key endpoints to
+the bottom of their tier so offloadable work prefers a free cloud peer) ->
+relative-exhaustion check (never empties a tier) -> first surviving tier's
+best candidate wins. Two-pass: a strict pass excludes
 unclassified ("unknown" cost_tier) models; if that yields nothing, a
 permissive pass re-admits them, so a fresh/lightly-curated registry still
 resolves something instead of a cold-install dead end.
@@ -20,6 +22,13 @@ import model_registry as registry
 
 MIN_SAMPLES = 3
 DEFAULT_SLOW_FACTOR = 4.0
+
+# Intra-tier score penalty applied to no-key/local endpoints when a call sets
+# reqs.deprioritize_local. Far larger than the [0, ~1.1] score range so ANY
+# non-local peer in the same tier outranks every local one — yet applied
+# uniformly, so a tier that is all-local keeps its internal order and still
+# resolves.
+_LOCAL_OFFLOAD_PENALTY = 100.0
 
 
 @dataclass(frozen=True)
@@ -40,6 +49,13 @@ class LlmRequirements:
     prefer_capable: bool = False               # invert tier preference: pick the SMARTEST tier
                                                # first (frontier>cheap>free) instead of cheapest —
                                                # for the planner/router turn ("fast AND smart")
+    deprioritize_local: bool = False           # SOFT within-tier bias: rank no-key/local endpoints
+                                               # (self-hosted GPU, LM Studio, claude_cli session) LAST
+                                               # so offloadable work (log review, batch) prefers a
+                                               # capable FREE CLOUD peer and leaves the GPU idle for
+                                               # the coordinator. Never excludes: if the GPU is the
+                                               # only free option it still wins its tier (paid stays
+                                               # a fallback, reached only when nothing free qualifies).
 
 
 @dataclass
@@ -148,6 +164,18 @@ def _rank_tier(tier_candidates, perf, reqs, min_samples):
         if reqs.needs_streaming and caps.get("supports_streaming"):
             bonus += 0.05
         s["score"] += bonus
+
+    # Offload bias: push no-key/local endpoints (self-hosted GPU, LM Studio,
+    # claude_cli session auth) to the BOTTOM of their tier so offloadable work
+    # (log review, batch summaries) prefers a capable free CLOUD peer and the
+    # GPU stays idle for the coordinator/planner. This is intra-tier only — the
+    # penalty is applied equally to every local candidate, so an all-local tier
+    # keeps its relative order and still resolves (never empties a tier), and a
+    # paid tier is never promoted over it.
+    if reqs.deprioritize_local:
+        for s in stats:
+            if registry.is_nokey_provider(s["c"].get("provider")):
+                s["score"] -= _LOCAL_OFFLOAD_PENALTY
 
     stats.sort(key=lambda s: s["score"], reverse=True)
     return stats
@@ -333,7 +361,11 @@ def explain_selection(reqs, candidates, perf=None, tuning=None):
             row["reason"] = selection.reason
         elif key in alt_rank:
             row["status"] = "alternative"
-            row["reason"] = "capable fallback (tier=%s)" % (caps.get("cost_tier") or "?")
+            if reqs.deprioritize_local and registry.is_nokey_provider(c.get("provider")):
+                row["reason"] = ("local/GPU deprioritized for offloadable work — "
+                                 "fallback if no free cloud (tier=%s)" % (caps.get("cost_tier") or "?"))
+            else:
+                row["reason"] = "capable fallback (tier=%s)" % (caps.get("cost_tier") or "?")
         else:
             row["status"] = "excluded"
             row["reason"] = (_exclusion_reason(c, reqs, allow_unknown)

@@ -1583,6 +1583,7 @@ def _run_log_analysis(source, window_minutes=None, precomputed=False):
     update_task_state(task_id=_LOG_ANALYSIS_TASK, task_name=f"Analyzing {title}", action="start")
     try:
         reqs = LlmRequirements(complexity="small", latency_sensitive=True,
+                               deprioritize_local=True,
                                min_context_tokens=len(log_text) // 4)
         raw = analyze_logs(log_text, title=f"{title} for the BugFixer system",
                            task_id=_LOG_ANALYSIS_TASK, requirements=reqs)

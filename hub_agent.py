@@ -445,6 +445,7 @@ class HubAgentClient:
                 status, error = "error", "no logs provided"
             else:
                 reqs = LlmRequirements(complexity="small", latency_sensitive=False,
+                                       deprioritize_local=True,
                                        min_context_tokens=len(log_text) // 4)
                 raw = await _aio.get_event_loop().run_in_executor(
                     None, lambda: analyze_logs(log_text, title, requirements=reqs))

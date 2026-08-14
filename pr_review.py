@@ -302,6 +302,7 @@ def _summarize_changes(pr, files, config, repo=None):
     prompt = ("Summarize what this pull request changes, for the reviewer.\n\n"
               "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest))
     reqs = LlmRequirements(complexity="trivial", batch_ok=True,
+                           deprioritize_local=True,
                            min_context_tokens=len(prompt) // 4)
     batch_context = None
     if repo is not None:
