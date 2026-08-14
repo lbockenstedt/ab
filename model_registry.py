@@ -97,11 +97,14 @@ DEFAULT_MODEL_RULES = [
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True, "notes": ""},
     {"id": "claude-cli", "provider": "claude_cli", "match": "*", "label": "Claude CLI (session auth)",
-     "cost_tier": "free", "max_complexity": "large", "context_window": 200000,
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
      "enabled": True,
-     "notes": "session-auth, no per-call billing; the only provider with native_agentic_tools/supports_mutating_agent"},
+     "notes": "session auth (no API key), but every call bills the operator's Anthropic "
+              "account — cost_tier=frontier so the picker RESERVES it (free/GPU wins first, "
+              "claude_cli is used only when a call needs its native_agentic_tools/"
+              "supports_mutating_agent, e.g. feature_build)"},
     {"id": "ollama-cloud", "provider": "ollama_cloud", "match": "*", "label": "Ollama Cloud",
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -311,6 +314,34 @@ def upgrade_capable_local_rules(rules):
         existing_ids.add(default.get("id"))
         existing_pairs.add(pair)
     return rules, added_ids
+
+
+def reclassify_claude_cli_paid(rules):
+    """Return (new_rules, changed): a COPY of `rules` with any claude_cli rule
+    still marked cost_tier="free" bumped to "frontier".
+
+    claude_cli authenticates via a local session (no API key), so an earlier
+    registry classified it "free" alongside the self-hosted GPU — but every
+    claude_cli call actually bills the operator's Anthropic account. Marking it
+    frontier makes the cost-first picker RESERVE it: free/GPU wins first, and
+    claude_cli is reached only when a call needs its native_agentic_tools /
+    supports_mutating_agent (e.g. feature_build) or nothing cheaper qualifies.
+
+    Only touches rules whose provider is claude_cli AND whose cost_tier is
+    exactly "free" — an operator who deliberately set another tier is left
+    alone. Idempotent (a second run finds nothing to change); never reorders,
+    adds, or removes rules."""
+    rules = list(rules or [])
+    changed = False
+    out = []
+    for r in rules:
+        if (isinstance(r, dict)
+                and (r.get("provider") or "").lower().strip() == "claude_cli"
+                and (r.get("cost_tier") or "").lower().strip() == "free"):
+            r = {**r, "cost_tier": "frontier"}
+            changed = True
+        out.append(r)
+    return out, changed
 
 
 def _model_param_b(name):

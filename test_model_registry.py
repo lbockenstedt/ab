@@ -69,7 +69,7 @@ def main():
                 reg.resolve("anthropic", "claude-opus-4-8", disabled_config) == reg.UNKNOWN_CAPS)
 
     ok &= _check("empty/absent model_registry key falls back to DEFAULT_MODEL_RULES",
-                reg.resolve("claude_cli", "sonnet", {})["cost_tier"] == "free")
+                reg.resolve("claude_cli", "sonnet", {})["cost_tier"] == "frontier")
 
     # --- per-family seed defaults (DEFAULT_MODEL_RULES itself) --------------
 
@@ -77,8 +77,8 @@ def main():
                 reg.resolve("ollama", "qwen2.5-coder:14b", {})["cost_tier"] == "free")
     ok &= _check("lmstudio defaults to free",
                 reg.resolve("lmstudio", "some-model", {})["cost_tier"] == "free")
-    ok &= _check("claude_cli defaults to free",
-                reg.resolve("claude_cli", "sonnet", {})["cost_tier"] == "free")
+    ok &= _check("claude_cli defaults to frontier (session auth, but bills the operator's account)",
+                reg.resolve("claude_cli", "sonnet", {})["cost_tier"] == "frontier")
     ok &= _check("ollama_cloud (the one ollama* that takes a key) is cheap, not free",
                 reg.resolve("ollama_cloud", "qwen2.5-coder:14b", {})["cost_tier"] == "cheap")
     ok &= _check("claude_cli is the only provider with native_agentic_tools",
@@ -270,6 +270,27 @@ def main():
     own_top, own_added = reg.upgrade_capable_local_rules(own)
     ok &= _check("capable top-up never overrides an operator's own (provider, match) rule",
                 "ollama2-qwen3-coder" not in own_added)
+
+    # --- reclassify_claude_cli_paid: a frozen free claude_cli rule -> frontier
+    frozen_claude = [
+        {"id": "claude-cli", "provider": "claude_cli", "match": "*", "cost_tier": "free",
+         "max_complexity": "large", "context_window": 200000, "enabled": True},
+        {"id": "gpu", "provider": "ollama2", "match": "*", "cost_tier": "free",
+         "max_complexity": "medium", "context_window": 32768, "enabled": True},
+    ]
+    repaired, changed = reg.reclassify_claude_cli_paid(frozen_claude)
+    _claude = next(r for r in repaired if r.get("provider") == "claude_cli")
+    _gpu = next(r for r in repaired if r.get("provider") == "ollama2")
+    ok &= _check("reclassify bumps a free claude_cli rule to frontier", changed and _claude["cost_tier"] == "frontier")
+    ok &= _check("reclassify leaves the free GPU rule untouched", _gpu["cost_tier"] == "free")
+    _, changed2 = reg.reclassify_claude_cli_paid(repaired)
+    ok &= _check("reclassify is idempotent — a second run changes nothing", changed2 is False)
+    # An operator who deliberately set another claude_cli tier is left alone.
+    op = [{"id": "claude-cli", "provider": "claude_cli", "match": "*", "cost_tier": "cheap",
+           "max_complexity": "large", "context_window": 200000, "enabled": True}]
+    op_out, op_changed = reg.reclassify_claude_cli_paid(op)
+    ok &= _check("reclassify only touches cost_tier=free — a curated 'cheap' is preserved",
+                op_changed is False and op_out[0]["cost_tier"] == "cheap")
 
     print()
     if ok:

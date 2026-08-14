@@ -30,8 +30,12 @@ What it does (see the plan's §7):
   7. (v3) Registry top-up of known-capable self-hosted model rules
      (qwen3-coder, llama3.3, gemma4) so a frozen config gains them without a
      manual Settings edit. Append-only/idempotent; see
-     model_registry.upgrade_capable_local_rules. Bumping the version to 3 is
-     what re-triggers this one-shot top-up on an already-v2 config.
+     model_registry.upgrade_capable_local_rules.
+  8. (v4) Reclassify a frozen claude_cli rule from free -> frontier: it is
+     session-auth (no key) but bills the operator's Anthropic account, so the
+     picker must RESERVE it rather than tie it with the truly-free GPU. See
+     model_registry.reclassify_claude_cli_paid. Bumping the version re-triggers
+     these one-shot top-ups on an already-migrated config.
 """
 
 import logging
@@ -40,7 +44,7 @@ import model_registry
 
 logger = logging.getLogger("BugFixer")
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 
 def _slot_entry_id(config, slot):
@@ -154,6 +158,11 @@ def migrate(config):
         if _added_cap:
             config["model_registry"] = _topped
             logger.info("LLM registry: added capable self-hosted model rules %s during migration.", _added_cap)
+        _repaired, _reclassified = model_registry.reclassify_claude_cli_paid(config["model_registry"])
+        if _reclassified:
+            config["model_registry"] = _repaired
+            logger.info("LLM registry: reclassified claude_cli free -> frontier (bills the "
+                        "operator's Anthropic account) during migration.")
 
     # 6: capability seeding + one summary line.
     try:
