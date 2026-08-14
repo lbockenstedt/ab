@@ -1204,13 +1204,24 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                 resp.raise_for_status()
 
             if resp.status_code == 400:
+                # Attach the provider's own explanation instead of the bare
+                # "400 Client Error: Bad Request for url: ..." that
+                # raise_for_status() produces. Ollama's 400 body carries the
+                # actual reason (unsupported tools, prompt longer than context,
+                # bad model tag) — discarding it left the proxy reporting only
+                # "All LLM candidates failed. Last error: 400 Bad Request",
+                # which says nothing an operator can act on.
                 err_body = ""
                 try:
-                    err_body = resp.text[:1000]
-                except Exception:
+                    err_body = _redact_secrets(resp.text[:1000], headers)
+                except Exception:  # noqa: BLE001 — body is best-effort
                     pass
                 logger.error(f"LLM 400 Bad Request at {endpoint}. Body: {err_body!r}")
                 resp.close()
+                if err_body:
+                    raise requests.exceptions.HTTPError(
+                        f"400 Client Error: {resp.reason} for url: {endpoint} — {err_body}",
+                        response=resp)
                 resp.raise_for_status()
 
             if 500 <= resp.status_code < 600:
