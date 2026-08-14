@@ -48,7 +48,7 @@ import model_registry
 
 logger = logging.getLogger("BugFixer")
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 
 
 def _slot_entry_id(config, slot):
@@ -172,6 +172,11 @@ def migrate(config):
             config["model_registry"] = _topped
             logger.info("LLM registry: added per-model claude_cli capability rules %s "
                         "(Haiku=medium, Sonnet/Opus=large) during migration.", _added_cc)
+        _topped, _added_router = model_registry.upgrade_openrouter_free_router_rule(config["model_registry"])
+        if _added_router:
+            config["model_registry"] = _topped
+            logger.info("LLM registry: added the OpenRouter Free Models Router rule "
+                        "(openrouter/free -> free tier) during migration.")
 
     # 6: capability seeding + one summary line.
     try:

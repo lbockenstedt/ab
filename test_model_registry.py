@@ -91,6 +91,10 @@ def main():
     ok &= _check("openrouter's :free suffix is more specific than the bare openrouter wildcard",
                 reg.resolve("openrouter", "some-model:free", {})["cost_tier"] == "free"
                 and reg.resolve("openrouter", "some-model", {})["cost_tier"] == "cheap")
+    ok &= _check("the OpenRouter Free Models Router (openrouter/free) resolves to the FREE tier",
+                reg.resolve("openrouter", "openrouter/free", {})["cost_tier"] == "free"
+                and reg.resolve("openrouter", "openrouter/free", {})["_matched_rule_id"]
+                    == "openrouter-free-router")
     ok &= _check("anthropic haiku family is cheap, sonnet/opus are frontier",
                 reg.resolve("anthropic", "claude-haiku-4-5", {})["cost_tier"] == "cheap"
                 and reg.resolve("anthropic", "claude-sonnet-5", {})["cost_tier"] == "frontier"
@@ -339,6 +343,31 @@ def main():
     _, cc_own_added = reg.upgrade_claude_cli_model_rules(cc_own)
     ok &= _check("claude_cli per-model top-up never overrides an operator's own (provider, match) rule",
                 "claude-cli-haiku" not in cc_own_added)
+
+    # --- OpenRouter Free Models Router rule + upgrade_openrouter_free_router_rule ---
+
+    # Injected into a frozen config that predates the rule (append-only).
+    frozen_no_router = [r for r in reg.DEFAULT_MODEL_RULES
+                        if r["id"] != "openrouter-free-router"]
+    routed, router_added = reg.upgrade_openrouter_free_router_rule(frozen_no_router)
+    ok &= _check("free-router top-up appends the openrouter-free-router rule when missing",
+                router_added is True
+                and any(r["id"] == "openrouter-free-router" for r in routed))
+    _, router_added2 = reg.upgrade_openrouter_free_router_rule(routed)
+    ok &= _check("free-router top-up is idempotent — a second run adds nothing",
+                router_added2 is False)
+    _, router_default_added = reg.upgrade_openrouter_free_router_rule(reg.DEFAULT_MODEL_RULES)
+    ok &= _check("DEFAULT_MODEL_RULES already ships the free-router rule — top-up is a no-op",
+                router_default_added is False)
+    router_own = [{"id": "my-router", "provider": "openrouter", "match": "openrouter/free",
+                   "cost_tier": "cheap", "max_complexity": "small", "enabled": True}]
+    _, router_own_added = reg.upgrade_openrouter_free_router_rule(router_own)
+    ok &= _check("free-router top-up never overrides an operator's own (provider, openrouter/free) rule",
+                router_own_added is False)
+    # After the top-up, a frozen config resolves openrouter/free to the free tier.
+    ok &= _check("post-top-up, openrouter/free resolves free (offload prefers it over the GPU)",
+                reg.resolve("openrouter", "openrouter/free", {"model_registry": routed})["cost_tier"]
+                    == "free")
 
     print()
     if ok:
