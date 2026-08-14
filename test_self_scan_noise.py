@@ -67,6 +67,13 @@ def main():
          "log": "[ERROR] ABORTING fix: new content contains a truncation marker"},
         {"module": "bugfixer-core",
          "log": "[ERROR] No verified fix found after 3 attempt(s) — AI generated invalid JSON format"},
+        # config/state I/O operational errors (bugfixer#806) — environment
+        # conditions load_config/save_config already handle, not code defects.
+        {"module": "bugfixer-core",
+         "log": "2026-08-13 02:05:49 [ERROR] Error reading persistent config "
+                "/etc/bugfixer/config.json: Expecting value: line 1 column 1 (char 0)"},
+        {"module": "bugfixer-core",
+         "log": "[ERROR] Critical failure saving config: [Errno 28] No space left on device"},
     ]
     real = [
         {"module": "spoke",
@@ -85,10 +92,12 @@ def main():
         print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
         ok = ok and cond
 
-    check("all fix-engine chatter dropped",
+    check("all fix-engine + config-I/O chatter dropped",
           not any(n["log"] in kept_texts for n in noise))
     check("exact #834 anchor-miss line dropped",
           not any("search snippet not found" in t for t in kept_texts))
+    check("exact #806 config-read error dropped",
+          not any("Error reading persistent config" in t for t in kept_texts))
     check("genuine KeyError preserved",
           any("KeyError" in t for t in kept_texts))
     check("genuine traceback preserved",

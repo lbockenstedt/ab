@@ -182,24 +182,40 @@ def get_hub_state():
         return None
 
 
-# BugFixer's fix engine logs its OWN fix-attempt mechanics at ERROR level (so a
-# within-run retry can still see the failing snippet). Those lines are handled,
-# expected control flow — a non-matching edit anchor, an unparseable model
-# reply, a rejected rewrite — NOT product defects. But they carry an [ERROR]
-# tag, so the self-log scanner used to hand them to the LLM as "actionable
-# errors" and file phantom issues about BugFixer fixing its own fix attempts
-# (e.g. bugfixer#834, created verbatim from a single "Edit search snippet not
-# found ... skipping this edit" line). There is no code to fix, so every such
-# issue burns its retry budget and fails "AI generated invalid JSON format",
-# then recurs the next time any edit anchor misses — a self-referential loop.
-# Drop the fix engine's operational chatter before it can seed an issue.
+# BugFixer's own operational self-reporting that carries an [ERROR] tag but is
+# NOT a product defect the code-fixing LLM can act on. Two families:
+#
+#  1. Fix-engine attempt mechanics, logged at ERROR so a within-run retry can
+#     still see the failing snippet — a non-matching edit anchor, an unparseable
+#     model reply, a rejected rewrite, giving up after N attempts. These are
+#     handled, expected control flow, not bugs. The self-log scanner used to
+#     hand them to the LLM and file phantom issues about BugFixer fixing its own
+#     fix attempts (e.g. bugfixer#834, created verbatim from a single "Edit
+#     search snippet not found ... skipping this edit" line). There is no code
+#     to fix, so the issue burns its retry budget and fails "AI generated
+#     invalid JSON format", then recurs the next edit anchor miss.
+#
+#  2. Config/state file I/O errors (e.g. "Error reading persistent config ...
+#     Expecting value: line 1 column 1 (char 0)"). These are environment/ops
+#     conditions — a transiently empty or hand-edited config.json — that
+#     load_config already recovers from via its local/defaults fallback, and
+#     save_config already writes atomically to prevent. The scanner filed them
+#     as issues too, but their own triage can only ever conclude "non-actionable
+#     — ensure the file is valid JSON" (e.g. bugfixer#806); a code edit cannot
+#     fix a corrupt file on disk.
+#
+# The lines are still logged (humans and the Diagnostics view see them); they
+# just no longer seed an auto-fix issue.
 _SELF_SCAN_NOISE = re.compile(
     r'search snippet not found'
     r'|No fixes could be applied'
     r'|Error parsing or applying JSON fix'
     r'|AI generated invalid JSON format'
     r'|ABORTING fix'
-    r'|No verified fix found after',
+    r'|No verified fix found after'
+    r'|Error reading persistent config'
+    r'|Could not save to persistent storage'
+    r'|Critical failure saving config',
     re.IGNORECASE,
 )
 
@@ -253,8 +269,8 @@ def filter_error_logs(logs):
         if not error_pattern.search(text):
             continue
 
-        # Skip BugFixer's own fix-engine chatter so it can't seed phantom issues
-        # about its own fix attempts (see _SELF_SCAN_NOISE above).
+        # Skip BugFixer's own operational chatter (fix-engine mechanics + config
+        # I/O errors) so it can't seed phantom issues (see _SELF_SCAN_NOISE).
         if _SELF_SCAN_NOISE.search(text):
             continue
 
