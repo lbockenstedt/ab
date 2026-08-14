@@ -162,6 +162,51 @@ DEFAULT_MODEL_RULES = [
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
      "enabled": True, "notes": ""},
+
+    # --- Capable self-hosted models -------------------------------------
+    # The generic `ollama`/`ollama2` defaults are deliberately conservative
+    # (tools=False, max_complexity refined to at most `medium`, 32k context)
+    # because capability can't be inferred from a model name alone. These
+    # families, however, are known-capable: they support Ollama tool-calling
+    # and long context, so a self-hoster's GPU can serve tool/large/long-
+    # context work for free instead of falling through to a paid tier. The
+    # large `context_window` also matters — the generic 32k default fails the
+    # picker's `context_window >= min_context_tokens * 1.25` gate for the ~81k
+    # planner/agent calls, which is why those "resolved nothing" and fell to a
+    # paid model. Duplicated per local provider because provider match is exact.
+    # (supports_mutating_agent stays False — Ollama has NO agentic file-edit
+    # runtime; only claude_cli does. Flagging it would pick a model for
+    # feature_build that then changes zero files.)
+    {"id": "ollama-qwen3-coder", "provider": "ollama", "match": "qwen3-coder*", "label": "Qwen3-Coder (self-hosted)",
+     "cost_tier": "free", "max_complexity": "large", "context_window": 262144,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "strong local coder with native tool-calling + long context"},
+    {"id": "ollama2-qwen3-coder", "provider": "ollama2", "match": "qwen3-coder*", "label": "Qwen3-Coder (GPU)",
+     "cost_tier": "free", "max_complexity": "large", "context_window": 262144,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "strong local coder with native tool-calling + long context"},
+    {"id": "ollama-llama33", "provider": "ollama", "match": "llama3.3*", "label": "Llama 3.3 (self-hosted)",
+     "cost_tier": "free", "max_complexity": "large", "context_window": 131072,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "native tool-calling; capable general planner/coordinator"},
+    {"id": "ollama2-llama33", "provider": "ollama2", "match": "llama3.3*", "label": "Llama 3.3 (GPU)",
+     "cost_tier": "free", "max_complexity": "large", "context_window": 131072,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "native tool-calling; capable general planner/coordinator"},
+    {"id": "ollama-gemma4", "provider": "ollama", "match": "gemma4*", "label": "Gemma 4 (self-hosted)",
+     "cost_tier": "free", "max_complexity": "large", "context_window": 131072,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "capable reasoning + JSON; tools left off (Gemma native tool-calling is unreliable)"},
+    {"id": "ollama2-gemma4", "provider": "ollama2", "match": "gemma4*", "label": "Gemma 4 (GPU)",
+     "cost_tier": "free", "max_complexity": "large", "context_window": 131072,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "capable reasoning + JSON; tools left off (Gemma native tool-calling is unreliable)"},
 ]
 
 
@@ -212,6 +257,59 @@ def upgrade_local_free_rules(rules):
         added_ids.append(default.get("id"))
         existing_ids.add(default.get("id"))
         existing_providers.add(provider)
+    return rules, added_ids
+
+
+# The known-capable self-hosted model rules (see DEFAULT_MODEL_RULES). Unlike
+# upgrade_local_free_rules, these are appended even when the provider already
+# has rules — the generic `ollama*` `*` rule is almost always present, so a
+# provider-absence gate would never let these through. They only add capability
+# for SPECIFIC model families and are skipped if the operator already curated a
+# rule for that same (provider, match), so an operator's own choices always win.
+_CAPABLE_LOCAL_RULE_IDS = frozenset({
+    "ollama-qwen3-coder", "ollama2-qwen3-coder",
+    "ollama-llama33", "ollama2-llama33",
+    "ollama-gemma4", "ollama2-gemma4",
+})
+
+
+def upgrade_capable_local_rules(rules):
+    """Return (new_rules, added_ids): a COPY of `rules` with any missing
+    known-capable self-hosted model rules (_CAPABLE_LOCAL_RULE_IDS) appended.
+
+    These promote specific local model families (qwen3-coder, llama3.3, gemma4)
+    to their real capabilities — tool-calling, long context, large complexity —
+    so a self-hoster's GPU is used for capable work for free instead of falling
+    through to a paid tier. Unlike upgrade_local_free_rules this does NOT gate on
+    provider-absence (the generic `*` rule is almost always present); instead it
+    skips a default whose:
+      * `id` is already in `rules`, OR
+      * (provider, match) pair is already curated by the operator — so an
+        operator who wrote their own rule for that exact model keeps it.
+
+    Append-only, idempotent, never reorders or modifies existing rules. Because
+    the appended rules carry a more-specific `match` than the generic `*`, they
+    win by specificity for those model families (see resolve()/_specificity)."""
+    rules = list(rules or [])
+    existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
+    existing_pairs = {
+        ((r.get("provider") or "").lower().strip(), (r.get("match") or "").lower().strip())
+        for r in rules if isinstance(r, dict)
+    }
+    added_ids = []
+    for default in DEFAULT_MODEL_RULES:
+        if default.get("id") not in _CAPABLE_LOCAL_RULE_IDS:
+            continue
+        if default.get("id") in existing_ids:
+            continue
+        pair = ((default.get("provider") or "").lower().strip(),
+                (default.get("match") or "").lower().strip())
+        if pair in existing_pairs:
+            continue
+        rules.append(dict(default))
+        added_ids.append(default.get("id"))
+        existing_ids.add(default.get("id"))
+        existing_pairs.add(pair)
     return rules, added_ids
 
 

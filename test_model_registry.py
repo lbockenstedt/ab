@@ -177,8 +177,11 @@ def main():
     # --- upgrade_local_free_rules (idempotent local/free top-up) -------------
 
     # A config frozen before ollama2 got a default rule: has ollama-local but
-    # no ollama2 rule at all.
-    frozen = [dict(r) for r in reg.DEFAULT_MODEL_RULES if r["id"] != "ollama2-local"]
+    # no ollama2 rule at all. (Strip EVERY ollama2 rule — incl. the capable
+    # qwen3/llama3.3/gemma4 defaults — so the provider is genuinely absent, the
+    # precondition upgrade_local_free_rules gates on.)
+    frozen = [dict(r) for r in reg.DEFAULT_MODEL_RULES
+              if (r.get("provider") or "").lower() != "ollama2"]
     n_before = len(frozen)
     topped, added = reg.upgrade_local_free_rules(frozen)
     ok &= _check("top-up appends exactly one ollama2 free rule when it's missing",
@@ -222,6 +225,51 @@ def main():
     # And resolve() now classifies an ollama2 model as free by default.
     ok &= _check("resolve() classifies an ollama2 model as free with the shipped defaults",
                 reg.resolve("ollama2", "qwen2.5-coder:14b", {})["cost_tier"] == "free")
+
+    # --- capable self-hosted model rules + upgrade_capable_local_rules --------
+
+    # The shipped defaults promote specific local families to their real caps:
+    # tool-calling, large complexity, long context — while staying free and
+    # NOT mutating-agent (Ollama has no agentic file-edit runtime).
+    qwen = reg.resolve("ollama2", "qwen3-coder:30b", {})
+    ok &= _check("qwen3-coder on the GPU resolves free + large + tools + structured",
+                qwen["cost_tier"] == "free" and qwen["max_complexity"] == "large"
+                and qwen["supports_tools"] is True and qwen["supports_structured_output"] is True)
+    ok &= _check("qwen3-coder gets a long context window (clears the ~81k*1.25 gate)",
+                (qwen["context_window"] or 0) >= 101000)
+    ok &= _check("qwen3-coder is NOT flagged mutating-agent (no ollama agentic runtime)",
+                qwen["supports_mutating_agent"] is False)
+    llama = reg.resolve("ollama2", "llama3.3:70b", {})
+    ok &= _check("llama3.3 on the GPU resolves free + large + tools",
+                llama["cost_tier"] == "free" and llama["max_complexity"] == "large"
+                and llama["supports_tools"] is True)
+    gemma = reg.resolve("ollama2", "gemma4:26b", {})
+    ok &= _check("gemma4 resolves free + large + structured but tools stays off",
+                gemma["max_complexity"] == "large" and gemma["supports_structured_output"] is True
+                and gemma["supports_tools"] is False)
+    # A more-specific capable rule beats the generic ollama2 '*' rule.
+    generic = reg.resolve("ollama2", "some-unlisted-model:8b", {})
+    ok &= _check("an unlisted ollama2 model still falls back to the generic (medium, no tools) rule",
+                generic["max_complexity"] == "medium" and generic["supports_tools"] is False)
+
+    # upgrade_capable_local_rules injects the capable rules even when the
+    # provider already has its generic rule (unlike the free top-up).
+    frozen_no_cap = [r for r in reg.DEFAULT_MODEL_RULES
+                     if r["id"] not in reg._CAPABLE_LOCAL_RULE_IDS]
+    capped, cap_added = reg.upgrade_capable_local_rules(frozen_no_cap)
+    ok &= _check("capable top-up appends all missing capable-local rules",
+                set(cap_added) == set(reg._CAPABLE_LOCAL_RULE_IDS))
+    ok &= _check("capable top-up appends even though ollama/ollama2 providers already exist",
+                reg.resolve("ollama2", "qwen3-coder:30b", {"model_registry": capped})["max_complexity"] == "large")
+    capped2, cap_added2 = reg.upgrade_capable_local_rules(capped)
+    ok &= _check("capable top-up is idempotent — a second run adds nothing", cap_added2 == [])
+    # An operator who curated their OWN rule for that (provider, match) keeps it.
+    own = [{"id": "my-qwen", "provider": "ollama2", "match": "qwen3-coder*",
+            "cost_tier": "free", "max_complexity": "medium", "supports_tools": False,
+            "supports_structured_output": False, "context_window": 32768, "enabled": True}]
+    own_top, own_added = reg.upgrade_capable_local_rules(own)
+    ok &= _check("capable top-up never overrides an operator's own (provider, match) rule",
+                "ollama2-qwen3-coder" not in own_added)
 
     print()
     if ok:

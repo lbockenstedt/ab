@@ -1,9 +1,9 @@
 """One-shot config migration for the LLM Selection Redesign (Phase 7).
 
-`migrate(config)` upgrades a pre-redesign config in place to schema version 2
+`migrate(config)` upgrades a pre-redesign config in place to schema version 3
 and returns ``(config, changed)``. It is:
 
-  * **guarded** — a no-op when ``config.get("llm_config_version") == 2``;
+  * **guarded** — a no-op when ``config.get("llm_config_version") == 3``;
   * **idempotent** — running it twice produces the same result as once (the
     test relies on this);
   * **pure of I/O** — it never loads or saves; the caller (main startup)
@@ -27,6 +27,11 @@ What it does (see the plan's §7):
      model registry; unmatched (provider, model) pairs get an auto-discovery
      stub appended to ``model_registry_auto`` so they surface in Settings for
      review. One summary line is logged.
+  7. (v3) Registry top-up of known-capable self-hosted model rules
+     (qwen3-coder, llama3.3, gemma4) so a frozen config gains them without a
+     manual Settings edit. Append-only/idempotent; see
+     model_registry.upgrade_capable_local_rules. Bumping the version to 3 is
+     what re-triggers this one-shot top-up on an already-v2 config.
 """
 
 import logging
@@ -35,7 +40,7 @@ import model_registry
 
 logger = logging.getLogger("BugFixer")
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 
 def _slot_entry_id(config, slot):
@@ -145,6 +150,10 @@ def migrate(config):
         if _added:
             config["model_registry"] = _topped
             logger.info("LLM registry: added missing local/free rules %s during migration.", _added)
+        _topped, _added_cap = model_registry.upgrade_capable_local_rules(config["model_registry"])
+        if _added_cap:
+            config["model_registry"] = _topped
+            logger.info("LLM registry: added capable self-hosted model rules %s during migration.", _added_cap)
 
     # 6: capability seeding + one summary line.
     try:
