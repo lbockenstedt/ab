@@ -2370,7 +2370,8 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
 # Shared LLM Utility
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=None, messages=None, tools=None, stream=None,
              repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None, profile="readonly",
-             extra_add_dirs=None, requirements=None, batch_kind=None, batch_context=None, used_model_out=None):
+             extra_add_dirs=None, requirements=None, batch_kind=None, batch_context=None, used_model_out=None,
+             config=None):
     """Generic LLM caller. Routing is capability/cost-aware: the required
     ``requirements=<LlmRequirements>`` describes what the call needs (complexity,
     context size, structured output, restrict/exclude, escalation) and
@@ -2398,7 +2399,12 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=No
     Concurrency: LLM_MAX_CONCURRENT gates per selection category; a per-model
     lock serialises jobs against the same model.
     """
-    config = load_config()
+    # config override: interactive callers (the Anthropic proxy) pass a config
+    # with short per-attempt timeouts / no retries so a slow or stuck upstream
+    # fails over fast instead of blocking the client for minutes on the
+    # autonomous-engine defaults (LLM_TIMEOUT=900, LLM_MAX_RETRIES=5). Defaults
+    # to the on-disk config for every existing caller.
+    config = config if config is not None else load_config()
     if requirements is None:
         raise ValueError("call_llm requires a requirements=LlmRequirements (the "
                          "capability/cost-aware picker path); legacy slot routing "

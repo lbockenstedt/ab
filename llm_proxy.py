@@ -47,6 +47,36 @@ router = APIRouter()
 _PROXY_MODEL_ID = "bugfixer-router"
 
 
+def _interactive_config() -> Dict[str, Any]:
+    """load_config() with interactive routing bounds layered on top.
+
+    call_llm's defaults are tuned for the autonomous fix engine, where a 15-min
+    generation is fine: LLM_TIMEOUT=900s per attempt, LLM_MAX_RETRIES=5 (6
+    attempts) PER candidate, tried sequentially down the whole failover chain.
+    For a human waiting in Claude Code that turns one slow or stuck upstream
+    into a multi-minute hang that finally surfaces as "all upstream LLMs
+    failed" — the client gives up long before the router does, and the wedged
+    call keeps holding the shared PICKER slot behind it.
+
+    Shrink per-attempt time and drop same-endpoint retries so failover reaches
+    a working model in seconds (or returns the real error fast). Operators can
+    override via LLM_PROXY_* config keys. Read live on every request so a
+    settings change needs no restart.
+    """
+    cfg = dict(load_config() or {})
+    cfg["LLM_TIMEOUT"] = int(cfg.get("LLM_PROXY_TIMEOUT") or 120)
+    cfg["LLM_MAX_RETRIES"] = int(cfg.get("LLM_PROXY_MAX_RETRIES") or 0)
+    cfg["LLM_5XX_MAX_RETRIES"] = 0
+    return cfg
+
+
+def _proxy_deadline(cfg: Dict[str, Any]) -> float:
+    """Hard wall-clock ceiling for the whole routing attempt. asyncio.wait_for
+    can't cancel the worker thread, but it stops the CLIENT hanging: a
+    pathological chain returns a prompt 504 instead of an open connection."""
+    return float(cfg.get("LLM_PROXY_DEADLINE") or 150)
+
+
 # ── Auth ────────────────────────────────────────────────────────────────────
 def _configured_key() -> str:
     env = (os.environ.get("BUGFIXER_PROXY_KEY") or "").strip()
@@ -328,11 +358,23 @@ async def messages(request: Request):
     reqs = _build_requirements(system, a_messages, bool(internal_tools), max_tokens)
 
     used: Dict[str, Any] = {}
+    icfg = _interactive_config()
     try:
-        result = await asyncio.to_thread(
-            call_llm, prompt="", task_id=f"proxy-{uuid.uuid4().hex[:8]}",
-            messages=internal_msgs, tools=internal_tools, stream=False,
-            requirements=reqs, used_model_out=used)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                call_llm, prompt="", task_id=f"proxy-{uuid.uuid4().hex[:8]}",
+                messages=internal_msgs, tools=internal_tools, stream=False,
+                requirements=reqs, used_model_out=used, config=icfg),
+            timeout=_proxy_deadline(icfg))
+    except asyncio.TimeoutError:
+        logger.warning("LLM proxy routing exceeded %ss deadline", _proxy_deadline(icfg))
+        return JSONResponse(status_code=504, content={
+            "type": "error",
+            "error": {"type": "api_error",
+                      "message": ("Upstream LLM routing timed out — no endpoint "
+                                  "responded within the interactive deadline. Check "
+                                  "that a configured endpoint is reachable and its "
+                                  "model is loaded.")}})
     except Exception as e:  # noqa: BLE001 - surface as an API error, never 500-crash
         logger.exception("LLM proxy call_llm failed")
         return JSONResponse(status_code=502, content={
