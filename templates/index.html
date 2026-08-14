@@ -1604,6 +1604,18 @@
                                 </label>
                             </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                                <input type="checkbox" name="llm_proxy_agentic_default" id="llm_proxy_agentic_default" {{ 'checked' if settings.llm_proxy_agentic_default else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="llm_proxy_agentic_default" class="text-xs font-medium text-slate-700" title="Off by default: only requests with model=bugfixer-agent run the agentic loop. On: every /v1/messages (LLM router / Claude CLI) request runs BugFixer's agent loop with repo tools.">
+                                    Agentic LLM Router by default (all /v1/messages use the agent loop)
+                                </label>
+                            </div>
+                            <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                                <input type="checkbox" name="llm_proxy_autofix_enabled" id="llm_proxy_autofix_enabled" {{ 'checked' if settings.llm_proxy_autofix_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="llm_proxy_autofix_enabled" class="text-xs font-medium text-slate-700" title="Off by default (safe for an open/keyless proxy): the agentic router proposes fixes but does not run them. On: the router may trigger the real fix pipeline — still gated by the review panel, with core-systems diffs forced to a human-reviewed PR.">
+                                    Allow Agentic Router to trigger fixes (full autonomy, panel + boundary gated)
+                                </label>
+                            </div>
+                            <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
                                 <input type="checkbox" name="qa_enabled" id="qa_enabled" {{ 'checked' if settings.qa_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
                                 <label for="qa_enabled" class="text-xs font-medium text-slate-700">
                                     Enable QA Test Module
