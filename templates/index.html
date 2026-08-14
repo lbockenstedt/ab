@@ -288,30 +288,58 @@
                 <span id="hdr-tps" class="hidden text-[10px] font-semibold text-white/50 tabular-nums"
                       title="Average generation speed over recent runs (busy time only)"></span>
             </div>
-            <!-- Providers (moved from System Health) -->
-            <div class="hidden sm:flex items-center gap-1.5" title="LLM endpoints actively serving calls — online (green) / offline (red). Only endpoints that have handled a call (or are serving right now) are shown, not every configured endpoint.">
+            <!-- Providers: one compact chip — an aggregate health dot plus an
+                 online/total count — instead of a pill per endpoint. A row of
+                 4-letter codes (often the same provider repeated) made the
+                 header noisy; the per-endpoint detail now lives in a hover
+                 dropdown, mirroring the hub status dot. Click through to the
+                 Diagnostics providers table for the full view. Server-rendered
+                 from state (no JS). -->
+            <div id="hdr-providers-group" class="hidden sm:flex items-center gap-1.5 group relative cursor-pointer"
+                 onclick="location.href='/diagnostics'"
+                 title="LLM endpoints actively serving calls — click for the full providers table">
                 <span class="text-[10px] uppercase tracking-widest text-white/50">Providers</span>
-                <div class="flex gap-1">
-                    {% if state.llm_endpoints_online %}
-                    {# Entry-aware view: one pill per routable endpoint that is
-                       actually being used (has served a call, or is serving now)
-                       — not every configured endpoint. #}
-                    {% set used_eps = state.llm_endpoints_online | selectattr('used') | list %}
+                {% if state.llm_endpoints_online %}
+                {% set used_eps = state.llm_endpoints_online | selectattr('used') | list %}
+                {% set online_eps = used_eps | selectattr('online') | list %}
+                {% if used_eps %}
+                <span class="inline-flex items-center gap-1.5">
+                    <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if online_eps|length == used_eps|length else ('bg-amber-400' if online_eps|length else 'bg-red-400') }}"></span>
+                    <span class="text-xs font-semibold text-white/80 tabular-nums">{{ online_eps|length }}/{{ used_eps|length }}</span>
+                </span>
+                <!-- Hover detail: one line per endpoint currently serving. -->
+                <div class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[220px] text-left normal-case tracking-normal">
+                    <div class="opacity-50 mb-1">Endpoints serving calls</div>
                     {% for ep in used_eps %}
-                    <span class="status-pill {{ 'pill-online' if ep.online else 'pill-offline' }}" title="{{ ep.provider }} · {{ ep.model }}{{ ' — ' ~ ep.base_url if ep.base_url else '' }}{{ ' · ' ~ ep.runs ~ ' run(s)' if ep.runs else ' · serving now' }}">{{ (ep.provider or '?')[:4]|upper }}</span>
+                    <div class="flex items-center gap-2 py-0.5">
+                        <span class="w-1.5 h-1.5 rounded-full shrink-0 {{ 'bg-emerald-400' if ep.online else 'bg-red-400' }}"></span>
+                        <span class="font-mono truncate">{{ ep.provider }} · {{ ep.model }}</span>
+                        <span class="opacity-50 ml-auto shrink-0">{{ (ep.runs ~ ' runs') if ep.runs else 'serving' }}</span>
+                    </div>
                     {% endfor %}
-                    {% if not used_eps %}<span class="text-[11px] text-white/40" title="No endpoint has served a call yet">—</span>{% endif %}
-                    {% else %}
-                    {# Fallback: legacy per-slot pills (no routable entries reported yet). #}
-                    {% for n in [1, 2, 3, 4] %}
-                    {% set cfg_key = 'provider_' ~ n ~ '_configured' %}
-                    {% if state[cfg_key] %}
-                    {% set online_key = 'provider_' ~ n ~ '_online' %}
-                    {% if state[online_key] %}<span class="status-pill pill-online">P{{ n }}</span>{% else %}<span class="status-pill pill-offline">P{{ n }}</span>{% endif %}
-                    {% endif %}
-                    {% endfor %}
-                    {% endif %}
                 </div>
+                {% else %}
+                <span class="text-[11px] text-white/40" title="No endpoint has served a call yet">—</span>
+                {% endif %}
+                {% else %}
+                {# Legacy fallback (no routable entries reported): collapse the
+                   configured slots to the same online/total count chip. #}
+                {% set slot_ns = namespace(total=0, online=0) %}
+                {% for n in [1, 2, 3, 4] %}
+                {% if state['provider_' ~ n ~ '_configured'] %}
+                {% set slot_ns.total = slot_ns.total + 1 %}
+                {% if state['provider_' ~ n ~ '_online'] %}{% set slot_ns.online = slot_ns.online + 1 %}{% endif %}
+                {% endif %}
+                {% endfor %}
+                {% if slot_ns.total %}
+                <span class="inline-flex items-center gap-1.5">
+                    <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if slot_ns.online == slot_ns.total else ('bg-amber-400' if slot_ns.online else 'bg-red-400') }}"></span>
+                    <span class="text-xs font-semibold text-white/80 tabular-nums">{{ slot_ns.online }}/{{ slot_ns.total }}</span>
+                </span>
+                {% else %}
+                <span class="text-[11px] text-white/40">—</span>
+                {% endif %}
+                {% endif %}
             </div>
             {% set _hs = (state.hub_agent_status or 'not_registered') %}
             {# Mirror refreshHubStatusDot()'s JS logic exactly (index.html ~3338):
