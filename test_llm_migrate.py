@@ -41,7 +41,7 @@ def main():
     out, changed = llm_migrate.migrate(cfg)
 
     ok &= _check("migrate reports changed=True on a v1 config", changed is True)
-    ok &= _check("stamps llm_config_version=3", out.get("llm_config_version") == 3)
+    ok &= _check("stamps llm_config_version=4", out.get("llm_config_version") == 4)
     ok &= _check("deletes llm_slots", "llm_slots" not in out)
     ok &= _check("deletes chat_slot", "chat_slot" not in out)
 
@@ -68,7 +68,7 @@ def main():
     # A config with no legacy keys still stamps the version and reports changed.
     fresh = {"llm_entries": [{"id": "x", "provider": "openai", "model": "gpt-4o", "enabled": True}]}
     out3, changed3 = llm_migrate.migrate(fresh)
-    ok &= _check("bare config gets version-stamped", out3.get("llm_config_version") == 3 and changed3)
+    ok &= _check("bare config gets version-stamped", out3.get("llm_config_version") == 4 and changed3)
     ok &= _check("already-enabled entry keeps its explicit flag",
                  out3["llm_entries"][0]["enabled"] is True)
 
