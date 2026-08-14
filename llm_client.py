@@ -474,6 +474,48 @@ def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
     return min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.0)
 
 
+# Gemini's function-calling `parameters` accepts only an OpenAPI-3.0 subset —
+# NOT full JSON Schema. Keys like `$schema`, `additionalProperties`,
+# `propertyNames`, and `const` make the API 400 ("Unknown name ... Cannot find
+# field"), which took down every tool-using call routed to Gemini. Recursively
+# strip the unsupported keys and translate the ones with a direct equivalent
+# (`const X` -> `enum: [X]`; `oneOf`/`allOf` -> `anyOf`) so the same tool schema
+# that OpenAI/Anthropic accept verbatim also works on Gemini.
+_GEMINI_SCHEMA_DROP_KEYS = frozenset({
+    "$schema", "$id", "$ref", "$defs", "$comment", "definitions",
+    "additionalProperties", "unevaluatedProperties", "propertyNames",
+    "patternProperties", "dependencies", "dependentSchemas", "dependentRequired",
+    "not", "if", "then", "else", "additionalItems", "unevaluatedItems",
+    "contains", "minContains", "maxContains", "prefixItems", "readOnly",
+    "writeOnly", "deprecated", "examples", "const",
+})
+
+
+def _sanitize_gemini_schema(node):
+    """Return a copy of a JSON-Schema node keeping only Gemini-accepted fields."""
+    if isinstance(node, list):
+        return [_sanitize_gemini_schema(n) for n in node]
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for k, v in node.items():
+        if k in _GEMINI_SCHEMA_DROP_KEYS:
+            # `const` has a direct Gemini equivalent: a single-value enum.
+            if k == "const":
+                out["enum"] = [v]
+            continue
+        if k in ("oneOf", "allOf"):
+            # Gemini only understands anyOf; treat the alternatives as such.
+            out["anyOf"] = [_sanitize_gemini_schema(n) for n in (v or [])]
+        elif k == "properties" and isinstance(v, dict):
+            out[k] = {pk: _sanitize_gemini_schema(pv) for pk, pv in v.items()}
+        elif isinstance(v, (dict, list)):
+            out[k] = _sanitize_gemini_schema(v)
+        else:
+            out[k] = v
+    return out
+
+
 def _tool_spec(t):
     """Normalize one tool entry to its flat {name, description, parameters} spec.
 
@@ -1460,7 +1502,7 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
     if tools:
         payload["tools"] = [{"function_declarations": [
             {"name": (fn := _tool_spec(t)).get("name", ""), "description": fn.get("description", ""),
-             "parameters": fn.get("parameters", {})}
+             "parameters": _sanitize_gemini_schema(fn.get("parameters", {}))}
             for t in tools
         ]}]
 
