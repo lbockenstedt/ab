@@ -141,6 +141,17 @@ DEFAULT_MODEL_RULES = [
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True, "notes": ""},
+    {"id": "openrouter-free-router", "provider": "openrouter", "match": "openrouter/free",
+     "label": "OpenRouter Free Models Router",
+     "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True,
+     "notes": "the 'openrouter/free' Free Models Router auto-routes each call to whatever "
+              ":free model is currently available/capable, transparently absorbing per-model "
+              "rate-limits + outages. Its id has no ':free' suffix so it would otherwise fall "
+              "through to openrouter-paid (cheap); this literal match (more specific than *:free "
+              "and *) keeps it in the free tier so offloadable work prefers it over the GPU."},
     {"id": "openrouter-paid", "provider": "openrouter", "match": "*", "label": "OpenRouter (paid)",
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -411,6 +422,41 @@ def upgrade_claude_cli_model_rules(rules):
         existing_ids.add(default.get("id"))
         existing_pairs.add(pair)
     return rules, added_ids
+
+
+def upgrade_openrouter_free_router_rule(rules):
+    """Return (new_rules, added): a COPY of `rules` with the OpenRouter Free
+    Models Router rule ("openrouter-free-router") appended when it is missing.
+
+    The Free Models Router model id is "openrouter/free" — it has no ":free"
+    suffix, so the generic openrouter-free (`*:free`) rule does NOT match it and
+    it falls through to openrouter-paid (`*` -> cost_tier "cheap"). That hides
+    the single most reliable free option from the cost-first picker (the router
+    auto-routes around per-model rate-limits/outages). This appends a literal
+    `openrouter/free` rule (more specific than both `*:free` and `*`) that puts
+    it in the free tier, so offloadable log/batch work prefers it over the GPU.
+
+    Append-only + idempotent: skipped when the rule id already exists OR the
+    operator already curated a rule for that exact (provider, match). Never
+    reorders or mutates existing rules; the more-specific match wins (resolve)."""
+    rules = list(rules or [])
+    existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
+    existing_pairs = {
+        ((r.get("provider") or "").lower().strip(), (r.get("match") or "").lower().strip())
+        for r in rules if isinstance(r, dict)
+    }
+    default = next((d for d in DEFAULT_MODEL_RULES
+                    if d.get("id") == "openrouter-free-router"), None)
+    if default is None:
+        return rules, False
+    if default.get("id") in existing_ids:
+        return rules, False
+    pair = ((default.get("provider") or "").lower().strip(),
+            (default.get("match") or "").lower().strip())
+    if pair in existing_pairs:
+        return rules, False
+    rules.append(dict(default))
+    return rules, True
 
 
 def _model_param_b(name):
