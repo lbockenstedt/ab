@@ -37,6 +37,9 @@ class LlmRequirements:
     restrict: str | None = None                # "local"|"cloud"|"claude" — HARD filter
     pin_key: str | None = None                 # exact ModelKey "provider|base_url|model" — HARD pin (chat_pin)
     exclude_models: tuple = ()                 # ModelKeys already burned this run
+    prefer_capable: bool = False               # invert tier preference: pick the SMARTEST tier
+                                               # first (frontier>cheap>free) instead of cheapest —
+                                               # for the planner/router turn ("fast AND smart")
 
 
 @dataclass
@@ -50,6 +53,21 @@ class Selection:
     tier: str
     reason: str
     alternatives: list = field(default_factory=list)
+
+
+def _canon_key(k):
+    """Canonicalise a ModelKey for comparison. Candidate keys are tuples
+    ``(provider, base_url, model)`` but pins (chat_pin / planner pin) arrive as
+    ``"provider|base_url|model"`` STRINGS from config/UI — so normalise BOTH to
+    the same tuple (lowered provider, trailing-slash-stripped base_url) or a
+    string pin can never match a tuple key. Returns a 3-tuple."""
+    if isinstance(k, (tuple, list)):
+        parts = list(k) + ["", "", ""]
+        p, b, m = parts[0], parts[1], parts[2]
+    else:
+        p, _, rest = str(k).partition("|")
+        b, _, m = rest.partition("|")
+    return ((p or "").lower().strip(), (b or "").strip().rstrip("/"), (m or "").strip())
 
 
 def _passes_restriction(candidate, restrict):
@@ -166,7 +184,7 @@ def _select_pass(reqs, candidates, perf, slow_factor, min_samples, allow_unknown
             continue
         if c.get("key") in (reqs.exclude_models or ()):
             continue
-        if reqs.pin_key and c.get("key") != reqs.pin_key:
+        if reqs.pin_key and _canon_key(c.get("key")) != _canon_key(reqs.pin_key):
             continue
         if not _passes_restriction(c, reqs.restrict):
             continue
@@ -184,7 +202,18 @@ def _select_pass(reqs, candidates, perf, slow_factor, min_samples, allow_unknown
     for c in pool:
         tiers.setdefault((c.get("caps") or {}).get("cost_tier", "unknown"), []).append(c)
 
-    for tier_name in sorted(tiers.keys(), key=lambda t: registry.COST_TIER_RANK.get(t, 99)):
+    # Normally the cheapest tier wins (cost-first). For the planner/router turn
+    # (prefer_capable) we invert it: the SMARTEST tier wins first (frontier >
+    # cheap > free), with unknown always last — a fast, capable model makes the
+    # routing decision. Within whichever tier is chosen, _rank_tier still ranks
+    # by measured throughput/latency, so it stays "fast" too.
+    _CAPABILITY_TIER_ORDER = {"frontier": 0, "cheap": 1, "free": 2, "unknown": 3}
+    if reqs.prefer_capable:
+        tier_keys = sorted(tiers.keys(), key=lambda t: _CAPABILITY_TIER_ORDER.get(t, 99))
+    else:
+        tier_keys = sorted(tiers.keys(), key=lambda t: registry.COST_TIER_RANK.get(t, 99))
+
+    for tier_name in tier_keys:
         tier_candidates = tiers[tier_name]
         ranked = _rank_tier(tier_candidates, perf, reqs, min_samples)
         survivors = _apply_exhaustion(ranked, slow_factor, min_samples)
@@ -245,7 +274,7 @@ def _exclusion_reason(c, reqs, allow_unknown):
         return "unavailable: " + str(c.get("unavailable_reason") or "cooldown")
     if c.get("key") in (reqs.exclude_models or ()):
         return "excluded this run (already tried/burned)"
-    if reqs.pin_key and c.get("key") != reqs.pin_key:
+    if reqs.pin_key and _canon_key(c.get("key")) != _canon_key(reqs.pin_key):
         return "not the pinned endpoint (chat_pin)"
     if not _passes_restriction(c, reqs.restrict):
         return "restrict=" + str(reqs.restrict)

@@ -2386,6 +2386,9 @@ async def save_settings(request: Request):
         if str(data.get("ORCHESTRATOR_MAX_PARALLEL") or "").strip().isdigit() else 3
     config_data["ORCHESTRATOR_MAX_TASKS"] = max(1, int(data.get("ORCHESTRATOR_MAX_TASKS"))) \
         if str(data.get("ORCHESTRATOR_MAX_TASKS") or "").strip().isdigit() else 5
+    # Planner/router model: a ModelKey pin (provider|base_url|model) for the
+    # planning turn, or "" for the automatic smart+fast pick. Stored verbatim.
+    config_data["ORCHESTRATOR_PLANNER_PIN"] = str(data.get("ORCHESTRATOR_PLANNER_PIN") or "").strip()
     # chat_pin: a hard ModelKey pin (provider|base_url|model) for chat, or ""
     # for the auto picker. Replaces the old int chat_slot; stored verbatim.
     config_data["chat_pin"] = str(data.get("chat_pin") or "").strip()

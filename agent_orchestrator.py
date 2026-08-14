@@ -156,7 +156,20 @@ def plan_tasks(request, config, call_llm_fn, max_tasks=DEFAULT_MAX_TASKS):
     single = [AgentTask(id="main", goal=request, depends_on=(), complexity="medium")]
     try:
         from model_selection import LlmRequirements
-        reqs = LlmRequirements(complexity="small", needs_structured_output=True)
+        # The planner/router turn must be FAST and SMART: it decides how the
+        # whole request is decomposed and routed, so a weak/cheap model here
+        # mis-plans everything downstream. prefer_capable flips the picker to
+        # the smartest tier first (frontier>cheap>free); latency_sensitive +
+        # the picker's throughput ranking keep it fast. An explicit
+        # ORCHESTRATOR_PLANNER_PIN (else chat_pin) hard-overrides the pick.
+        planner_pin = (config or {}).get("ORCHESTRATOR_PLANNER_PIN") or (config or {}).get("chat_pin") or None
+        reqs = LlmRequirements(
+            complexity="medium",
+            needs_structured_output=True,
+            latency_sensitive=True,
+            prefer_capable=True,
+            pin_key=planner_pin,
+        )
         prompt = (
             f"Task limit: {max_tasks}. Decompose this request into a sub-task DAG "
             f"as specified.\n\nREQUEST:\n{request}"
