@@ -289,9 +289,17 @@
                       title="Average generation speed over recent runs (busy time only)"></span>
             </div>
             <!-- Providers (moved from System Health) -->
-            <div class="hidden sm:flex items-center gap-1.5" title="LLM providers — online (green) / offline (red)">
+            <div class="hidden sm:flex items-center gap-1.5" title="LLM endpoints — online (green) / offline (red). Reflects the routable Model Registry endpoints the picker ranks per call.">
                 <span class="text-[10px] uppercase tracking-widest text-white/50">Providers</span>
                 <div class="flex gap-1">
+                    {% if state.llm_endpoints_online %}
+                    {# Entry-aware view: one pill per routable endpoint (llm_entries),
+                       matching what the capability/cost picker actually routes over. #}
+                    {% for ep in state.llm_endpoints_online %}
+                    <span class="status-pill {{ 'pill-online' if ep.online else 'pill-offline' }}" title="{{ ep.provider }} · {{ ep.model }}{{ ' — ' ~ ep.base_url if ep.base_url else '' }}">{{ (ep.provider or '?')[:4]|upper }}</span>
+                    {% endfor %}
+                    {% else %}
+                    {# Fallback: legacy per-slot pills (no routable entries reported yet). #}
                     {% for n in [1, 2, 3, 4] %}
                     {% set cfg_key = 'provider_' ~ n ~ '_configured' %}
                     {% if state[cfg_key] %}
@@ -299,6 +307,7 @@
                     {% if state[online_key] %}<span class="status-pill pill-online">P{{ n }}</span>{% else %}<span class="status-pill pill-offline">P{{ n }}</span>{% endif %}
                     {% endif %}
                     {% endfor %}
+                    {% endif %}
                 </div>
             </div>
             {% set _hs = (state.hub_agent_status or 'not_registered') %}

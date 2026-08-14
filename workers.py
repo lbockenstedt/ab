@@ -86,8 +86,20 @@ def _ollama_model_present(resp, model):
 
 
 def _check_provider_online(n, config):
-    """Ping provider n and return True if reachable."""
+    """Ping legacy provider slot n and return True if reachable."""
     provider, api_key, model, base_url = _get_provider_config(n, config)
+    return _probe_endpoint_online(provider, api_key, model, base_url, label=f"Provider {n}")
+
+
+def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint"):
+    """Ping a single (provider, model, base_url) endpoint; return True if
+    reachable, else None/False.
+
+    Shared by the legacy per-slot _check_provider_online and the entry-aware
+    _check_entries_online, so the header online/offline pills reflect the SAME
+    endpoints the capability/cost picker actually routes over (llm_entries) —
+    not the retired 8 fixed provider slots.
+    """
     p = (provider or "openai").lower().strip()
     # claude_cli authenticates via Claude Code session — just check the binary exists.
     if p == "claude_cli":
@@ -132,7 +144,7 @@ def _check_provider_online(n, config):
                 return None
             if not _ollama_model_present(resp, model):
                 logger.warning(
-                    f"Provider {n} (ollama) server is up but model '{model}' is not pulled on "
+                    f"{label} (ollama) server is up but model '{model}' is not pulled on "
                     f"{base} — pull it (Settings → Local LLM Setup, or `ollama pull {model}`)."
                 )
                 return None
@@ -149,11 +161,11 @@ def _check_provider_online(n, config):
             tok = _copilot_api_token(api_key)
             resp = requests.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=15)
             if resp.status_code == 401:
-                logger.warning(f"Provider {n} (copilot) connectivity check: 401 — token exchange rejected (re-authorize).")
+                logger.warning(f"{label} (copilot) connectivity check: 401 — token exchange rejected (re-authorize).")
                 return None
             return resp.status_code < 300
         except Exception as e:  # noqa: BLE001
-            logger.debug(f"Provider {n} (copilot) connectivity check error: {e}")
+            logger.debug(f"{label} (copilot) connectivity check error: {e}")
             return None
     if not api_key or not model:
         return None
@@ -191,15 +203,48 @@ def _check_provider_online(n, config):
             headers = {"Authorization": f"Bearer {api_key}"}
             resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 401:
-            logger.warning(f"Provider {n} ({provider}) connectivity check: 401 — API key invalid or missing.")
+            logger.warning(f"{label} ({provider}) connectivity check: 401 — API key invalid or missing.")
             return None
         if resp.status_code == 429:
-            logger.warning(f"Provider {n} ({provider}) connectivity check: 429 — rate-limited (not tripping CB).")
+            logger.warning(f"{label} ({provider}) connectivity check: 429 — rate-limited (not tripping CB).")
             return None
         return resp.status_code < 300
     except Exception as e:
-        logger.debug(f"Provider {n} ({provider}) connectivity check error: {e}")
+        logger.debug(f"{label} ({provider}) connectivity check error: {e}")
         return None
+
+
+def _check_entries_online(config):
+    """Probe every ENABLED routable endpoint (llm_entries + legacy env slots,
+    exactly the set model_selection.select_model ranks) and return a compact
+    per-endpoint status list for the header pills.
+
+    The legacy provider_N_online pills only reflected the retired 8 fixed slots
+    (llm_slots), so once routing moved to the capability/cost picker over
+    llm_entries, endpoints that route fine still showed red. This mirrors the
+    real routable set instead. Each probe is wrapped so one unreachable endpoint
+    can't abort the whole sweep. Deduplicated by (provider, base_url, model).
+    """
+    try:
+        from llm_client import _iter_configured_endpoints
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_check_entries_online: cannot enumerate endpoints: {e}")
+        return []
+    out, seen = [], set()
+    for entry_id, provider, api_key, model, base_url, rpm in _iter_configured_endpoints(config):
+        key = ((provider or "").lower().strip(), (base_url or "").strip(), (model or "").strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        label = f"{provider}:{model}" if model else (provider or "endpoint")
+        try:
+            online = _probe_endpoint_online(provider, api_key, model, base_url, label=label)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"_check_entries_online probe failed for {label}: {e}")
+            online = None
+        out.append({"id": entry_id, "provider": provider, "model": model,
+                    "base_url": base_url, "online": bool(online)})
+    return out
 
 
 def connectivity_worker():
@@ -215,7 +260,14 @@ def connectivity_worker():
             state["provider_2_online"] = p2_online
             state["provider_3_online"] = p3_online
             state["provider_4_online"] = p4_online
-            logger.info(f"Connectivity Check: P1={p1_online}, P2={p2_online}, P3={p3_online}, P4={p4_online}")
+            # Entry-aware view: the header pills read this so they reflect the
+            # endpoints the picker actually routes over, not the retired slots.
+            endpoints = _check_entries_online(config)
+            state["llm_endpoints_online"] = endpoints
+            state["any_llm_online"] = any(e["online"] for e in endpoints)
+            online_n = sum(1 for e in endpoints if e["online"])
+            logger.info(f"Connectivity Check: P1={p1_online}, P2={p2_online}, P3={p3_online}, "
+                        f"P4={p4_online}; entries {online_n}/{len(endpoints)} online")
         except Exception as e:
             logger.error(f"Connectivity worker error: {e}")
         time.sleep(900)

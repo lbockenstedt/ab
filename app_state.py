@@ -244,6 +244,9 @@ feature_built_count = sum(1 for i in processed_init.values() if i.get("status") 
 state = {
     "status": "Idle", "active_llm": "Unknown",
     "provider_1_online": False, "provider_2_online": False, "provider_3_online": False, "provider_4_online": False,
+    # Entry-aware endpoint reachability (the routable llm_entries set) + an
+    # any-online rollup. Header pills prefer this over the legacy per-slot flags.
+    "llm_endpoints_online": [], "any_llm_online": False,
     "provider_1_configured": False, "provider_2_configured": False, "provider_3_configured": False, "provider_4_configured": False,
     # Per-slot last failover outcome (status sentinel + reason + iso8601), surfaced in the
     # Diagnostics panel so silent skips (e.g. "not_configured") are visible without CLI logs.
