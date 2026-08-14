@@ -897,8 +897,24 @@ def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
         if hit_proposal:
             break
     else:
-        # Iteration cap reached without a no-tool_calls turn; return last text.
+        # Iteration cap reached without a no-tool_calls turn. If the model kept
+        # calling tools and never wrote a final answer, last_text can be empty —
+        # returning it would hand the caller a blank reply. Force ONE final
+        # tools-free turn so the gathered context is turned into a written
+        # answer. Best-effort: on failure, fall back to whatever text we have.
         final_text = last_text or ""
+        if not (final_text and final_text.strip()):
+            try:
+                _status("Summarizing…")
+                messages.append({"role": "system", "content": "You have gathered enough information from the tools. Do NOT call any more tools. Write your final answer to the user now, in plain text."})
+                _final_reqs = LlmRequirements(complexity="medium", latency_sensitive=True)
+                forced = call_llm("", messages=messages, task_id=task_id, requirements=_final_reqs)
+                if isinstance(forced, dict):
+                    forced = forced.get("text") or ""
+                if forced and forced.strip():
+                    final_text = forced
+            except Exception as e:
+                logger.warning(f"Agent final-answer turn failed ({e}); returning best-effort text.")
 
     if final_text is None:
         final_text = last_text or ""
