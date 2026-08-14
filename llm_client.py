@@ -476,9 +476,12 @@ def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
 
 # Gemini's function-calling `parameters` accepts only an OpenAPI-3.0 subset —
 # NOT full JSON Schema. Keys like `$schema`, `additionalProperties`,
-# `propertyNames`, and `const` make the API 400 ("Unknown name ... Cannot find
-# field"), which took down every tool-using call routed to Gemini. Recursively
-# strip the unsupported keys and translate the ones with a direct equivalent
+# `propertyNames`, `const`, and `exclusiveMinimum` make the API 400 ("Unknown
+# name ... Cannot find field"), and an array-valued `type` (e.g.
+# ``["string","null"]``) 400s with "Proto field is not repeating, cannot start
+# list" — both took down every tool-using call routed to Gemini. Recursively
+# strip the unsupported keys, collapse a union `type` list to a single string
+# (+ `nullable`), and translate the constructs with a direct equivalent
 # (`const X` -> `enum: [X]`; `oneOf`/`allOf` -> `anyOf`) so the same tool schema
 # that OpenAI/Anthropic accept verbatim also works on Gemini.
 _GEMINI_SCHEMA_DROP_KEYS = frozenset({
@@ -488,7 +491,23 @@ _GEMINI_SCHEMA_DROP_KEYS = frozenset({
     "not", "if", "then", "else", "additionalItems", "unevaluatedItems",
     "contains", "minContains", "maxContains", "prefixItems", "readOnly",
     "writeOnly", "deprecated", "examples", "const",
+    # Numeric validators Gemini's OpenAPI subset rejects (it keeps only
+    # minimum/maximum): exclusive bounds and multipleOf 400 as unknown fields.
+    "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
 })
+
+
+def _gemini_type(v):
+    """Collapse a JSON-Schema `type` to what Gemini accepts: a single string.
+
+    Gemini rejects an array-valued `type` ("Proto field is not repeating").
+    Returns ``(type_str_or_None, nullable)`` — the first non-"null" member and
+    whether "null" was among the members (surfaced as OpenAPI `nullable`)."""
+    if isinstance(v, (list, tuple)):
+        nullable = "null" in v
+        non_null = [t for t in v if t != "null"]
+        return (non_null[0] if non_null else None), nullable
+    return v, False
 
 
 def _sanitize_gemini_schema(node):
@@ -504,7 +523,15 @@ def _sanitize_gemini_schema(node):
             if k == "const":
                 out["enum"] = [v]
             continue
-        if k in ("oneOf", "allOf"):
+        if k == "type":
+            # A union `type` (e.g. ["string","null"]) must become a single
+            # string; a present "null" member maps to OpenAPI `nullable`.
+            t, nullable = _gemini_type(v)
+            if t is not None:
+                out["type"] = t
+            if nullable:
+                out["nullable"] = True
+        elif k in ("oneOf", "allOf"):
             # Gemini only understands anyOf; treat the alternatives as such.
             out["anyOf"] = [_sanitize_gemini_schema(n) for n in (v or [])]
         elif k == "properties" and isinstance(v, dict):
