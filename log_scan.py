@@ -182,6 +182,28 @@ def get_hub_state():
         return None
 
 
+# BugFixer's fix engine logs its OWN fix-attempt mechanics at ERROR level (so a
+# within-run retry can still see the failing snippet). Those lines are handled,
+# expected control flow — a non-matching edit anchor, an unparseable model
+# reply, a rejected rewrite — NOT product defects. But they carry an [ERROR]
+# tag, so the self-log scanner used to hand them to the LLM as "actionable
+# errors" and file phantom issues about BugFixer fixing its own fix attempts
+# (e.g. bugfixer#834, created verbatim from a single "Edit search snippet not
+# found ... skipping this edit" line). There is no code to fix, so every such
+# issue burns its retry budget and fails "AI generated invalid JSON format",
+# then recurs the next time any edit anchor misses — a self-referential loop.
+# Drop the fix engine's operational chatter before it can seed an issue.
+_SELF_SCAN_NOISE = re.compile(
+    r'search snippet not found'
+    r'|No fixes could be applied'
+    r'|Error parsing or applying JSON fix'
+    r'|AI generated invalid JSON format'
+    r'|ABORTING fix'
+    r'|No verified fix found after',
+    re.IGNORECASE,
+)
+
+
 def filter_error_logs(logs):
     """Scrubs raw logs down to error-relevant entries before sending to the LLM.
 
@@ -229,6 +251,11 @@ def filter_error_logs(logs):
             text = str(entry)
 
         if not error_pattern.search(text):
+            continue
+
+        # Skip BugFixer's own fix-engine chatter so it can't seed phantom issues
+        # about its own fix attempts (see _SELF_SCAN_NOISE above).
+        if _SELF_SCAN_NOISE.search(text):
             continue
 
         key = (module, text.strip())
