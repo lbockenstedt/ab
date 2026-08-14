@@ -299,7 +299,28 @@ def heartbeat_worker():
             elif p2_configured:
                 state["active_llm"] = p2_model
             else:
-                state["active_llm"] = "Not configured"
+                # The 8 fixed provider slots are retired: an operator may
+                # configure ONLY llm_entries, in which case the slots above are
+                # all empty and the header would read "Not configured" while
+                # routing works fine. Fall back to the first configured entry so
+                # the banner reflects the real routable model.
+                entry_model = None
+                entry_provider = None
+                try:
+                    from llm_client import _configured_entries
+                    for ent in _configured_entries(config):
+                        if ent.get("_configured"):
+                            entry_model = ent.get("model")
+                            entry_provider = ent.get("provider")
+                            break
+                except Exception:
+                    logger.exception("Heartbeat: entry lookup failed")
+                if entry_model:
+                    state["active_llm"] = entry_model
+                    if not state.get("active_llm_provider"):
+                        state["active_llm_provider"] = entry_provider
+                else:
+                    state["active_llm"] = "Not configured"
         except Exception as e:
             logger.error(f"Heartbeat worker error: {e}")
         time.sleep(5)

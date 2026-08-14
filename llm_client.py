@@ -863,6 +863,31 @@ def _any_provider_available(config):
             soonest = 0.0
         else:
             soonest = min(soonest, rem)
+
+    # Entry registry (the modern routable set). The 8 fixed provider slots are
+    # retired — an operator may configure ONLY llm_entries, leaving the slot
+    # loop above empty. Without this, the scheduler gate would report "no LLM
+    # available" and defer every fix even though call_llm routes fine. Mirror
+    # _enumerate_candidates' availability logic over the entries so this gate
+    # matches what routing can actually reach.
+    try:
+        for cand in _enumerate_candidates(config):
+            if cand.get("available"):
+                any_free = True
+                soonest = 0.0
+                continue
+            reason = cand.get("unavailable_reason")
+            if reason == "credit_cooldown":
+                rem = _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(cand["provider"], cand["base_url"]))
+            elif reason == "rate_limited":
+                rem = _cb_remaining(_MODEL_RATE_CB, cand["key"])
+            else:
+                rem = 0.0  # dead_model / unknown: not a timed recovery
+            if rem > 0:
+                soonest = min(soonest, rem)
+    except Exception:
+        logger.exception("_any_provider_available: entry enumeration failed")
+
     if soonest == float("inf"):
         soonest = 0.0  # no providers configured at all
     return any_free, soonest
