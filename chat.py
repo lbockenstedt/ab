@@ -373,13 +373,15 @@ CHAT_TOOLS = [
     },
     {
         "name": "read_file",
-        "description": "Read a single file's decoded contents from a repo's default branch. For large files, ask the user to narrow scope. Returns up to max_bytes.",
+        "description": "Read a file's decoded contents from a repo's default branch. Returns up to max_bytes STARTING AT byte `offset`, plus total_bytes and next_offset — so you can PAGE THROUGH a large file by re-calling with offset=next_offset while has_more is true. To jump straight to a region, pass `pattern` (a regex): the window is centered on the first match and match_lines lists where it matched. Prefer `pattern` for big files instead of paging from the start.",
         "parameters": {
             "type": "object",
             "properties": {
                 "repo": {"type": "string"},
                 "path": {"type": "string"},
                 "max_bytes": {"type": "integer", "minimum": 256, "maximum": 20000, "default": 8000},
+                "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Byte offset to start reading from (use next_offset from a prior call to page)."},
+                "pattern": {"type": "string", "description": "Optional regex; if given, the returned window is centered on the first match so you don't have to page to find it."},
             },
             "required": ["repo", "path"],
         },
@@ -525,14 +527,50 @@ def _tool_read_file(gh, config, args):
         return {"error": "repo and path are required"}
     max_bytes = max(256, min(20000, int(args.get("max_bytes") or 8000)))
     try:
+        offset = max(0, int(args.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    pattern = args.get("pattern") or ""
+    try:
         contents = gh.get_repo(repo_name).get_contents(path)
         if isinstance(contents, list):
             return {"error": f"{path} is a directory, not a file"}
         raw = contents.decoded_content or b""
         text = raw.decode("utf-8", "replace")
-        truncated = len(text) > max_bytes
-        return {"repo": repo_name, "path": path, "truncated": truncated,
-                "content": text[:max_bytes]}
+        total = len(text)
+
+        # pattern: jump the window to the first match so large files don't have
+        # to be paged from the start to reach the relevant region.
+        match_lines = []
+        if pattern:
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                return {"error": f"invalid pattern: {e}"}
+            m = rx.search(text)
+            if m is None:
+                return {"repo": repo_name, "path": path, "total_bytes": total,
+                        "pattern": pattern, "match_found": False,
+                        "note": "pattern not found; call again without pattern (optionally with offset) to page the file."}
+            # Center the window on the match, clamped to the file.
+            offset = max(0, m.start() - max_bytes // 4)
+            for lm in rx.finditer(text):
+                match_lines.append(text.count("\n", 0, lm.start()) + 1)
+                if len(match_lines) >= 50:
+                    break
+
+        offset = min(offset, total)
+        window = text[offset:offset + max_bytes]
+        next_offset = offset + len(window)
+        start_line = text.count("\n", 0, offset) + 1
+        result = {"repo": repo_name, "path": path, "total_bytes": total,
+                  "offset": offset, "next_offset": next_offset,
+                  "start_line": start_line, "has_more": next_offset < total,
+                  "content": window}
+        if pattern:
+            result["match_found"] = True
+            result["match_lines"] = match_lines
+        return result
     except Exception as e:
         return {"error": f"{type(e).__name__}: {_trunc(e, 300)}"}
 
