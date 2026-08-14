@@ -115,6 +115,81 @@ def _sanitize_json_string_newlines(raw):
     return ''.join(out)
 
 
+# Keys that legitimately appear in a fix-response object. Used by the lenient
+# repair below to recognise the ONE token that must follow a real closing quote
+# (a comma before the next member) and tell it apart from a quote that merely
+# lives inside a code snippet.
+_FIX_JSON_KEYS = (
+    "file", "search", "replace", "code", "reason", "confidence",
+    "edits", "fixes", "path", "content", "description", "title",
+)
+# A comma followed by the next object member: `, "anykey":`. This — not a bare
+# comma — is what reliably marks the end of a code value, because inner code like
+# print("a", x) or split(",") has a comma but never `, "…":` after the quote.
+# Any quoted key is accepted (not just the known set) so an unfamiliar field
+# can't strand the scanner mid-value; a wrong guess still can't corrupt anything
+# because the whole repair is only accepted if json.loads then succeeds, and a
+# mis-split value simply fails the downstream edit-anchor match.
+_JSON_NEXT_MEMBER_RE = re.compile(r'\s*,\s*"[^"\\]{0,80}"\s*:')
+# The keys whose VALUES hold real code (and thus unescaped quotes / newlines).
+# Only these values are repaired leniently; every other byte of the response is
+# copied verbatim, so already-valid JSON is passed through untouched.
+_FIX_CODE_KEY_RE = re.compile(r'"(?:search|replace|code)"\s*:\s*"')
+
+
+def _relax_json_fix_strings(raw):
+    """Repair the single most destructive way an LLM's fix JSON breaks: a
+    "search"/"replace"/"code" value holds a real code snippet whose OWN string
+    literals contain unescaped double-quotes (e.g. logger.error("…")) — and
+    often literal newlines too. json.loads sees the first inner `"` as the end
+    of the value, so everything after it (an em-dash, a colon, a paren) is read
+    as broken structure and BOTH the newline-repair and the ast.literal_eval
+    fallbacks choke ("invalid character '—'", "Expecting ',' delimiter").
+
+    We know the schema, so ONLY the code-bearing values are re-scanned: a value's
+    true closing quote is the one immediately followed by structural JSON — `}` /
+    `]` / end, or a comma before the next member (`, "replace":`). Any other `"`
+    inside the value is an inner code quote and is escaped in place; literal
+    control characters are escaped too. Everything outside those values is copied
+    byte-for-byte, so this is a no-op on already-valid input and never corrupts
+    unrelated fields (other keys, arrays of short strings, etc.). The result is
+    only ever used if json.loads accepts it, so a mis-guessed boundary degrades
+    to the existing fallbacks rather than to a bad parse."""
+    out = []
+    pos = 0
+    n = len(raw)
+    while True:
+        m = _FIX_CODE_KEY_RE.search(raw, pos)
+        if not m:
+            out.append(raw[pos:])
+            break
+        out.append(raw[pos:m.end()])   # verbatim up to and incl. the opening quote
+        j = m.end()
+        escape = False
+        while j < n:
+            ch = raw[j]
+            if escape:
+                out.append(ch); escape = False; j += 1; continue
+            if ch == '\\':
+                out.append(ch); escape = True; j += 1; continue
+            if ch == '\n':
+                out.append('\\n'); j += 1; continue
+            if ch == '\r':
+                out.append('\\r'); j += 1; continue
+            if ch == '\t':
+                out.append('\\t'); j += 1; continue
+            if ch == '"':
+                rest = raw[j + 1:]
+                nxt = rest.lstrip()[:1]
+                if nxt in ('}', ']', '') or _JSON_NEXT_MEMBER_RE.match(rest):
+                    break                      # structural close of the value
+                out.append('\\"'); j += 1; continue   # inner code quote
+            out.append(ch); j += 1
+        out.append('"')                        # emit the closing quote
+        pos = j + 1
+    return ''.join(out)
+
+
 def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=None):
     """For a REOPENED, previously-fixed issue: figure out what changed the fix's
     files SINCE our fix landed, so the builder triages from the regression cause
@@ -1609,35 +1684,47 @@ def parse_and_apply(content, repo_path):
             try:
                 data = _robust_json_loads(_sanitize_json_string_newlines(raw))
             except json.JSONDecodeError:
-                # Fallback 2: some LLMs (Gemini Flash) return Python-style dicts
-                # with single quotes instead of JSON double quotes. ast.literal_eval
-                # is safe (only evaluates literals) and handles those cleanly.
+                # Fallback 1b: a code snippet whose OWN string literals contain
+                # unescaped double-quotes (logger.error("…")) — the first inner
+                # quote prematurely ends the value, so newline-repair alone is
+                # not enough. Escape inner quotes (and control chars) by anchoring
+                # the real closing quote on the following structural token, then
+                # retry as JSON. This is the confirmed cause of the recurring
+                # "invalid character '—'"/"Expecting ',' delimiter" fix failures.
                 try:
-                    parsed = _ast.literal_eval(raw)
-                    if not isinstance(parsed, dict):
-                        raise ValueError(f"Expected dict, got {type(parsed).__name__}")
-                    data = parsed
-                except Exception:
-                    # Fallback 3: same single-quote-dict case, but with the same
-                    # literal-newline repair as fallback 1 applied first.
+                    data = _robust_json_loads(_relax_json_fix_strings(raw))
+                except json.JSONDecodeError:
+                    data = None
+                if data is None:
+                    # Fallback 2: some LLMs (Gemini Flash) return Python-style
+                    # dicts with single quotes instead of JSON double quotes.
+                    # ast.literal_eval is safe (only evaluates literals).
                     try:
-                        parsed = _ast.literal_eval(_sanitize_json_string_newlines(raw))
+                        parsed = _ast.literal_eval(raw)
                         if not isinstance(parsed, dict):
                             raise ValueError(f"Expected dict, got {type(parsed).__name__}")
                         data = parsed
-                    except Exception as ast_err:
-                        # Content embedded IN the ERROR line (not a separate DEBUG
-                        # line): the self-log scanner captures single ERROR/CRITICAL
-                        # lines verbatim with no surrounding context, so a DEBUG-only
-                        # dump here is invisible to it — this exact gap is why this
-                        # failure kept recurring as a "non-actionable, please provide
-                        # the full log snippet" issue instead of ever being fixed.
-                        logger.error(
-                            f"Error parsing or applying JSON fix: {ast_err} — "
-                            f"raw content ({len(content)} chars): {content[:1500]!r}"
-                        )
-                        parse_and_apply.last_reason = "invalid_json"
-                        return False, {}, 0.0
+                    except Exception:
+                        # Fallback 3: same single-quote-dict case, but with the same
+                        # literal-newline repair as fallback 1 applied first.
+                        try:
+                            parsed = _ast.literal_eval(_sanitize_json_string_newlines(raw))
+                            if not isinstance(parsed, dict):
+                                raise ValueError(f"Expected dict, got {type(parsed).__name__}")
+                            data = parsed
+                        except Exception as ast_err:
+                            # Content embedded IN the ERROR line (not a separate DEBUG
+                            # line): the self-log scanner captures single ERROR/CRITICAL
+                            # lines verbatim with no surrounding context, so a DEBUG-only
+                            # dump here is invisible to it — this exact gap is why this
+                            # failure kept recurring as a "non-actionable, please provide
+                            # the full log snippet" issue instead of ever being fixed.
+                            logger.error(
+                                f"Error parsing or applying JSON fix: {ast_err} — "
+                                f"raw content ({len(content)} chars): {content[:1500]!r}"
+                            )
+                            parse_and_apply.last_reason = "invalid_json"
+                            return False, {}, 0.0
 
         fixes = data.get("fixes", {}) or {}
         edits = data.get("edits", []) or []
