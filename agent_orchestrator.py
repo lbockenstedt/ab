@@ -156,18 +156,22 @@ def plan_tasks(request, config, call_llm_fn, max_tasks=DEFAULT_MAX_TASKS):
     single = [AgentTask(id="main", goal=request, depends_on=(), complexity="medium")]
     try:
         from model_selection import LlmRequirements
-        # The planner/router turn must be FAST and SMART: it decides how the
-        # whole request is decomposed and routed, so a weak/cheap model here
-        # mis-plans everything downstream. prefer_capable flips the picker to
-        # the smartest tier first (frontier>cheap>free); latency_sensitive +
-        # the picker's throughput ranking keep it fast. An explicit
+        # The planner/router turn decides how the whole request is decomposed
+        # and routed, so it must be handled by a genuinely capable model — but
+        # NOT necessarily a paid one. We keep the DEFAULT cost-first ordering
+        # (free/GPU tier first, then cheap, then frontier): the capability
+        # filter (complexity="medium") already guarantees only capable models
+        # are in the pool, so the cheapest capable one wins and a paid frontier
+        # model is used only when nothing free/local qualifies. Paid tiers are
+        # never excluded — just deferred. (This deliberately does NOT set
+        # prefer_capable, which would invert to frontier-first.) latency_sensitive
+        # + the picker's throughput ranking keep it fast; an explicit
         # ORCHESTRATOR_PLANNER_PIN (else chat_pin) hard-overrides the pick.
         planner_pin = (config or {}).get("ORCHESTRATOR_PLANNER_PIN") or (config or {}).get("chat_pin") or None
         reqs = LlmRequirements(
             complexity="medium",
             needs_structured_output=True,
             latency_sensitive=True,
-            prefer_capable=True,
             pin_key=planner_pin,
         )
         prompt = (

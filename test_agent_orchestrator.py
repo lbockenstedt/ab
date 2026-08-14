@@ -114,8 +114,10 @@ def main():
         return json.dumps({"tasks": []})
     orch.plan_tasks("req", {}, _capture_llm)
     _r = captured.get("reqs")
-    ok &= _check("planner requests a capable (smart) model via prefer_capable",
-                 getattr(_r, "prefer_capable", False) is True)
+    ok &= _check("planner uses cost-first ordering (prefer_capable NOT set), so free/GPU wins if capable",
+                 getattr(_r, "prefer_capable", False) is False)
+    ok &= _check("planner still requires medium capability so only capable models qualify",
+                 getattr(_r, "complexity", None) == "medium")
     ok &= _check("planner requests a fast model via latency_sensitive",
                  getattr(_r, "latency_sensitive", False) is True)
     ok &= _check("planner has no pin under default config", getattr(_r, "pin_key", "x") is None)
