@@ -1191,6 +1191,10 @@ _FAILURE_LABELS = {
     "low_confidence":  "Confidence below threshold",
     "qa_failed":       "Fix failed QA tests",
     "error":           "Error during fix",
+    "invalid_json":    "AI output was not parseable JSON",
+    "edit_anchor_miss": "Edit search text did not match the file",
+    "no_edits":        "AI returned no edits",
+    "unsafe_rewrite":  "Fix rejected as an unsafe/truncated rewrite",
     "unknown":         "No verified fix found",
 }
 
@@ -1574,9 +1578,17 @@ def _snippet_language_mismatch_hint(search, filepath):
 def parse_and_apply(content, repo_path):
     import re as _re, ast as _ast
     parse_and_apply.last_failures = []   # reset per call; read by the retry loop
+    # Coarse reason for the LAST return, read by the retry loop so it can give
+    # the model accurate feedback. "invalid_json" is NOT a catch-all: a valid
+    # JSON object whose edit anchors simply didn't match the file is a
+    # different failure ("edit_anchor_miss") that needs different feedback —
+    # conflating them made the model keep repeating a well-formed but
+    # non-matching edit while being told its JSON was malformed.
+    parse_and_apply.last_reason = "unknown"
     # --- Locate a JSON / Python-dict object in the LLM response ---
     if not content or not content.strip():
         logger.debug("parse_and_apply: empty content — expected retry case.")
+        parse_and_apply.last_reason = "empty"
         return False, {}, 0.0
 
     try:
@@ -1585,6 +1597,7 @@ def parse_and_apply(content, repo_path):
             # LLM returned prose / "None" / refusal — no JSON object present.
             # This is a non-error transient failure; caller will retry.
             logger.debug(f"parse_and_apply: no JSON object in response (first 120 chars: {content[:120]!r})")
+            parse_and_apply.last_reason = "no_json"
             return False, {}, 0.0
 
         raw = match.group()
@@ -1623,6 +1636,7 @@ def parse_and_apply(content, repo_path):
                             f"Error parsing or applying JSON fix: {ast_err} — "
                             f"raw content ({len(content)} chars): {content[:1500]!r}"
                         )
+                        parse_and_apply.last_reason = "invalid_json"
                         return False, {}, 0.0
 
         fixes = data.get("fixes", {}) or {}
@@ -1747,6 +1761,7 @@ def parse_and_apply(content, repo_path):
                         f"marker — the model did not reproduce the whole file; applying it would delete "
                         f"real code."
                     )
+                    parse_and_apply.last_reason = "unsafe_rewrite"
                     return False, {}, 0.0
                 old_lines = existing.count("\n") + 1
                 new_lines = new_code.count("\n") + 1
@@ -1756,6 +1771,7 @@ def parse_and_apply(content, repo_path):
                         f"{new_lines} lines (>60% deleted) — almost certainly a truncated rewrite, "
                         f"not a targeted fix."
                     )
+                    parse_and_apply.last_reason = "unsafe_rewrite"
                     return False, {}, 0.0
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, "w") as f:
@@ -1766,13 +1782,21 @@ def parse_and_apply(content, repo_path):
             _detail = "; ".join(parse_and_apply.last_failures or []) or \
                       "all edits rejected as unsafe or out-of-repo"
             logger.error(f"No fixes could be applied ({_detail}).")
+            # Valid JSON that produced no change. Distinguish the two shapes so
+            # the retry can give targeted feedback: edits present but every
+            # anchor missed the file (requote the exact text) vs no edits/fixes
+            # at all (return a non-empty edits array).
+            parse_and_apply.last_reason = (
+                "edit_anchor_miss" if parse_and_apply.last_failures else "no_edits")
             return False, {}, 0.0
+        parse_and_apply.last_reason = None
         return True, applied, confidence
     except Exception as e:
         logger.error(
             f"Error parsing or applying JSON fix: {e} — "
             f"raw content ({len(content)} chars): {content[:1500]!r}"
         )
+        parse_and_apply.last_reason = "exception"
         return False, {}, 0.0
 
 
@@ -2147,8 +2171,39 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
                     if not success_applied:
                         verified = False
-                        failure_msg = "AI generated invalid JSON format"
-                        last_failure = {"kind": "invalid_json", "detail": failure_msg}
+                        # Classify WHY parse_and_apply gave up so the retry can
+                        # feed the model accurate, actionable guidance. Labeling
+                        # every non-apply as "invalid JSON" is what let issue
+                        # #834 fail 3× : the JSON was valid, but the edits' search
+                        # anchors didn't match the file, and the model was told to
+                        # fix its JSON instead of to requote the file text.
+                        _reason = getattr(parse_and_apply, "last_reason", None) or "invalid_json"
+                        _misses = getattr(parse_and_apply, "last_failures", None) or []
+                        if _reason == "edit_anchor_miss":
+                            _detail = "; ".join(_misses)[:800]
+                            failure_msg = (
+                                "The JSON was valid, but the edits' \"search\" text was not found "
+                                "in the file. Copy the EXACT current file text (byte-for-byte, "
+                                "correct indentation) into each \"search\", or use a larger unique "
+                                "anchor. Anchors that did not match: " + _detail)
+                            _kind = "edit_anchor_miss"
+                        elif _reason == "no_edits":
+                            failure_msg = (
+                                "The JSON parsed but contained no applicable changes. Return a JSON "
+                                "object with a non-empty \"edits\" array, each item having "
+                                "\"file\", \"search\", and \"replace\".")
+                            _kind = "no_edits"
+                        elif _reason == "unsafe_rewrite":
+                            failure_msg = (
+                                "The fix was rejected as an unsafe/truncated full-file rewrite. Use "
+                                "targeted \"edits\" (file/search/replace) instead of replacing the "
+                                "whole file, and never use placeholders like \"rest of file "
+                                "unchanged\".")
+                            _kind = "unsafe_rewrite"
+                        else:
+                            failure_msg = "AI generated invalid JSON format"
+                            _kind = "invalid_json"
+                        last_failure = {"kind": _kind, "detail": failure_msg}
                         error_context = failure_msg
                         # parse_and_apply can apply some edits before hitting the
                         # malformed tail, so reset to a pristine tree before the
