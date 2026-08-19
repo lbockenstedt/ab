@@ -183,6 +183,21 @@ def _sync_webui_cert_from_mtls():
 
     if _self_signed(client_cert) is not False:
         return  # mTLS cert isn't a CA-issued cert — nothing to promote
+    # The hub mTLS client cert is now ALWAYS a Hub-Local-CA clientAuth cert
+    # (issuer e.g. "LM Hub mTLS Client CA"), delivered by SPOKE_SET_MTLS_CLIENT_CERT
+    # — NOT a publicly-trusted WebUI cert. Never promote it onto the WebUI (browsers
+    # / GitHub webhooks wouldn't trust the private CA). The WebUI cert comes straight
+    # from INSTALL_CERT (LE) instead.
+    def _issued_by_hub_mtls_ca(path):
+        try:
+            from cryptography import x509
+            with open(path, "rb") as f:
+                c = x509.load_pem_x509_certificate(f.read())
+            return "mtls" in c.issuer.rfc4514_string().lower()
+        except Exception:  # noqa: BLE001
+            return False
+    if _issued_by_hub_mtls_ca(client_cert):
+        return
     web_self_signed = _self_signed(SSL_CERT) if os.path.exists(SSL_CERT) else True
     if web_self_signed is False:
         return  # WebUI already has a CA-issued cert — don't clobber it

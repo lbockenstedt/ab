@@ -257,10 +257,13 @@ class HubAgentClient:
         # LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify against a shipped CA.
         self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0") == "1"
         self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "") or "").strip()
-        # mTLS CLIENT identity for the wss connection, installed by the hub's
-        # cert-distribution (INSTALL_CERT, LE-issued). When both files exist the
-        # SSL context presents them so the hub can mutually-authenticate ab
-        # — required by hubs that gate data reads on a client cert.
+        # mTLS CLIENT identity for the wss connection: a Hub-Local-CA clientAuth
+        # cert delivered by SPOKE_SET_MTLS_CLIENT_CERT (NOT the LE WebUI cert —
+        # public CAs can't issue a cert that chains to the hub's client CA, so an
+        # LE cert presented here is rejected at the handshake). When both files
+        # exist the SSL context presents them so the hub can mutually-authenticate
+        # ab — required by hubs that gate data reads (HUB_REQUEST log/update) on a
+        # pinned client cert.
         self._client_cert_file = (os.environ.get("AB_HUB_CLIENT_CERT")
                                   or "/etc/ab/hub-client-cert.pem")
         self._client_key_file = (os.environ.get("AB_HUB_CLIENT_KEY")
@@ -804,20 +807,23 @@ class HubAgentClient:
                 pass
 
     async def _handle_install_cert(self, msg, data):
-        """Install a hub-distributed (LE) cert. It serves TWO roles for ab,
-        both from the one deployment:
-          1. the WebUI SERVER cert (AB_SSL_CERT/KEY, default
-             /etc/ab/cert.pem+key.pem) — so browsers AND GitHub webhooks
-             reach the ab WebUI over a PUBLICLY-TRUSTED cert instead of the
-             install-time self-signed one (GitHub rejects self-signed webhook URLs);
-          2. our mTLS CLIENT identity for the hub connection (hub-client-cert.pem)
-             — the cert the hub's HUB_REQUEST channel authorizes on (log reads +
-             fleet update commands), gated by AppBuilder SAN pinning.
-        Write both, reply the COMMAND_RESULT the hub's request_response awaits, then
-        trigger a graceful full-service restart so uvicorn reloads the new WebUI
-        cert (a running listener can't hot-swap its cert) and the reconnect presents
-        the new mTLS cert. Mirrors the INSTALL_CERT contract other cert-capable
-        spokes implement (cert_distribution.py)."""
+        """Install a hub-distributed (LE) cert as the WebUI SERVER cert
+        (AB_SSL_CERT/KEY, default /etc/ab/cert.pem+key.pem) — so browsers AND
+        GitHub webhooks reach the ab WebUI over a PUBLICLY-TRUSTED cert instead of
+        the install-time self-signed one (GitHub rejects self-signed webhook URLs).
+
+        This does NOT touch the hub mTLS CLIENT identity. That is a SEPARATE,
+        Hub-Local-CA clientAuth cert delivered by SPOKE_SET_MTLS_CLIENT_CERT
+        (hub-client-cert.pem) — public/LE CAs can't issue a cert that chains to the
+        hub's client CA, so writing the LE cert there would clobber the valid
+        local-CA cert and make the hub REJECT our wss handshake, killing the
+        HUB_REQUEST channel (hub-log reads + fleet update triggers).
+
+        Write the WebUI cert, reply the COMMAND_RESULT the hub's request_response
+        awaits, then trigger a graceful full-service restart so uvicorn reloads the
+        new cert (a running listener can't hot-swap its cert). Mirrors the
+        INSTALL_CERT contract other cert-capable spokes implement
+        (cert_distribution.py)."""
         status, message = "SUCCESS", "cert installed"
         try:
             fullchain = data.get("fullchain") or ""
@@ -831,47 +837,25 @@ class HubAgentClient:
                 # only ROOTS (ISRG), not LE intermediates, so a verifier can only
                 # build leaf -> intermediate -> root if WE present the intermediate.
                 # If the hub/LE sent the chain separately and fullchain didn't
-                # already include it, append it — otherwise a leaf-only fullchain is
-                # rejected at the hub handshake (and browsers show an incomplete
-                # chain for the WebUI cert).
+                # already include it, append it — otherwise browsers show an
+                # incomplete chain for the WebUI cert.
                 chain = data.get("chain") or ""
                 if chain.strip() and chain.strip() not in fc:
                     fc = fc + (chain if chain.endswith("\n") else chain + "\n")
-                # 1. mTLS client identity for the hub connection.
-                os.makedirs(os.path.dirname(self._client_cert_file) or ".", exist_ok=True)
-                with open(self._client_cert_file, "w") as f:
-                    f.write(fc)
-                with open(self._client_key_file, "w") as f:
-                    f.write(pk)
-                try:
-                    os.chmod(self._client_key_file, 0o600)
-                except OSError:
-                    pass
-                # 2. WebUI server cert (so GitHub webhooks + browsers trust it).
+                # WebUI server cert ONLY (so GitHub webhooks + browsers trust it).
+                # Do NOT write the hub mTLS client cert here — see docstring.
                 webui_cert = os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem")
                 webui_key = os.environ.get("AB_SSL_KEY", "/etc/ab/key.pem")
-                webui_written = False
+                os.makedirs(os.path.dirname(webui_cert) or ".", exist_ok=True)
+                with open(webui_cert, "w") as f:
+                    f.write(fc)
+                with open(webui_key, "w") as f:
+                    f.write(pk)
                 try:
-                    os.makedirs(os.path.dirname(webui_cert) or ".", exist_ok=True)
-                    with open(webui_cert, "w") as f:
-                        f.write(fc)
-                    with open(webui_key, "w") as f:
-                        f.write(pk)
-                    try:
-                        os.chmod(webui_key, 0o600)
-                    except OSError:
-                        pass
-                    webui_written = True
-                except Exception as we:  # noqa: BLE001 — WebUI cert is best-effort
-                    logger.warning("INSTALL_CERT: WebUI cert write failed (%s) — "
-                                   "mTLS client cert still installed", we)
-                # A freshly-deployed cert is worth trying even if a prior one was
-                # rejected — re-arm the present-cert path so the restart's reconnect
-                # presents THIS cert over mTLS.
-                self._present_cert = True
-                self._cert_ever_worked = False
-                message = (f"cert installed for {data.get('domain') or '?'}"
-                           f"{' (WebUI + mTLS)' if webui_written else ' (mTLS only)'}"
+                    os.chmod(webui_key, 0o600)
+                except OSError:
+                    pass
+                message = (f"WebUI cert installed for {data.get('domain') or '?'}"
                            " — restarting to load it")
                 logger.info("INSTALL_CERT: %s", message)
         except Exception as e:  # noqa: BLE001
