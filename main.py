@@ -250,6 +250,7 @@ import auth as _auth  # noqa: E402 — after logger/app so its logging is config
 #:  a restart succeeded, and restart_worker does the same. Gate it and every
 #:  restart looks like a failed start, which triggers the watchdog's ROLLBACK.
 _AUTH_EXEMPT_EXACT = {"/api/health", "/login", "/logout", "/setup-admin",
+                      "/auth/oidc/enabled", "/auth/oidc/login", "/auth/oidc/callback",
                       "/favicon.ico", "/apple-touch-icon.png",
                       "/apple-touch-icon-precomposed.png"}
 _AUTH_EXEMPT_PREFIX = ("/static/", "/assets/", "/v1/")

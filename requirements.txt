@@ -11,3 +11,6 @@ tenacity
 websockets
 psutil
 ruff
+httpx
+PyJWT
+cryptography

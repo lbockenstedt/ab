@@ -206,6 +206,137 @@ async def setup_admin_submit(request: Request):
     return resp
 
 
+# ── Auth: Azure Entra ID (OIDC) single sign-on ──────────────────────────────
+# These three endpoints are in main.py's middleware exempt list (a user has no
+# session yet while signing in). /setup/oidc-config requires a session (admin).
+
+def _sso_error_page(message: str, status: int = 400):
+    """A styled HTML page for an SSO failure (browsers land here mid-redirect,
+    so a JSON body would be unreadable)."""
+    from fastapi.responses import HTMLResponse
+    safe = (message or "Single sign-on failed.").replace("<", "&lt;").replace(">", "&gt;")
+    html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign-in failed — AppBuilder</title><script src="https://cdn.tailwindcss.com"></script>
+<style>body{{background:#0f172a}}.card{{background:#fff;border-radius:.75rem;
+box-shadow:0 20px 45px rgba(0,0,0,.35)}}.btn{{background:#01A982}}.btn:hover{{background:#018f6f}}</style>
+</head><body class="min-h-screen flex items-center justify-center p-6">
+<div class="card w-full max-w-md p-8">
+<h1 class="text-xl font-bold text-[#263040] mb-2">Sign-in failed</h1>
+<div class="mb-5 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">{safe}</div>
+<a href="/login" class="btn inline-block py-2 px-4 rounded-lg text-white font-bold text-sm">Back to sign in</a>
+</div></body></html>"""
+    return HTMLResponse(content=html, status_code=status)
+
+
+@router.get("/auth/oidc/enabled")
+async def oidc_enabled():
+    """Cheap probe the login page uses to decide whether to show the Microsoft
+    button. ``ready`` means enough is configured for a login to succeed."""
+    import oidc as _o
+    cfg = _o.get_oidc_config()
+    return {"enabled": bool(cfg.enabled and cfg.ready)}
+
+
+@router.get("/auth/oidc/login")
+async def oidc_login(request: Request):
+    """Mint PKCE + state + nonce, stash them in a signed cookie, and redirect the
+    browser to Entra's authorize endpoint."""
+    import oidc as _o
+    cfg = _o.get_oidc_config()
+    if not (cfg.enabled and cfg.ready):
+        return _sso_error_page("Microsoft sign-in is not configured on this server.")
+    try:
+        doc = await _o.discover(cfg)
+        state, nonce, verifier, challenge = _o.new_pkce()
+        url = _o.authorize_url(cfg, doc, state, nonce, challenge)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("oidc: could not start login")
+        return _sso_error_page(f"Could not start Microsoft sign-in: {e}", status=502)
+    resp = RedirectResponse(url, status_code=303)
+    resp.set_cookie(_o.STATE_COOKIE, _o.sign_state_cookie(state, nonce, verifier),
+                    max_age=_o._STATE_TTL_S, httponly=True, samesite="lax",
+                    secure=request.url.scheme == "https", path="/")
+    return resp
+
+
+@router.get("/auth/oidc/callback")
+async def oidc_callback(request: Request, code: str = "", state: str = "",
+                        error: str = "", error_description: str = ""):
+    """Validate the state cookie, exchange the code, verify the id-token, enforce
+    the optional group gate, provision the user, and open a session."""
+    import oidc as _o
+    if error:
+        return _sso_error_page(f"Microsoft returned an error: {error_description or error}")
+    cfg = _o.get_oidc_config()
+    if not (cfg.enabled and cfg.ready):
+        return _sso_error_page("Microsoft sign-in is not configured on this server.")
+    cookie = request.cookies.get(_o.STATE_COOKIE) or ""
+    parsed = _o.verify_state_cookie(cookie)
+    if not parsed:
+        return _sso_error_page("Sign-in expired or the state was tampered with. "
+                               "Please try again.")
+    exp_state, nonce, verifier = parsed
+    if not code or not _o.hmac_eq(state, exp_state):
+        return _sso_error_page("State mismatch — sign-in cannot be trusted. Please try again.")
+    try:
+        doc = await _o.discover(cfg)
+        tokens = await _o.exchange_code(cfg, doc, code, verifier)
+        id_token = tokens.get("id_token")
+        if not id_token:
+            raise _o.OidcError("token response had no id_token")
+        jwks = await _o.fetch_jwks(doc.get("jwks_uri"))
+        claims = _o.verify_id_token(cfg, id_token, nonce, jwks)
+        _o.enforce_allowed_group(cfg.allowed_group, _o.extract_member_groups(claims))
+        username = _o.provision_entra_user(claims)
+    except _o.OidcError as e:
+        logger.warning("oidc: login rejected — %s", e)
+        return _sso_error_page(str(e), status=403)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("oidc: callback failed")
+        return _sso_error_page(f"Microsoft sign-in failed: {e}", status=502)
+    import auth as _a
+    src = (request.client.host if request.client else "?")
+    logger.info("auth: %r signed in via Entra from %s", username, src)
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+                    max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
+                    secure=request.url.scheme == "https", path="/")
+    resp.delete_cookie(_o.STATE_COOKIE, path="/")
+    return resp
+
+
+@router.get("/setup/oidc-config")
+async def oidc_config_get():
+    """Return the stored OIDC config (secret redacted) for the Settings UI."""
+    import oidc as _o
+    cfg = _o.get_oidc_config()
+    try:
+        from config_store import load_config
+        stored = (load_config() or {}).get("oidc", {}) or {}
+    except Exception:  # noqa: BLE001
+        stored = {}
+    out = _o.redact_config(stored)
+    out["ready"] = bool(cfg.ready)
+    return out
+
+
+@router.post("/setup/oidc-config")
+async def oidc_config_set(request: Request):
+    """Persist the operator-editable OIDC config from the Settings UI."""
+    import oidc as _o
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    try:
+        stored = _o.save_oidc_config(body or {})
+    except Exception as e:  # noqa: BLE001
+        logger.exception("oidc: could not save config")
+        return {"status": "error", "message": str(e)}
+    return {"status": "ok", "config": stored}
+
+
 # ── Auth: account management (every account is an admin) ─────────────────────
 
 @router.get("/api/auth/users")

@@ -14,5 +14,15 @@
   "refresh_status_seconds": 30,
   "refresh_logs_seconds": 10,
   "bug_report_enabled": true,
-  "bug_report_repo": "lbockenstedt/lm"
+  "bug_report_repo": "lbockenstedt/lm",
+  "oidc": {
+    "enabled": false,
+    "tenant_id": "",
+    "client_id": "",
+    "client_secret": "",
+    "redirect_uri": "https://your-appbuilder-host/auth/oidc/callback",
+    "allowed_group": "",
+    "cert_path": "",
+    "key_path": ""
+  }
 }

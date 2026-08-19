@@ -34,6 +34,14 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 
 `main.py` (FastAPI app — poller, LLM orchestration, git workflow, triage), `hub_agent.py` (self-contained `HubAgentClient` + `MessageSigner` reimplementing lm-core's HMAC-SHA256 scheme; daemon-thread asyncio loop), `dedup.py` (pure stdlib duplicate-issue detection, `test_dedup.py`), `watchdog.py` (health-gate + auto-update rollback), `install.sh`/`setup.sh`/`update.sh`/`install_github.sh`, `templates/index.html`, `config.json.example`, `.env.example`, `requirements.txt`, `Dockerfile`, `VERSION`, `.github/workflows/version-bump.yml`.
 
+## Authentication & multi-user
+
+- **Local accounts** (`auth.py`, stdlib-only) — every account is a full admin. `users.json` (0600) in `/etc/ab`; scrypt/pbkdf2 hashes; signed `ab_session` cookie. First run funnels to `/setup-admin` to create the initial account, which then closes.
+- **Azure Entra ID (OIDC) SSO** (`oidc.py`, routes in `routes.py`) — Authorization Code + PKCE against Entra. Enable it in `config.json` under `oidc` (or the Settings API `POST /setup/oidc-config`) with `tenant_id`, `client_id`, `redirect_uri`, and **one** credential: a `client_secret` OR a certificate (`cert_path`/`key_path`, sent as an RS256 `client_assertion` — mirrors the LM hub). Optional `allowed_group` (comma/space-separated Entra group **object IDs**) gates access. `AB_OIDC_*` env vars override stored config.
+  - Endpoints: `GET /auth/oidc/enabled` (login page probe), `GET /auth/oidc/login` (→ Entra), `GET /auth/oidc/callback` (verifies id-token signature/issuer/audience/nonce, provisions the user, issues a session). The id-token is verified against the Entra JWKS; MFA is enforced by Entra Conditional Access, not in-token.
+  - Entra users are provisioned into `users.json` as passwordless `auth_type:"entra"` accounts (keyed by email/UPN, else `oid`), so they can only ever SSO in and can never password-log-in. A local password account is never silently converted.
+  - Redirect URI to register in Entra: `https://<host>/auth/oidc/callback`.
+
 ## Notable behaviors & gotchas
 
 - **Hub agent, not spoke** — registered in `active_connections` as `module_type="agent"`; does not register a spoke module or handle `CS_*`/`PXMX_*`/`LE_*` commands.

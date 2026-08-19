@@ -123,7 +123,8 @@ def list_users() -> list:
     return sorted(
         ({"username": u,
           "created": rec.get("created"),
-          "last_login": rec.get("last_login")}
+          "last_login": rec.get("last_login"),
+          "auth_type": rec.get("auth_type", "local")}
          for u, rec in users.items() if isinstance(rec, dict)),
         key=lambda r: r["username"],
     )
@@ -181,6 +182,46 @@ def create_user(username: str, password: str) -> tuple[bool, str]:
     _write_store(data)
     logger.info("auth: created user %r", username)
     return True, f"User {username!r} created."
+
+
+def upsert_external_user(username: str, provider: str = "entra",
+                         email: str = "", name: str = "",
+                         oid: str = "") -> tuple[bool, str]:
+    """Create (first SSO login) or refresh a federated account that has NO
+    password — it can only ever sign in via its identity provider (e.g. Azure
+    Entra). Because the record carries no ``salt``/``hash``, ``verify_credentials``
+    will always reject a password login for it, so the two auth paths can never
+    cross over. Returns ``(ok, message)``."""
+    username = (username or "").strip()
+    if not username:
+        return False, "External username is required."
+    data = _read_store()
+    if data.get("_unreadable"):
+        return False, "User store is unreadable — fix or remove users.json."
+    users = data.setdefault("users", {})
+    rec = users.get(username)
+    now = datetime.now().isoformat(timespec="seconds")
+    if isinstance(rec, dict):
+        if rec.get("salt") or rec.get("hash"):
+            # A local password account already owns this username — refuse to
+            # silently convert it into a passwordless SSO account.
+            return False, (f"User {username!r} is a local password account; "
+                           "cannot convert it to an external account.")
+        rec.update({"auth_type": provider, "email": email or rec.get("email", ""),
+                    "name": name or rec.get("name", ""),
+                    "oid": oid or rec.get("oid", ""), "last_login": now})
+    else:
+        users[username] = {
+            "auth_type": provider,
+            "email": email,
+            "name": name,
+            "oid": oid,
+            "created": now,
+            "last_login": now,
+        }
+    _write_store(data)
+    logger.info("auth: %s user %r signed in", provider, username)
+    return True, f"External user {username!r} provisioned."
 
 
 def set_password(username: str, password: str) -> tuple[bool, str]:
@@ -242,6 +283,25 @@ def verify_credentials(username: str, password: str) -> bool:
 
 def _secret() -> bytes:
     return (_read_store().get("session_secret") or "").encode("utf-8")
+
+
+def ensure_session_secret() -> bytes:
+    """Return the persisted signing secret, creating + writing an (empty) user
+    store on first use so the secret is STABLE across calls.
+
+    ``_read_store`` mints a fresh random secret every time the file is absent
+    (``_blank_store``) without persisting it, so two calls would disagree. Any
+    signature that must survive a round-trip *before* the first account exists —
+    notably the OIDC state cookie when SSO is the very first login — needs this
+    to pin the secret to disk once."""
+    if not os.path.exists(USERS_FILE):
+        data = _blank_store()
+        try:
+            _write_store(data)
+        except Exception as e:  # noqa: BLE001 — fall back to the in-memory secret
+            logger.debug("auth: could not persist session secret: %s", e)
+        return (data.get("session_secret") or "").encode("utf-8")
+    return _secret()
 
 
 def issue_session(username: str, ttl_s: int | None = None) -> str:
