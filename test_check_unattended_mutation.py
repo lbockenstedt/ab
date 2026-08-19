@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Self-test for bugfixer/check_unattended_mutation.py.
+"""Self-test for ab/check_unattended_mutation.py.
 
-Run:  python3 bugfixer/test_check_unattended_mutation.py
+Run:  python3 ab/test_check_unattended_mutation.py
 
 Standalone: imports only check_unattended_mutation (stdlib-only, no app init,
 no GitHub/network). Uses a minimal fake PyGithub File (.filename, .patch).
 
 Cases mirror the motivating incident (lm#151): an automatic 15-min sweep
-loop that deletes client registry records, reviewed by BugFixer's own panel
+loop that deletes client registry records, reviewed by AppBuilder's own panel
 at 55%/Reject over a safety-rail gap only closed by adding a real test.
 """
 import sys
@@ -51,7 +51,7 @@ _LOOP_NO_DELETE_PATCH = """@@ -1,0 +1,4 @@
 
 
 def main():
-    print("Running bugfixer check_unattended_mutation self-test...")
+    print("Running ab check_unattended_mutation self-test...")
     ok = True
 
     # (1) loop + delete, no test file anywhere in the PR -> flagged.

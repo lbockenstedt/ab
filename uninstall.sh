@@ -1,12 +1,12 @@
 #!/bin/bash
-# BugFixer Uninstaller
+# AppBuilder Uninstaller
 #
 # Pipe directly (root shell):
-#   curl -fsSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/uninstall.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/lbockenstedt/ab/main/uninstall.sh | bash
 #
-#   --purge-deps   also remove what the installer added FOR bugfixer: ollama
+#   --purge-deps   also remove what the installer added FOR ab: ollama
 #                  (incl. downloaded models), the Claude Code CLI, and Node.js.
-#   --keep-config  leave /etc/bugfixer (credentials, tokens, PR history) in place.
+#   --keep-config  leave /etc/ab (credentials, tokens, PR history) in place.
 #   --yes, -y      no confirmation prompt.
 #
 # WHAT THIS DELIBERATELY DOES NOT REMOVE
@@ -19,14 +19,14 @@
 # genuinely want them gone, remove them by hand where you can see what apt plans
 # to take with them.
 #
-# /etc/logrotate.d/lm is also left alone: despite living next to bugfixer's
+# /etc/logrotate.d/lm is also left alone: despite living next to ab's
 # install it rotates /var/log/lm/*.log and /var/log/client-sim-*.log — it belongs
 # to lm and client-sim, and deleting it would silently stop THEIR log rotation.
 set -uo pipefail
 
-INSTALL_DIR="/opt/bugfixer"
-CONFIG_DIR="/etc/bugfixer"
-LOG_FILE="/var/log/bugfixer.log"
+INSTALL_DIR="/opt/ab"
+CONFIG_DIR="/etc/ab"
+LOG_FILE="/var/log/ab.log"
 SVC_USER="svc_bg"
 
 PURGE_DEPS=0
@@ -53,13 +53,13 @@ say() { echo "$*"; }
 ok()  { echo "   ok   $*"; }
 skip(){ echo "   --   $*"; }
 
-say "BugFixer uninstaller"
+say "AppBuilder uninstaller"
 say ""
 say "Will remove:"
-say "  services   bugfixer.service, bugfixer-watchdog.service"
+say "  services   ab.service, ab-watchdog.service"
 say "  files      $INSTALL_DIR, $LOG_FILE"
 [ "$KEEP_CONFIG" -eq 1 ] && say "  config     KEPT ($CONFIG_DIR)" || say "  config     $CONFIG_DIR  (credentials, tokens, PR history)"
-say "  helpers    /usr/local/bin/bugfixer-*, /etc/sudoers.d/bugfixer"
+say "  helpers    /usr/local/bin/ab-*, /etc/sudoers.d/ab"
 say "  user       $SVC_USER"
 if [ "$PURGE_DEPS" -eq 1 ]; then
     say "  deps       ollama (+ models), Claude Code CLI, Node.js"
@@ -79,7 +79,7 @@ fi
 
 # ── 1. Services ─────────────────────────────────────────────────────────────
 say ">> Stopping services..."
-for unit in bugfixer.service bugfixer-watchdog.service; do
+for unit in ab.service ab-watchdog.service; do
     if systemctl list-unit-files 2>/dev/null | grep -q "^${unit}"; then
         systemctl stop "$unit" >/dev/null 2>&1
         systemctl disable "$unit" >/dev/null 2>&1
@@ -90,7 +90,7 @@ for unit in bugfixer.service bugfixer-watchdog.service; do
     fi
 done
 # Any transient restart unit the self-restart helper may have scheduled.
-systemctl stop 'bugfixer-restart-*' >/dev/null 2>&1 || true
+systemctl stop 'ab-restart-*' >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl reset-failed >/dev/null 2>&1 || true
 
@@ -108,13 +108,13 @@ fi
 say ">> Removing root helpers..."
 # sudoers FIRST: leaving a NOPASSWD rule pointing at a path that no longer
 # exists is a footgun — anyone who can create that path gets root.
-if [ -f /etc/sudoers.d/bugfixer ]; then
-    rm -f /etc/sudoers.d/bugfixer
-    ok "removed /etc/sudoers.d/bugfixer"
+if [ -f /etc/sudoers.d/ab ]; then
+    rm -f /etc/sudoers.d/ab
+    ok "removed /etc/sudoers.d/ab"
 else
     skip "no sudoers drop-in"
 fi
-for h in bugfixer-self-restart bugfixer-sandbox bugfixer-ollama-setup bugfixer-claude-install; do
+for h in ab-self-restart ab-sandbox ab-ollama-setup ab-claude-install; do
     if [ -e "/usr/local/bin/$h" ]; then rm -f "/usr/local/bin/$h"; ok "removed $h"; fi
 done
 
@@ -148,11 +148,11 @@ else
     skip "user $SVC_USER does not exist"
 fi
 
-# ── 5. Optional: dependencies bugfixer installed for itself ─────────────────
+# ── 5. Optional: dependencies ab installed for itself ─────────────────
 if [ "$PURGE_DEPS" -eq 1 ]; then
-    say ">> Removing bugfixer-installed dependencies..."
+    say ">> Removing ab-installed dependencies..."
 
-    # ollama: service, binary, models, the systemd override bugfixer wrote, and
+    # ollama: service, binary, models, the systemd override ab wrote, and
     # its own service user. Models are the reason this is opt-in — they are tens
     # of GB and re-downloading them is slow.
     if systemctl list-unit-files 2>/dev/null | grep -q "^ollama.service"; then
@@ -191,7 +191,7 @@ else
 fi
 
 say ""
-say "Done. BugFixer removed."
+say "Done. AppBuilder removed."
 [ "$KEEP_CONFIG" -eq 1 ] && say "Config kept at $CONFIG_DIR."
 if [ "$PURGE_DEPS" -ne 1 ]; then
     say "ollama, the Claude CLI and Node.js were kept — re-run with --purge-deps to remove them."

@@ -1,4 +1,4 @@
-"""Pure, dependency-free duplicate-detection helpers for the BugFixer.
+"""Pure, dependency-free duplicate-detection helpers for the AppBuilder.
 
 This module is intentionally stdlib-only (``re`` only) and performs NO app
 initialization, so it can be imported standalone for unit testing — unlike
@@ -9,7 +9,7 @@ Strengthened over the original inline helpers in ``main.py``:
 
 * ``strip_boilerplate`` removes the template wrapper that ``create_automated_issue``
   injects into EVERY automated issue (``🤖 Log Alert:``, ``Automated Error
-  Detection``, ``BugFixer Update``, ``Log Evidence``, ``AI Fix`` …). Without
+  Detection``, ``AppBuilder Update``, ``Log Evidence``, ``AI Fix`` …). Without
   stripping it, that boilerplate dominates the token comparison and the actual
   error content is drowned out.
 * ``MODULE_ALIASES`` collapses module-name variants so ``opns`` and ``opnsense``
@@ -35,7 +35,7 @@ MODULE_ALIASES = {
 _BOILERPLATE_RE = re.compile(
     r'\b(?:'
     r'bug report|feature request|'
-    r'log alert|automated error detection|bugfixer update|bugfixer hub analysis|'
+    r'log alert|automated error detection|ab update|ab hub analysis|'
     r'log evidence|ai fix|automated issue|automated fix|log detected|'
     r'detected a potential issue in the logs|'
     r'this issue has been automatically created for fixing|'

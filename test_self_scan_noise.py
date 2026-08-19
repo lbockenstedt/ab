@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Regression guard: filter_error_logs must drop BugFixer's own fix-engine
+"""Regression guard: filter_error_logs must drop AppBuilder's own fix-engine
 operational chatter so the self-log scanner cannot file phantom issues about
-BugFixer fixing its own fix attempts (bugfixer#834).
+AppBuilder fixing its own fix attempts (ab#834).
 
 #834 was auto-created verbatim from a single fix-engine log line —
 "Edit search snippet not found in 'src/spoke.py'; skipping this edit ..." —
@@ -52,27 +52,27 @@ def main():
     fel = _load_filter()
 
     noise = [
-        # the exact bugfixer#834 seed line
-        {"module": "bugfixer-core",
+        # the exact ab#834 seed line
+        {"module": "ab-core",
          "log": "2026-08-13 22:50:01 [ERROR] Edit search snippet not found in "
                 "'src/spoke.py'; skipping this edit (search starts with: 'None, "
                 "lambda: self.queries.get_recent_sessions(...)')"},
-        {"module": "bugfixer-core",
+        {"module": "ab-core",
          "log": "[ERROR] No fixes could be applied (src/spoke.py: search snippet not found)."},
-        {"module": "bugfixer-core",
+        {"module": "ab-core",
          "log": "[ERROR] Error parsing or applying JSON fix: invalid syntax"},
-        {"module": "bugfixer-core",
+        {"module": "ab-core",
          "log": "[ERROR] AI generated invalid JSON format"},
-        {"module": "bugfixer-core",
+        {"module": "ab-core",
          "log": "[ERROR] ABORTING fix: new content contains a truncation marker"},
-        {"module": "bugfixer-core",
+        {"module": "ab-core",
          "log": "[ERROR] No verified fix found after 3 attempt(s) — AI generated invalid JSON format"},
-        # config/state I/O operational errors (bugfixer#806) — environment
+        # config/state I/O operational errors (ab#806) — environment
         # conditions load_config/save_config already handle, not code defects.
-        {"module": "bugfixer-core",
+        {"module": "ab-core",
          "log": "2026-08-13 02:05:49 [ERROR] Error reading persistent config "
-                "/etc/bugfixer/config.json: Expecting value: line 1 column 1 (char 0)"},
-        {"module": "bugfixer-core",
+                "/etc/ab/config.json: Expecting value: line 1 column 1 (char 0)"},
+        {"module": "ab-core",
          "log": "[ERROR] Critical failure saving config: [Errno 28] No space left on device"},
     ]
     real = [

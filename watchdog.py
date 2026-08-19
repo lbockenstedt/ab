@@ -35,7 +35,7 @@ def _bf_bytecode_self_heal():
         except Exception:  # noqa: BLE001
             pass
         print(
-            f"[bugfixer] {target} is not writable by this user"
+            f"[ab] {target} is not writable by this user"
             + (f" (owned by {owner})" if owner else "")
             + " — disabling bytecode caching so imports do not fail. "
               f"Repair with: sudo chown -R $(id -un) {os.path.dirname(os.path.dirname(os.path.dirname(target)))}",
@@ -50,11 +50,11 @@ import os, sys, json, time, requests, subprocess, logging
 from datetime import datetime
 
 # Config
-CONFIG_DIR = "/etc/bugfixer"
+CONFIG_DIR = "/etc/ab"
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 UPDATE_PENDING_FILE = os.path.join(CONFIG_DIR, "update_pending")
 STARTUP_STAMP_FILE = os.path.join(CONFIG_DIR, "startup_stamp.json")
-# Privileged ollama-setup delegation. bugfixer.service runs under a locked
+# Privileged ollama-setup delegation. ab.service runs under a locked
 # CapabilityBoundingSet (CAP_NET_BIND_SERVICE only) so it can neither sudo
 # (setgid(0) EPERM) nor systemd-run (polkit denied) a root helper. The watchdog
 # service has no such restriction — sudo works here (same pattern as
@@ -63,14 +63,14 @@ STARTUP_STAMP_FILE = os.path.join(CONFIG_DIR, "startup_stamp.json")
 # Setup log. Paths kept in sync with ollama_setup.py.
 OLLAMA_SETUP_REQUEST = os.path.join(CONFIG_DIR, "ollama_setup_request.json")
 OLLAMA_SETUP_STATUS = os.path.join(CONFIG_DIR, "ollama_setup_status.json")
-OLLAMA_SETUP_HELPER = "/usr/local/bin/bugfixer-ollama-setup"
+OLLAMA_SETUP_HELPER = "/usr/local/bin/ab-ollama-setup"
 # Same delegation for the Claude Code CLI install: the main service is
 # cap-locked and cannot escalate, so it drops a request file and we run the
 # root helper. Installed AS the service user (per-user session auth).
 CLAUDE_INSTALL_REQUEST = os.path.join(CONFIG_DIR, "claude_install_request.json")
 CLAUDE_INSTALL_STATUS = os.path.join(CONFIG_DIR, "claude_install_status.json")
-CLAUDE_INSTALL_HELPER = "/usr/local/bin/bugfixer-claude-install"
-# Delegated restart. bugfixer.service is cap-locked (CAP_NET_BIND_SERVICE only) so
+CLAUDE_INSTALL_HELPER = "/usr/local/bin/ab-claude-install"
+# Delegated restart. ab.service is cap-locked (CAP_NET_BIND_SERVICE only) so
 # it can't restart itself (sudo setgid(0) EPERM); it writes this request file and
 # the watchdog (unrestricted) runs the restart. Same privileged-arm pattern as
 # ollama-setup. Kept in sync with workers.RESTART_REQUEST_FILE.
@@ -78,11 +78,11 @@ RESTART_REQUEST = os.path.join(CONFIG_DIR, "restart_request")
 # Derive the health probe from the same env the server binds on (unified-443:
 # HTTPS on :443 by default). Kept in lockstep with main.py's SERVER_PORT / SSL
 # settings so the watchdog never probes the wrong scheme/port.
-_HEALTH_PORT = os.environ.get("BUGFIXER_PORT", "443")
+_HEALTH_PORT = os.environ.get("AB_PORT", "443")
 _HEALTH_SCHEME = "https" if os.path.exists(
-    os.environ.get("BUGFIXER_SSL_CERT", "/etc/bugfixer/cert.pem")) else "http"
+    os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem")) else "http"
 HEALTH_URL = os.environ.get(
-    "BUGFIXER_HEALTH_URL", f"{_HEALTH_SCHEME}://127.0.0.1:{_HEALTH_PORT}/api/health")
+    "AB_HEALTH_URL", f"{_HEALTH_SCHEME}://127.0.0.1:{_HEALTH_PORT}/api/health")
 CHECK_INTERVAL = 5 # seconds
 HEALTH_TIMEOUT = 60 # seconds
 
@@ -100,10 +100,10 @@ except ImportError:
                         if log_file else None)
             _logging.basicConfig(level=default_level, force=True,
                                  format=_FMT, datefmt=_DFMT, handlers=handlers)
-# The BugFixerWatchdog logger name carries identity via %(name)s, replacing
+# The AppBuilderWatchdog logger name carries identity via %(name)s, replacing
 # the literal [WATCHDOG] format tag (now standard across all LM components).
-configure_logging(log_file="/var/log/bugfixer_watchdog.log")
-logger = logging.getLogger("BugFixerWatchdog")
+configure_logging(log_file="/var/log/ab_watchdog.log")
+logger = logging.getLogger("AppBuilderWatchdog")
 
 def load_update_state():
     if os.path.exists(UPDATE_STATE_FILE):
@@ -122,7 +122,7 @@ def save_update_state(state):
 
 def is_service_active():
     try:
-        res = subprocess.run(["systemctl", "is-active", "bugfixer"], capture_output=True, text=True)
+        res = subprocess.run(["systemctl", "is-active", "ab"], capture_output=True, text=True)
         return res.stdout.strip() == "active"
     except:
         return False
@@ -136,14 +136,14 @@ def read_startup_stamp():
         return None
 
 def spawn_restart():
-    """Detached `systemctl restart bugfixer` that survives this process dying. The
+    """Detached `systemctl restart ab` that survives this process dying. The
     service runs as svc_bg, so non-root invokes the race-free root helper via
     sudoers (mirrors main.py _spawn_restart); root still calls systemctl directly
     for dev/standalone."""
     if os.geteuid() != 0:
-        cmd = ["sudo", "-n", "/usr/local/bin/bugfixer-self-restart"]
+        cmd = ["sudo", "-n", "/usr/local/bin/ab-self-restart"]
     else:
-        cmd = ["systemctl", "restart", "bugfixer"]
+        cmd = ["systemctl", "restart", "ab"]
     subprocess.Popen(cmd, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
     logger.info("WATCHDOG: spawned detached restart.")
@@ -151,7 +151,7 @@ def spawn_restart():
 def handle_restart_request():
     """Consume a restart request from the cap-locked main service and restart it.
 
-    bugfixer.service can't restart itself (sudo can't setgid(0) under its locked
+    ab.service can't restart itself (sudo can't setgid(0) under its locked
     CapabilityBoundingSet), so it writes RESTART_REQUEST and we — the unrestricted
     watchdog — perform the restart. Claim the request by deleting it first so a
     burst of requests collapses to one restart."""
@@ -161,7 +161,7 @@ def handle_restart_request():
         os.remove(RESTART_REQUEST)
     except Exception:  # noqa: BLE001
         pass
-    logger.info("WATCHDOG: restart requested by bugfixer.service — restarting it.")
+    logger.info("WATCHDOG: restart requested by ab.service — restarting it.")
     spawn_restart()
 
 
@@ -174,7 +174,7 @@ def rollback():
         return False
 
     try:
-        app_dir = "/opt/bugfixer"
+        app_dir = "/opt/ab"
         if not os.path.exists(app_dir):
             logger.error(f"WATCHDOG: Application directory {app_dir} not found. Rollback impossible.")
             return False
@@ -228,7 +228,7 @@ def _reset_stale_ollama_status():
 
 
 def handle_ollama_setup_request():
-    """Run the privileged ollama-setup helper on behalf of bugfixer.service.
+    """Run the privileged ollama-setup helper on behalf of ab.service.
 
     The main service is locked to CAP_NET_BIND_SERVICE and can't escalate; the
     watchdog can (sudo works here). It writes a request file; we claim it, run
@@ -255,7 +255,7 @@ def handle_ollama_setup_request():
     except Exception:  # noqa: BLE001
         pass
     _write_ollama_status("running", "")
-    logger.info(f"ollama-setup: running helper (cores={cores}, max_loaded={max_loaded}) on behalf of bugfixer.service")
+    logger.info(f"ollama-setup: running helper (cores={cores}, max_loaded={max_loaded}) on behalf of ab.service")
     cmd = ["sudo", "-n", OLLAMA_SETUP_HELPER, cores, max_loaded]
     stream = []
     try:
@@ -292,7 +292,7 @@ def _write_claude_status(state, stream, returncode=None):
 
 
 def handle_claude_install_request():
-    """Install the Claude Code CLI on behalf of bugfixer.service.
+    """Install the Claude Code CLI on behalf of ab.service.
 
     Mirrors handle_ollama_setup_request: the main service writes a request file
     (it is locked to CAP_NET_BIND_SERVICE and cannot escalate), we claim it and
@@ -349,7 +349,7 @@ _WATCHDOG_SRC = os.path.abspath(__file__)
 def _maybe_reload_on_code_change(orig_mtime):
     """Re-exec the watchdog if watchdog.py changed on disk since we started.
 
-    The watchdog is a long-lived process that restarts bugfixer.service on
+    The watchdog is a long-lived process that restarts ab.service on
     update — but NOTHING restarts the watchdog itself, so after an update pulls
     a newer watchdog.py the running process keeps executing STALE in-memory code
     (a newly-added handler like handle_ollama_setup_request never runs → the
@@ -369,7 +369,7 @@ def _maybe_reload_on_code_change(orig_mtime):
 
 
 def main():
-    logger.info("BugFixer Watchdog started.")
+    logger.info("AppBuilder Watchdog started.")
     _reset_stale_ollama_status()
     try:
         _src_mtime = os.path.getmtime(_WATCHDOG_SRC)

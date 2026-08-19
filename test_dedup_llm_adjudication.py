@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for the LLM-based dedup fallback (Gap 2).
 
-Run:  python3 bugfixer/test_dedup_llm_adjudication.py
+Run:  python3 ab/test_dedup_llm_adjudication.py
 
 github_ops.py cannot be imported directly (it pulls in the app's circular
 import chain), so this extracts the SOURCE of the pure functions via ast and

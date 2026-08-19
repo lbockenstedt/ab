@@ -1,4 +1,4 @@
-"""Shared mutable application state for BugFixer.
+"""Shared mutable application state for AppBuilder.
 
 Extracted verbatim from main.py so the modules split out of main (llm_client,
 workers, ollama_setup, ...) can share the single module-level ``state`` dict and
@@ -75,7 +75,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     ``review`` is the skeptical panel's ``{confidence, verdict, critique}`` (or a
     ``{status, reason}`` when the panel was unavailable). It used to be rendered
     into the GitHub PR comment and then thrown away, so the advisory verdict was
-    visible on github.com but nowhere in BugFixer's own UI. Stored flat as
+    visible on github.com but nowhere in AppBuilder's own UI. Stored flat as
     panel_verdict / panel_confidence / panel_status so the PR list can show it
     without re-reading the comment."""
     global state
@@ -114,7 +114,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     # Second panel (pr_review._state_logic_review) — same flattening, own flat
     # fields. Previously computed every scan and rendered into the GitHub
     # comment but never persisted here, so its verdict was invisible in
-    # BugFixer's own UI even for ordinary human PRs. Added when feature
+    # AppBuilder's own UI even for ordinary human PRs. Added when feature
     # auto-drive's auto-merge gate needed to require BOTH panels to clear
     # (see pr_review._automerge_decision) — fixes that pre-existing gap for
     # every PR, not just feature-built ones.
@@ -297,7 +297,7 @@ state = {
     "refresh_logs_seconds": config_on_start.get("refresh_logs_seconds", 10),
     "cpu_count": os.cpu_count() or 4,  # detected core count, surfaced in the Local LLM setup UI
     "local_llm_setup": {},             # last-run summary for the one-click Local LLM setup
-    # Hub agent (WebSocket) status — BugFixer authenticates to the LM Hub as an
+    # Hub agent (WebSocket) status — AppBuilder authenticates to the LM Hub as an
     # agent like any other system, instead of the removed static admin token.
     "hub_agent_status": "not_registered",  # not_registered | pending | approved | error
     "hub_agent_message": "",

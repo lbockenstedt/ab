@@ -2,7 +2,7 @@
 """Self-test for model_selection.py — select_model()'s full decision truth
 table, the highest-value test in the LLM redesign per the approved plan.
 
-Run:  python3 bugfixer/test_model_selection.py
+Run:  python3 ab/test_model_selection.py
 
 Standalone: imports only model_selection (which imports model_registry).
 No app/main init.
@@ -39,7 +39,7 @@ def _perf(lat, tps, n):
 
 
 def main():
-    print("Running bugfixer model_selection self-test...")
+    print("Running ab model_selection self-test...")
     ok = True
     R = sel.LlmRequirements
 

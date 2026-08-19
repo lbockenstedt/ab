@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for llm_perf.py — the per-model performance sample store.
 
-Run:  python3 bugfixer/test_llm_perf_store.py
+Run:  python3 ab/test_llm_perf_store.py
 
 Standalone: imports only llm_perf (stdlib json/os/time only). No app/main init.
 """
@@ -22,7 +22,7 @@ KEY2 = ("anthropic", "https://api.anthropic.com", "claude-sonnet-5")
 
 
 def main():
-    print("Running bugfixer llm_perf self-test...")
+    print("Running ab llm_perf self-test...")
     ok = True
 
     # --- record + snapshot basics --------------------------------------------

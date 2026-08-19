@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for the OpenRouter model-listing branch of _fetch_models_for_provider.
 
-Run:  python3 bugfixer/test_openrouter_free_router.py
+Run:  python3 ab/test_openrouter_free_router.py
 
 workers.py cannot be imported directly (it pulls in main.py's FastAPI app), so
 this extracts the SOURCE of the pure function via ast and execs it with a

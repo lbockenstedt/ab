@@ -1,4 +1,4 @@
-"""User accounts + session auth for the BugFixer WebUI.
+"""User accounts + session auth for the AppBuilder WebUI.
 
 Everyone who can log in is an admin — there are no roles. The point is to stop an
 unauthenticated browser on the LAN from driving a service that holds a GitHub
@@ -8,7 +8,7 @@ Deliberately STDLIB ONLY. requirements.txt has no passlib/bcrypt/itsdangerous, a
 adding a dependency to the auth path of a self-updating service is a poor trade —
 `hashlib.scrypt` and `hmac` are in the standard library and sufficient here.
 
-Storage: ``/etc/bugfixer/users.json``, 0600, next to config.json (a directory the
+Storage: ``/etc/ab/users.json``, 0600, next to config.json (a directory the
 service already owns and writes). It holds the per-user salt+hash and the session
 signing secret. It is NEVER logged and never returned by an API.
 
@@ -23,10 +23,10 @@ the payload, so neither can be edited without the secret.
 
 RECOVERY (locked out): from a shell on the box, as root or the service user —
 
-    python3 -c "import sys; sys.path.insert(0,'/opt/bugfixer'); import auth; \\
+    python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; \\
                 auth.set_password('you','newpassword'); print('ok')"
 
-and to start over completely, delete /etc/bugfixer/users.json — the next request
+and to start over completely, delete /etc/ab/users.json — the next request
 re-enters first-run setup.
 """
 from __future__ import annotations
@@ -41,17 +41,17 @@ import secrets
 import time
 from datetime import datetime
 
-logger = logging.getLogger("BugFixer")
+logger = logging.getLogger("AppBuilder")
 
 try:
     from config_store import CONFIG_DIR
 except Exception:  # noqa: BLE001 — keep auth importable in isolation (recovery CLI)
-    CONFIG_DIR = os.environ.get("BUGFIXER_CONFIG_DIR", "/etc/bugfixer")
+    CONFIG_DIR = os.environ.get("AB_CONFIG_DIR", "/etc/ab")
 
 USERS_FILE = os.path.join(CONFIG_DIR, "users.json")
 
-SESSION_COOKIE = "bugfixer_session"
-SESSION_TTL_S = int(os.environ.get("BUGFIXER_SESSION_TTL_S", str(14 * 24 * 3600)))
+SESSION_COOKIE = "ab_session"
+SESSION_TTL_S = int(os.environ.get("AB_SESSION_TTL_S", str(14 * 24 * 3600)))
 
 # scrypt is preferred but is an OPTIONAL OpenSSL feature — Pythons linked against
 # LibreSSL (macOS system Python, some BSDs) have no hashlib.scrypt at all. An auth

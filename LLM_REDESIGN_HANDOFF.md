@@ -73,7 +73,7 @@ Phase 6 (deletion of the now-dead slot machinery) is unblocked.
   has the field, but `_call_llm_with_requirements` just raises a generic
   exception when every candidate + the safety floor fail. The actual
   `awaiting_human` state-setting behavior (reset tree, comment, label
-  `bugfixer-needs-human`, persist status) lives in `fix_engine.py` today and is
+  `ab-needs-human`, persist status) lives in `fix_engine.py` today and is
   explicitly Phase 8 scope per the plan — don't build it early.
 
 ## Remaining phases (unstarted)
@@ -262,7 +262,7 @@ All three intentional behavior changes are wired and covered:
 - **`awaiting_human` re-trigger** on `must_escalate_to_human=True` +
   `select_model()` returning None — `LlmHumanEscalationNeeded` raised in
   `llm_client._call_llm_with_requirements`, caught in `process_single_issue`,
-  which resets the tree, labels `bugfixer-needs-human`, and marks the issue
+  which resets the tree, labels `ab-needs-human`, and marks the issue
   `awaiting_human` (no silent safety-floor fallback).
 - **Invalid-JSON sets `error_context`** — the `invalid_json` failure kind feeds
   the reviewer/parse failure back into the next attempt's prompt.
@@ -292,7 +292,7 @@ Operator-facing changes to call out in the next release:
   an unslotted entry was never used).
 - **Issues can now be held for human review at selection time.** If no
   configured model meets a fix's requirements, the issue is labeled
-  `bugfixer-needs-human` and marked `awaiting_human` instead of silently
+  `ab-needs-human` and marked `awaiting_human` instead of silently
   falling back — surfaced in the dashboard.
 - **Retries always start from a clean working tree.** A fix attempt that fails
   QA (or returns invalid JSON) no longer leaves its rejected edits in the tree

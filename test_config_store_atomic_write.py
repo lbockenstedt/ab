@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for config_store's persistent-file writers being crash-safe.
 
-Run:  python3 bugfixer/test_config_store_atomic_write.py
+Run:  python3 ab/test_config_store_atomic_write.py
 
 config_store.py cannot be imported directly (it does `from main import
 logger`, and main.py's own import chain circularly re-imports config_store —
@@ -10,8 +10,8 @@ routes.py), so this extracts the pure save/load functions via ast and execs
 them with a stubbed logger/os/json, exactly like that file does for
 delete_issue.
 
-Regression guard: BugFixer Hub logged
-  "Error reading persistent config /etc/bugfixer/config.json: Expecting
+Regression guard: AppBuilder Hub logged
+  "Error reading persistent config /etc/ab/config.json: Expecting
   value: line 1 column 1 (char 0)"
 which is exactly what json.load raises against a zero-byte file. The old
 save_config/save_processed/save_pr_reviews/save_update_state each opened
@@ -88,7 +88,7 @@ def main():
         # is actually exercised (matches production; "config directory not
         # writable" would just silently redirect to the local-fallback branch
         # and never touch the temp-file/os.replace code path under test).
-        persistent_dir = os.path.join(tmpdir, "etc_bugfixer")
+        persistent_dir = os.path.join(tmpdir, "etc_ab")
         os.makedirs(persistent_dir, exist_ok=True)
         ns["CONFIG_DIR"] = persistent_dir
         ns["CONFIG_FILE"] = os.path.join(persistent_dir, "config.json")

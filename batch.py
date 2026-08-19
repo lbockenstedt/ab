@@ -2,7 +2,7 @@
 batch.py — async BATCH processing for the CLOUD tier (Anthropic Message Batches +
 Google Gemini Batch). ~50% off vs synchronous, for latency-tolerant work.
 
-Model: BugFixer runs local-first; when it would escalate a *latency-tolerant*
+Model: AppBuilder runs local-first; when it would escalate a *latency-tolerant*
 task (triage / log_review / pr_summary) to the cloud, it can instead ENQUEUE the
 request here, and a poller submits batches + dispatches results whenever they come
 back (minutes to hours). The tight fix→review loop stays synchronous.
@@ -10,7 +10,7 @@ back (minutes to hours). The tight fix→review loop stays synchronous.
 Everything is GATED behind config['batch_enabled'] (default OFF) — inert until
 turned on. State (pending queue + submitted batches) persists to a JSON file so it
 survives restarts. Import + worker registration are wrapped defensively by callers
-so a problem here can never crash BugFixer.
+so a problem here can never crash AppBuilder.
 
 Wiring a task:
   1. register_handler(kind, fn)  — fn(context, text) does whatever the result means
@@ -39,13 +39,13 @@ except Exception:  # pragma: no cover - fallback so import never hard-fails
     logger = logging.getLogger("batch")
     def load_config():  # type: ignore
         return {}
-    CONFIG_DIR = os.getenv("BUGFIXER_CONFIG_DIR", "/etc/bugfixer")
+    CONFIG_DIR = os.getenv("AB_CONFIG_DIR", "/etc/ab")
 
 ANTHROPIC_BASE = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
 GOOGLE_BASE = "https://generativelanguage.googleapis.com"
 
-_STATE_FILE = os.path.join(CONFIG_DIR or "/etc/bugfixer", "batch_state.json")
+_STATE_FILE = os.path.join(CONFIG_DIR or "/etc/ab", "batch_state.json")
 _LOCK = threading.Lock()
 _HANDLERS = {}   # kind -> callable(context: dict, text: str)
 

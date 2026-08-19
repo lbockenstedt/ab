@@ -1,6 +1,6 @@
-# bugfixer — Autonomous GitHub Issue Fixer
+# ab — Autonomous GitHub Issue Fixer
 
-Autonomous bot, and an optional hub **agent** (not a spoke). Repo: `bugfixer`. See [architecture-topology.md](architecture-topology.md).
+Autonomous bot, and an optional hub **agent** (not a spoke). Repo: `ab`. See [architecture-topology.md](architecture-topology.md).
 
 ## Role & module_type
 
@@ -8,8 +8,8 @@ A standalone autonomous bot that polls GitHub repos for issues labeled `automate
 
 ## Entrypoints
 
-- **Main:** `python3 main.py` (FastAPI app, poller, LLM orchestration, git workflow), systemd `bugfixer.service`, `User=root`, `Restart=always`. Installer `install.sh` (clones to `/opt/bugfixer`, apt + Node.js 20 + `@anthropic-ai/claude-code` CLI, `bugfixer.service` + `bugfixer-watchdog.service`, config to `/etc/bugfixer/config.json`). Alternates: `setup.sh` (local), `install_github.sh` (legacy spoke-style installer), `update.sh` (hourly self-update).
-- **Watchdog:** `python3 watchdog.py`, systemd `bugfixer-watchdog.service` — polls `http://localhost:8000/api/health` every 5s and rolls back a failed auto-update.
+- **Main:** `python3 main.py` (FastAPI app, poller, LLM orchestration, git workflow), systemd `ab.service`, `User=root`, `Restart=always`. Installer `install.sh` (clones to `/opt/ab`, apt + Node.js 20 + `@anthropic-ai/claude-code` CLI, `ab.service` + `ab-watchdog.service`, config to `/etc/ab/config.json`). Alternates: `setup.sh` (local), `install_github.sh` (legacy spoke-style installer), `update.sh` (hourly self-update).
+- **Watchdog:** `python3 watchdog.py`, systemd `ab-watchdog.service` — polls `http://localhost:8000/api/health` every 5s and rolls back a failed auto-update.
 
 ## Ports
 
@@ -17,8 +17,8 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 
 ## Environment variables
 
-- `.env`: `GITHUB_TOKEN`, `LOCAL_OLLAMA_MODEL`, `CLOUD_OLLAMA_MODEL`, `LOCAL_OLLAMA_URL`, `CLOUD_OLLAMA_URL`, `POLL_INTERVAL_SECONDS`, `UPDATE_API_URL`, `LOG_FILE_PATH` (`/var/log/bugfixer.log`).
-- `config.json`: `monitored_repos`, `trusted_repos`, `default_branch`, `self_diagnosis_repo`, `enabled_models`, `direct_push_enabled`, `dev_branch`, `repo_tests`, `GITHUB_TOKEN`, `monitored_labels` (default `["automated-fix"]`), `HUB_WS_URL`, `HUB_AGENT_ID` (default `bugfixer`), `HUB_AGENT_SECRET`, `HUB_SECRET`, `refresh_status_seconds`, `refresh_logs_seconds`, `bug_report_enabled`, `bug_report_repo`, `TRIAGE_STRICTNESS`, `heartbeat_exclude`. LLM provider slots: `LLM_PROVIDER_N`, `LLM_API_KEY_N`, `LLM_MODEL_N`, `LLM_BASE_URL_N`, `LLM_RPM_N` (1-based; vault-based `llm_credentials`/`llm_entries`/`llm_slots` supported). Providers: openai, anthropic, google, groq, openrouter, ollama (local+cloud), lmstudio, claude_cli, copilot.
+- `.env`: `GITHUB_TOKEN`, `LOCAL_OLLAMA_MODEL`, `CLOUD_OLLAMA_MODEL`, `LOCAL_OLLAMA_URL`, `CLOUD_OLLAMA_URL`, `POLL_INTERVAL_SECONDS`, `UPDATE_API_URL`, `LOG_FILE_PATH` (`/var/log/ab.log`).
+- `config.json`: `monitored_repos`, `trusted_repos`, `default_branch`, `self_diagnosis_repo`, `enabled_models`, `direct_push_enabled`, `dev_branch`, `repo_tests`, `GITHUB_TOKEN`, `monitored_labels` (default `["automated-fix"]`), `HUB_WS_URL`, `HUB_AGENT_ID` (default `ab`), `HUB_AGENT_SECRET`, `HUB_SECRET`, `refresh_status_seconds`, `refresh_logs_seconds`, `bug_report_enabled`, `bug_report_repo`, `TRIAGE_STRICTNESS`, `heartbeat_exclude`. LLM provider slots: `LLM_PROVIDER_N`, `LLM_API_KEY_N`, `LLM_MODEL_N`, `LLM_BASE_URL_N`, `LLM_RPM_N` (1-based; vault-based `llm_credentials`/`llm_entries`/`llm_slots` supported). Providers: openai, anthropic, google, groq, openrouter, ollama (local+cloud), lmstudio, claude_cli, copilot.
 
 ## Install flags
 
@@ -38,8 +38,8 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 
 - **Hub agent, not spoke** — registered in `active_connections` as `module_type="agent"`; does not register a spoke module or handle `CS_*`/`PXMX_*`/`LE_*` commands.
 - **Reimplements lm-core signing** — `hub_agent.py::MessageSigner` mirrors `lm/core/src/security/signer.py` (HMAC-SHA256 canonical JSON) so it can talk to the hub without depending on lm-core.
-- **Watchdog rollback** — polls `/api/health` every 5s; rolls back via `update_state.json`/`update_pending` in `/etc/bugfixer/` only on a failed auto-update.
-- **`SET_LOG_LEVEL`** — bugfixer is in the hub's broadcast set, so the WebUI "Enable Debug" flips its log level too.
+- **Watchdog rollback** — polls `/api/health` every 5s; rolls back via `update_state.json`/`update_pending` in `/etc/ab/` only on a failed auto-update.
+- **`SET_LOG_LEVEL`** — ab is in the hub's broadcast set, so the WebUI "Enable Debug" flips its log level too.
 
 ## Related pages
 

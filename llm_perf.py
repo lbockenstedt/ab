@@ -1,5 +1,5 @@
 """
-llm_perf.py — per-model performance sample store for BugFixer's LLM picker.
+llm_perf.py — per-model performance sample store for AppBuilder's LLM picker.
 
 No main import: computation runs over a plain in-memory dict (ModelKey ->
 sample history), with a thin JSON load/save boundary at the edges. Feeds

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for pr_review_retry.is_queued_for_retry_stale.
 
-Run:  python3 bugfixer/test_queue_for_retry_stale.py
+Run:  python3 ab/test_queue_for_retry_stale.py
 
 Standalone: imports only pr_review_retry (no app/main init — pr_review.py
 itself can't be imported outside the running app due to a circular import
@@ -28,7 +28,7 @@ def _check(label, condition):
 
 
 def main():
-    print("Running bugfixer is_queued_for_retry_stale self-test...")
+    print("Running ab is_queued_for_retry_stale self-test...")
     ok = True
 
     # (1) The exact bug: prior review at the SAME head was queue_for_retry —

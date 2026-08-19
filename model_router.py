@@ -1,5 +1,5 @@
 """
-model_router.py — pick the RIGHT-SIZED model per task, so BugFixer doesn't burn
+model_router.py — pick the RIGHT-SIZED model per task, so AppBuilder doesn't burn
 Opus on a log summary.
 
 Maps a ``task_kind`` → a tier (small / medium / large) → a concrete model per cloud

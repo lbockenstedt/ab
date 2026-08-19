@@ -4,7 +4,7 @@ that backs Diagnostics → LLM picker. Verifies every candidate is classified
 (selected / alternative / excluded) with a faithful reason, so an operator can
 audit routing for a requirement set without spending a token.
 
-Run:  python3 bugfixer/test_model_selection_explain.py
+Run:  python3 ab/test_model_selection_explain.py
 
 Standalone: imports only model_selection (which imports model_registry).
 """
@@ -40,7 +40,7 @@ def _row(res, key):
 
 
 def main():
-    print("Running bugfixer model_selection.explain_selection self-test...")
+    print("Running ab model_selection.explain_selection self-test...")
     ok = True
     R = sel.LlmRequirements
 

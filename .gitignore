@@ -5,7 +5,7 @@ processed_issues.json
 node_modules/
 .DS_Store
 *.pyc
-bugfixer.log
+ab.log
 # Runtime log files written by the service in its working dir; never commit these.
 server.log
 server_debug.log

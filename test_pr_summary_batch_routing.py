@@ -230,7 +230,7 @@ def main():
             return self._repo
 
     body_before = (
-        "<!-- bugfixer-pr-review -->\n<!-- head: abc123 -->\n## \U0001F916 BugFixer PR pre-review\n\n"
+        "<!-- ab-pr-review -->\n<!-- head: abc123 -->\n## \U0001F916 AppBuilder PR pre-review\n\n"
         "_Automated pre-review — **informational only**. A human is the sole approver; "
         "this bot never approves, denies, or edits the branch._\n\n"
         "### Tier-1 checks\n\n✅ **Passed**\n"

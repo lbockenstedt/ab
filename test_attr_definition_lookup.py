@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Self-test for bugfixer/attr_definition_lookup.py.
+"""Self-test for ab/attr_definition_lookup.py.
 
-Run:  python3 bugfixer/test_attr_definition_lookup.py
+Run:  python3 ab/test_attr_definition_lookup.py
 
 Standalone: imports only attr_definition_lookup (stdlib-only, no app init,
 no real GitHub/network — fake gh/repo/content objects stand in for PyGithub).
@@ -69,7 +69,7 @@ class _Repo:
 
 
 def main():
-    print("Running bugfixer attr_definition_lookup self-test...")
+    print("Running ab attr_definition_lookup self-test...")
     ok = True
 
     # (1) extract_getattr_names dedupes and preserves first-seen order.

@@ -35,7 +35,7 @@ def _bf_bytecode_self_heal():
         except Exception:  # noqa: BLE001
             pass
         print(
-            f"[bugfixer] {target} is not writable by this user"
+            f"[ab] {target} is not writable by this user"
             + (f" (owned by {owner})" if owner else "")
             + " — disabling bytecode caching so imports do not fail. "
               f"Repair with: sudo chown -R $(id -un) {os.path.dirname(os.path.dirname(os.path.dirname(target)))}",
@@ -74,10 +74,10 @@ import git
 from tenacity import retry
 
 # Setup Logging — uses the shared logging_setup helper when lm/core is on
-# PYTHONPATH, else an inline equivalent (bugfixer is self-contained and does
+# PYTHONPATH, else an inline equivalent (ab is self-contained and does
 # NOT import lm/core, so the inline fallback is the normal path here). Either
 # way LOG_LEVEL env is honored at boot and the standard format (with %(name)s)
-# is applied so the BugFixer logger name carries identity without a literal tag.
+# is applied so the AppBuilder logger name carries identity without a literal tag.
 try:
     from logging_setup import configure_logging
 except ImportError:
@@ -94,10 +94,10 @@ except ImportError:
                                  format=_FMT, datefmt=_DFMT, handlers=handlers)
 
 def get_log_path():
-    path = os.getenv("LOG_FILE_PATH", "/var/log/bugfixer.log")
+    path = os.getenv("LOG_FILE_PATH", "/var/log/ab.log")
     log_dir = os.path.dirname(path) or "."
     if not os.access(log_dir, os.W_OK):
-        return os.path.join(os.getcwd(), "bugfixer.log")
+        return os.path.join(os.getcwd(), "ab.log")
     return path
 
 log_file = get_log_path()
@@ -111,8 +111,8 @@ if not os.path.exists(log_dir):
         print(f"Error creating log directory {log_dir}: {e}")
 
 _resolved_level = configure_logging(log_file=log_file)
-logger = logging.getLogger("BugFixer")
-logger.info(f"BugFixer started. Logging level: {logging.getLevelName(_resolved_level)}. Logging to: {log_file}")
+logger = logging.getLogger("AppBuilder")
+logger.info(f"AppBuilder started. Logging level: {logging.getLevelName(_resolved_level)}. Logging to: {log_file}")
 
 # main.py is launched directly (systemd `ExecStart=python3 main.py`), so it loads
 # as the module __main__. The sibling modules below do `from main import ...`
@@ -150,10 +150,10 @@ app = FastAPI()
 # serves HTTPS, otherwise it falls back to plain HTTP on the SAME port so the
 # UI still comes up. The internal restart/health check and watchdog.py derive
 # their probe URL from the same settings so they never drift from the bind.
-SERVER_HOST = os.environ.get("BUGFIXER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("BUGFIXER_PORT", "443") or "443")
-SSL_CERT = (os.environ.get("BUGFIXER_SSL_CERT", "/etc/bugfixer/cert.pem") or "").strip()
-SSL_KEY  = (os.environ.get("BUGFIXER_SSL_KEY", "/etc/bugfixer/key.pem") or "").strip()
+SERVER_HOST = os.environ.get("AB_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("AB_PORT", "443") or "443")
+SSL_CERT = (os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem") or "").strip()
+SSL_KEY  = (os.environ.get("AB_SSL_KEY", "/etc/ab/key.pem") or "").strip()
 
 def _tls_enabled() -> bool:
     return bool(SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY))
@@ -167,8 +167,8 @@ def _sync_webui_cert_from_mtls():
     GitHub webhooks). INSTALL_CERT writes both going forward; this heals a
     deployment whose WebUI cert was left self-signed by an older handler. Runs at
     startup, before uvicorn binds. Never clobbers an already-CA-issued WebUI cert."""
-    client_cert = os.environ.get("BUGFIXER_HUB_CLIENT_CERT", "/etc/bugfixer/hub-client-cert.pem")
-    client_key = os.environ.get("BUGFIXER_HUB_CLIENT_KEY", "/etc/bugfixer/hub-client-key.pem")
+    client_cert = os.environ.get("AB_HUB_CLIENT_CERT", "/etc/ab/hub-client-cert.pem")
+    client_key = os.environ.get("AB_HUB_CLIENT_KEY", "/etc/ab/hub-client-key.pem")
     if not (SSL_CERT and SSL_KEY and os.path.exists(client_cert) and os.path.exists(client_key)):
         return
 
@@ -246,7 +246,7 @@ def _in_update_cooldown():
 import auth as _auth  # noqa: E402 — after logger/app so its logging is configured
 
 #: Paths reachable WITHOUT a session.
-#:  /api/health is load-bearing: bugfixer-watchdog polls it at 127.0.0.1 to verify
+#:  /api/health is load-bearing: ab-watchdog polls it at 127.0.0.1 to verify
 #:  a restart succeeded, and restart_worker does the same. Gate it and every
 #:  restart looks like a failed start, which triggers the watchdog's ROLLBACK.
 _AUTH_EXEMPT_EXACT = {"/api/health", "/login", "/logout", "/setup-admin",
@@ -310,7 +310,7 @@ async def catch_exceptions_mid(request: Request, call_next):
         logger.error(f"UNCAUGHT EXCEPTION: {e}\n{tb}")
         return JSONResponse(
             status_code=500,
-            content={"message": "Internal Server Error. Check bugfixer.log for details.", "error": str(e)}
+            content={"message": "Internal Server Error. Check ab.log for details.", "error": str(e)}
         )
 
 # Shared mutable application state + task-state locks + update_task_state live in
@@ -341,7 +341,7 @@ except Exception as ve:
 
 
 # --- Chat system-prompt context index (cached, TTL-bounded) -----------------
-# A compact markdown snapshot of BugFixer's repos, their open monitored-label
+# A compact markdown snapshot of AppBuilder's repos, their open monitored-label
 # issues, processed-issue status totals, and recent Hub error count. Prepended
 # to the chat system prompt every turn so the assistant has the lay of the land
 # without a tool round-trip. Tool calls drill deeper on demand.
@@ -353,7 +353,7 @@ except Exception as ve:
 
 
 
-# Default colors for labels bugfixer creates when missing. PyGithub's
+# Default colors for labels ab creates when missing. PyGithub's
 # create_issue(labels=...) raises UnknownObjectException if a label doesn't
 # exist on the target repo, so _ensure_label creates it first. The "Bug"
 # label is applied to user-filed "File a Bug" reports (see scan_bugs).
@@ -411,7 +411,7 @@ except Exception as ve:
 # =============================================================================
 # Chat agent: tool schemas, executors, secret sanitizer, and stream helpers.
 #
-# The chat agent gives the assistant awareness of BugFixer's repos, GitHub
+# The chat agent gives the assistant awareness of AppBuilder's repos, GitHub
 # issues, processed-issue state, and recent Hub/self log errors. The LLM calls
 # these tools on demand (Ollama /api/chat `tools`). All tools are READ-ONLY
 # except `propose_fix`, which does NOT mutate GitHub either — it only produces a
@@ -511,7 +511,7 @@ app.include_router(_llm_proxy_router)
 
 # ── Single-instance guard for the scan workers ────────────────────────────────
 # These threads start at IMPORT time, before uvicorn binds the port. So a second
-# bugfixer process that loses the race for :443 has already started all seven
+# ab process that loses the race for :443 has already started all seven
 # workers — every scan, LLM call and GitHub request runs twice while only one web
 # server exists. Observed live: two PIDs 3s apart, duplicate SelfScan/Discovery/
 # RepoScan cycles, doubled API and LLM load, and a max_concurrent=1 limiter that
@@ -525,7 +525,7 @@ app.include_router(_llm_proxy_router)
 # The loser is NOT killed: it still serves whatever it can and, more importantly,
 # exiting here would fight systemd's Restart=always and produce a restart loop.
 # It just stays silent instead of doubling the work.
-_WORKER_LOCK_PATH = os.path.join(CONFIG_DIR, "bugfixer.workers.lock")
+_WORKER_LOCK_PATH = os.path.join(CONFIG_DIR, "ab.workers.lock")
 _worker_lock_fh = None   # module-global: holds the flock for the process lifetime
 
 
@@ -546,7 +546,7 @@ def _acquire_worker_singleton():
                 holder = "unknown"
             fh.close()
             logger.error(
-                "Scan workers NOT started: another bugfixer process (pid %s) already holds "
+                "Scan workers NOT started: another ab process (pid %s) already holds "
                 "%s. Running two sets would double every scan, LLM call and GitHub request. "
                 "This process will serve requests only.", holder, _WORKER_LOCK_PATH)
             return False
@@ -573,7 +573,7 @@ if _acquire_worker_singleton():
     threading.Thread(target=log_health_worker, daemon=True).start()
     threading.Thread(target=model_preload_worker, daemon=True).start()
     # Batch worker (async cloud batch processing). Gated by batch_enabled (default
-    # off). Defensive import/start so a batch issue can never crash BugFixer startup.
+    # off). Defensive import/start so a batch issue can never crash AppBuilder startup.
     try:
         from batch import batch_worker as _batch_worker
         threading.Thread(target=_batch_worker, daemon=True).start()
@@ -596,7 +596,7 @@ if __name__ == "__main__":
     except Exception as _e:  # noqa: BLE001
         logger.warning("WebUI cert sync skipped: %s", _e)
     if _tls_enabled():
-        logger.info("Serving BugFixer UI on https://%s:%s (TLS)", SERVER_HOST, SERVER_PORT)
+        logger.info("Serving AppBuilder UI on https://%s:%s (TLS)", SERVER_HOST, SERVER_PORT)
         uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT,
                     ssl_certfile=SSL_CERT, ssl_keyfile=SSL_KEY)
     else:

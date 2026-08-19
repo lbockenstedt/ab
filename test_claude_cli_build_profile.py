@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for claude_cli_native_tools' mutating "build" profile.
 
-Run:  python3 bugfixer/test_claude_cli_build_profile.py
+Run:  python3 ab/test_claude_cli_build_profile.py
 
 Standalone: imports only claude_cli_native_tools (no app/main init).
 
@@ -26,7 +26,7 @@ def _check(label, condition):
 
 
 def main():
-    print("Running bugfixer claude_cli build-profile self-test...")
+    print("Running ab claude_cli build-profile self-test...")
     ok = True
 
     # --- separation: the two constant sets never alias or overlap ----------

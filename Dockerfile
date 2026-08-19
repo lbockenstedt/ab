@@ -21,7 +21,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && npm install -g @anthropic-ai/claude-code
 
 # Create application directory
-WORKDIR /opt/bugfixer
+WORKDIR /opt/ab
 
 # Copy requirements and install
 COPY requirements.txt .

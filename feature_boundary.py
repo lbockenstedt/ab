@@ -1,5 +1,5 @@
 """
-feature_boundary.py — pure, standalone boundary-matching for BugFixer's
+feature_boundary.py — pure, standalone boundary-matching for AppBuilder's
 feature auto-drive classifier (feature_drive.py) and auto-merge gate
 (pr_review.py's _automerge_decision).
 
@@ -9,9 +9,9 @@ call, and is ALSO reused, unmodified, as the auto-merge gate's re-check
 against the actual PR diff. Being import-light keeps both call sites cheap
 and keeps this file directly unit-testable outside the running app.
 
-A "boundary" is one operator-authored rule describing something BugFixer
+A "boundary" is one operator-authored rule describing something AppBuilder
 must never build without a human — e.g. "never hardcode a PSK for spoke-hub
-comms". The list is stored in BugFixer's own config (key: feature_boundaries)
+comms". The list is stored in AppBuilder's own config (key: feature_boundaries)
 so the operator can add/remove/adjust it from Settings without a commit; see
 DEFAULT_BOUNDARIES below for the seeded starting draft.
 

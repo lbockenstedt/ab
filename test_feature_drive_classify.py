@@ -2,7 +2,7 @@
 """Self-test for feature_drive.py — the deterministic-then-LLM classifier and
 the flag/clarify actions (Phase 1 of the feature auto-drive plan).
 
-Run:  python3 bugfixer/test_feature_drive_classify.py
+Run:  python3 ab/test_feature_drive_classify.py
 
 feature_drive.py imports `main` (real feature-drive worker deployment
 context), and this checkout's main.py fully boots the live app as a side
@@ -262,7 +262,7 @@ def main():
     repo = ns["_FakeRepo"]()
     flag_result = {"verdict": "flag", "boundary_ids": ["psk-hardcode"], "reason": "x"}
     ns["_flag_issue"](repo, issue, flag_result)
-    ok &= _check("_flag_issue applies the needs-human label", "bugfixer-needs-human" in issue.added_labels)
+    ok &= _check("_flag_issue applies the needs-human label", "ab-needs-human" in issue.added_labels)
     ok &= _check("_flag_issue posts exactly one comment", len(issue.comments_posted) == 1)
     ok &= _check("_flag_issue's comment quotes the crossed rule", "Never hardcode a PSK" in issue.comments_posted[0])
     ns["_flag_issue"](repo, issue, flag_result)  # second call, same issue
@@ -272,7 +272,7 @@ def main():
     issue2 = ns["_FakeIssue"](2, title="x", body="y")
     clarify_result = {"verdict": "clarify", "questions": ["Which page?"], "reason": "x"}
     ns["_clarify_issue"](repo, issue2, clarify_result)
-    ok &= _check("_clarify_issue applies the needs-info label", "bugfixer-needs-info" in issue2.added_labels)
+    ok &= _check("_clarify_issue applies the needs-info label", "ab-needs-info" in issue2.added_labels)
     ok &= _check("_clarify_issue posts exactly one comment", len(issue2.comments_posted) == 1)
     ok &= _check("_clarify_issue's comment lists the question", "Which page?" in issue2.comments_posted[0])
     ns["_clarify_issue"](repo, issue2, clarify_result)  # same questions again

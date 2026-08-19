@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Self-test for bugfixer/check_test_regressions.py — the pure-logic pieces
+"""Self-test for ab/check_test_regressions.py — the pure-logic pieces
 only (failure-line parsing, test-command detection, default-off gating).
 Does NOT exercise the actual clone/Docker-sandbox path — that needs a real
 git remote + Docker, which is exactly the kind of thing this file avoids per
 the other test_*.py self-tests in this repo (stdlib-only, no network).
 
-Run:  python3 bugfixer/test_check_test_regressions.py
+Run:  python3 ab/test_check_test_regressions.py
 """
 import sys
 import tempfile
@@ -40,7 +40,7 @@ class _FakeConfig(dict):
 
 
 def main():
-    print("Running bugfixer check_test_regressions self-test...")
+    print("Running ab check_test_regressions self-test...")
     ok = True
 
     # (1) FAILED-line extraction matches pytest's standard -q short summary.

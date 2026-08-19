@@ -4,7 +4,7 @@ Selection Redesign): candidate enumeration, the identity-keyed circuit
 breakers, and _call_llm_with_requirements' selection + failover + safety-
 floor logic.
 
-Run:  python3 bugfixer/test_llm_client_requirements_path.py
+Run:  python3 ab/test_llm_client_requirements_path.py
 
 llm_client.py imports `main` (app-init side effects — see
 test_skills_loader.py's docstring), so this extracts the relevant pieces by
@@ -108,7 +108,7 @@ def _entry(id_, provider, model, api_key="k", base_url="", rpm=0, enabled=True):
 
 
 def main():
-    print("Running bugfixer call_llm requirements= path self-test...")
+    print("Running ab call_llm requirements= path self-test...")
     ok = True
 
     # --- _enumerate_candidates -------------------------------------------------

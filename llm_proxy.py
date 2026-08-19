@@ -1,8 +1,8 @@
 """Anthropic Messages API-compatible proxy so external Anthropic clients
 (notably Claude Code, pointed at this host via ``ANTHROPIC_BASE_URL``) can use
-BugFixer as an LLM router.
+AppBuilder as an LLM router.
 
-Every inbound ``POST /v1/messages`` is translated into BugFixer's internal
+Every inbound ``POST /v1/messages`` is translated into AppBuilder's internal
 message shape and routed through :func:`llm_client.call_llm` with an
 ``LlmRequirements`` derived from the request (size + tool presence), so the
 existing capability/cost-aware ``model_selection.select_model`` picks the best
@@ -12,7 +12,7 @@ JSON, or a synthetic SSE stream when the client asks for ``stream: true``).
 
 Auth: the WebUI's session middleware is bypassed for ``/v1/*`` (see main's
 ``_AUTH_EXEMPT_PREFIX``); this router does its own API-key check instead. Set a
-key via the ``BUGFIXER_PROXY_KEY`` env var or the ``llm_proxy_api_key`` config
+key via the ``AB_PROXY_KEY`` env var or the ``llm_proxy_api_key`` config
 value and clients must send it as ``x-api-key`` or ``Authorization: Bearer``.
 With no key configured the endpoint is open (a warning is logged) — fine for a
 trusted LAN, but set a key for anything exposed.
@@ -43,25 +43,25 @@ logger = logging.getLogger("LlmProxy")
 router = APIRouter()
 
 # Model id advertised to clients. Claude Code sends whatever model it's told to
-# use; the proxy ignores it for routing (BugFixer picks the model) and echoes a
+# use; the proxy ignores it for routing (AppBuilder picks the model) and echoes a
 # stable synthetic id back so the client has something coherent to display.
-_PROXY_MODEL_ID = "bugfixer-router"
+_PROXY_MODEL_ID = "ab-router"
 
 # Agentic mode: when the client asks for this model id (Claude Code:
-# ANTHROPIC_MODEL=bugfixer-agent), the proxy does NOT do a single passthrough
-# call — it runs BugFixer's OWN server-side agent loop (chat.run_agent_loop)
+# ANTHROPIC_MODEL=ab-agent), the proxy does NOT do a single passthrough
+# call — it runs AppBuilder's OWN server-side agent loop (chat.run_agent_loop)
 # with the same CHAT_TOOLS the dashboard chat uses, so an external client (a
 # curl, the Claude CLI) gets an agent that can list repos, read files, inspect
 # issues, and — when autofix is enabled — trigger the real fix pipeline. This
 # makes the LLM router a third fix/feature intake alongside the UI bug report
 # and the UI feature request, reusing the exact same build/maintain tools.
-_PROXY_AGENT_MODEL_ID = "bugfixer-agent"
+_PROXY_AGENT_MODEL_ID = "ab-agent"
 
 
 def _wants_agentic(body: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
     """True when this request should run the server-side agent loop instead of a
     single passthrough. Triggered by the requested model id (contains
-    ``bugfixer-agent``, or an operator-configured ``llm_proxy_agent_model_ids``
+    ``ab-agent``, or an operator-configured ``llm_proxy_agent_model_ids``
     entry) or globally via ``llm_proxy_agentic_default``."""
     if cfg.get("llm_proxy_agentic_default"):
         return True
@@ -149,7 +149,7 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
 
 def _run_agentic(system: Any, a_messages: List[Dict[str, Any]],
                  cfg: Dict[str, Any]) -> Tuple[str, str]:
-    """Run BugFixer's server-side agent loop for one /v1/messages turn and
+    """Run AppBuilder's server-side agent loop for one /v1/messages turn and
     return (final_text, model_label). Builds the same context index + system
     prompt the dashboard chat uses so the router agent has repo/issue awareness
     and the CHAT_TOOLS."""
@@ -233,7 +233,7 @@ def _proxy_deadline(cfg: Dict[str, Any]) -> float:
 
 # ── Auth ────────────────────────────────────────────────────────────────────
 def _configured_key() -> str:
-    env = (os.environ.get("BUGFIXER_PROXY_KEY") or "").strip()
+    env = (os.environ.get("AB_PROXY_KEY") or "").strip()
     if env:
         return env
     try:
@@ -256,7 +256,7 @@ def _authorized(request: Request) -> bool:
     want = _configured_key()
     if not want:
         logger.warning("LLM proxy request served with NO api key configured — "
-                       "endpoint is open. Set BUGFIXER_PROXY_KEY or "
+                       "endpoint is open. Set AB_PROXY_KEY or "
                        "llm_proxy_api_key to require authentication.")
         return True
     return _presented_key(request) == want
@@ -295,7 +295,7 @@ def _stringify_content(content: Any) -> str:
 
 def _to_internal_messages(system: Any,
                           messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Translate an Anthropic request's system+messages into BugFixer's internal
+    """Translate an Anthropic request's system+messages into AppBuilder's internal
     message list ({role, content[, tool_calls]} / {role:tool,...})."""
     out: List[Dict[str, Any]] = []
     sys_txt = _system_text(system)
@@ -510,7 +510,7 @@ async def messages(request: Request):
     icfg = _interactive_config()
 
     # ── Agentic mode ──────────────────────────────────────────────────────
-    # model=bugfixer-agent (or llm_proxy_agentic_default): run BugFixer's own
+    # model=ab-agent (or llm_proxy_agentic_default): run AppBuilder's own
     # server-side agent loop with CHAT_TOOLS instead of a single passthrough, so
     # the caller gets an agent that can investigate the repo and (with autofix
     # enabled) trigger the real fix pipeline.
@@ -605,12 +605,12 @@ async def count_tokens(request: Request):
 @router.get("/v1/models")
 async def models(request: Request):
     """Minimal model list so clients that enumerate models get one coherent id.
-    Routing is decided per-request by BugFixer regardless of the id chosen."""
+    Routing is decided per-request by AppBuilder regardless of the id chosen."""
     if not _authorized(request):
         return JSONResponse(status_code=401, content={
             "type": "error",
             "error": {"type": "authentication_error", "message": "Missing or invalid api key."}})
     now = int(time.time())
     return JSONResponse(content={"data": [
-        {"type": "model", "id": _PROXY_MODEL_ID, "display_name": "BugFixer Router",
+        {"type": "model", "id": _PROXY_MODEL_ID, "display_name": "AppBuilder Router",
          "created_at": now}]})

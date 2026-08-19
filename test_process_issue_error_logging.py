@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for process_single_issue's exception-logging fix (#796).
 
-Run:  python3 bugfixer/test_process_issue_error_logging.py
+Run:  python3 ab/test_process_issue_error_logging.py
 
 process_single_issue is a ~600-line function with heavy dependencies
 (GitHub API, LLM providers, sandboxed git clones) that can't be reasonably

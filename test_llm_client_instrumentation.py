@@ -3,7 +3,7 @@
 through _call_provider's dispatch, and _call_provider_timed's latency/tok-s
 capture + llm_perf recording.
 
-Run:  python3 bugfixer/test_llm_client_instrumentation.py
+Run:  python3 ab/test_llm_client_instrumentation.py
 
 llm_client.py imports `main` (app-init side effects — see
 test_skills_loader.py's docstring), so this extracts the relevant pieces by
@@ -113,7 +113,7 @@ def _check(label, cond):
 
 
 def main():
-    print("Running bugfixer llm_client instrumentation self-test...")
+    print("Running ab llm_client instrumentation self-test...")
     ok = True
 
     # --- usage_out reaches every provider branch of _call_provider's dispatch -

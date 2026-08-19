@@ -1,13 +1,13 @@
 #!/bin/bash
-# BugFixer Installer
+# AppBuilder Installer
 #
 # Pipe directly (root shell):
-#   curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/lbockenstedt/ab/main/install.sh | bash
 # Connect to an LM hub at install time (first arg via `bash -s --`, or env):
 #   curl -sSL .../install.sh | bash -s -- wss://lm-hub.example.com
 #   curl -sSL .../install.sh | HUB_WS_URL=wss://lm-hub.example.com bash
 # Or download then run:
-#   curl -sSL .../install.sh -o /tmp/install-bugfixer.sh && bash /tmp/install-bugfixer.sh wss://lm-hub.example.com
+#   curl -sSL .../install.sh -o /tmp/install-ab.sh && bash /tmp/install-ab.sh wss://lm-hub.example.com
 set -e
 
 # NOTE: do NOT `exec </dev/null` here. When this script is run via
@@ -17,10 +17,10 @@ set -e
 # instead prevented per-command: apt runs DEBIAN_FRONTEND=noninteractive with
 # -y, and the npm / NodeSource calls get their own `</dev/null` redirect below.
 
-REPO_URL="https://github.com/lbockenstedt/bugfixer.git"
-INSTALL_DIR="/opt/bugfixer"
-CONFIG_DIR="/etc/bugfixer"
-LOG_FILE="/var/log/bugfixer.log"
+REPO_URL="https://github.com/lbockenstedt/ab.git"
+INSTALL_DIR="/opt/ab"
+CONFIG_DIR="/etc/ab"
+LOG_FILE="/var/log/ab.log"
 
 # Optional LM-hub connection, baked into config.json below. First positional arg
 # (via `bash -s -- <url>`) OR the HUB_WS_URL env var. A bare host is fine — the
@@ -29,7 +29,7 @@ LOG_FILE="/var/log/bugfixer.log"
 HUB_WS_URL="${1:-${HUB_WS_URL:-}}"
 HUB_QUERY_URL="${HUB_QUERY_URL:-}"
 
-echo "=== BugFixer Installer ==="
+echo "=== AppBuilder Installer ==="
 
 # 1. System dependencies
 echo ">> Installing system dependencies..."
@@ -40,19 +40,19 @@ DEBIAN_FRONTEND=noninteractive apt-get update -qq
 # helpers via passwordless sudo, so the package is genuinely needed at runtime.
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git build-essential python3-pip python3-venv psmisc openssl zstd sudo
 
-# Dedicated service user (mirrors lm/install_all.sh svc_lm). bugfixer + its
+# Dedicated service user (mirrors lm/install_all.sh svc_lm). ab + its
 # watchdog run as svc_bg; the two genuinely root-only capabilities (the Docker
 # sandbox for untrusted repo code, and ollama service management) stay behind
 # narrow root helpers invoked via passwordless sudo (see the sudoers drop-in
-# below). /opt/bugfixer is the home dir so claude auth login / git creds land
+# below). /opt/ab is the home dir so claude auth login / git creds land
 # in ~svc_bg, not ~root.
 SVC_USER="svc_bg"
 if ! id -u "$SVC_USER" >/dev/null 2>&1; then
     echo ">> Creating service user $SVC_USER..."
-    # No -m: /opt/bugfixer is created by the git clone below (with -m, useradd
+    # No -m: /opt/ab is created by the git clone below (with -m, useradd
     # would pre-create it + skel litter and the clone would refuse a non-empty
     # target). chown after the clone makes svc_bg own its home.
-    useradd -r -d /opt/bugfixer -s /usr/sbin/nologin "$SVC_USER"
+    useradd -r -d /opt/ab -s /usr/sbin/nologin "$SVC_USER"
 fi
 
 # Node.js + npm (needed only for the OPTIONAL Claude Code CLI). Trigger the
@@ -85,7 +85,7 @@ fi
 # Whitelist the tree SYSTEM-WIDE (/etc/gitconfig) so every user can operate on it.
 git config --system --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
 if [ ! -d "$INSTALL_DIR/.git" ]; then
-    echo ">> Cloning BugFixer to $INSTALL_DIR..."
+    echo ">> Cloning AppBuilder to $INSTALL_DIR..."
     git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
 else
     echo ">> Updating existing install in $INSTALL_DIR..."
@@ -152,7 +152,7 @@ done
 
 # 4. Log directories — owned by svc_bg so the unit's StandardOutput=append
 # (and the watchdog's) can write them. Watchdog uses a separate log file.
-WATCHDOG_LOG="/var/log/bugfixer_watchdog.log"
+WATCHDOG_LOG="/var/log/ab_watchdog.log"
 touch "$LOG_FILE" "$WATCHDOG_LOG"
 chmod 644 "$LOG_FILE" "$WATCHDOG_LOG"
 chown "$SVC_USER:$SVC_USER" "$LOG_FILE" "$WATCHDOG_LOG"
@@ -202,7 +202,7 @@ if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
     IP_FOR_CERT=$(hostname -I 2>/dev/null | awk '{print $1}')
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
         -keyout "$KEY_FILE" -out "$CERT_FILE" \
-        -subj "/CN=${IP_FOR_CERT:-bugfixer}" \
+        -subj "/CN=${IP_FOR_CERT:-ab}" \
         -addext "subjectAltName=IP:${IP_FOR_CERT:-127.0.0.1},IP:127.0.0.1,DNS:localhost" \
         >/dev/null 2>&1 \
       && echo "   Certificate created (self-signed, 10y)." \
@@ -218,11 +218,11 @@ fi
 # svc_bg, readable only by it). Migrates an existing root-owned dir on re-run.
 chown -R "$SVC_USER:$SVC_USER" "$CONFIG_DIR"
 
-# 6. Systemd service for BugFixer
+# 6. Systemd service for AppBuilder
 echo ">> Installing systemd services..."
-cat > /etc/systemd/system/bugfixer.service << SERVICE
+cat > /etc/systemd/system/ab.service << SERVICE
 [Unit]
-Description=BugFixer Autonomous GitHub Issue Bot
+Description=AppBuilder Autonomous GitHub Issue Bot
 After=network.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -230,10 +230,10 @@ StartLimitBurst=5
 [Service]
 User=${SVC_USER}
 WorkingDirectory=${INSTALL_DIR}
-Environment=BUGFIXER_HOST=0.0.0.0
-Environment=BUGFIXER_PORT=443
-Environment=BUGFIXER_SSL_CERT=${CERT_FILE}
-Environment=BUGFIXER_SSL_KEY=${KEY_FILE}
+Environment=AB_HOST=0.0.0.0
+Environment=AB_PORT=443
+Environment=AB_SSL_CERT=${CERT_FILE}
+Environment=AB_SSL_KEY=${KEY_FILE}
 # svc_bg binds the privileged 443 without being root (mirrors lm.service's
 # AmbientCapabilities=CAP_NET_BIND_SERVICE). CapabilityBoundingSet drops
 # everything else, so the unit has no other ambient root powers.
@@ -250,17 +250,17 @@ WantedBy=multi-user.target
 SERVICE
 
 # 7. Watchdog service
-cat > /etc/systemd/system/bugfixer-watchdog.service << WSERVICE
+cat > /etc/systemd/system/ab-watchdog.service << WSERVICE
 [Unit]
-Description=BugFixer Watchdog (auto-update recovery)
-After=bugfixer.service
+Description=AppBuilder Watchdog (auto-update recovery)
+After=ab.service
 
 [Service]
 User=${SVC_USER}
 WorkingDirectory=${INSTALL_DIR}
-Environment=BUGFIXER_PORT=443
-Environment=BUGFIXER_SSL_CERT=${CERT_FILE}
-Environment=BUGFIXER_SSL_KEY=${KEY_FILE}
+Environment=AB_PORT=443
+Environment=AB_SSL_CERT=${CERT_FILE}
+Environment=AB_SSL_KEY=${KEY_FILE}
 ExecStart=${INSTALL_DIR}/venv/bin/python3 watchdog.py
 Restart=always
 RestartSec=15
@@ -271,64 +271,64 @@ StandardError=append:${WATCHDOG_LOG}
 WantedBy=multi-user.target
 WSERVICE
 
-# 7b. Root helpers + sudoers drop-in. bugfixer runs as svc_bg (no ambient root
+# 7b. Root helpers + sudoers drop-in. ab runs as svc_bg (no ambient root
 # powers), but two capabilities genuinely need root: the Docker sandbox that
 # runs UNTRUSTED repo code (fix_engine.run_sandboxed_command), and ollama
 # service management (install + /etc override + restart). Plus its own
-# self-restart, which must run from OUTSIDE bugfixer.service's cgroup to avoid
-# the ~min-strand race a bare `systemctl restart bugfixer` hits from inside
+# self-restart, which must run from OUTSIDE ab.service's cgroup to avoid
+# the ~min-strand race a bare `systemctl restart ab` hits from inside
 # the unit (same bug lm hit — see lm/install_all.sh lm-self-restart). Each
 # helper is a narrow, root-owned path; the sudoers drop-in grants svc_bg ONLY
 # these three exact paths (no direct systemctl, no docker, no apt).
 echo ">> Installing root helpers + sudoers for $SVC_USER..."
 
 # Self-restart via a transient systemd unit owned by PID 1, so the restart
-# command survives bugfixer.service being stopped (mirrors lm-self-restart).
-cat > /usr/local/bin/bugfixer-self-restart <<'HELPER'
+# command survives ab.service being stopped (mirrors lm-self-restart).
+cat > /usr/local/bin/ab-self-restart <<'HELPER'
 #!/bin/bash
-# Schedules a bugfixer.service restart from a transient unit outside
-# bugfixer's cgroup. Invoked by bugfixer as `sudo -n /usr/local/bin/bugfixer-self-restart`.
+# Schedules a ab.service restart from a transient unit outside
+# ab's cgroup. Invoked by ab as `sudo -n /usr/local/bin/ab-self-restart`.
 set -euo pipefail
-_unit="bugfixer-self-restart-$$-$RANDOM"
+_unit="ab-self-restart-$$-$RANDOM"
 exec systemd-run --no-block --quiet --collect \
     --unit="$_unit" --service-type=oneshot \
-    /bin/bash -c 'sleep 3; exec systemctl restart bugfixer'
+    /bin/bash -c 'sleep 3; exec systemctl restart ab'
 HELPER
 
 # Docker sandbox for untrusted repo code. Takes <image> <cwd> <command>; the
 # command is passed to docker as a single argv element (sh -c inside the
 # container) — no host-side shell parsing, so svc_bg can't inject host args.
-# cwd MUST be under /opt/bugfixer so a compromised svc_bg can't bind-mount
+# cwd MUST be under /opt/ab so a compromised svc_bg can't bind-mount
 # arbitrary host dirs into a root container.
-cat > /usr/local/bin/bugfixer-sandbox <<'HELPER'
+cat > /usr/local/bin/ab-sandbox <<'HELPER'
 #!/bin/bash
 # Runs untrusted repo code in a Docker container as root. Invoked by fix_engine
-# as `sudo -n /usr/local/bin/bugfixer-sandbox <image> <cwd> <command>`.
+# as `sudo -n /usr/local/bin/ab-sandbox <image> <cwd> <command>`.
 set -euo pipefail
-image="${1:?usage: bugfixer-sandbox <image> <cwd> <command>}"
+image="${1:?usage: ab-sandbox <image> <cwd> <command>}"
 cwd="${2:?missing cwd}"
 cmd="${3:?missing command}"
 case "$cwd" in
-    /opt/bugfixer/*) : ;;
-    *) echo "cwd must be under /opt/bugfixer (got $cwd)" >&2; exit 2 ;;
+    /opt/ab/*) : ;;
+    *) echo "cwd must be under /opt/ab (got $cwd)" >&2; exit 2 ;;
 esac
 exec docker run --rm -v "$cwd:/app" -w /app "$image" sh -c "$cmd"
 HELPER
 
 # Ollama privileged setup: install ollama if absent, write the CPU-tuning
 # systemd override, daemon-reload + restart. The HTTP-API stages (pull model,
-# create derived model, verify reachable) stay in bugfixer running as svc_bg.
-# Args: <num_thread>. Prints progress lines to stdout for bugfixer to relay.
-cat > /usr/local/bin/bugfixer-ollama-setup <<'HELPER'
+# create derived model, verify reachable) stay in ab running as svc_bg.
+# Args: <num_thread>. Prints progress lines to stdout for ab to relay.
+cat > /usr/local/bin/ab-ollama-setup <<'HELPER'
 #!/bin/bash
-# Privileged stages of bugfixer's Local LLM Setup. Invoked by main.py as
-# `sudo -n /usr/local/bin/bugfixer-ollama-setup <num_thread>`.
+# Privileged stages of ab's Local LLM Setup. Invoked by main.py as
+# `sudo -n /usr/local/bin/ab-ollama-setup <num_thread>`.
 set -uo pipefail
 num_thread="${1:-1}"
 max_loaded="${2:-3}"    # OLLAMA_MAX_LOADED_MODELS — how many models stay resident at once
 # OLLAMA_HOST — the address ollama BINDS to. Upstream defaults to 127.0.0.1, which
 # makes the API reachable only from the box itself; other hosts (a second
-# bugfixer, the hub, a workstation) get connection-refused. Bind all interfaces
+# ab, the hub, a workstation) get connection-refused. Bind all interfaces
 # so the model server is usable across the lab.
 #
 # NOTE: ollama has NO authentication. Anything that can reach this port can run
@@ -385,12 +385,12 @@ fi
 say "done"
 HELPER
 
-cat > /usr/local/bin/bugfixer-claude-install <<'HELPER'
+cat > /usr/local/bin/ab-claude-install <<'HELPER'
 #!/bin/bash
-# Root helper: install the Claude Code CLI FOR THE BUGFIXER SERVICE USER.
+# Root helper: install the Claude Code CLI FOR THE AB SERVICE USER.
 #
-# Invoked as `sudo -n /usr/local/bin/bugfixer-claude-install <svc_user>` by
-# bugfixer-watchdog on behalf of the cap-locked main service (which cannot
+# Invoked as `sudo -n /usr/local/bin/ab-claude-install <svc_user>` by
+# ab-watchdog on behalf of the cap-locked main service (which cannot
 # escalate). Also run directly at install time.
 #
 # Installed as the SERVICE USER, not root, on purpose: `claude` authenticates
@@ -423,57 +423,57 @@ fi
 echo "installer completed but no binary at $HOME_DIR/.local/bin/claude"; exit 1
 HELPER
 
-chown root:root /usr/local/bin/bugfixer-self-restart /usr/local/bin/bugfixer-sandbox /usr/local/bin/bugfixer-ollama-setup /usr/local/bin/bugfixer-claude-install
-chmod 0755 /usr/local/bin/bugfixer-self-restart /usr/local/bin/bugfixer-sandbox /usr/local/bin/bugfixer-ollama-setup /usr/local/bin/bugfixer-claude-install
+chown root:root /usr/local/bin/ab-self-restart /usr/local/bin/ab-sandbox /usr/local/bin/ab-ollama-setup /usr/local/bin/ab-claude-install
+chmod 0755 /usr/local/bin/ab-self-restart /usr/local/bin/ab-sandbox /usr/local/bin/ab-ollama-setup /usr/local/bin/ab-claude-install
 
 # Sudoers: svc_bg may invoke ONLY these four exact paths, passwordless.
 # No direct systemctl, no docker, no apt — least privilege.
 mkdir -p /etc/sudoers.d   # belt-and-suspenders: exists once `sudo` is installed
-cat > /etc/sudoers.d/bugfixer <<SUDOERS
-# Grants the bugfixer service user (svc_bg) passwordless access to its four
+cat > /etc/sudoers.d/ab <<SUDOERS
+# Grants the ab service user (svc_bg) passwordless access to its four
 # narrow root helpers ONLY. Mirrors lm/install_all.sh's /etc/sudoers.d/lm.
-${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/bugfixer-self-restart
-${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/bugfixer-sandbox *
-${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/bugfixer-ollama-setup *
-${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/bugfixer-claude-install *
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/ab-self-restart
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/ab-sandbox *
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/ab-ollama-setup *
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/ab-claude-install *
 SUDOERS
-chmod 440 /etc/sudoers.d/bugfixer
+chmod 440 /etc/sudoers.d/ab
 # Validate the sudoers syntax before leaving it in place (visudo -c would
-# refuse a broken drop-in on next sudo load, stranding bugfixer's root ops).
+# refuse a broken drop-in on next sudo load, stranding ab's root ops).
 if command -v visudo >/dev/null 2>&1; then
-    visudo -cf /etc/sudoers.d/bugfixer >/dev/null 2>&1 || echo "   ⚠️  sudoers syntax check failed — review /etc/sudoers.d/bugfixer"
+    visudo -cf /etc/sudoers.d/ab >/dev/null 2>&1 || echo "   ⚠️  sudoers syntax check failed — review /etc/sudoers.d/ab"
 fi
 
 # 7c. Claude Code CLI for the service user (best-effort; the claude_cli provider
 # slot needs the binary AND a session owned by the user that runs it). Never
-# fatal — bugfixer works fine on the API-key providers without it.
+# fatal — ab works fine on the API-key providers without it.
 echo ">> Installing Claude Code CLI for $SVC_USER (optional provider)..."
-/usr/local/bin/bugfixer-claude-install "$SVC_USER" || \
+/usr/local/bin/ab-claude-install "$SVC_USER" || \
     echo "   ⚠️  Claude Code CLI not installed — the claude_cli slot stays unavailable until it is."
 
 chmod +x "$INSTALL_DIR/update.sh" 2>/dev/null || true
 
 systemctl daemon-reload
-systemctl enable bugfixer bugfixer-watchdog
-systemctl restart bugfixer bugfixer-watchdog
+systemctl enable ab ab-watchdog
+systemctl restart ab ab-watchdog
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo ""
 echo "======================================="
-echo " BugFixer installed successfully"
+echo " AppBuilder installed successfully"
 echo "======================================="
 echo "  Dashboard : https://${IP:-<server-ip>}/   (self-signed cert — accept the browser warning)"
 echo "  Config    : $CONFIG_DIR/config.json"
 if [ -n "$HUB_WS_URL" ]; then
-echo "  Hub       : $HUB_WS_URL  → APPROVE 'bugfixer' in the LM Hub WebUI (Setup → Spokes & Agents)"
+echo "  Hub       : $HUB_WS_URL  → APPROVE 'ab' in the LM Hub WebUI (Setup → Spokes & Agents)"
 fi
-echo "  Logs      : journalctl -u bugfixer -f"
+echo "  Logs      : journalctl -u ab -f"
 echo "              tail -f $LOG_FILE"
-echo "  Status    : systemctl status bugfixer"
+echo "  Status    : systemctl status ab"
 echo "======================================="
 echo ""
 echo "Next: open the dashboard and go to Settings to add your"
 echo "GitHub token and LLM provider API keys."
 if [ -n "$HUB_WS_URL" ]; then
-echo "Then approve the pending 'bugfixer' agent in the LM Hub WebUI so it can connect."
+echo "Then approve the pending 'ab' agent in the LM Hub WebUI so it can connect."
 fi

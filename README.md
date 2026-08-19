@@ -1,4 +1,4 @@
-# 🤖 BugFixer
+# 🤖 AppBuilder
 
 An automated GitHub issue fixer that polls repositories for the `automated-fix` label, generates code fixes using local or cloud LLMs, and synchronizes changes with an infrastructure API.
 
@@ -8,17 +8,17 @@ An automated GitHub issue fixer that polls repositories for the `automated-fix` 
 Every installer in this repo, with every flag and environment variable it accepts.
 Installers are idempotent — re-running one updates code and preserves credentials.
 
-### BugFixer — `install.sh`
+### AppBuilder — `install.sh`
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/ab/main/install.sh | bash
 ```
 
 Connect it to an LM hub at install time — first positional argument, or `HUB_WS_URL`:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | bash -s -- wss://lm-hub.lrbtechnologies.com
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh | HUB_WS_URL=wss://lm-hub.lrbtechnologies.com bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/ab/main/install.sh | bash -s -- wss://lm-hub.lrbtechnologies.com
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/ab/main/install.sh | HUB_WS_URL=wss://lm-hub.lrbtechnologies.com bash
 ```
 
 | Argument | Purpose |
@@ -33,13 +33,13 @@ curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.s
 | `HUB_QUERY_URL` | Hub WebUI URL, used for approvals and as the log fallback. Derived as `https://<host>` when unset. |
 | `IP_FOR_CERT` | SAN baked into the self-signed WebUI certificate. Default `127.0.0.1`. |
 
-Installs to `/opt/bugfixer`, config in `/etc/bugfixer`, log at `/var/log/bugfixer.log`.
+Installs to `/opt/ab`, config in `/etc/ab`, log at `/var/log/ab.log`.
 
 **The WebUI requires a login.** On first visit you are sent to `/setup-admin` to
 create the initial account; every account is a full admin. Locked out:
 
 ```bash
-python3 -c "import sys; sys.path.insert(0,'/opt/bugfixer'); import auth; auth.set_password('user','newpass')"
+python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; auth.set_password('user','newpass')"
 ```
 <!-- INSTALLERS:END -->
 
@@ -56,24 +56,24 @@ python3 -c "import sys; sys.path.insert(0,'/opt/bugfixer'); import auth; auth.se
 2. Visit `http://<LXC-IP>:8000` to access the dashboard.
 3. Navigate to the **Settings** page to configure your API tokens, LLM endpoints, and repository lists. No manual CLI editing of config files is required.
 
-## 🔀 LLM Router Proxy (point Claude Code at BugFixer)
+## 🔀 LLM Router Proxy (point Claude Code at AppBuilder)
 
-BugFixer exposes an **Anthropic Messages API-compatible** endpoint at `/v1/messages`
+AppBuilder exposes an **Anthropic Messages API-compatible** endpoint at `/v1/messages`
 on its normal listener. Any Anthropic client — notably **Claude Code** — can send
-requests to it, and BugFixer routes each one to the **best available LLM for the job**
+requests to it, and AppBuilder routes each one to the **best available LLM for the job**
 using its capability/cost-aware model selection (the same routing the fix engine uses).
 Tool use, streaming (`stream: true`), and `system` prompts are supported.
 
 Point Claude Code at it with environment variables:
 
 ```bash
-export ANTHROPIC_BASE_URL="https://<bugfixer-host>:<port>"
-export ANTHROPIC_API_KEY="<your-proxy-key>"   # matches BUGFIXER_PROXY_KEY / llm_proxy_api_key
+export ANTHROPIC_BASE_URL="https://<ab-host>:<port>"
+export ANTHROPIC_API_KEY="<your-proxy-key>"   # matches AB_PROXY_KEY / llm_proxy_api_key
 claude
 ```
 
 **Auth:** the `/v1/*` endpoints are exempt from the WebUI login and do their own
-API-key check. Set a key via the `BUGFIXER_PROXY_KEY` env var or the
+API-key check. Set a key via the `AB_PROXY_KEY` env var or the
 `llm_proxy_api_key` config value; clients send it as `x-api-key` or
 `Authorization: Bearer`. If no key is configured the endpoint is **open** (a warning
 is logged per request) — fine on a trusted LAN, but set a key for anything exposed.

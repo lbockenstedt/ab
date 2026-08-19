@@ -2,13 +2,13 @@
 """Self-test for fix_engine's targeted-edit apply path (search/replace) and the
 large-file windowing that feeds the model the buggy region.
 
-Run:  python3 bugfixer/test_fix_apply.py
+Run:  python3 ab/test_fix_apply.py
 
 fix_engine.py cannot be imported directly (its ``from main import …`` runs
 FastAPI/logging init), so we extract the SOURCE of the pure helpers via ast and
 exec them with a stub logger. This exercises the real code text.
 
-Regression guard for the failure that made BugFixer unable to fix a one-char
+Regression guard for the failure that made AppBuilder unable to fix a one-char
 typo in a 22k-line file: the model was asked to reproduce the WHOLE file (it
 truncated → the truncated-rewrite guard aborted every attempt) and the buggy
 line lived past the head-truncation cutoff so the model never saw it. The fix:
@@ -75,7 +75,7 @@ def main():
     # both far past a 12k-char head-truncation. The top 2000 lines are FLOODED
     # with the common identifier "ldap" (also an issue identifier): a naive
     # file-order window would exhaust its budget on this noise and never reach the
-    # buggy region — which is exactly how BugFixer once "fixed" the crash with a
+    # buggy region — which is exactly how AppBuilder once "fixed" the crash with a
     # no-op stub instead of the typo. The rare-identifier-first ranking must still
     # surface the buggy call AND its correctly-spelled twin.
     lines = [f"// filler line {i}" for i in range(1, 22823)]

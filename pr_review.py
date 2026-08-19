@@ -1,18 +1,18 @@
 """
-pr_review.py — BugFixer PR PRE-REVIEW (review-only; a human is the sole gate).
+pr_review.py — AppBuilder PR PRE-REVIEW (review-only; a human is the sole gate).
 
 Polls OPEN pull requests on the monitored repos and runs a Tier-1 deterministic
 pass (dual-copy-guard parity, secrets scan, undefined-name lint) against each
 PR's changed-file set, then posts a COMMENT-type summary (upserted in place,
 keyed by head SHA so it never spams) plus a NON-required informational
-`bugfixer/review` commit status.
+`ab/review` commit status.
 
-INVARIANTS (see memory pr-gate-bugfixer-prereview):
+INVARIANTS (see memory pr-gate-ab-prereview):
   * NEVER approves/denies a PR and NEVER pushes to the branch. It posts findings
     as a comment; only a human approves/denies.
     ONE DELIBERATE, NARROWLY-SCOPED EXCEPTION (added for feature auto-drive):
     ``_maybe_auto_merge``/``_automerge_decision`` CAN approve+merge a PR
-    unattended — but ONLY a PR carrying the ``bugfixer-feature-drive`` marker
+    unattended — but ONLY a PR carrying the ``ab-feature-drive`` marker
     (feature_build.py's own PRs), and only when both review panels Approve
     above a configurable confidence floor, the diff touches no configured
     boundary, and the repo is explicitly opted into
@@ -77,8 +77,8 @@ from config_store import load_config
 
 logger = logging.getLogger(__name__)
 
-PR_REVIEW_MARKER = "<!-- bugfixer-pr-review -->"
-STATUS_CONTEXT = "bugfixer/review"
+PR_REVIEW_MARKER = "<!-- ab-pr-review -->"
+STATUS_CONTEXT = "ab/review"
 _LEVEL_ORDER = {"error": 0, "warning": 1, "advisory": 2}
 _LEVEL_ICON = {"error": "\U0001F534", "warning": "\U0001F7E0", "advisory": "\U0001F535"}
 
@@ -637,7 +637,7 @@ def _render(findings, head_sha, summary="", review=None, state_review=None):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
-        "## \U0001F916 BugFixer PR pre-review",
+        "## \U0001F916 AppBuilder PR pre-review",
         "",
         "_Automated pre-review — **informational only**. A human is the sole approver; this bot never approves, denies, or edits the branch._",
         "",
@@ -645,7 +645,7 @@ def _render(findings, head_sha, summary="", review=None, state_review=None):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
-        "## \U0001F916 BugFixer PR pre-review",
+        "## \U0001F916 AppBuilder PR pre-review",
         "",
         "_Automated pre-review — **informational only**. A human is the sole approver; "
         "this bot never approves, denies, or edits the branch._",
@@ -773,7 +773,7 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
     return out
 
 
-_FEATURE_DRIVE_MARKER_RE = re.compile(r"<!--\s*bugfixer-feature-drive:\s*([^\s>]+)#(\d+)\s*-->")
+_FEATURE_DRIVE_MARKER_RE = re.compile(r"<!--\s*ab-feature-drive:\s*([^\s>]+)#(\d+)\s*-->")
 
 
 def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None):
@@ -783,7 +783,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None):
 
     THE INVARIANT THIS FUNCTION DELIBERATELY BREAKS: this module's own
     docstring (top of file) and routes.py's approve/merge routes say
-    "BugFixer never auto-approves"/"never auto-merges". This function is the
+    "AppBuilder never auto-approves"/"never auto-merges". This function is the
     one narrow, deliberate exception — see pr_meta["is_feature_drive"] below,
     which is what keeps a human-authored PR structurally ineligible no
     matter how high its confidence.
@@ -826,9 +826,9 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None):
     if pr_meta.get("mergeable") is not True:
         return False, "PR is not cleanly mergeable (conflicts / required checks / unknown)"
     if state_flags.get("paused"):
-        return False, "BugFixer is paused"
+        return False, "AppBuilder is paused"
     if state_flags.get("blackout"):
-        return False, "BugFixer is in a blackout window"
+        return False, "AppBuilder is in a blackout window"
 
     if rec.get("panel_status"):
         return False, "panel 1 (skeptical review) could not run"
@@ -894,7 +894,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
             logger.debug("pr_review: auto-merge skipped for %s (%s)", key, reason)
             return
         logger.info("pr_review: auto-merging %s — %s", key, reason)
-        approve_pr(gh, repo.full_name, pr.number, actor="bugfixer-auto")
+        approve_pr(gh, repo.full_name, pr.number, actor="ab-auto")
         mark_pr_approved(repo.full_name, pr.number, True)
         update_pr_review(repo.full_name, pr.number, auto_merge_score=min(
             rec.get("panel_confidence") or 0.0, rec.get("panel2_confidence") or 0.0),
@@ -918,10 +918,10 @@ def _review_one(gh, repo, pr, config, force=False):
     moving, or the operator just doesn't want to wait for the next poll cycle."""
     if getattr(pr, "draft", False):
         return  # skip WIP drafts
-    # Skip BugFixer's OWN AI-fix PRs — they were already vetted by the fix panel
+    # Skip AppBuilder's OWN AI-fix PRs — they were already vetted by the fix panel
     # when it opened them; pre-reviewing them is redundant and clutters the bot's
     # own fix backlog. Signals: title "AI Fix #N" and head branch "ai-fix-issue-N"
-    # (fix_engine.create_pull). BugFixer commits under the operator's token, so
+    # (fix_engine.create_pull). AppBuilder commits under the operator's token, so
     # author can't distinguish it — use the title/branch signal.
     # DELIBERATELY does not match feature_build.py's PRs ("AI Feature #N" /
     # "ai-feature-issue-N") — those have NOT been vetted by any panel yet (the
@@ -932,7 +932,7 @@ def _review_one(gh, repo, pr, config, force=False):
     _title = pr.title or ""
     _head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
     if _title.startswith("AI Fix #") or _head_ref.startswith("ai-fix-issue-"):
-        logger.info("pr_review: skipping BugFixer's own fix PR %s #%s", repo.full_name, pr.number)
+        logger.info("pr_review: skipping AppBuilder's own fix PR %s #%s", repo.full_name, pr.number)
         return
     head_sha = pr.head.sha
     # Compute findings every scan (cheap, deterministic, no LLM) so the UI
@@ -1014,11 +1014,11 @@ def _review_one(gh, repo, pr, config, force=False):
             logger.info("pr_review: status check skipped (%s) — token likely lacks statuses:write", e)
     # Always persist for the UI 'PRs Reviewed' filter (survives restarts). The
     # panel result rides along so the advisory verdict/confidence shows in
-    # BugFixer's own PR list, not only in the GitHub comment. state_review (the
+    # AppBuilder's own PR list, not only in the GitHub comment. state_review (the
     # state-logic panel) is ALSO persisted now (panel2_* fields, app_state.py) —
     # feature auto-drive's auto-merge gate requires BOTH panels to clear, and
     # this fixes the pre-existing gap where that panel's verdict was invisible
-    # in BugFixer's own UI for every PR, not just feature-built ones.
+    # in AppBuilder's own UI for every PR, not just feature-built ones.
     record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha,
                      summary=summary, review=review, review2=state_review)
     if action != "cached":
@@ -1061,7 +1061,7 @@ def reprocess_one_pr(repo_full_name, number, config=None):
 
 def fix_one_pr(repo_full_name, number, config=None):
     """Entry point for the UI's per-PR "Fix" button (routes.py
-    /api/pr-review/fix) — the ONLY way this ever runs; BugFixer never applies a
+    /api/pr-review/fix) — the ONLY way this ever runs; AppBuilder never applies a
     PR fix on its own. A human clicks Fix, and this:
 
       1. Recomputes this PR's Tier-1 findings (parity/secrets/lint) fresh, and
@@ -1128,7 +1128,7 @@ def fix_one_pr(repo_full_name, number, config=None):
         if pr.body:
             lines.append((pr.body or "").strip()[:2000])
         if findings:
-            lines.append("\nBugFixer pre-review findings to fix:")
+            lines.append("\nAppBuilder pre-review findings to fix:")
             for f in findings:
                 lines.append("- [%s] %s: %s" % (
                     (f.get("level") or "advisory").upper(), f.get("title") or "", f.get("detail") or ""))
@@ -1164,7 +1164,7 @@ def fix_one_pr(repo_full_name, number, config=None):
             if review_verdict != "Approve":
                 try:
                     pr.create_issue_comment(
-                        "\U0001F916 **BugFixer — Fix attempt rejected**\n\nGenerated a fix for the "
+                        "\U0001F916 **AppBuilder — Fix attempt rejected**\n\nGenerated a fix for the "
                         "findings above, but the skeptical reviewer panel rejected it (not pushed):"
                         "\n\n%s" % (critique or "no critique given"))
                 except Exception:  # noqa: BLE001
@@ -1180,7 +1180,7 @@ def fix_one_pr(repo_full_name, number, config=None):
                 if not verified:
                     try:
                         pr.create_issue_comment(
-                            "\U0001F916 **BugFixer — Fix attempt failed verification**\n\nA fix was "
+                            "\U0001F916 **AppBuilder — Fix attempt failed verification**\n\nA fix was "
                             "generated and approved by the reviewer panel, but failed verification "
                             "(not pushed):\n\n%s" % (failure_msg or "unknown failure"))
                     except Exception:  # noqa: BLE001
@@ -1189,7 +1189,7 @@ def fix_one_pr(repo_full_name, number, config=None):
 
             final_confidence = (confidence + review_conf) / 2
             files_list = ", ".join(fixes.keys())
-            commit_msg = "BugFixer: fix PR #%s review findings" % pr.number
+            commit_msg = "AppBuilder: fix PR #%s review findings" % pr.number
             repo_git.git.add(A=True)
             repo_git.index.commit(commit_msg)
             with _authenticated_remote(repo_git.remotes.origin, repo.clone_url, token):
@@ -1197,7 +1197,7 @@ def fix_one_pr(repo_full_name, number, config=None):
 
             try:
                 pr.create_issue_comment(
-                    "\U0001F916 **BugFixer — Fix applied**\n\nPushed a fix commit for the findings "
+                    "\U0001F916 **AppBuilder — Fix applied**\n\nPushed a fix commit for the findings "
                     "above onto this PR's branch (avg confidence %.0f%%).\n\n**Files:** `%s`"
                     % (final_confidence * 100, files_list))
             except Exception:  # noqa: BLE001

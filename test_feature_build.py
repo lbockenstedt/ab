@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for feature_build.py — Phase 2's mutating build->PR orchestrator.
 
-Run:  python3 bugfixer/test_feature_build.py
+Run:  python3 ab/test_feature_build.py
 
 feature_build.py imports `main`/`fix_engine`/`llm_client`/`github_ops` (real
 app-context modules whose import fully boots the live app as a side effect in
@@ -18,7 +18,7 @@ Regression guards this pins:
     -> still none -> flags (not built), NO PR opened
   - when docs ARE present, the full commit->push->PR path runs, and the PR
     is named/branched EXACTLY "AI Feature #N" / "ai-feature-issue-N" (the
-    load-bearing detail that makes pr_review._review_one's "skip BugFixer's
+    load-bearing detail that makes pr_review._review_one's "skip AppBuilder's
     own AI Fix PR" check NOT match — see test_pr_review_own_pr_skip.py)
   - ground truth for "what changed" is the REAL git diff, never the agent's
     self-reported (and possibly malformed) JSON summary
@@ -278,7 +278,7 @@ def main():
     ok_result, msg = ns["build_feature"](None, repo, issue, {**classify_build, "skill": None}, config)
     ok &= _check("no skill resolved -> refuses to build", ok_result is False)
     ok &= _check("no skill resolved -> flags (needs-human label applied)",
-                "bugfixer-needs-human" in issue.added_labels)
+                "ab-needs-human" in issue.added_labels)
     ok &= _check("no skill resolved -> status recorded as feature_flagged",
                 ns["_store"]["owner/repo:42"]["status"] == "feature_flagged")
 
@@ -373,10 +373,10 @@ def main():
     ok &= _check("PR title is 'AI Feature #N: ...' (NOT 'AI Fix #N' — pr_review's own-PR skip must not match)",
                 repo.created_prs[0]["title"].startswith("AI Feature #7"))
     ok &= _check("PR body carries the feature-drive marker",
-                "<!-- bugfixer-feature-drive: owner/repo#7 -->" in repo.created_prs[0]["body"])
+                "<!-- ab-feature-drive: owner/repo#7 -->" in repo.created_prs[0]["body"])
     ok &= _check("PR body's file list comes from the REAL git diff, not agent self-report",
                 "docs/pxmx.md" in repo.created_prs[0]["body"] and "templates/index.html" in repo.created_prs[0]["body"])
-    ok &= _check("PR gets the feature-drive label", "bugfixer-feature-drive" in repo.ensured_labels)
+    ok &= _check("PR gets the feature-drive label", "ab-feature-drive" in repo.ensured_labels)
     ok &= _check("processed status is feature_built with the PR url",
                 ns["_store"]["owner/repo:7"]["status"] == "feature_built"
                 and ns["_store"]["owner/repo:7"]["pr_url"] == pr_url)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-test for llm_proxy.py's agentic mode (the LLM router reusing BugFixer's
+"""Self-test for llm_proxy.py's agentic mode (the LLM router reusing AppBuilder's
 own agent loop as a third fix intake).
 
 Run:  python3 test_llm_proxy_agentic.py
@@ -10,7 +10,7 @@ test_chat_requirements.py) — the module-level helpers under test are extracted
 via ast and exec'd with stubbed dependencies.
 
 Covers:
-1. _wants_agentic: model id containing "bugfixer-agent" opts in; a plain model
+1. _wants_agentic: model id containing "ab-agent" opts in; a plain model
    does not; llm_proxy_agentic_default forces it on; an operator-configured
    llm_proxy_agent_model_ids entry opts in.
 2. _proxy_fix_proposal: with autofix DISABLED (default) it never triggers a fix
@@ -61,8 +61,8 @@ def main():
     propose = ns["_proxy_fix_proposal"]
 
     # ---- 1. _wants_agentic ----
-    ok &= _check("model 'bugfixer-agent' opts into agentic mode",
-                 wants({"model": "bugfixer-agent"}, {}) is True)
+    ok &= _check("model 'ab-agent' opts into agentic mode",
+                 wants({"model": "ab-agent"}, {}) is True)
     ok &= _check("plain model does NOT opt in",
                  wants({"model": "claude-3-5-sonnet"}, {}) is False)
     ok &= _check("empty model does NOT opt in",

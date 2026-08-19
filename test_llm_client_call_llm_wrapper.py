@@ -4,7 +4,7 @@ wrapper that REQUIRES a requirements=LlmRequirements and delegates entirely to
 _call_llm_with_requirements — the legacy slot-pool/task_kind/force_provider
 routing was deleted.
 
-Run:  python3 bugfixer/test_llm_client_call_llm_wrapper.py
+Run:  python3 ab/test_llm_client_call_llm_wrapper.py
 
 llm_client.py imports `main` (app-init side effects), so this extracts the
 source of call_llm via ast and execs it with stubbed leaf dependencies,

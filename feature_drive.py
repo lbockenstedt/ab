@@ -1,5 +1,5 @@
 """
-feature_drive.py — BugFixer's feature auto-drive: intake + classify stage.
+feature_drive.py — AppBuilder's feature auto-drive: intake + classify stage.
 
 Phase 1 of the plan at ~/.claude/plans/agile-snacking-lark.md. This module
 owns the SEPARATE intake query + the deterministic-then-LLM classifier that
@@ -60,10 +60,10 @@ from github_ops import _ensure_label
 _TERMINAL_STATUSES = {"feature_flagged", "feature_built", "feature_failed"}
 
 _FEATURE_MARKER_RE = re.compile(r"<!--\s*report-type:\s*feature\s*-->")
-_BOUNDARY_FLAG_MARKER = "<!-- bugfixer-boundary-flag: v1 -->"
+_BOUNDARY_FLAG_MARKER = "<!-- ab-boundary-flag: v1 -->"
 
 _CLASSIFY_SYSTEM = (
-    "You are BugFixer's feature-request classifier. You decide whether an "
+    "You are AppBuilder's feature-request classifier. You decide whether an "
     "incoming feature request is a safe, small bolt-on that can be built "
     "automatically using EXISTING project infrastructure, whether it crosses "
     "an operator-defined boundary that requires a human decision, or whether "
@@ -220,7 +220,7 @@ def _already_commented(issue, marker_prefix):
 def _flag_issue(gh_repo, issue, result):
     """Labels + comments a boundary-crossing request. No code touched, issue
     stays open. Idempotent via _BOUNDARY_FLAG_MARKER."""
-    _ensure_label(gh_repo, "bugfixer-needs-human")
+    _ensure_label(gh_repo, "ab-needs-human")
     if _already_commented(issue, _BOUNDARY_FLAG_MARKER):
         return
     boundaries = {b.get("id"): b for b in (load_config().get("feature_boundaries") or [])}
@@ -230,15 +230,15 @@ def _flag_issue(gh_repo, issue, result):
     else:
         rule_lines = f"- {result.get('reason') or 'Crosses a configured boundary.'}"
     body = (
-        "🤖 **BugFixer — Feature Auto-Drive**\n\n"
-        "This request would require touching something outside what BugFixer is allowed to "
+        "🤖 **AppBuilder — Feature Auto-Drive**\n\n"
+        "This request would require touching something outside what AppBuilder is allowed to "
         "build automatically, so **no code has been touched**. It stays open here for a human "
         "to design and implement.\n\n"
         f"**Boundary crossed:**\n{rule_lines}\n\n"
         f"{_BOUNDARY_FLAG_MARKER}"
     )
     try:
-        issue.add_to_labels("bugfixer-needs-human")
+        issue.add_to_labels("ab-needs-human")
     except Exception as e:
         logger.warning(f"feature_drive: could not label {issue.number} needs-human: {e}")
     try:
@@ -253,14 +253,14 @@ def _clarify_marker(questions):
     questions (e.g. a partial reply prompted a second round) does comment
     again — a plain fixed marker would suppress that legitimate update."""
     qhash = hashlib.sha1("\n".join(questions).encode("utf-8", "replace")).hexdigest()[:10]
-    return f"<!-- bugfixer-clarify: v1:{qhash} -->"
+    return f"<!-- ab-clarify: v1:{qhash} -->"
 
 
 def _clarify_issue(gh_repo, issue, result):
     """Labels + comments an under-specified (but not risky) request with
     concrete follow-up questions. No code touched, issue stays open, and is
     NOT terminal — it's re-classified on the next cycle in case of a reply."""
-    _ensure_label(gh_repo, "bugfixer-needs-info")
+    _ensure_label(gh_repo, "ab-needs-info")
     marker = _clarify_marker(result["questions"])
     # Exact-marker match: the hash is derived from the question text itself,
     # so this alone gives "same questions -> skip, different questions ->
@@ -269,7 +269,7 @@ def _clarify_issue(gh_repo, issue, result):
         return
     q_lines = "\n".join(f"{i}. {q}" for i, q in enumerate(result["questions"], 1))
     body = (
-        "🤖 **BugFixer — Feature Auto-Drive**\n\n"
+        "🤖 **AppBuilder — Feature Auto-Drive**\n\n"
         "This looks like a reasonable request, but there isn't quite enough detail to build it "
         "safely yet. Could you (or whoever can speak to this) reply on this issue with answers to:\n\n"
         f"{q_lines}\n\n"
@@ -277,7 +277,7 @@ def _clarify_issue(gh_repo, issue, result):
         f"{marker}"
     )
     try:
-        issue.add_to_labels("bugfixer-needs-info")
+        issue.add_to_labels("ab-needs-info")
     except Exception as e:
         logger.warning(f"feature_drive: could not label {issue.number} needs-info: {e}")
     try:
@@ -325,7 +325,7 @@ def scan_feature_requests(gh, config):
                     break
                 if issue.pull_request:
                     continue
-                if any(lbl.name == "bugfixer-dismissed" for lbl in issue.labels):
+                if any(lbl.name == "ab-dismissed" for lbl in issue.labels):
                     continue
                 body = issue.body or ""
                 if require_marker and not _is_feature_request(body):

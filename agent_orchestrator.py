@@ -1,5 +1,5 @@
 """
-agent_orchestrator.py — multi-agent request orchestration for BugFixer.
+agent_orchestrator.py — multi-agent request orchestration for AppBuilder.
 
 Turns ONE request into a small DAG of sub-tasks ("agents"), runs the
 independent ones CONCURRENTLY — each end-to-end on the LLM best suited AND
@@ -39,7 +39,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-logger = logging.getLogger("bugfixer.orchestrator")
+logger = logging.getLogger("ab.orchestrator")
 
 # Config-key defaults (operator-tunable in Settings). Kept conservative: the
 # whole subsystem is gated on ORCHESTRATOR_ENABLED, default off.

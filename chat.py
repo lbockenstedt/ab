@@ -28,7 +28,7 @@ _CHAT_INDEX_LOCK = threading.Lock()
 
 
 def _build_chat_context_index_uncached(config, gh=None):
-    lines = ["## BugFixer Context (snapshot — may be up to ~60s stale; use tools for live detail)"]
+    lines = ["## AppBuilder Context (snapshot — may be up to ~60s stale; use tools for live detail)"]
     monitored = get_monitored_repos(config)
     trusted = list(config.get("trusted_repos", []) or [])
     sd = resolve_self_diagnosis_repo(config)
@@ -330,7 +330,7 @@ def _trunc(s, n):
 CHAT_TOOLS = [
     {
         "name": "list_repos",
-        "description": "List all repositories BugFixer monitors (monitored + trusted + self-diagnosis), with the count of open issues matching monitored labels for each. Use this first to learn what repos exist.",
+        "description": "List all repositories AppBuilder monitors (monitored + trusted + self-diagnosis), with the count of open issues matching monitored labels for each. Use this first to learn what repos exist.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -388,7 +388,7 @@ CHAT_TOOLS = [
     },
     {
         "name": "get_processed_issues",
-        "description": "Return BugFixer's processed-issue state (statuses: fixed/verified/awaiting_prod_verification/failed/non-actionable/awaiting_review/processing). Optionally filter by repo.",
+        "description": "Return AppBuilder's processed-issue state (statuses: fixed/verified/awaiting_prod_verification/failed/non-actionable/awaiting_review/processing). Optionally filter by repo.",
         "parameters": {
             "type": "object",
             "properties": {"repo": {"type": "string"}},
@@ -397,7 +397,7 @@ CHAT_TOOLS = [
     },
     {
         "name": "get_recent_errors",
-        "description": "Fetch recent Hub + BugFixer self log errors. Returns deduped, capped error entries.",
+        "description": "Fetch recent Hub + AppBuilder self log errors. Returns deduped, capped error entries.",
         "parameters": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 15}},
@@ -605,7 +605,7 @@ def _tool_get_recent_errors(gh, config, args):
             hub_errors = filter_error_logs(logs)[:limit]
         except Exception as e:
             hub_errors = [{"error": f"filter failed: {type(e).__name__}"}]
-    # Self errors: tail the local BugFixer log and keep ERROR/Traceback lines.
+    # Self errors: tail the local AppBuilder log and keep ERROR/Traceback lines.
     self_errors = []
     try:
         path = get_log_path()

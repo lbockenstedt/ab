@@ -1,6 +1,6 @@
-"""BugFixer Hub agent — a self-contained WebSocket agent client.
+"""AppBuilder Hub agent — a self-contained WebSocket agent client.
 
-This makes BugFixer authenticate to the Lab Manager (LM) Hub the same way every
+This makes AppBuilder authenticate to the Lab Manager (LM) Hub the same way every
 other spoke/agent does: zero-touch connect, admin approval in the Hub WebUI,
 HMAC session-key exchange, then signed heartbeats + request/response messages
 over a single persistent WebSocket. It replaces the old static-token HTTP
@@ -9,7 +9,7 @@ calls (LM_ADMIN_TOKEN / X-Admin-Token), which the Hub never actually honored.
 The module is intentionally self-contained — it reimplements the Hub's signing
 scheme (core/src/security/signer.py) and mirrors the connect/auth/heartbeat
 handshake from core/src/messaging/control_plane.py without importing the lm
-package, so BugFixer can run on hosts that don't have the lm source tree.
+package, so AppBuilder can run on hosts that don't have the lm source tree.
 """
 
 import asyncio
@@ -33,7 +33,7 @@ from websockets.exceptions import ConnectionClosedError
 
 # Self-contained runtime DEBUG/INFO flip used by the WebUI "Enable Debug"
 # button (the Hub broadcasts SET_LOG_LEVEL to every connected spoke). Inline
-# fallback because bugfixer does NOT import lm/core (see module docstring) — the
+# fallback because ab does NOT import lm/core (see module docstring) — the
 # fallback is the standard block.
 try:
     from logging_setup import set_log_level
@@ -53,8 +53,8 @@ logger = logging.getLogger("HubAgent")
 
 class _HubLogRelayHandler(logging.Handler):
     """Captures INFO+ records into a bounded ring buffer for relay to the hub as
-    SPOKE_LOG. Per logging-observability-contract.md: the BugFixer's own logs
-    and crashes must reach the hub (Error Log + the BugFixer's own GET_LOGS) —
+    SPOKE_LOG. Per logging-observability-contract.md: the AppBuilder's own logs
+    and crashes must reach the hub (Error Log + the AppBuilder's own GET_LOGS) —
     the tool that triages every module can't be the one blind spot. Buffered
     while disconnected; drained by the relay task once connected."""
 
@@ -77,7 +77,7 @@ _HEARTBEAT_INTERVAL = 30
 _HANDSHAKE_TIMEOUT = 5.0
 # After the hub rejects our client cert we disengage it (connect on the session
 # key). Retry the cert on a natural reconnect once this long has passed since the
-# rejection, so bugfixer auto-recovers mTLS once the hub is taught to trust the
+# rejection, so ab auto-recovers mTLS once the hub is taught to trust the
 # cert — no manual restart needed.
 _CERT_RETRY_INTERVAL = 300
 
@@ -110,7 +110,7 @@ def _hub_unreachable(exc: BaseException) -> bool:
     The cert-rejection heuristic below must fire ONLY when the hub answered and
     refused our client certificate. Without this split, a hub that is simply
     restarting (every LM upgrade → connection refused) is misread as "our cert
-    was rejected": bugfixer disengages mTLS and then won't retry the cert for
+    was rejected": ab disengages mTLS and then won't retry the cert for
     _CERT_RETRY_INTERVAL (5 min), turning a routine restart into a five-minute
     mTLS outage.
 
@@ -222,7 +222,7 @@ def _normalize_hub_ws_url(url: Optional[str]) -> Optional[str]:
 
 
 class HubAgentClient:
-    """Persistent Hub WebSocket agent for BugFixer.
+    """Persistent Hub WebSocket agent for AppBuilder.
 
     Runs an asyncio event loop in a daemon thread. Sync callers use
     request_sync(); the loop handles connect/auth/heartbeat/receive.
@@ -246,7 +246,7 @@ class HubAgentClient:
         self.on_status = on_status or (lambda _s, _m: None)
         self.on_secret = on_secret or (lambda _s: None)
         # Fired with the LIVE socket state (True on a completed handshake, False when
-        # the connection drops) so the UI can show whether bugfixer is ACTUALLY
+        # the connection drops) so the UI can show whether ab is ACTUALLY
         # connected right now — distinct from on_status, which reports the
         # registration state (approved/pending) that persists across brief drops.
         self.on_connection = on_connection or (lambda _c: None)
@@ -259,22 +259,22 @@ class HubAgentClient:
         self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "") or "").strip()
         # mTLS CLIENT identity for the wss connection, installed by the hub's
         # cert-distribution (INSTALL_CERT, LE-issued). When both files exist the
-        # SSL context presents them so the hub can mutually-authenticate bugfixer
+        # SSL context presents them so the hub can mutually-authenticate ab
         # — required by hubs that gate data reads on a client cert.
-        self._client_cert_file = (os.environ.get("BUGFIXER_HUB_CLIENT_CERT")
-                                  or "/etc/bugfixer/hub-client-cert.pem")
-        self._client_key_file = (os.environ.get("BUGFIXER_HUB_CLIENT_KEY")
-                                 or "/etc/bugfixer/hub-client-key.pem")
+        self._client_cert_file = (os.environ.get("AB_HUB_CLIENT_CERT")
+                                  or "/etc/ab/hub-client-cert.pem")
+        self._client_key_file = (os.environ.get("AB_HUB_CLIENT_KEY")
+                                 or "/etc/ab/hub-client-key.pem")
         # Present the client cert whenever it exists — the hub's reverse
         # HUB_REQUEST channel (log reads + fleet update triggers) is authorized
-        # ONLY for the connection that presents the pinned BugFixer cert over mTLS
-        # (_hub_request_authorized), so bugfixer MUST present it to read hub data.
-        # BUGFIXER_HUB_MTLS=0 force-disables (debug). But an UNTRUSTED cert breaks
+        # ONLY for the connection that presents the pinned AppBuilder cert over mTLS
+        # (_hub_request_authorized), so ab MUST present it to read hub data.
+        # AB_HUB_MTLS=0 force-disables (debug). But an UNTRUSTED cert breaks
         # the wss handshake entirely, so _present_cert is a runtime fallback: a
         # handshake failure while presenting flips it off for the next attempt
         # (recover the session-key connection so a corrected cert can be
         # re-deployed), and INSTALL_CERT flips it back on to try the fresh cert.
-        self._hub_mtls = os.environ.get("BUGFIXER_HUB_MTLS", "1") != "0"
+        self._hub_mtls = os.environ.get("AB_HUB_MTLS", "1") != "0"
         self._present_cert = True
         self._presented_cert = False   # was a cert presented on the current attempt?
         self._cert_ever_worked = False  # did a handshake ever SUCCEED while presenting the cert?
@@ -353,7 +353,7 @@ class HubAgentClient:
                 }
                 await websocket.send(encode_frame(self.signer, msg))
             except Exception as e:  # noqa: BLE001
-                logger.debug("BugFixer log relay send failed: %s", e)
+                logger.debug("AppBuilder log relay send failed: %s", e)
 
     # ------------------------------------------------------------------ public
 
@@ -473,7 +473,7 @@ class HubAgentClient:
     async def _handle_escalate_log_issue(self, msg, data):
         """Tier-2: the LM hub's log sentinel flagged a real problem in a module and
         escalated it here for deep triage. File a GitHub issue (module repo, deduped)
-        so the RepoScan -> fix pipeline engages; BugFixer's fix step can pull ALL logs.
+        so the RepoScan -> fix pipeline engages; AppBuilder's fix step can pull ALL logs.
         Runs off-thread (GitHub I/O) and replies with the filing outcome."""
         import asyncio as _aio
         module = str(data.get("module") or "hub")
@@ -530,7 +530,7 @@ class HubAgentClient:
 
         log_access is the honest signal: the current connection is presenting a
         cert the hub accepted. HUB_REQUEST also requires the hub to have SAN-pinned
-        this cert as the BugFixer identity — that half lives on the hub and can't
+        this cert as the AppBuilder identity — that half lives on the hub and can't
         be observed from here, so we report 'mTLS active', not 'authorized'."""
         def _cert_info(path):
             info = {"path": path, "exists": bool(path and os.path.exists(path))}
@@ -608,7 +608,7 @@ class HubAgentClient:
                 info["parse_error"] = str(e)
             return info
 
-        webui_cert = os.environ.get("BUGFIXER_SSL_CERT", "/etc/bugfixer/cert.pem")
+        webui_cert = os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem")
         connected = self._ws is not None
         return {
             "available": True,
@@ -646,7 +646,7 @@ class HubAgentClient:
         while not self._stop.is_set():
             # Auto-retry a previously-rejected client cert on this reconnect once
             # enough time has passed — so mTLS log/update access self-heals after
-            # the hub is taught to trust the cert, without a manual bugfixer restart.
+            # the hub is taught to trust the cert, without a manual ab restart.
             if (not self._present_cert and self._cert_rejected and self._cert_rejected_at
                     and (time.time() - self._cert_rejected_at) > _CERT_RETRY_INTERVAL):
                 self._present_cert = True
@@ -684,11 +684,11 @@ class HubAgentClient:
                 # (untrusted CA / not chained to the hub's mTLS CA). Drop it for the
                 # next attempt so the session-key connection recovers instead of
                 # hard-looping offline. Gate on _cert_ever_worked (NOT the secret) —
-                # bugfixer keeps a persisted session secret across the transport-
+                # ab keeps a persisted session secret across the transport-
                 # layer cert, so the old `not self.secret` guard never fired and the
                 # rejected cert stranded it. A restart or a fresh INSTALL_CERT
                 # re-arms _present_cert to try again (e.g. after the hub is taught to
-                # trust the BugFixer cert's CA).
+                # trust the AppBuilder cert's CA).
                 # ...but ONLY when the hub actually answered. A hub that is down or
                 # restarting (every LM upgrade) refuses the connection outright,
                 # which is not a verdict on our certificate — treating it as one
@@ -700,9 +700,9 @@ class HubAgentClient:
                     logger.warning(
                         "wss: hub rejected our client cert (handshake failed) — "
                         "retrying WITHOUT it so the basic connection recovers. The hub "
-                        "must trust the BugFixer cert's CA before mTLS log/update "
+                        "must trust the AppBuilder cert's CA before mTLS log/update "
                         "access can work; re-deploy it from the LE module (tagged "
-                        "BugFixer) or restart bugfixer to retry.")
+                        "AppBuilder) or restart ab to retry.")
 
             # _connect_and_serve returned/raised → the socket is down. Mark the live
             # connection false so the UI reflects the drop immediately (the
@@ -767,7 +767,7 @@ class HubAgentClient:
         """Install the Hub-Local-CA clientAuth cert the hub minted for our mTLS
         CLIENT identity (public CAs no longer issue clientAuth). Written to the mTLS
         client paths ONLY — the WebUI/server cert stays the LE cert. Ack, then
-        reconnect to present it. This is what finally makes bugfixer's HUB_REQUEST
+        reconnect to present it. This is what finally makes ab's HUB_REQUEST
         channel (hub logs + fleet updates) authorize: the hub trusts its own CA and
         SAN-pins us."""
         status, message = "SUCCESS", "mtls client cert installed"
@@ -804,15 +804,15 @@ class HubAgentClient:
                 pass
 
     async def _handle_install_cert(self, msg, data):
-        """Install a hub-distributed (LE) cert. It serves TWO roles for bugfixer,
+        """Install a hub-distributed (LE) cert. It serves TWO roles for ab,
         both from the one deployment:
-          1. the WebUI SERVER cert (BUGFIXER_SSL_CERT/KEY, default
-             /etc/bugfixer/cert.pem+key.pem) — so browsers AND GitHub webhooks
-             reach the bugfixer WebUI over a PUBLICLY-TRUSTED cert instead of the
+          1. the WebUI SERVER cert (AB_SSL_CERT/KEY, default
+             /etc/ab/cert.pem+key.pem) — so browsers AND GitHub webhooks
+             reach the ab WebUI over a PUBLICLY-TRUSTED cert instead of the
              install-time self-signed one (GitHub rejects self-signed webhook URLs);
           2. our mTLS CLIENT identity for the hub connection (hub-client-cert.pem)
              — the cert the hub's HUB_REQUEST channel authorizes on (log reads +
-             fleet update commands), gated by BugFixer SAN pinning.
+             fleet update commands), gated by AppBuilder SAN pinning.
         Write both, reply the COMMAND_RESULT the hub's request_response awaits, then
         trigger a graceful full-service restart so uvicorn reloads the new WebUI
         cert (a running listener can't hot-swap its cert) and the reconnect presents
@@ -848,8 +848,8 @@ class HubAgentClient:
                 except OSError:
                     pass
                 # 2. WebUI server cert (so GitHub webhooks + browsers trust it).
-                webui_cert = os.environ.get("BUGFIXER_SSL_CERT", "/etc/bugfixer/cert.pem")
-                webui_key = os.environ.get("BUGFIXER_SSL_KEY", "/etc/bugfixer/key.pem")
+                webui_cert = os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem")
+                webui_key = os.environ.get("AB_SSL_KEY", "/etc/ab/key.pem")
                 webui_written = False
                 try:
                     os.makedirs(os.path.dirname(webui_cert) or ".", exist_ok=True)
@@ -922,7 +922,7 @@ class HubAgentClient:
         # self-signed hub cert doesn't fail the handshake; ws:// passes ssl=None.
         _ssl = self._client_ssl_ctx() if str(self.hub_ws_url or "").startswith("wss://") else None
         # ping_interval/ping_timeout: without these, websockets uses ~20s defaults —
-        # so if bugfixer's event loop stalls during heavy work (a scan/fix/LLM call),
+        # so if ab's event loop stalls during heavy work (a scan/fix/LLM call),
         # the keepalive pong is late and the hub connection is dropped, causing the
         # "keeps going offline" flap. Generous values tolerate transient stalls while
         # still detecting a truly dead socket within ~2 min.
@@ -939,16 +939,16 @@ class HubAgentClient:
             self.on_connection(True)     # socket is LIVE now (distinct from approval)
 
             # 1. Spoke authentication handshake.
-            # module_type "bugfixer" (NOT "agent"): bugfixer is a STANDALONE
+            # module_type "ab" (NOT "agent"): ab is a STANDALONE
             # module, not a generic multi-role node. Connecting as "agent" made
             # the hub treat it as a role-hosting agent — it hid from the plain
-            # approval list, tried to LOAD_ROLE a (non-existent) bugfixer role
+            # approval list, tried to LOAD_ROLE a (non-existent) ab role
             # (UI stuck on "activating"), and diverted the session-key push so it
-            # never armed. The hub reaches bugfixer by spoke_id ("bugfixer",
+            # never armed. The hub reaches ab by spoke_id ("ab",
             # HUB_AGENT_ID) and broadcasts SET_LOG_LEVEL to ALL spokes, so a
             # distinct type keeps every integration working while it registers as
             # an ordinary approvable module.
-            auth_payload = {"spoke_id": self.spoke_id, "module_type": "bugfixer"}
+            auth_payload = {"spoke_id": self.spoke_id, "module_type": "ab"}
             sent_secret = bool(self.secret)
             if self.secret:
                 auth_payload["secret"] = self.secret
@@ -989,7 +989,7 @@ class HubAgentClient:
             # (re)sends SPOKE_UPDATE_SESSION_KEY / APPROVED on a ZERO-TOUCH connect,
             # NOT when a valid secret is presented, so without this flip the status
             # set to "pending" at reconnect (line ~374) would stick forever and
-            # bugfixer would keep suppressing its hub-log scans as if unapproved. A
+            # ab would keep suppressing its hub-log scans as if unapproved. A
             # stale secret self-corrects: the hub closes 1008 → the reconnect
             # handler clears the secret and re-onboards zero-touch.
             if sent_secret and self.secret:
@@ -1009,10 +1009,10 @@ class HubAgentClient:
                         await websocket.send(encode_frame(self.signer, msg))
                     except Exception as e:  # noqa: BLE001
                         # A heartbeat that can't be sent means the socket is gone.
-                        # Returning SILENTLY (the old behaviour) was the "bugfixer
+                        # Returning SILENTLY (the old behaviour) was the "ab
                         # is offline after every LM upgrade" hang: the task simply
                         # stopped, so the hub's last_seen froze and aged forever
-                        # while bugfixer kept scanning repos, believing it was
+                        # while ab kept scanning repos, believing it was
                         # connected — and nothing logged a thing. Say so, and close
                         # the socket so the receive loop raises, _connect_and_serve
                         # returns, and the reconnect loop actually runs.
@@ -1153,16 +1153,16 @@ class HubAgentClient:
             return
 
         if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
-            # The hub's wildcard mTLS-materials fan-out. bugfixer keeps its OWN
-            # dedicated cert (bugfixer.<domain>) as its mTLS client identity — it
+            # The hub's wildcard mTLS-materials fan-out. ab keeps its OWN
+            # dedicated cert (ab.<domain>) as its mTLS client identity — it
             # must NOT adopt the fanned-out wildcard client cert, which would
             # replace its SAN-pinned identity and break HUB_REQUEST authorization.
             # So ignore the payload and just ACK, so the hub's durable mailbox
             # clears it instead of retrying to exhaustion ("failed after max
             # retries"). The hub also skips us once our cert is a claimed target.
             await self._ack(msg, "SUCCESS",
-                            "ignored — bugfixer uses its own dedicated cert, not the wildcard")
-            logger.info("SPOKE_SET_MTLS_MATERIALS ignored (bugfixer keeps its own cert) — acked")
+                            "ignored — ab uses its own dedicated cert, not the wildcard")
+            logger.info("SPOKE_SET_MTLS_MATERIALS ignored (ab keeps its own cert) — acked")
             return
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
@@ -1199,7 +1199,7 @@ class HubAgentClient:
 
         if cmd_type in ("HELP_ASK", "help_ask"):
             # LLM-turn executor for the hub's Help "Ask" assistant. The HUB owns
-            # the doc corpus, the tools, and the agentic loop; BugFixer just runs
+            # the doc corpus, the tools, and the agentic loop; AppBuilder just runs
             # ONE model turn (reusing its multi-provider call_llm) and returns the
             # normalized {content, tool_calls}. call_llm is sync → run off-thread
             # so we don't block the agent's WS receive loop. Reply mirrors the
@@ -1291,10 +1291,10 @@ class HubAgentClient:
 
         if cmd_type in ("SET_LOG_LEVEL", "SPOKE_SET_LOG_LEVEL"):
             # WebUI "Enable Debug" broadcast. It's broadcast to every connected
-            # spoke (any module_type), so bugfixer receives it while in
+            # spoke (any module_type), so ab receives it while in
             # active_connections; without a handler here it silently dropped to
             # "Unhandled"
-            # and the BugFixer/HubAgent loggers never flipped to DEBUG.
+            # and the AppBuilder/HubAgent loggers never flipped to DEBUG.
             enabled = bool(data.get("enabled", False))
             level = set_log_level(enabled)
             logger.info("Log level set to %s", logging.getLevelName(level))
@@ -1303,12 +1303,12 @@ class HubAgentClient:
         logger.debug("Unhandled Hub message type: %s", cmd_type)
 
 
-# Module-level singleton, started by BugFixer at app startup if HUB_WS_URL is set.
+# Module-level singleton, started by AppBuilder at app startup if HUB_WS_URL is set.
 hub_agent_client: Optional[HubAgentClient] = None
 
 
 def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub_secret=None, on_connection=None) -> Optional[HubAgentClient]:
-    """Build and start the Hub agent from a BugFixer config dict.
+    """Build and start the Hub agent from a AppBuilder config dict.
 
     Returns the client (also stored as the module singleton), or None if
     HUB_WS_URL is not configured.
@@ -1317,7 +1317,7 @@ def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub
     hub_ws_url = (config.get("HUB_WS_URL") or "").strip()
     if not hub_ws_url:
         return None
-    spoke_id = (config.get("HUB_AGENT_ID") or "bugfixer").strip() or "bugfixer"
+    spoke_id = (config.get("HUB_AGENT_ID") or "ab").strip() or "ab"
     secret = (config.get("HUB_AGENT_SECRET") or "").strip()
     hub_secret = (config.get("HUB_SECRET") or "").strip()
     client = HubAgentClient(

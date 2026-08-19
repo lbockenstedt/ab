@@ -2,7 +2,7 @@
 """Self-test that `profile=` actually reaches claude_cli_native_tools.build_command
 through the dispatch layer, not just that build_command itself accepts it.
 
-Run:  python3 bugfixer/test_llm_client_build_profile_threading.py
+Run:  python3 ab/test_llm_client_build_profile_threading.py
 
 llm_client.py imports `main` (app-init side effects — see
 test_skills_loader.py's docstring for why direct import is unsafe here), so

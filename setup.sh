@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-echo "🚀 Installing BugFixer..."
+echo "🚀 Installing AppBuilder..."
 
 # 1. System dependencies
 apt-get update && apt-get install -y curl git gnupg build-essential python3-pip python3-venv psmisc
@@ -8,8 +8,8 @@ curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y 
 npm install -g @anthropic-ai/claude-code
 
 # 2. Setup environment
-mkdir -p /opt/bugfixer
-mkdir -p /var/log/bugfixer
+mkdir -p /opt/ab
+mkdir -p /var/log/ab
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
@@ -33,14 +33,14 @@ SOTP
 fi
 
 # 4. Systemd Service
-cat << 'SERVICE' > /etc/systemd/system/bugfixer.service
+cat << 'SERVICE' > /etc/systemd/system/ab.service
 [Unit]
-Description=GitHub BugFixer Hybrid LLM
+Description=GitHub AppBuilder Hybrid LLM
 After=network.target
 [Service]
 User=root
-WorkingDirectory=/opt/bugfixer
-ExecStart=/opt/bugfixer/venv/bin/python3 main.py
+WorkingDirectory=/opt/ab
+ExecStart=/opt/ab/venv/bin/python3 main.py
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -48,5 +48,5 @@ SERVICE
 
 chmod +x update.sh
 
-systemctl daemon-reload && systemctl enable bugfixer && systemctl restart bugfixer
+systemctl daemon-reload && systemctl enable ab && systemctl restart ab
 echo "✅ Installation complete. Dashboard at http://$(hostname -I | awk '{print $1}'):8000"

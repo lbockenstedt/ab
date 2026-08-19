@@ -4,7 +4,7 @@ added so feature_build.py's agentic builder can inject a chosen skill's full
 recipe into its prompt (skills_context() only exposes names+descriptions,
 enough to PICK a skill but not enough to follow it).
 
-Run:  python3 bugfixer/test_skills_loader.py
+Run:  python3 ab/test_skills_loader.py
 
 NOT a direct import: skills_loader.py's `from main import logger` is wrapped
 in try/except, but in this checkout main.py actually IMPORTS CLEANLY (no
@@ -40,7 +40,7 @@ def _check(label, condition):
 
 
 def main():
-    print("Running bugfixer skills_loader self-test...")
+    print("Running ab skills_loader self-test...")
     ok = True
     ns = _load_ns()
 

@@ -1,5 +1,5 @@
 """
-model_registry.py — capability + cost-tier registry for BugFixer's LLM
+model_registry.py — capability + cost-tier registry for AppBuilder's LLM
 model-selection picker (model_selection.py). Pure, standalone module (no
 `main` import) so it's directly unit-testable, matching feature_boundary.py's
 pattern.

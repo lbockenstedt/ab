@@ -2,7 +2,7 @@
 feature_build.py — Phase 2 of feature auto-drive: the mutating build stage.
 
 Picks up a "build" verdict from feature_drive.classify() and turns it into a
-PR: a throwaway temp checkout, BugFixer's NEW mutating claude_cli profile
+PR: a throwaway temp checkout, AppBuilder's NEW mutating claude_cli profile
 (claude_cli_native_tools.BUILD_* — see that module's docstring; Edit/Write/
 Skill-enabled, still denies commit/push/reset/checkout/clean/rm/sudo/curl),
 a deterministic docs-completeness gate, then commit+push+PR. ALWAYS a PR,
@@ -44,7 +44,7 @@ from github_ops import _ensure_label
 # primary throttle.
 _BUILD_LOCK = threading.Lock()
 
-_FEATURE_DRIVE_MARKER = "<!-- bugfixer-feature-drive: {repo}#{number} -->"
+_FEATURE_DRIVE_MARKER = "<!-- ab-feature-drive: {repo}#{number} -->"
 
 _BUILD_JSON_SCHEMA = {
     "type": "object",
@@ -57,14 +57,14 @@ _BUILD_JSON_SCHEMA = {
 }
 
 _BUILD_SYSTEM = (
-    "You are BugFixer's feature-build agent. You have Read/Grep/Glob/Edit/Write/"
+    "You are AppBuilder's feature-build agent. You have Read/Grep/Glob/Edit/Write/"
     "Bash(narrow, read-only)/Skill access scoped to a throwaway git checkout on "
     "a dedicated branch. Build EXACTLY the feature request below by following "
     "the named skill's recipe, in order, completely — a silent skip reads as "
     "\"done\" when it isn't, so if you intentionally skip a touch-point, say so "
     "in touchpoints_skipped rather than leaving it out silently.\n\n"
     "Do NOT run git commit, git push, git reset, git checkout, git clean, sudo, "
-    "curl, or pip install — these are blocked, and BugFixer commits + pushes "
+    "curl, or pip install — these are blocked, and AppBuilder commits + pushes "
     "your working-tree changes itself once you're done. Do not touch anything "
     "outside the checkout you were given.\n\n"
     "When finished, return the required JSON summary."
@@ -163,18 +163,18 @@ def _flag_incomplete(gh_repo, issue, reason):
     its own reason text. Kept local rather than imported from feature_drive
     to avoid a circular import (feature_drive will import feature_build to
     dispatch "build" verdicts once this module lands)."""
-    _ensure_label(gh_repo, "bugfixer-needs-human")
+    _ensure_label(gh_repo, "ab-needs-human")
     try:
-        issue.add_to_labels("bugfixer-needs-human")
+        issue.add_to_labels("ab-needs-human")
     except Exception as e:
         logger.warning(f"feature_build: could not label {issue.number} needs-human: {e}")
     try:
         issue.create_comment(
-            "🤖 **BugFixer — Feature Auto-Drive**\n\n"
+            "🤖 **AppBuilder — Feature Auto-Drive**\n\n"
             "An automatic build was attempted but could not be completed cleanly, so "
             "**no PR was opened**. It stays open here for a human.\n\n"
             f"**Reason:** {reason}\n\n"
-            "<!-- bugfixer-boundary-flag: v1 -->"
+            "<!-- ab-boundary-flag: v1 -->"
         )
     except Exception as e:
         logger.warning(f"feature_build: could not comment on {issue.number}: {e}")
@@ -333,7 +333,7 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
                 f"{marker}"
             )
 
-            _ensure_label(repo_obj, "bugfixer-feature-drive")
+            _ensure_label(repo_obj, "ab-feature-drive")
             existing_pr = find_existing_pull_request(repo_obj, branch_name, base_branch)
             if existing_pr:
                 pr = existing_pr
@@ -349,7 +349,7 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
                     else:
                         raise
             try:
-                pr.add_to_labels("bugfixer-feature-drive")
+                pr.add_to_labels("ab-feature-drive")
             except Exception as e:
                 logger.warning(f"feature_build: could not label PR #{pr.number}: {e}")
 

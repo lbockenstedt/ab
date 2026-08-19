@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Self-test for the dismissed-issue rolling dedup window (Gap 1).
 
-Run:  python3 bugfixer/test_dedup_dismissed_rolling_window.py
+Run:  python3 ab/test_dedup_dismissed_rolling_window.py
 
 github_ops.py cannot be imported directly (it pulls in the app's circular
 import chain), so this extracts the SOURCE of find_global_duplicate_issue via
 ast and execs it with a fake PyGithub-shaped repo/issue set.
 
-Regression guard: a bugfixer-dismissed issue's label promises "will not be
+Regression guard: a ab-dismissed issue's label promises "will not be
 reopened" — an unconditional claim — but the dedup search used to anchor its
 60-day recurrence window to the issue's ORIGINAL closed_at, so a dismissal
 older than 60 days silently dropped out of the search regardless of how often
@@ -105,7 +105,7 @@ def main():
     #    alone), but updated 5 days ago (a recent recurrence comment). Must
     #    still be found — rolling window anchored to updated_at.
     old_closed_recent_activity = _Issue(
-        101, "closed", ["bugfixer-dismissed"],
+        101, "closed", ["ab-dismissed"],
         closed_at=now - timedelta(days=200), updated_at=now - timedelta(days=5))
     repo1 = _Repo([old_closed_recent_activity])
     gh1 = _GhCurrent(repo1)
@@ -116,7 +116,7 @@ def main():
     # 2. Dismissed issue: closed 200 days ago AND no activity since (updated_at
     #    also 200 days ago) — must age out, same as before this change.
     old_closed_no_activity = _Issue(
-        102, "closed", ["bugfixer-dismissed"],
+        102, "closed", ["ab-dismissed"],
         closed_at=now - timedelta(days=200), updated_at=now - timedelta(days=200))
     repo2 = _Repo([old_closed_no_activity])
     gh2 = _GhCurrent(repo2)
@@ -129,7 +129,7 @@ def main():
     #    if something else bumped updated_at recently (e.g. an unrelated label
     #    edit), it should not be resurrected as a match.
     normal_closed_stale = _Issue(
-        103, "closed", [],  # no bugfixer-dismissed label
+        103, "closed", [],  # no ab-dismissed label
         closed_at=now - timedelta(days=70), updated_at=now - timedelta(days=1))
     repo3 = _Repo([normal_closed_stale])
     gh3 = _GhCurrent(repo3)

@@ -25,13 +25,13 @@ Two PROFILES, selected by the caller, never mixed:
 
 - ``profile="build"`` (feature auto-drive's mutating agent ONLY): adds
   Edit/Write/Skill on top of the readonly categories, for one specific,
-  narrowly-scoped caller — bugfixer/feature_build.py's agentic feature
+  narrowly-scoped caller — ab/feature_build.py's agentic feature
   builder, which runs in a throwaway temp checkout (never a live working
-  tree, never /opt/bugfixer). Even in this profile, git commit/push/reset/
+  tree, never /opt/ab). Even in this profile, git commit/push/reset/
   clean/checkout stay DENIED: the agent only edits the working tree;
-  BugFixer's own code does add/commit/push via GitPython afterwards, so
+  AppBuilder's own code does add/commit/push via GitPython afterwards, so
   branch naming, commit message, and "what actually changed" stay under
-  BugFixer's control rather than the agent's self-report. ``BUILD_*``
+  AppBuilder's control rather than the agent's self-report. ``BUILD_*``
   constants back this profile and are a SEPARATE object from the readonly
   ones on purpose (see test_claude_cli_build_profile.py's identity checks).
 """
@@ -49,7 +49,7 @@ DISALLOWED_TOOLS = ["Edit", "Write", "Bash(rm:*)", "Bash(git push:*)", "Bash(git
 
 # --- build profile (feature_build.py's mutating agent ONLY) ----------------
 # Adds Edit/Write/Skill; still denies every history-rewriting/publishing git
-# op (BugFixer commits+pushes itself, never the agent) plus rm/sudo/curl/pip
+# op (AppBuilder commits+pushes itself, never the agent) plus rm/sudo/curl/pip
 # install/WebFetch/WebSearch (no network egress, no privilege escalation, no
 # destructive shell from an agent operating on a temp checkout).
 BUILD_TOOL_CATEGORIES = "Read,Grep,Glob,Bash,Task,Edit,Write,Skill"

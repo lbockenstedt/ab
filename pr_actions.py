@@ -17,11 +17,11 @@ from main import logger, state
 from app_state import update_pr_review
 from github_ops import _ensure_label
 
-_APPROVE_LABEL = "bugfixer-approved"
+_APPROVE_LABEL = "ab-approved"
 
 
 def approve_pr(gh, repo_name, number, *, actor="human"):
-    """Applies the bugfixer-approved label + posts an approval comment.
+    """Applies the ab-approved label + posts an approval comment.
     Does NOT itself update state["pr_reviews"] — the caller does that
     (routes.py calls mark_pr_approved; the auto path calls it too, which is
     what makes merge_pr's approval guard genuinely pass rather than being
@@ -35,9 +35,9 @@ def approve_pr(gh, repo_name, number, *, actor="human"):
     except Exception as e:
         logger.warning(f"pr_actions: could not label {repo_name}#{number} approved: {e}")
     comment = (
-        "✅ **Approved** via BugFixer (human review). Cleared to merge/pull."
+        "✅ **Approved** via AppBuilder (human review). Cleared to merge/pull."
         if actor == "human" else
-        "🤖 **Auto-Approved** via BugFixer Feature Auto-Drive — both review panels "
+        "🤖 **Auto-Approved** via AppBuilder Feature Auto-Drive — both review panels "
         "cleared the configured confidence threshold and the diff touched no "
         "configured boundary. Merging automatically."
     )

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for _qa_service_verify's handling of a completed-but-empty QA run.
 
-Run:  python3 bugfixer/test_qa_service_verify_empty_results.py
+Run:  python3 ab/test_qa_service_verify_empty_results.py
 
 fix_engine.py cannot be imported directly (it pulls in the full main.py ->
 routes.py circular-import chain -- see test_dismiss_background_retry.py's
@@ -11,8 +11,8 @@ this extracts _qa_service_verify's SOURCE via ast and execs it with a
 stubbed `requests` module and `time.sleep`, exactly like that file does for
 delete_issue.
 
-Regression guard: bugfixer issue #815's auto-fix (PR #817) introduced an
-actual IndentationError into llm_client.py, yet BugFixer's own PR comment
+Regression guard: ab issue #815's auto-fix (PR #817) introduced an
+actual IndentationError into llm_client.py, yet AppBuilder's own PR comment
 claimed "Verification: Tests passed successfully". The QA-service path
 (verify_fix's priority-1 check when QA_API_URL is configured) computed
 `passed == total` off `results = data.get("results", [])` without ever
@@ -100,7 +100,7 @@ def main():
 
     # --- COMPLETED with zero results must NOT be treated as a pass ---------
     ns = make_ns([{"status": "COMPLETED", "results": []}])
-    passed, summary = ns["_qa_service_verify"]("owner/bugfixer", {"QA_API_URL": "http://qa"})
+    passed, summary = ns["_qa_service_verify"]("owner/ab", {"QA_API_URL": "http://qa"})
     ok &= _check("COMPLETED with 0 results is NOT reported as passed (was vacuously True)",
                  passed is not True)
     ok &= _check("COMPLETED with 0 results is treated as inconclusive (None), not a hard failure",
@@ -112,7 +112,7 @@ def main():
     ns = make_ns([{"status": "COMPLETED",
                     "results": [{"name": "t1", "status": "PASS"},
                                 {"name": "t2", "status": "PASS"}]}])
-    passed, summary = ns["_qa_service_verify"]("owner/bugfixer", {"QA_API_URL": "http://qa"})
+    passed, summary = ns["_qa_service_verify"]("owner/ab", {"QA_API_URL": "http://qa"})
     ok &= _check("COMPLETED with 2/2 PASS results is reported as passed",
                  passed is True)
 
@@ -120,20 +120,20 @@ def main():
     ns = make_ns([{"status": "COMPLETED",
                     "results": [{"name": "t1", "status": "PASS"},
                                 {"name": "t2", "status": "FAIL"}]}])
-    passed, summary = ns["_qa_service_verify"]("owner/bugfixer", {"QA_API_URL": "http://qa"})
+    passed, summary = ns["_qa_service_verify"]("owner/ab", {"QA_API_URL": "http://qa"})
     ok &= _check("COMPLETED with a real failing test is reported as failed",
                  passed is False)
     ok &= _check("failed test name surfaces in the summary", "t2" in summary)
 
     # --- FAILED status is never a pass, even with misleading counts --------
     ns = make_ns([{"status": "FAILED", "results": []}])
-    passed, summary = ns["_qa_service_verify"]("owner/bugfixer", {"QA_API_URL": "http://qa"})
+    passed, summary = ns["_qa_service_verify"]("owner/ab", {"QA_API_URL": "http://qa"})
     ok &= _check("FAILED status with 0 results is reported as failed, not passed",
                  passed is False)
 
     # --- IDLE status (service never actually ran anything) isn't a pass ----
     ns = make_ns([{"status": "IDLE", "results": []}])
-    passed, summary = ns["_qa_service_verify"]("owner/bugfixer", {"QA_API_URL": "http://qa"})
+    passed, summary = ns["_qa_service_verify"]("owner/ab", {"QA_API_URL": "http://qa"})
     ok &= _check("IDLE status is reported as failed, not passed",
                  passed is False)
 

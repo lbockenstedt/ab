@@ -85,7 +85,7 @@ async def hub_agent_status():
         "message": state.get("hub_agent_message", ""),
         "last_seen": state.get("hub_agent_last_seen", ""),
         "hub_ws_url": (cfg.get("HUB_WS_URL") or "").strip(),
-        "hub_agent_id": (cfg.get("HUB_AGENT_ID") or "bugfixer").strip(),
+        "hub_agent_id": (cfg.get("HUB_AGENT_ID") or "ab").strip(),
         "has_secret": bool((cfg.get("HUB_AGENT_SECRET") or "").strip()),
         "has_hub_secret": bool((cfg.get("HUB_SECRET") or "").strip()),
     })
@@ -109,7 +109,7 @@ async def hub_agent_reregister():
         # Brief pause so the old loop closes before we start a fresh one.
         time.sleep(1)
         _start_hub_agent()
-        return JSONResponse({"status": "restarted", "message": "Hub agent re-registering (approve bugfixer in the Hub WebUI)"})
+        return JSONResponse({"status": "restarted", "message": "Hub agent re-registering (approve ab in the Hub WebUI)"})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
@@ -298,21 +298,21 @@ async def llm_diag_run(request: Request):
 @router.post("/api/toggle-pause")
 async def toggle_pause():
     state["paused"] = not state["paused"]
-    logger.info(f"BugFixer autonomous operations {'PAUSED' if state['paused'] else 'RESUMED'}")
+    logger.info(f"AppBuilder autonomous operations {'PAUSED' if state['paused'] else 'RESUMED'}")
     return {"status": "success", "paused": state["paused"]}
 
 
 @router.post("/api/toggle-blackout")
 async def toggle_blackout():
     state["blackout"] = not state.get("blackout", False)
-    logger.info(f"BugFixer blackout mode {'ON (triage only)' if state['blackout'] else 'OFF (fixes resumed)'}")
+    logger.info(f"AppBuilder blackout mode {'ON (triage only)' if state['blackout'] else 'OFF (fixes resumed)'}")
     return {"status": "success", "blackout": state["blackout"]}
 
 
 @router.post("/api/pr-review/approve")
 async def pr_review_approve(request: Request):
     """Human 'Approve' for a pre-reviewed PR (from the PRs Reviewed list). Adds a
-    'bugfixer-approved' label + an approval comment and flags it in state. Does
+    'ab-approved' label + an approval comment and flags it in state. Does
     NOT merge — the human merges/pulls after. This is the human-click path;
     the ONLY other caller of approve_pr is feature auto-drive's own narrow,
     opt-in auto-merge exception (pr_review._maybe_auto_merge — see that
@@ -389,8 +389,8 @@ async def pr_review_merge(request: Request):
 @router.post("/api/pr-review/deny")
 async def pr_review_deny(request: Request):
     """Human 'Deny' for a reviewed PR — closes it on GitHub (no merge) + labels it
-    'bugfixer-denied' + a comment, and flags it DENIED in the list (kept, badged).
-    Only a human denies; BugFixer never does."""
+    'ab-denied' + a comment, and flags it DENIED in the list (kept, badged).
+    Only a human denies; AppBuilder never does."""
     try:
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
@@ -406,7 +406,7 @@ async def pr_review_deny(request: Request):
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(number)
-        label = "bugfixer-denied"
+        label = "ab-denied"
         try:
             repo.get_label(label)
         except Exception:
@@ -419,7 +419,7 @@ async def pr_review_deny(request: Request):
         except Exception:
             pass
         try:
-            pr.create_issue_comment("⛔ **Denied** via BugFixer (human review) — closing without merge.")
+            pr.create_issue_comment("⛔ **Denied** via AppBuilder (human review) — closing without merge.")
         except Exception:
             pass
         if not pr.merged and pr.state == "open":
@@ -472,7 +472,7 @@ async def pr_review_reprocess(request: Request):
 
 @router.post("/api/pr-review/fix")
 async def pr_review_fix(request: Request):
-    """Human 'Fix' for a reviewed PR — the ONLY trigger for this; BugFixer never
+    """Human 'Fix' for a reviewed PR — the ONLY trigger for this; AppBuilder never
     applies a PR fix on its own. Generates an AI fix for this PR's pre-review
     findings, gates it through the same skeptical-panel review the bug/issue fix
     pipeline uses, and on approval pushes it as a new commit onto the PR's OWN
@@ -782,13 +782,13 @@ def _system_stats():
                     cmd = " ".join(p.info.get("cmdline") or []).lower()
                     is_me = p.info["pid"] == me
                     if not (is_me or "ollama" in nm or "ollama" in cmd
-                            or "bugfixer" in cmd or "llama" in nm):
+                            or "ab" in cmd or "llama" in nm):
                         continue
                     mi = p.info.get("memory_info")
                     procs.append({
                         "pid": p.info["pid"],
                         "name": p.info.get("name"),
-                        "label": "bugfixer" if is_me else (p.info.get("name") or "proc"),
+                        "label": "ab" if is_me else (p.info.get("name") or "proc"),
                         "rss_mb": round(mi.rss / 1048576, 1) if mi else None,
                         "cpu_percent": p.info.get("cpu_percent"),
                         "self": is_me,
@@ -834,7 +834,7 @@ def _system_stats():
     except Exception:
         pass
 
-    # BugFixer process uptime from the startup stamp.
+    # AppBuilder process uptime from the startup stamp.
     try:
         with open(STARTUP_STAMP_FILE, "r") as f:
             started = json.load(f).get("started_at")
@@ -999,7 +999,7 @@ CLAUDE_INSTALL_STATUS = os.path.join(CONFIG_DIR, "claude_install_status.json")
 
 
 def _request_claude_install():
-    """Ask bugfixer-watchdog to install the Claude Code CLI for the service user.
+    """Ask ab-watchdog to install the Claude Code CLI for the service user.
 
     This service is cap-locked and cannot escalate, so installation is delegated
     the same way ollama-setup is: drop a request file, the watchdog runs the root
@@ -1115,7 +1115,7 @@ def claude_cli_auth_start():
                            "(up to a minute) — then click Start Login Flow again."
                            if queued else
                            "Claude Code isn't installed and the install request could not be "
-                           "queued. Check that bugfixer-watchdog is running.")}
+                           "queued. Check that ab-watchdog is running.")}
 
     # Kill any existing auth process first.
     old = state.get("claude_auth_proc")
@@ -1448,7 +1448,7 @@ async def get_hub_logs_page(request: Request):
         fetch_status = 200
     else:
         fetch_error = ("No synced logs yet — waiting for the first scan cycle. "
-                       "If this persists, confirm bugfixer is approved+connected "
+                       "If this persists, confirm ab is approved+connected "
                        "in the Hub WebUI (Setup → Spokes).")
     fetch_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return templates.TemplateResponse(
@@ -1560,21 +1560,21 @@ def _collect_logs_for_analysis(source, window_minutes=None):
             with open(get_log_path(), "r") as f:
                 all_lines = f.readlines()
         except Exception as e:  # noqa: BLE001
-            return "BugFixer service logs", f"(could not read BugFixer log: {e})"
+            return "AppBuilder service logs", f"(could not read AppBuilder log: {e})"
         if window_minutes:
             win = _window_lines_since(all_lines, window_minutes)
             all_lines = win if len(win) >= 5 else all_lines[-400:]
         else:
             all_lines = all_lines[-400:]
         text = "".join(all_lines)
-        title = f"BugFixer service logs (last {window_minutes} min)" if window_minutes else "BugFixer service logs"
+        title = f"AppBuilder service logs (last {window_minutes} min)" if window_minutes else "AppBuilder service logs"
     if len(text) > _LOG_ANALYSIS_MAX_CHARS:
         text = text[-_LOG_ANALYSIS_MAX_CHARS:]
     return title, text
 
 
 def _run_log_analysis(source, window_minutes=None, precomputed=False):
-    """Read the current logs and ask BugFixer's own LLM whether anything is wrong,
+    """Read the current logs and ask AppBuilder's own LLM whether anything is wrong,
     what it means, and what to check. Streams into the LogAnalysis task (live
     'thought process') and stores the final answer in state['log_analysis']."""
     from main import analyze_logs, parse_log_verdict, is_llm_cooldown_error  # re-exported from llm_client
@@ -1585,7 +1585,7 @@ def _run_log_analysis(source, window_minutes=None, precomputed=False):
         reqs = LlmRequirements(complexity="small", latency_sensitive=True,
                                deprioritize_local=True,
                                min_context_tokens=len(log_text) // 4)
-        raw = analyze_logs(log_text, title=f"{title} for the BugFixer system",
+        raw = analyze_logs(log_text, title=f"{title} for the AppBuilder system",
                            task_id=_LOG_ANALYSIS_TASK, requirements=reqs)
         verdict, result = parse_log_verdict(raw)  # strip the machine VERDICT line for display
         state["log_analysis"] = {
@@ -1617,7 +1617,7 @@ def _log_analysis_busy():
 
 
 def log_health_worker():
-    """When BugFixer is idle, pre-compute a health snapshot of the last N minutes of its
+    """When AppBuilder is idle, pre-compute a health snapshot of the last N minutes of its
     own logs so the Log Analysis panel shows a ready answer on page open. Cheap, respects
     the single LLM slot (skips while a fix/chat is running), and refreshes at most every
     N minutes — N = log_analysis_interval_min (Settings, default 30). The user's Refresh
@@ -1719,9 +1719,9 @@ DEFAULT_ENV = {
     "UPDATE_API_URL": "",
     "HUB_QUERY_URL": "",
     "HUB_WS_URL": "",
-    "HUB_AGENT_ID": "bugfixer",
+    "HUB_AGENT_ID": "ab",
     "POST_UPDATE_COOLDOWN_MINUTES": "10",
-    "LOG_FILE_PATH": "/var/log/bugfixer.log",
+    "LOG_FILE_PATH": "/var/log/ab.log",
     "DEV_BRANCH": "dev",
     "LLM_TIMEOUT": "900",
     "MAX_CONCURRENT_FIXES": "5",
@@ -1761,7 +1761,7 @@ _GITHUB_REPOS_TTL = 300
 def _fetch_github_repos_sync(token: str) -> list:
     """Best-effort list of the configured token's accessible GitHub repos
     (``owner/repo``). Filters to non-archived repos the user can push to (where
-    BugFixer could actually file/fix issues), sorted by name, capped at 200 so
+    AppBuilder could actually file/fix issues), sorted by name, capped at 200 so
     the settings page stays snappy. Returns ``[]`` on any failure."""
     if not token:
         return []
@@ -1826,7 +1826,7 @@ async def settings_page(request: Request):
     config.setdefault("feature_requests_enabled", True)
     config.setdefault("fix_logdetected_enabled", False)
     # Project skills (skills_loader.py) — repo-committed recipes (add-simulation,
-    # dual-copy-guard, ...) BugFixer follows for fix/build work. Feature
+    # dual-copy-guard, ...) AppBuilder follows for fix/build work. Feature
     # auto-drive's build stage depends entirely on these loading; previously
     # configurable only by editing config.json directly.
     config.setdefault("skills_enabled", True)
@@ -2120,7 +2120,7 @@ async def save_settings(request: Request):
         "MAX_ISSUES_PER_CYCLE": lambda v: v,
         "POLL_INTERVAL_SECONDS": lambda v: v,
         "self_diagnosis_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
-        # File-a-Bug: which repo bugfixer files user-submitted WebUI bug reports
+        # File-a-Bug: which repo ab files user-submitted WebUI bug reports
         # into (and where the fix pipeline then runs). Defaults to lbockenstedt/lm.
         "bug_report_repo": lambda v: clean_repo_name(v.strip()) if v and v.strip() else "",
         "module_repo_map": lambda v: parse_module_repo_map(v),
@@ -2152,7 +2152,7 @@ async def save_settings(request: Request):
         "QA_TEST_COMMAND": lambda v: v.strip() if v else "pytest",
         "HUB_QUERY_URL": lambda v: v.strip() if v else "",
         "HUB_WS_URL": lambda v: v.strip() if v else "",
-        "HUB_AGENT_ID": lambda v: v.strip() if v else "bugfixer",
+        "HUB_AGENT_ID": lambda v: v.strip() if v else "ab",
         "POST_UPDATE_COOLDOWN_MINUTES": lambda v: max(0, int(v)) if str(v).isdigit() else 10,
     }
 
@@ -2167,8 +2167,8 @@ async def save_settings(request: Request):
 
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     # Agentic LLM router (/v1/messages) toggles. agentic_default (OFF): route
-    # every proxy request through BugFixer's agent loop, not just model=
-    # bugfixer-agent. autofix_enabled (OFF, safe for an open/keyless proxy):
+    # every proxy request through AppBuilder's agent loop, not just model=
+    # ab-agent. autofix_enabled (OFF, safe for an open/keyless proxy):
     # let the agentic router trigger real fixes — still panel + boundary gated.
     config_data["llm_proxy_agentic_default"] = data.get("llm_proxy_agentic_default") == "on"
     config_data["llm_proxy_autofix_enabled"] = data.get("llm_proxy_autofix_enabled") == "on"
@@ -2197,7 +2197,7 @@ async def save_settings(request: Request):
         config_data["log_analysis_interval_min"] = max(1, int(_lai)) if _lai else 30
     except (TypeError, ValueError):
         config_data["log_analysis_interval_min"] = 30
-    # Post-boot grace (seconds) before BugFixer runs LLM/scan work — lets ollama +
+    # Post-boot grace (seconds) before AppBuilder runs LLM/scan work — lets ollama +
     # services finish starting after a reboot so it doesn't 404 on /api/chat. 0 = off.
     _sg = str(data.get("startup_grace_seconds") or "").strip()
     try:
@@ -2392,9 +2392,9 @@ async def save_settings(request: Request):
     else:
         _elm = form_data.get("enabled_log_modules", [])
         config_data["enabled_log_modules"] = _elm if isinstance(_elm, list) else ([_elm] if _elm else [])
-    # Self-log scan: scan BugFixer's OWN logs for internal errors + file them
+    # Self-log scan: scan AppBuilder's OWN logs for internal errors + file them
     # as GitHub issues in self_diagnosis_repo. On by default (self-diagnosis);
-    # turn OFF to stop BugFixer from monitoring/filing its own logs.
+    # turn OFF to stop AppBuilder from monitoring/filing its own logs.
     config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
     # Multi-agent orchestration (default off): a chat request is planned into a
@@ -2826,7 +2826,7 @@ async def clear_history():
 
 
 def _close_issue_on_github(issue_id: str):
-    """Close one issue on GitHub with the ``bugfixer-dismissed`` label + an
+    """Close one issue on GitHub with the ``ab-dismissed`` label + an
     explanatory comment. Returns (ok, message). Best-effort per step — label
     create/apply and the comment never raise. Shared by the single-issue
     delete and the bulk delete-all sweep so the close logic isn't duplicated."""
@@ -2843,13 +2843,13 @@ def _close_issue_on_github(issue_id: str):
     issue = repo.get_issue(issue_num)
 
     # Ensure the dismissal label exists in the repo; create it if not.
-    label_name = "bugfixer-dismissed"
+    label_name = "ab-dismissed"
     try:
         repo.get_label(label_name)
     except Exception:
         try:
             repo.create_label(label_name, "b60205",
-                              "Marked by BugFixer as not a real issue — will not be reopened")
+                              "Marked by AppBuilder as not a real issue — will not be reopened")
         except Exception as le:
             logger.warning(f"Could not create label '{label_name}': {le}")
     try:
@@ -2858,7 +2858,7 @@ def _close_issue_on_github(issue_id: str):
         logger.warning(f"Could not apply label '{label_name}' to #{issue_num}: {le}")
     try:
         issue.create_comment(
-            "🤖 **BugFixer**: This issue has been marked as **not a real issue** and dismissed. "
+            "🤖 **AppBuilder**: This issue has been marked as **not a real issue** and dismissed. "
             "It will not be automatically reopened or processed again."
         )
     except Exception:
@@ -3022,7 +3022,7 @@ async def resolve_issue(request: Request):
 
         try:
             issue.create_comment(
-                "🤖 **BugFixer**: This issue has been marked as **resolved** and is now closed. "
+                "🤖 **AppBuilder**: This issue has been marked as **resolved** and is now closed. "
                 "It will not be automatically reopened or processed again."
             )
         except Exception:
@@ -3159,10 +3159,10 @@ async def retry_issue(request: Request):
 
 @router.post("/reopen_issue")
 async def reopen_issue(request: Request):
-    """Reopen a BugFixer-closed issue on GitHub and re-queue it — for when BugFixer
+    """Reopen a AppBuilder-closed issue on GitHub and re-queue it — for when AppBuilder
     reported a fix that did NOT actually resolve the bug (e.g. it committed +
     verified in its sandbox but the push never landed). Reopens the issue, strips
-    the ``bugfixer-closed`` / ``bugfixer-dismissed`` labels that suppress
+    the ``ab-closed`` / ``ab-dismissed`` labels that suppress
     re-processing, clears its stored processed state, and kicks off a fresh fix."""
     data = await request.json()
     issue_id = data.get("issue_id")
@@ -3181,7 +3181,7 @@ async def reopen_issue(request: Request):
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         issue = repo.get_issue(issue_num)
-        for lbl in ("bugfixer-closed", "bugfixer-dismissed"):
+        for lbl in ("ab-closed", "ab-dismissed"):
             try:
                 issue.remove_from_labels(lbl)
             except Exception:  # noqa: BLE001 — label may not be present
@@ -3190,7 +3190,7 @@ async def reopen_issue(request: Request):
             issue.edit(state="open")
         try:
             issue.create_comment(
-                "🔁 **BugFixer**: Reopened by the operator — the previous fix did not "
+                "🔁 **AppBuilder**: Reopened by the operator — the previous fix did not "
                 "actually resolve this. Re-queued for another attempt."
             )
         except Exception:  # noqa: BLE001

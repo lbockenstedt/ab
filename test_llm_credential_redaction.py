@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for the LLM credential/entry api_key disclosure fix.
 
-Run:  python3 bugfixer/test_llm_credential_redaction.py
+Run:  python3 ab/test_llm_credential_redaction.py
 
 routes.py cannot be imported directly (main.py's app-init side effects — see
 test_dismiss_background_retry.py's docstring), so this extracts the specific

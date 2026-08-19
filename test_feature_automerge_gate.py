@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Self-test for pr_review._automerge_decision — the fence around the ONE
-deliberate exception to "BugFixer never auto-approves/auto-merges".
+deliberate exception to "AppBuilder never auto-approves/auto-merges".
 
-Run:  python3 bugfixer/test_feature_automerge_gate.py
+Run:  python3 ab/test_feature_automerge_gate.py
 
 pr_review.py imports `main`/`app_state` (real app-context modules whose
 import fully boots the live app as a side effect in this checkout — see
@@ -116,9 +116,9 @@ def main():
 
     # ── operational gates ────────────────────────────────────────────────────
     should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(), state_flags={"paused": True})
-    ok &= _check("BugFixer paused -> blocked", should is False)
+    ok &= _check("AppBuilder paused -> blocked", should is False)
     should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(), state_flags={"blackout": True})
-    ok &= _check("BugFixer in blackout -> blocked", should is False)
+    ok &= _check("AppBuilder in blackout -> blocked", should is False)
 
     # ── panel 1 must ACTUALLY have run and Approved ─────────────────────────
     should, reason = decide(_clean_rec(panel_status="queue_for_retry"), [], _clean_config(), _clean_pr_meta())
@@ -158,14 +158,14 @@ def main():
 
     # ── boundary check against the ACTUAL diff ───────────────────────────────
     boundaries = [{"id": "secrets", "paths": ["**/hub_agent.py"], "hard": True, "enabled": True}]
-    should, reason = decide(_clean_rec(), ["bugfixer/hub_agent.py"],
+    should, reason = decide(_clean_rec(), ["ab/hub_agent.py"],
                             _clean_config(feature_boundaries=boundaries), _clean_pr_meta())
     ok &= _check("diff touches a configured boundary path -> blocked", should is False)
     ok &= _check("blocking reason names the boundary id", "secrets" in reason)
-    should, reason = decide(_clean_rec(), ["bugfixer/routes.py"],
+    should, reason = decide(_clean_rec(), ["ab/routes.py"],
                             _clean_config(feature_boundaries=boundaries), _clean_pr_meta())
     ok &= _check("diff does NOT touch the boundary path -> not blocked by this gate", should is True)
-    should, reason = decide(_clean_rec(), ["bugfixer/hub_agent.py"],
+    should, reason = decide(_clean_rec(), ["ab/hub_agent.py"],
                             _clean_config(feature_boundaries=[{**boundaries[0], "enabled": False}]),
                             _clean_pr_meta())
     ok &= _check("a DISABLED boundary rule never blocks even with a matching path", should is True)

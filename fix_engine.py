@@ -195,7 +195,7 @@ def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=N
     files SINCE our fix landed, so the builder triages from the regression cause
     instead of re-analysing the whole error from scratch.
 
-    Resolves the prior fix sha from the processed record or, failing that, BugFixer's
+    Resolves the prior fix sha from the processed record or, failing that, AppBuilder's
     "Commit: `<sha>`" resolved comment on the issue. Then, in the fresh clone, runs
     `git log <sha>..HEAD` and `git diff <sha>..HEAD` scoped to the fix's files.
     Returns a context block to append to fix_body (or "" if there's nothing useful —
@@ -236,7 +236,7 @@ def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=N
     logger.info(f"Regression triage: fix {sha[:10]}, {len(files)} file(s), {len(log.splitlines())} commit(s) since.")
     return (
         "\n\n--- REGRESSION CONTEXT (issue was previously fixed, then reopened) ---\n"
-        f"BugFixer previously fixed this as commit {sha[:10]}. Since then the file(s) it "
+        f"AppBuilder previously fixed this as commit {sha[:10]}. Since then the file(s) it "
         "touched were changed again — that most likely REINTRODUCED the bug.\n"
         f"Commits to those files since the fix:\n{log}\n\n"
         f"Diff of those files since the fix:\n{diff or '(no line changes captured)'}\n"
@@ -319,12 +319,12 @@ def run_sandboxed_command(command, cwd):
     try:
         if os.geteuid() != 0:
             # Non-root (svc_bg): docker socket needs root, so delegate to the
-            # root helper. The helper validates cwd is under /opt/bugfixer and
+            # root helper. The helper validates cwd is under /opt/ab and
             # runs `docker run` as root; it exits with the docker rc and passes
             # stdout/stderr through. Image selection stays here (svc_bg picks
             # the image from repo files) and is passed as a single argv.
             result = subprocess.run(
-                ["sudo", "-n", "/usr/local/bin/bugfixer-sandbox", image, cwd, command],
+                ["sudo", "-n", "/usr/local/bin/ab-sandbox", image, cwd, command],
                 capture_output=True, text=True, timeout=300,
             )
         else:
@@ -737,7 +737,7 @@ def _fetch_repo_file_for_review(repo, head_sha, path):
     # raises AssertionError ("unsupported encoding: none") when GitHub's
     # Contents API doesn't inline the file (seen for files >1MB) — that
     # escaped getattr entirely and broke this function's "never raises"
-    # contract, crashing the reviewer's whole tool-call turn (bugfixer#753).
+    # contract, crashing the reviewer's whole tool-call turn (ab#753).
     try:
         raw = c.decoded_content
     except Exception as e:  # noqa: BLE001
@@ -788,7 +788,7 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
     couldn't clone), claude_cli falls back to the tools-blind path below,
     same as before this existed: telling it about a fetch_repo_file tool it
     has no way to invoke made it try to fake a tool call in prose instead of
-    returning clean JSON (bugfixer#730/#731 — the ORIGINAL report of this
+    returning clean JSON (ab#730/#731 — the ORIGINAL report of this
     error class), so the tool-primed addendum is only ever added when a
     provider will really see it as a callable tool.
 
@@ -799,7 +799,7 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
     Without this, a tools-blind reviewer has no way to confirm a referenced
     symbol exists, an import is already present above the visible diff, etc.
     — and reliably produces exactly that class of unverifiable, false-alarm
-    finding (confirmed live: BugFixer's own review of lm#151 flagged "is
+    finding (confirmed live: AppBuilder's own review of lm#151 flagged "is
     `time` imported" and "does `_all_tenant_ids` exist" as unverifiable from
     the diff — both were actually true, just outside the hunk claude_cli was
     shown). Bounded the same way the tool-calling path is (_REVIEW_TOOL_MAX_FILES
@@ -951,7 +951,7 @@ def _ensure_review_checkout(repo_path, repo, head_sha, config):
     try:
         from check_test_regressions import _clone_and_checkout
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
-        dest = tempfile.mkdtemp(prefix="bugfixer-review-")
+        dest = tempfile.mkdtemp(prefix="ab-review-")
         _clone_and_checkout(repo.clone_url, token, head_sha, dest)
         return dest, True
     except Exception as e:  # noqa: BLE001 — best-effort; reviewer falls back to tools-blind
@@ -1541,7 +1541,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
         # parse_and_apply, so nothing here bypasses that safety net. Gated on
         # repo_path actually being a real directory — enabling native tools
         # with no valid --add-dir would fall back to the subprocess's own cwd
-        # (bugfixer's own source tree), not the target repo.
+        # (ab's own source tree), not the target repo.
         _native = bool(repo_path and os.path.isdir(repo_path))
         import dataclasses
         from model_selection import LlmRequirements
@@ -1622,7 +1622,7 @@ def _relaxed_edit_span(haystack, needle):
     return matches[0].span() if len(matches) == 1 else None
 
 
-# Cheap cross-language sanity check for a failed edit (bugfixer#760): a search
+# Cheap cross-language sanity check for a failed edit (ab#760): a search
 # snippet with JS-only syntax against a .py target (or vice versa) can NEVER
 # match — that's not a whitespace/staleness miss, it's the model crossing the
 # file/search pairing between two DIFFERENT edits in the same response (e.g. a
@@ -1793,7 +1793,7 @@ def parse_and_apply(content, repo_path):
                     # last_failures): the self-log scanner captures single ERROR
                     # lines verbatim with no surrounding context, so this is the
                     # only copy of the actual failing snippet it will ever see —
-                    # the same gap that made bugfixer#735 recur as "non-actionable,
+                    # the same gap that made ab#735 recur as "non-actionable,
                     # please provide more context" instead of ever getting fixed.
                     logger.error(
                         f"Edit search snippet not found in {filepath!r}; skipping this edit "
@@ -1937,7 +1937,7 @@ def _qa_service_verify(repo_name, config, timeout=120):
                     # for it, etc.) -- "0/0 passed" must NOT be treated as a
                     # pass: `passed == total` is vacuously True for 0 == 0,
                     # which previously let a fix that ran zero tests report
-                    # "Tests passed successfully" (see bugfixer PR #817: a
+                    # "Tests passed successfully" (see ab PR #817: a
                     # commit with an actual IndentationError was marked
                     # verified). Returning None (inconclusive) lets the
                     # caller fall back to local tests instead of rubber-
@@ -2025,7 +2025,7 @@ def verify_fix(repo_path, repo_name, config):
         return False, error_msg
 
 
-# In-flight claim: BugFixer runs as ONE process (background scan ThreadPoolExecutor
+# In-flight claim: AppBuilder runs as ONE process (background scan ThreadPoolExecutor
 # + the FastAPI request thread that services the manual/reopen triggers), so a
 # process-wide lock is enough to guarantee a given issue is worked by at most one
 # worker at a time. Without it, the reopen re-queue and a concurrent scan both
@@ -2122,7 +2122,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         if not actionable:
             logger.info(f"Issue {repo_name}:{issue_num} is non-actionable: {request_msg}")
             try:
-                issue.create_comment(f"🤖 **BugFixer Triage**\n\nThis issue is currently non-actionable. To help me fix this, please provide: {request_msg}")
+                issue.create_comment(f"🤖 **AppBuilder Triage**\n\nThis issue is currently non-actionable. To help me fix this, please provide: {request_msg}")
             except Exception as ce:
                 logger.warning(f"Could not post non-actionable comment to {issue_id}: {ce}")
             processed = load_processed()
@@ -2414,10 +2414,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         pass
                     try:
                         issue.create_comment(
-                            "🧑‍⚖️ **BugFixer — held for human review**\n\nNo configured model currently "
+                            "🧑‍⚖️ **AppBuilder — held for human review**\n\nNo configured model currently "
                             "meets this fix's requirements (checked every available tier), so no fix "
                             "attempt was made. A human should review.")
-                        issue.add_to_labels("bugfixer-needs-human")
+                        issue.add_to_labels("ab-needs-human")
                     except Exception as ce:  # noqa: BLE001
                         logger.warning(f"human-review note failed for {issue_id}: {ce}")
                     processed = load_processed()
@@ -2466,7 +2466,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     failure_reason += f" | detail: {error_context}"
 
                 try:
-                    issue.create_comment(f"🤖 **BugFixer Failure**\n\nI attempted to fix this issue {max_attempts} times, but I could not find a solution that passed verification.\n\n**Final Error:** `{failure_reason}`")
+                    issue.create_comment(f"🤖 **AppBuilder Failure**\n\nI attempted to fix this issue {max_attempts} times, but I could not find a solution that passed verification.\n\n**Final Error:** `{failure_reason}`")
                 except Exception as ce:
                     logger.warning(f"Could not post failure comment to {issue_id}: {ce}")
 
@@ -2499,11 +2499,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 try:
                     mode_reason = "Blackout active" if state.get("blackout") else "Triage-only mode enabled"
                     issue.create_comment(
-                        f"🔍 **BugFixer Triage** — A fix has been identified for this issue.\n\n"
+                        f"🔍 **AppBuilder Triage** — A fix has been identified for this issue.\n\n"
                         f"Fix commit is being held back ({mode_reason}). "
-                        f"BugFixer will apply the fix automatically once restrictions are lifted."
+                        f"AppBuilder will apply the fix automatically once restrictions are lifted."
                     )
-                    issue.add_to_labels("bugfixer-triaged")
+                    issue.add_to_labels("ab-triaged")
                 except Exception as ce:
                     logger.warning(f"Could not post triage comment to {issue_id}: {ce}")
                 processed = load_processed()
@@ -2671,7 +2671,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             commit_hash = repo_git.head.commit.hexsha
 
             comment_body = (
-                f"🤖 **BugFixer AI Update**\n\n"
+                f"🤖 **AppBuilder AI Update**\n\n"
                 f"The issue has been successfully resolved via {commit_type}.\n"
                 f"{detail_msg}\n\n"
                 f"**Changes:**\n- Files modified: `{files_list}`\n- Commit: `{commit_hash[:7]}`\n\n"
@@ -2684,7 +2684,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             issue_id = f"{repo_name}:{issue_num}"
             # Auto-committed → close on GitHub, then hold in PENDING VERIFICATION: a
-            # human opens BugFixer, confirms the issue is actually gone and clicks
+            # human opens AppBuilder, confirms the issue is actually gone and clicks
             # Resolved (→ Resolved bucket), or clicks Re-open if it's still there.
             # EVERY direct-commit fix goes here — one consistent human-check gate.
             issue.edit(state='closed')

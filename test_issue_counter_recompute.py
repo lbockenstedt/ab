@@ -2,7 +2,7 @@
 """Self-test for the left-nav issue-counter badges staying in sync with
 delete_issue / delete_all_issues / clear_history.
 
-Run:  python3 bugfixer/test_issue_counter_recompute.py
+Run:  python3 ab/test_issue_counter_recompute.py
 
 routes.py cannot be imported directly (it pulls in the full FastAPI app /
 main.py's circular-import chain), so this extracts the SOURCE of the pure

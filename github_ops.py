@@ -155,9 +155,9 @@ _LABEL_COLORS = {
     "critical": "b60205",
     "high-priority": "d93f0b",
     "enhancement": "a2eeef",           # GitHub's own default enhancement blue
-    "bugfixer-needs-human": "5319e7",  # purple — feature_drive boundary flag
-    "bugfixer-needs-info": "c5def5",   # light blue — feature_drive clarify request
-    "bugfixer-feature-drive": "0e8a16",  # green — marks an auto-built feature PR
+    "ab-needs-human": "5319e7",  # purple — feature_drive boundary flag
+    "ab-needs-info": "c5def5",   # light blue — feature_drive clarify request
+    "ab-feature-drive": "0e8a16",  # green — marks an auto-built feature PR
 }
 
 
@@ -284,7 +284,7 @@ def _llm_confirms_same_issue(new_title, new_body, ex_title, ex_body, ex_number=N
     PID/line-number/timestamp, or an LLM-rephrased title, can defeat those
     even though a human would obviously call it the same bug. Shared by both
     call sites that currently gate on those heuristics: reopening a recurring
-    CLOSED issue, and suppressing a re-filing against a bugfixer-dismissed one.
+    CLOSED issue, and suppressing a re-filing against a ab-dismissed one.
 
     Returns (bool same_issue, str reason). FAILS CLOSED on any error (no
     provider available, malformed response, timeout) — returns (False, ...)
@@ -390,7 +390,7 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
                 # Skip closed issues older than the recurrence window — they are
                 # unlikely to be the same recurrence and would risk stale matches.
                 #
-                # DISMISSED issues (bugfixer-dismissed) are the one exception: the
+                # DISMISSED issues (ab-dismissed) are the one exception: the
                 # label's own text promises "will not be reopened", an unconditional
                 # claim, so a fixed window anchored to the ORIGINAL close date would
                 # quietly break that promise for anything dismissed >60 days ago no
@@ -402,7 +402,7 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
                 # next occurrence surfaces normally, same as before this change.
                 if issue.state == 'closed':
                     is_dismissed = any(
-                        getattr(lbl, 'name', None) == 'bugfixer-dismissed'
+                        getattr(lbl, 'name', None) == 'ab-dismissed'
                         for lbl in (issue.labels or []))
                     if is_dismissed:
                         anchor = getattr(issue, 'updated_at', None) or getattr(issue, 'closed_at', None)
@@ -567,7 +567,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
         if existing_issue:
             duplicate_repo_display = duplicate_repo_name or current_repo_name
 
-            # If the matching issue still carries the 'bugfixer-dismissed' label,
+            # If the matching issue still carries the 'ab-dismissed' label,
             # it was intentionally marked as not a real issue. Only suppress when
             # the NEW error is a genuine recurrence of the dismissed one — first
             # via the fast heuristic (normalized body containment), and if that's
@@ -581,7 +581,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
             # reopening the dismissed one). A human removing the label resumes
             # normal handling.
             existing_labels = [lbl.name for lbl in (existing_issue.labels or [])]
-            if "bugfixer-dismissed" in existing_labels:
+            if "ab-dismissed" in existing_labels:
                 _same = _body_containment_match(body_text, existing_issue.body or "")
                 _llm_reason = ""
                 if not _same:
@@ -598,7 +598,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                     # write failure here shouldn't cause a duplicate to be filed).
                     try:
                         existing_issue.create_comment(
-                            "🤖 **BugFixer**: Still recurring — matched again just now. "
+                            "🤖 **AppBuilder**: Still recurring — matched again just now. "
                             "Remains dismissed (no new issue filed)."
                         )
                     except Exception as ce:  # noqa: BLE001
@@ -608,7 +608,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                         )
                     logger.info(
                         f"Suppressing new issue for #{existing_issue.number} in "
-                        f"{duplicate_repo_display} — 'bugfixer-dismissed' label is "
+                        f"{duplicate_repo_display} — 'ab-dismissed' label is "
                         f"still present and "
                         + (f"the LLM confirmed the same issue ({_llm_reason})."
                            if _llm_reason else "the body is near-identical.")
@@ -640,7 +640,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                 try:
                     existing_issue.create_comment(
                         f"🔁 **Recurrence detected — reopening instead of filing a duplicate**\n\n"
-                        f"BugFixer re-detected this error in **{current_repo_name}** after the "
+                        f"AppBuilder re-detected this error in **{current_repo_name}** after the "
                         f"issue was closed.\n\n"
                         f"```\n{body_text}\n```"
                     )
@@ -658,7 +658,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                 existing_body = existing_issue.body or ""
                 if body_text.lower() not in existing_body.lower():
                     existing_issue.create_comment(
-                        f"🤖 **BugFixer Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}:**\n\n"
+                        f"🤖 **AppBuilder Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}:**\n\n"
                         f"```\n{body_text}\n```"
                     )
                     logger.info(f"Added additional evidence from {current_repo_name} to issue #{existing_issue.number}")
@@ -679,7 +679,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
             module_marker = f"\n\n<!-- bf-module: {str(_mod).strip()} -->"
         full_body = (
             f"**Automated Error Detection**\n\n"
-            f"The BugFixer Hub analysis detected a potential issue in the logs:\n\n"
+            f"The AppBuilder Hub analysis detected a potential issue in the logs:\n\n"
             f"### Log Evidence:\n```\n{body_text}\n```\n\n"
             f"This issue has been automatically created for fixing."
             f"{module_marker}"
@@ -742,28 +742,28 @@ def find_existing_pull_request(repo_obj, target_branch, base_branch):
     return existing_pr
 
 
-def _ensure_bugfixer_closed_label(repo):
-    """Ensure the `bugfixer-closed` label exists in repo (create if missing). Best-effort.
-    Mirrors the bugfixer-dismissed ensure-pattern used in delete_issue."""
+def _ensure_ab_closed_label(repo):
+    """Ensure the `ab-closed` label exists in repo (create if missing). Best-effort.
+    Mirrors the ab-dismissed ensure-pattern used in delete_issue."""
     try:
-        repo.get_label("bugfixer-closed")
+        repo.get_label("ab-closed")
     except Exception:
         try:
-            repo.create_label("bugfixer-closed", "6b7280",
-                               "Issue resolved and closed by BugFixer")
+            repo.create_label("ab-closed", "6b7280",
+                               "Issue resolved and closed by AppBuilder")
         except Exception as e:
-            logger.warning(f"Could not create bugfixer-closed label: {e}")
+            logger.warning(f"Could not create ab-closed label: {e}")
 
 
 def _apply_closed_label(repo, issue, issue_id):
-    """Best-effort add the `bugfixer-closed` label to an issue being closed (existing
+    """Best-effort add the `ab-closed` label to an issue being closed (existing
     labels are kept). Failure to label is non-fatal — the close + local transition still
     proceed."""
     try:
-        _ensure_bugfixer_closed_label(repo)
-        issue.add_to_labels("bugfixer-closed")
+        _ensure_ab_closed_label(repo)
+        issue.add_to_labels("ab-closed")
     except Exception as e:
-        logger.warning(f"Could not apply bugfixer-closed label to {issue_id}: {e}")
+        logger.warning(f"Could not apply ab-closed label to {issue_id}: {e}")
 
 
 __all__ = [
@@ -778,7 +778,7 @@ __all__ = [
     'find_global_duplicate_issue',
     'create_automated_issue',
     'find_existing_pull_request',
-    '_ensure_bugfixer_closed_label',
+    '_ensure_ab_closed_label',
     '_apply_closed_label',
     '_normalize_for_dedup',
     '_token_set',

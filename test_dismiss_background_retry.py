@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for the background-queued Dismiss action with GitHub retry.
 
-Run:  python3 bugfixer/test_dismiss_background_retry.py
+Run:  python3 ab/test_dismiss_background_retry.py
 
 routes.py cannot be imported directly (it pulls in the full FastAPI app /
 main.py's circular-import chain), so this extracts the SOURCE of the pure

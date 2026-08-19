@@ -5,7 +5,7 @@
 or translated before the request, or the API 400s ("Unknown name ... Cannot
 find field") and every tool-using call routed to Gemini fails.
 
-Run:  python3 bugfixer/test_gemini_schema_sanitize.py
+Run:  python3 ab/test_gemini_schema_sanitize.py
 
 llm_client.py imports `main` (app-init side effects), so this extracts the
 sanitizer's source (and its drop-key constant) via ast and execs it with no

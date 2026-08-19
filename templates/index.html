@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BugFixer Hub (Fixed)</title>
+    <title>AppBuilder Hub (Fixed)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script>
@@ -71,7 +71,7 @@
             background-color: rgba(1, 169, 130, 0.2);
         }
         /* LM-HUB shell — left sidebar + navy topbar (green bottom border) so
-           BugFixer matches the Lab Manager WebUI chrome. Mirrors the base CSS
+           AppBuilder matches the Lab Manager WebUI chrome. Mirrors the base CSS
            in lm/WebUI/index.html (hpe-sidebar / hpe-topbar / nav-item). */
         .hpe-sidebar {
             background-color: var(--hpe-white);
@@ -244,17 +244,17 @@
 <body class="flex flex-col h-screen w-screen overflow-hidden">
     <!-- Topbar — spans full page width (LM-HUB shell) -->
     <header class="hpe-topbar h-16 flex-none flex items-center justify-between px-6">
-        <!-- Left: BugFixer icon | BugFixer | <current module> — mirrors LM's
+        <!-- Left: AppBuilder icon | AppBuilder | <current module> — mirrors LM's
              (Logo | Lab Manager | <Module>) header pattern. The module label
              tracks the active sidebar view so it always reads "where am I". -->
         <div class="flex items-center gap-3 min-w-0">
-            <div class="bg-[#01A982] p-1.5 rounded-lg flex items-center shrink-0" title="BugFixer">
+            <div class="bg-[#01A982] p-1.5 rounded-lg flex items-center shrink-0" title="AppBuilder">
                 <i class="fas fa-robot text-white text-sm"></i>
             </div>
             <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
-            <h1 class="text-white text-xl font-bold tracking-tight shrink-0">BugFixer</h1>
+            <h1 class="text-white text-xl font-bold tracking-tight shrink-0">AppBuilder</h1>
             <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
-            <span class="text-white/80 text-base font-semibold tracking-tight truncate">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}Logs{% elif view == 'hub-logs' %}Hub Logs{% elif view == 'settings' %}Settings{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}BugFixer{% endif %}</span>
+            <span class="text-white/80 text-base font-semibold tracking-tight truncate">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}Logs{% elif view == 'hub-logs' %}Hub Logs{% elif view == 'settings' %}Settings{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}AppBuilder{% endif %}</span>
         </div>
         <!-- Hub agent connection status — mirrors LM's header status pattern
              (w-2 h-2 rounded-full, green/amber/red/slate by agent state) with a
@@ -265,7 +265,7 @@
              logo hard-left and this whole group hard-right. -->
         <div class="flex items-center gap-5">
             <!-- Status (moved from System Health) -->
-            <div class="hidden sm:flex items-center gap-1.5" title="BugFixer run status">
+            <div class="hidden sm:flex items-center gap-1.5" title="AppBuilder run status">
                 <span class="text-[10px] uppercase tracking-widest text-white/50">Status</span>
                 <span id="hdr-status" class="text-xs font-semibold {% if 'Error' in state.status %}text-red-300{% else %}text-emerald-300{% endif %}">{{ state.status }}</span>
             </div>
@@ -371,7 +371,7 @@
     <div class="flex flex-1 min-h-0 overflow-hidden">
     <!-- Sidebar (LM-HUB shell: white left nav) -->
     <aside class="hpe-sidebar w-56 flex-none flex flex-col">
-        <!-- Brand block moved to header (Logo | BugFixer | <module>); top spacer
+        <!-- Brand block moved to header (Logo | AppBuilder | <module>); top spacer
              keeps the nav from crowding the top, matching LM's sidebar. -->
         <div class="pt-4"></div>
         <nav class="py-2 px-2 space-y-1 flex-none">
@@ -427,7 +427,7 @@
                 <div onclick="goFilter('pr_denied')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Denied"><span class="text-slate-500">PRs Denied</span><span class="font-bold text-red-600">{{ _pr_ns.denied }}</span></div>
             </div>
             {% if state.skills %}
-            <div class="pt-2 border-t border-slate-100 text-xs" title="Claude skills loaded from lm/.claude/skills — injected into BugFixer's fixes.">
+            <div class="pt-2 border-t border-slate-100 text-xs" title="Claude skills loaded from lm/.claude/skills — injected into AppBuilder's fixes.">
                 <span class="text-slate-500">Skills</span>
                 <div class="font-semibold text-indigo-600 mt-0.5 break-words">{{ state.skills|join(', ') }}</div>
             </div>
@@ -492,7 +492,7 @@
                         <button onclick="clearHistory()" class="btn-danger px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap">
                             <i class="fas fa-trash-alt mr-1"></i> Clear History
                         </button>
-                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (bugfixer-dismissed) and clear the whole history">
+                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (ab-dismissed) and clear the whole history">
                             <i class="fas fa-trash-alt mr-1"></i> Dismiss All
                         </button>
                     </div>
@@ -514,7 +514,7 @@
                          (pull requests, not issues) and wrapping them into the issue
                          row made the two sets read as one list. -->
                     <div class="flex items-center flex-nowrap gap-2 mt-1">
-                    <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs BugFixer has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PR Pending</button>
+                    <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs AppBuilder has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PR Pending</button>
                     <button data-filter="pr_approved" onclick="filterActivity('pr_approved')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Approved"><i class="fas fa-code-branch mr-1"></i>PR Approved</button>
                     <button data-filter="pr_merged" onclick="filterActivity('pr_merged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human Merged"><i class="fas fa-code-branch mr-1"></i>PR Merged</button>
                     <button data-filter="pr_auto_merged" onclick="filterActivity('pr_auto_merged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature-drive PRs auto-merged unattended — no human clicked Approve/Merge"><i class="fas fa-robot mr-1"></i>PR Auto-Merged</button>
@@ -545,19 +545,19 @@
                                      but a boundary-flag or a clarify request has no code to fix; the
                                      next automatic classify pass (on a reply or a re-run) is what
                                      re-evaluates it, not a manual retry. -->
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                                 <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                                 {% elif info.status == 'feature_built' %}
                                 {% if info.pr_url %}
                                 <a href="{{ info.pr_url }}" target="_blank" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-teal-100 hover:bg-teal-200 text-teal-700 border border-teal-200 transition-colors">View PR</a>
                                 {% endif %}
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                                 <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                                 {% else %}
                                 <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap">Retry</button>
-                                <button onclick="reopenIssue('{{ issue_id }}')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when BugFixer marked it fixed but the fix didn't actually land">Reopen</button>
+                                <button onclick="reopenIssue('{{ issue_id }}')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when AppBuilder marked it fixed but the fix didn't actually land">Reopen</button>
                                 <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label bugfixer-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                                 <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                                 {% endif %}
                             </div>
@@ -672,7 +672,7 @@
                                 {% else %}
                                     <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-[10px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                     {% if pr.findings and pr.findings > 0 %}
-                                    {# Human-triggered only — BugFixer never applies a PR fix on its
+                                    {# Human-triggered only — AppBuilder never applies a PR fix on its
                                        own. Generates a fix for the findings above, gates it through
                                        the same skeptical panel the bug/issue pipeline uses, and on
                                        approval pushes a new commit onto THIS PR's own branch. #}
@@ -919,7 +919,7 @@
                                     </label>
                                     {% endfor %}
                                 </div>
-                                <span class="text-xs text-slate-500">Tick the repos BugFixer should monitor. Populated from your GitHub account (cached 5 min). Add any not listed below.</span>
+                                <span class="text-xs text-slate-500">Tick the repos AppBuilder should monitor. Populated from your GitHub account (cached 5 min). Add any not listed below.</span>
                                 {% else %}
                                 <span class="text-xs text-slate-400 block">Couldn't load your GitHub repo list (no token or fetch failed) — enter repos manually below.</span>
                                 {% endif %}
@@ -937,7 +937,7 @@
                                     </label>
                                     {% endfor %}
                                 </div>
-                                <span class="text-xs text-slate-500">Tick the repos BugFixer may push fixes to directly (without a PR). Same GitHub list as monitored.</span>
+                                <span class="text-xs text-slate-500">Tick the repos AppBuilder may push fixes to directly (without a PR). Same GitHub list as monitored.</span>
                                 {% else %}
                                 <span class="text-xs text-slate-400 block">Couldn't load your GitHub repo list — enter repos manually below.</span>
                                 {% endif %}
@@ -945,17 +945,17 @@
                                 <input type="text" name="trusted_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="owner/repo, org/another">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
-                                <label class="text-sm font-medium text-slate-600">Self-Diagnosis Repository (Where BugFixer files its own bugs)</label>
-                                <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. lbockenstedt/bugfixer">
+                                <label class="text-sm font-medium text-slate-600">Self-Diagnosis Repository (Where AppBuilder files its own bugs)</label>
+                                <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. lbockenstedt/ab">
                                 <div class="flex items-center gap-3 mt-2">
                                     <input type="checkbox" name="self_log_scan_enabled" id="self_log_scan_enabled" {{ 'checked' if settings.self_log_scan_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
-                                    <label for="self_log_scan_enabled" class="text-xs font-medium text-slate-700" title="On by default: BugFixer scans its own logs for errors and files them in the self-diagnosis repo. Turn off to stop self-monitoring.">
-                                        Self-monitor BugFixer logs (file issues for BugFixer's own errors)
+                                    <label for="self_log_scan_enabled" class="text-xs font-medium text-slate-700" title="On by default: AppBuilder scans its own logs for errors and files them in the self-diagnosis repo. Turn off to stop self-monitoring.">
+                                        Self-monitor AppBuilder logs (file issues for AppBuilder's own errors)
                                     </label>
                                 </div>
                                 <div class="flex items-center gap-3 mt-2">
                                     <input type="checkbox" name="pr_review_enabled" id="pr_review_enabled" {{ 'checked' if settings.pr_review_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
-                                    <label for="pr_review_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, BugFixer PRE-REVIEWS open PRs on monitored repos: it posts parity/dual-copy findings as a COMMENT (never approves/denies, never edits the branch) + a non-blocking bugfixer/review status. A human is still the sole approver.">
+                                    <label for="pr_review_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, AppBuilder PRE-REVIEWS open PRs on monitored repos: it posts parity/dual-copy findings as a COMMENT (never approves/denies, never edits the branch) + a non-blocking ab/review status. A human is still the sole approver.">
                                         Pre-review open PRs (comment parity/drift findings — never approves/denies)
                                     </label>
                                 </div>
@@ -1000,7 +1000,7 @@
                                 <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
                             </div>
                             <div class="space-y-3 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
-                                <label class="text-sm font-semibold text-slate-700">BugFixer Sources <span class="text-slate-400 font-normal">(turn noisy sources on one at a time)</span></label>
+                                <label class="text-sm font-semibold text-slate-700">AppBuilder Sources <span class="text-slate-400 font-normal">(turn noisy sources on one at a time)</span></label>
                                 <div class="flex items-center gap-3">
                                     <input type="checkbox" name="bug_reports_enabled" id="bug_reports_enabled" {{ 'checked' if settings.get('bug_reports_enabled', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
                                     <label for="bug_reports_enabled" class="text-xs font-medium text-slate-700" title="File &amp; auto-fix BUG reports submitted via the LM WebUI. On by default.">BugFixes from LM — file &amp; fix bug reports from the LM WebUI</label>
@@ -1356,7 +1356,7 @@
                         <p class="text-xs text-slate-500 mb-4">
                             One click installs <strong>Ollama</strong> (if missing), pulls a local CPU model,
                             applies CPU tuning (a systemd override + a context-tuned model), restarts the
-                            <code class="bg-slate-100 px-1 rounded">ollama</code> service, and wires it into BugFixer
+                            <code class="bg-slate-100 px-1 rounded">ollama</code> service, and wires it into AppBuilder
                             provider slot <strong>P4</strong>. Min: ~24 GB RAM, 8+ cores, ~22 GB disk, no GPU.
                             <span class="text-slate-400">Requires root (the app already runs privileged systemctl).</span>
                         </p>
@@ -1464,7 +1464,7 @@
                             <div class="space-y-2 col-span-1 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">QA Service URL <span class="text-[#01A982] font-bold">(primary)</span></label>
                                 <input type="text" name="QA_API_URL" value="{{ settings.QA_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. http://qa-server:8080">
-                                <span class="text-xs text-slate-500">URL of the QA service API. When set, BugFixer calls <code class="bg-slate-100 px-1 rounded">POST /api/run?module=&lt;repo&gt;</code> after each fix instead of running tests locally.</span>
+                                <span class="text-xs text-slate-500">URL of the QA service API. When set, AppBuilder calls <code class="bg-slate-100 px-1 rounded">POST /api/run?module=&lt;repo&gt;</code> after each fix instead of running tests locally.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">QA Test Repository (owner/repo) <span class="text-xs text-slate-400">fallback</span></label>
@@ -1503,7 +1503,7 @@
                                     </div>
                                 </div>
                                 <span id="auth-users-msg" class="text-xs"></span>
-                                <span class="text-xs text-slate-400 block">These act immediately — they are not part of the Save below. Locked out? From a shell on this host: <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/bugfixer'); import auth; auth.set_password('user','newpass')"</code></span>
+                                <span class="text-xs text-slate-400 block">These act immediately — they are not part of the Save below. Locked out? From a shell on this host: <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; auth.set_password('user','newpass')"</code></span>
                             </div>
                                                         <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Claude CLI binary path</label>
@@ -1520,7 +1520,7 @@
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max wait for model residency (s)</label>
                                 <input type="number" name="model_gate_max_wait_s" value="{{ settings.model_gate_max_wait_s if settings.model_gate_max_wait_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <span class="text-xs text-slate-400">Cap on the above, so a preload that can never succeed cannot wedge scanning. On timeout BugFixer proceeds and logs a warning. Default 3600.</span>
+                                <span class="text-xs text-slate-400">Cap on the above, so a preload that can never succeed cannot wedge scanning. On timeout AppBuilder proceeds and logs a warning. Default 3600.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama model-load timeout (s)</label>
@@ -1570,10 +1570,10 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub Agent ID</label>
-                                <input type="text" name="HUB_AGENT_ID" value="{{ settings.HUB_AGENT_ID or 'bugfixer' }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="bugfixer">
+                                <input type="text" name="HUB_AGENT_ID" value="{{ settings.HUB_AGENT_ID or 'ab' }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="ab">
                             </div>
                         </div>
-                        <!-- Hub Agent status / approval panel (BugFixer authenticates to the
+                        <!-- Hub Agent status / approval panel (AppBuilder authenticates to the
                              Hub as a WebSocket agent — zero-touch onboarding, admin approval,
                              then signed requests for logs + update triggers). -->
                         <div class="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
@@ -1592,13 +1592,13 @@
                                         class="px-3 py-1 text-xs btn-sec rounded font-bold">Refresh</button>
                             </div>
                             <p class="text-[11px] text-slate-500 mt-2">
-                                Approve <code class="bg-slate-100 px-1 rounded">bugfixer</code> in the Hub WebUI → Setup → Spoke Approvals
+                                Approve <code class="bg-slate-100 px-1 rounded">ab</code> in the Hub WebUI → Setup → Spoke Approvals
                                 {% if settings.HUB_QUERY_URL %}at <a href="{{ settings.HUB_QUERY_URL }}" target="_blank" class="text-[#01A982] underline">{{ settings.HUB_QUERY_URL }}</a>{% endif %}.
                                 The session key is exchanged automatically after approval — zero-touch.
                             </p>
                         </div>
         <!-- Project skills (skills_loader.py) — the repo-committed recipes
-             (add-simulation, dual-copy-guard, ...) BugFixer follows for fix/
+             (add-simulation, dual-copy-guard, ...) AppBuilder follows for fix/
              build work. Feature auto-drive's build stage depends entirely on
              these loading; previously configurable only by hand-editing
              config.json. -->
@@ -1606,7 +1606,7 @@
                             <div class="flex items-center gap-3 mb-3">
                                 <input type="checkbox" name="skills_enabled" id="skills_enabled" {{ 'checked' if settings.get('skills_enabled', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
                                 <label for="skills_enabled" class="text-sm font-semibold text-slate-700" title="Load repo-committed Skill recipes (add-simulation, dual-copy-guard, ...) so fix/build work follows the same boundaries a human invoking the skill would. On by default.">
-                                    Project Skills <span class="text-slate-400 font-normal">(recipes BugFixer follows for fix/build work)</span>
+                                    Project Skills <span class="text-slate-400 font-normal">(recipes AppBuilder follows for fix/build work)</span>
                                 </label>
                             </div>
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1633,7 +1633,7 @@
                             </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
                                 <input type="checkbox" name="llm_proxy_agentic_default" id="llm_proxy_agentic_default" {{ 'checked' if settings.llm_proxy_agentic_default else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
-                                <label for="llm_proxy_agentic_default" class="text-xs font-medium text-slate-700" title="Off by default: only requests with model=bugfixer-agent run the agentic loop. On: every /v1/messages (LLM router / Claude CLI) request runs BugFixer's agent loop with repo tools.">
+                                <label for="llm_proxy_agentic_default" class="text-xs font-medium text-slate-700" title="Off by default: only requests with model=ab-agent run the agentic loop. On: every /v1/messages (LLM router / Claude CLI) request runs AppBuilder's agent loop with repo tools.">
                                     Agentic LLM Router by default (all /v1/messages use the agent loop)
                                 </label>
                             </div>
@@ -1729,7 +1729,7 @@
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Log File Path</label>
-                                <input type="text" name="LOG_FILE_PATH" value="{{ settings.LOG_FILE_PATH }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="/var/log/bugfixer/bugfixer.log">
+                                <input type="text" name="LOG_FILE_PATH" value="{{ settings.LOG_FILE_PATH }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="/var/log/ab/ab.log">
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
@@ -1931,7 +1931,7 @@
                                 <div class="space-y-1">
                                     <label class="text-xs text-slate-500">Work-hours cap (% of daily budget)</label>
                                     <input type="number" name="SCHEDULER_WORK_CAP_PCT" min="1" max="100" value="{{ settings.get('SCHEDULER_WORK_CAP_PCT', 25) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
-                                    <p class="text-[10px] text-slate-400">25% of 50 = 12 fixes before BugFixer goes quiet during work hours</p>
+                                    <p class="text-[10px] text-slate-400">25% of 50 = 12 fixes before AppBuilder goes quiet during work hours</p>
                                 </div>
                             </div>
 
@@ -1957,7 +1957,7 @@
                     </section>
 
                     <!-- Feature Auto-Drive (Phase 1: intake + classify — build/flag/clarify).
-                         BugFixer auto-drives small bolt-on FEATURE requests filed+approved
+                         AppBuilder auto-drives small bolt-on FEATURE requests filed+approved
                          via LM's "File a Bug" flow, while flagging anything that crosses an
                          operator-defined boundary for a human instead of building it. See
                          feature_drive.py / feature_boundary.py. -->
@@ -2169,7 +2169,7 @@
         {% if view == 'diagnostics' %}
         <div id="diag-root" class="space-y-6">
             <!-- Copy-raw button row — the "Diagnostics" title lives in the
-                 topbar now (BugFixer | Diagnostics), so only the action remains. -->
+                 topbar now (AppBuilder | Diagnostics), so only the action remains. -->
             <div class="flex items-center justify-end">
                 <button id="diag-copy-btn" onclick="copyDiagnostics()"
                         class="btn-sec px-3 py-1.5 rounded font-bold text-xs flex items-center gap-2"
@@ -2271,7 +2271,7 @@
                     <div class="text-slate-500 mt-1">at <span id="diag-hb-at">—</span></div>
                 </div>
                 <p class="text-[11px] text-slate-500 mt-2">
-                    Triage is suppressed until BugFixer is fully connected to the Hub AND the Hub's own heartbeat is
+                    Triage is suppressed until AppBuilder is fully connected to the Hub AND the Hub's own heartbeat is
                     observed — this prevents a flood of false "missing heartbeat" bugs while the telemetry pipeline
                     warms up after a reinstall.
                 </p>
@@ -2293,8 +2293,8 @@
                     <div title="Extended Key Usage must include clientAuth to be presented as an mTLS client cert. A serverAuth-only cert verifies as a chain but is rejected on the wire."><div class="text-slate-500">Usable as client cert (clientAuth)</div><div id="diag-hc-clientauth" class="font-bold text-slate-800">—</div></div>
                 </div>
                 <div id="diag-hc-rejected" class="hidden mt-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2">
-                    <i class="fas fa-exclamation-triangle mr-1"></i>The hub rejected the BugFixer client cert — mTLS log/update access is OFF.
-                    The hub must trust the cert's CA (it is verified against the private mTLS CA + the system store). Re-deploy the cert from the LE module or restart bugfixer to retry.
+                    <i class="fas fa-exclamation-triangle mr-1"></i>The hub rejected the AppBuilder client cert — mTLS log/update access is OFF.
+                    The hub must trust the cert's CA (it is verified against the private mTLS CA + the system store). Re-deploy the cert from the LE module or restart ab to retry.
                     <div class="text-slate-500 mt-1">last rejected at <span id="diag-hc-rejected-at">—</span></div>
                 </div>
                 <div id="diag-hc-error" class="hidden mt-2 text-xs text-amber-700"><span class="font-semibold">Last connection error:</span> <span id="diag-hc-error-msg" class="font-mono">—</span></div>
@@ -2310,14 +2310,14 @@
                 </div>
                 <p class="text-[11px] text-slate-500 mt-3">
                     "Log/update access" requires the current connection to present a cert the hub accepts. The hub must
-                    also have this cert SAN-pinned as the BugFixer identity (LE module → Tag BugFixer) — that half is
+                    also have this cert SAN-pinned as the AppBuilder identity (LE module → Tag AppBuilder) — that half is
                     enforced on the hub and isn't visible here.
                 </p>
             </div>
 
             <!-- LM Bug-Report ingestion card — the "File a Bug" pipeline flows over
                  the mTLS-gated HUB_REQUEST channel (GET_LOGS + GET_BUG_REPORTS), so
-                 this shows whether filed bugs are reaching bugfixer. -->
+                 this shows whether filed bugs are reaching ab. -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-bold text-[#263040]">LM Bug-Report Ingestion</h3>
@@ -2336,13 +2336,13 @@
                 <div id="diag-bi-note" class="hidden mt-2 text-xs text-amber-700"></div>
                 <div id="diag-bi-error" class="hidden mt-2 text-xs text-red-600 font-mono"></div>
                 <p class="text-[11px] text-slate-500 mt-2">
-                    LM "File a Bug" reports reach bugfixer over the mTLS HUB_REQUEST channel. "Hub-log markers seen" &gt; 0
+                    LM "File a Bug" reports reach ab over the mTLS HUB_REQUEST channel. "Hub-log markers seen" &gt; 0
                     means GET_LOGS is working; a filed report becomes a GitHub issue (label <code class="bg-slate-100 px-1 rounded">automated-fix</code>) in the target repo.
                 </p>
             </div>
 
             <!-- LM Feature-Request ingestion card — feature requests share the same
-                 pipeline but are GATED on admin approval in LM: bugfixer only files
+                 pipeline but are GATED on admin approval in LM: ab only files
                  (as an `enhancement` issue) once an admin approves. -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
@@ -2363,7 +2363,7 @@
                 <div id="diag-fi-error" class="hidden mt-2 text-xs text-red-600 font-mono"></div>
                 <p class="text-[11px] text-slate-500 mt-2">
                     Feature requests are held until an admin clicks <b>Approve</b> in LM (Bug/Feature Reports view).
-                    "Awaiting approval" &gt; 0 means those are withheld from bugfixer; once approved they become an
+                    "Awaiting approval" &gt; 0 means those are withheld from ab; once approved they become an
                     <code class="bg-slate-100 px-1 rounded">enhancement</code> issue (no auto-fix — a human works the feature).
                 </p>
             </div>
@@ -2413,7 +2413,7 @@
                     </div>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs text-slate-500 uppercase tracking-wider mb-2">Processes (BugFixer + LLM runtimes)</div>
+                    <div class="text-xs text-slate-500 uppercase tracking-wider mb-2">Processes (AppBuilder + LLM runtimes)</div>
                     <div class="overflow-x-auto">
                         <table class="w-full text-sm">
                             <thead class="text-left text-xs text-slate-500 uppercase tracking-wider">
@@ -2449,7 +2449,7 @@
     <footer class="h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all shrink-0" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
         <div class="flex justify-between w-full items-center">
             <div class="flex items-center gap-4 opacity-70">
-                <span>© 2026 BugFixer</span>
+                <span>© 2026 AppBuilder</span>
                 <span class="text-slate-400">|</span>
                 <span class="font-bold">Automated Issue Triage</span>
             </div>
@@ -2467,7 +2467,7 @@
                     </button>
                 </form>
                 <form action="/restart" method="post" onsubmit="handleFormSubmit(event, '/restart')" class="inline">
-                    <button type="submit" title="Restart BugFixer"
+                    <button type="submit" title="Restart AppBuilder"
                         class="text-[10px] uppercase tracking-widest opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all whitespace-nowrap">
                         <i class="fas fa-sync-alt mr-1"></i>Restart
                     </button>
@@ -2803,7 +2803,7 @@
             }
         }
 
-        // ── Log Analysis: BugFixer's own LLM reads the logs and reports health ──
+        // ── Log Analysis: AppBuilder's own LLM reads the logs and reports health ──
         let _logAnalysisTimer = null;
         function _laEls() {
             return {
@@ -3129,7 +3129,7 @@
         }
 
         // The Dashboard always opens on 'pr_review' — the PR Pending filter, the
-        // queue that actually needs a human (BugFixer never approves or denies).
+        // queue that actually needs a human (AppBuilder never approves or denies).
         // It used to restore whatever was last clicked from sessionStorage, so a
         // session that once clicked e.g. "PR Merged" reopened there on every
         // later visit and login, which reads as the dashboard being stuck rather
@@ -4695,7 +4695,7 @@
         }
 
         async function hubAgentReregister() {
-            if (!confirm('Re-register the Hub agent? This clears the stored session key and restarts zero-touch onboarding (you must re-approve bugfixer in the Hub WebUI).')) return;
+            if (!confirm('Re-register the Hub agent? This clears the stored session key and restarts zero-touch onboarding (you must re-approve ab in the Hub WebUI).')) return;
             try {
                 const r = await fetch('/api/hub-agent/reregister', {method: 'POST'});
                 const d = await r.json().catch(() => ({}));
@@ -4959,7 +4959,7 @@
         }
 
         async function deleteAllIssues() {
-            // Dismiss All = Clear History + dismiss (bugfixer-dismissed label +
+            // Dismiss All = Clear History + dismiss (ab-dismissed label +
             // close) every issue on GitHub. The backend wipes local history
             // immediately and closes on GitHub in a background thread (can't
             // time out). No confirm popup — the success toast confirms it

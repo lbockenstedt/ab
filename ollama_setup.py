@@ -1,4 +1,4 @@
-"""One-click local-LLM (Ollama) setup for BugFixer.
+"""One-click local-LLM (Ollama) setup for AppBuilder.
 
 Extracted verbatim from main.py: the Ollama HTTP helpers (_ollama_reachable /
 _wait_for_ollama / _ollama_tags / _ollama_bin_path / _ollama_http_pull /
@@ -31,7 +31,7 @@ from main import (
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_OVERRIDE_DIR = "/etc/systemd/system/ollama.service.d"
-OLLAMA_OVERRIDE_PATH = os.path.join(OLLAMA_OVERRIDE_DIR, "bugfixer-tuning.conf")
+OLLAMA_OVERRIDE_PATH = os.path.join(OLLAMA_OVERRIDE_DIR, "ab-tuning.conf")
 
 
 def _llm_setup_log(line, replace_last=False):
@@ -64,13 +64,13 @@ def _ollama_reachable(base_url=OLLAMA_BASE_URL, timeout=5):
 
 
 def _watchdog_active():
-    """True/False if we could determine bugfixer-watchdog.service's active state,
+    """True/False if we could determine ab-watchdog.service's active state,
     None if the query itself failed. `systemctl is-active` is a read-only query
     that needs no privilege, so the cap-locked main service can run it — this is
     how we tell "watchdog is down" apart from "watchdog is up but not consuming"
     (stale code) instead of waiting out the full 16-min poll for a blank timeout."""
     try:
-        r = subprocess.run(["systemctl", "is-active", "--quiet", "bugfixer-watchdog"],
+        r = subprocess.run(["systemctl", "is-active", "--quiet", "ab-watchdog"],
                            timeout=10)
         return r.returncode == 0
     except Exception:
@@ -90,7 +90,7 @@ def _wait_for_ollama(base_url, timeout=60):
 def _ollama_tags(base_url=OLLAMA_BASE_URL):
     """Return the set of model names via GET /api/tags (empty on failure).
 
-    Uses the HTTP API rather than the `ollama` CLI because the bugfixer service
+    Uses the HTTP API rather than the `ollama` CLI because the ab service
     runs under systemd with a minimal PATH that does not include /usr/local/bin
     (where the Ollama installer places the binary).
     """
@@ -297,15 +297,15 @@ def run_local_llm_setup(model, num_ctx, cores):
     try:
         # ---- Stage 1: detect / install Ollama + apply CPU tuning ----
         # Installed = the HTTP API answers OR the binary exists at a known path.
-        # We do NOT rely on `which("ollama")` alone because the bugfixer service
+        # We do NOT rely on `which("ollama")` alone because the ab service
         # runs under systemd with a minimal PATH that omits /usr/local/bin.
-        # bugfixer runs as svc_bg under a systemd unit whose
+        # ab runs as svc_bg under a systemd unit whose
         # CapabilityBoundingSet is locked to CAP_NET_BIND_SERVICE (least
         # privilege). That bounding set omits CAP_SETGID/CAP_SETUID, so sudo
         # spawned from the service can't setgid(0) ("unable to change to root
         # gid: Operation not permitted"), and a direct `systemd-run` from the
         # service is polkit-denied ("Failed to start transient service unit:
-        # Access denied"). bugfixer-WATCHDOG.service has no such restriction,
+        # Access denied"). ab-WATCHDOG.service has no such restriction,
         # so sudo works THERE (same privileged-arm pattern as spawn_restart).
         # We delegate Stage 1 to the watchdog: write a request file, then poll
         # the status file it streams the helper's output to, relaying new
@@ -323,10 +323,10 @@ def run_local_llm_setup(model, num_ctx, cores):
         # a request nothing will consume, then waiting out a 16-min blank timeout.
         if _watchdog_active() is False:
             raise RuntimeError(
-                "bugfixer-watchdog.service is not active, so the privileged "
+                "ab-watchdog.service is not active, so the privileged "
                 "ollama-setup helper can't run. Start it with "
-                "'systemctl restart bugfixer-watchdog' (check "
-                "'systemctl status bugfixer-watchdog' / 'journalctl -u bugfixer-watchdog').")
+                "'systemctl restart ab-watchdog' (check "
+                "'systemctl status ab-watchdog' / 'journalctl -u ab-watchdog').")
         req_path = os.path.join(CONFIG_DIR, "ollama_setup_request.json")
         status_path = os.path.join(CONFIG_DIR, "ollama_setup_status.json")
         # Clear any stale status so we read a fresh run (not a previous done/failed).
@@ -380,15 +380,15 @@ def run_local_llm_setup(model, num_ctx, cores):
                 try: os.remove(req_path)
                 except OSError: pass
                 raise RuntimeError(
-                    "bugfixer-watchdog is running but never picked up the ollama-setup "
+                    "ab-watchdog is running but never picked up the ollama-setup "
                     "request — it's likely executing stale code (watchdog.py was updated "
                     "but the long-lived watchdog process wasn't restarted). Run "
-                    "'systemctl restart bugfixer-watchdog' and try again.")
+                    "'systemctl restart ab-watchdog' and try again.")
             time.sleep(2)
         if not final:
-            raise RuntimeError("ollama-setup helper did not finish in time — is bugfixer-watchdog "
+            raise RuntimeError("ollama-setup helper did not finish in time — is ab-watchdog "
                                "running? The watchdog runs the privileged helper; check "
-                               "'systemctl status bugfixer-watchdog'.")
+                               "'systemctl status ab-watchdog'.")
         if final.get("state") != "done":
             tail = (final.get("stream") or "").strip()[-800:]
             raise RuntimeError(f"ollama-setup helper exited {final.get('returncode')}: {tail}")

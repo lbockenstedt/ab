@@ -1,4 +1,4 @@
-"""Background workers + scan/update orchestration for BugFixer.
+"""Background workers + scan/update orchestration for AppBuilder.
 
 Extracted verbatim from main.py: the connectivity / heartbeat / updater / restart
 / poller worker loops, run_scan_cycle + scan_repo_issues + scan_self_logs, the
@@ -352,7 +352,7 @@ def heartbeat_worker():
 def _trigger_spoke_updates(config):
     """Trigger updates across the Hub, its spokes, and its agents after a fix push.
 
-    BugFixer is an authenticated WebSocket agent of the Hub, so it issues a single
+    AppBuilder is an authenticated WebSocket agent of the Hub, so it issues a single
     TRIGGER_ALL_UPDATES request rather than the old admin-token HTTP calls (which
     the Hub never actually honored and always returned 401). The Hub self-updates,
     fans SPOKE_UPDATE to every approved spoke, and queues updates for every
@@ -376,7 +376,7 @@ def _trigger_spoke_updates(config):
         return "Hub agent not approved/connected — update not triggered"
     # The hub returns {hub, spokes, agents} on success but an ERROR ENVELOPE
     # ({"status":"error","message":...}) when it rejects the request — most
-    # commonly the H1 authz denial (the BugFixer client cert must be pinned via
+    # commonly the H1 authz denial (the AppBuilder client cert must be pinned via
     # the LE module AND presented over mTLS). That envelope is also a dict, so a
     # bare isinstance check would report a hollow "hub= | spokes= | agents="
     # SUCCESS for a request the hub never honored. Require all three result keys.
@@ -411,9 +411,9 @@ def _upd_summary(d):
 
 
 # ---------------------------------------------------------------------------
-# Hub agent (WebSocket) — BugFixer authenticates to the LM Hub as an agent.
+# Hub agent (WebSocket) — AppBuilder authenticates to the LM Hub as an agent.
 # See hub_agent.py for the protocol. The helpers below bridge the async agent
-# client to BugFixer's sync state dict + config file.
+# client to AppBuilder's sync state dict + config file.
 # ---------------------------------------------------------------------------
 
 def _derive_ws_url(http_url):
@@ -491,7 +491,7 @@ def _start_hub_agent():
 
     HUB_WS_URL is authoritative; if it's empty we try to derive it from
     HUB_QUERY_URL (host + :8765). If still empty, the agent stays unstarted and
-    state reports "not_registered" — BugFixer runs fine without Hub integration.
+    state reports "not_registered" — AppBuilder runs fine without Hub integration.
     """
     try:
         import hub_agent
@@ -594,7 +594,7 @@ def check_for_updates():
             logger.warning(f"Remote head {remote_head[:7]} is in failed_commits blocklist. Skipping pull.")
             return None, f"Update skipped: remote head {remote_head[:7]} is a known-bad commit."
 
-        # Advance to the fetched remote head. /opt/bugfixer is a DEPLOYMENT MIRROR,
+        # Advance to the fetched remote head. /opt/ab is a DEPLOYMENT MIRROR,
         # not a dev tree — a plain `git pull` aborts with "local changes would be
         # overwritten" the moment any tracked file is dirtied at runtime, wedging
         # self-update forever. Hard-reset to the fetched head instead (robust to a
@@ -687,22 +687,22 @@ RESTART_REQUEST_FILE = os.path.join(CONFIG_DIR, "restart_request")
 
 
 def _watchdog_active():
-    """True if bugfixer-watchdog.service is active (so a delegated restart request
+    """True if ab-watchdog.service is active (so a delegated restart request
     will actually be consumed). None/False on error → caller falls back to a
     hard exit. Mirrors ollama_setup._watchdog_active."""
     import subprocess as _sp
     try:
-        r = _sp.run(["systemctl", "is-active", "--quiet", "bugfixer-watchdog"], timeout=5)
+        r = _sp.run(["systemctl", "is-active", "--quiet", "ab-watchdog"], timeout=5)
         return r.returncode == 0
     except Exception:  # noqa: BLE001
         return None
 
 
 def _request_watchdog_restart():
-    """Ask bugfixer-watchdog (the unrestricted privileged arm) to restart us, by
+    """Ask ab-watchdog (the unrestricted privileged arm) to restart us, by
     writing a request file it consumes. Returns True if the request was queued to
     an ACTIVE watchdog; False otherwise (caller hard-exits instead). Mirrors the
-    ollama-setup delegation — bugfixer.service is cap-locked and can't restart
+    ollama-setup delegation — ab.service is cap-locked and can't restart
     itself, but the watchdog can."""
     if _watchdog_active() is False:
         return None
@@ -716,22 +716,22 @@ def _request_watchdog_restart():
 
 
 def _spawn_restart():
-    """Restart bugfixer, robust to the cap-locked service.
+    """Restart ab, robust to the cap-locked service.
 
-    As root (dev/standalone): a direct detached `systemctl restart bugfixer`.
+    As root (dev/standalone): a direct detached `systemctl restart ab`.
 
-    As the svc_bg service user, bugfixer.service is locked to
+    As the svc_bg service user, ab.service is locked to
     CAP_NET_BIND_SERVICE, so sudo can't setgid(0) ("unable to change to root gid:
-    Operation not permitted") and the old `sudo -n /usr/local/bin/bugfixer-self-restart`
+    Operation not permitted") and the old `sudo -n /usr/local/bin/ab-self-restart`
     path fails every time (noisy ERROR + only recovered via a hard exit). Instead we
-    DELEGATE to bugfixer-watchdog — the unrestricted privileged arm that already runs
+    DELEGATE to ab-watchdog — the unrestricted privileged arm that already runs
     ollama-setup on our behalf — via a request file it consumes to run the restart.
     If the watchdog isn't active to pick it up, hard-exit so systemd Restart=always
     revives us regardless (the manual Restart button can never silently no-op)."""
     import subprocess as _sp
     if os.geteuid() == 0:
         try:
-            _sp.Popen(["systemctl", "restart", "bugfixer"], start_new_session=True,
+            _sp.Popen(["systemctl", "restart", "ab"], start_new_session=True,
                       stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, close_fds=True)
         except Exception as e:  # noqa: BLE001
             logger.error("restart: root systemctl restart failed (%s) — hard-exiting", e)
@@ -739,16 +739,16 @@ def _spawn_restart():
         return
     # Non-root: delegate to the watchdog, else hard-exit.
     if _request_watchdog_restart():
-        logger.info("restart: delegated to bugfixer-watchdog (privileged arm); "
-                    "it will `systemctl restart bugfixer` shortly.")
+        logger.info("restart: delegated to ab-watchdog (privileged arm); "
+                    "it will `systemctl restart ab` shortly.")
         return
-    logger.warning("restart: bugfixer-watchdog not active — hard-exiting so systemd "
+    logger.warning("restart: ab-watchdog not active — hard-exiting so systemd "
                    "Restart=always revives us.")
     _exit_for_systemd_restart()
 
 
 def _exit_for_systemd_restart():
-    """Last-resort restart: flush logs, then hard-exit. bugfixer.service is
+    """Last-resort restart: flush logs, then hard-exit. ab.service is
     Restart=always / RestartSec=10, so systemd revives the process — no sudo, no
     cgroup race. Used when the detached restart path fails so the manual Restart
     button (and cert-install restarts) can never silently no-op."""
@@ -769,7 +769,7 @@ def restart_worker():
     Watches state["restart_pending"]; when set, consumes the flag, waits a short grace
     window so in-flight git clone / LLM calls can reach a commit point or fail cleanly
     (SIGTERM mid-op is already classified as a non-bug by the self-diagnosis filter),
-    then spawns a detached `systemctl restart bugfixer`. Best-effort verifies health
+    then spawns a detached `systemctl restart ab`. Best-effort verifies health
     post-restart and retries the spawn once. The authoritative post-restart verification
     is the watchdog's restart-then-verify flow; this worker is the fast path and the
     on-disk update_pending file is the durable backstop."""
@@ -864,10 +864,10 @@ def scan_repo_issues(gh_current, config, processed):
                         if issue.state != 'open' or issue.pull_request:
                             continue
 
-                        # Skip issues carrying the 'bugfixer-dismissed' label — they were
+                        # Skip issues carrying the 'ab-dismissed' label — they were
                         # intentionally marked as not real. Remove the label to resume processing.
-                        if any(lbl.name == "bugfixer-dismissed" for lbl in issue.labels):
-                            logger.debug(f"Skipping {repo_name}#{issue.number} — 'bugfixer-dismissed' label present.")
+                        if any(lbl.name == "ab-dismissed" for lbl in issue.labels):
+                            logger.debug(f"Skipping {repo_name}#{issue.number} — 'ab-dismissed' label present.")
                             continue
 
                         # Skip LM-filed feature requests — feature_drive.py owns these via its
@@ -889,7 +889,7 @@ def scan_repo_issues(gh_current, config, processed):
                                 pass
                             # For awaiting_review, we let it proceed to check the 1-hour timer in process_single_issue
 
-                        # Case-INSENSITIVE label match: BugFixer files with "Bug",
+                        # Case-INSENSITIVE label match: AppBuilder files with "Bug",
                         # but GitHub applies the repo's EXISTING lowercase "bug"
                         # label, so an exact match misses it and a real LM bug report
                         # drops into the log-detected tier — which fix_logdetected_
@@ -981,7 +981,7 @@ def resolve_self_diagnosis_repo(config):
 
     Priority:
       1. Explicit 'self_diagnosis_repo' config key (preferred, user-configurable).
-      2. Git remote origin URL of the running BugFixer checkout (best-effort).
+      2. Git remote origin URL of the running AppBuilder checkout (best-effort).
 
     Returns the normalized 'owner/repo' string, or None if no valid target could
     be determined. Callers MUST handle a None return by skipping self-diagnosis
@@ -1041,7 +1041,7 @@ def save_self_scan_offset(offset, inode):
 
 
 def scan_self_logs(gh_current, config):
-    """Scans BugFixer's own logs and creates GitHub issues for internal errors.
+    """Scans AppBuilder's own logs and creates GitHub issues for internal errors.
 
     The target repository for self-diagnosis issues is resolved via
     resolve_self_diagnosis_repo(), which honors the 'self_diagnosis_repo' config
@@ -1051,7 +1051,7 @@ def scan_self_logs(gh_current, config):
     """
     global state
     update_task_state(task_id="SelfScan", task_name="Scanning Self Logs", action="start")
-    logger.info("Scanning internal BugFixer logs for errors...")
+    logger.info("Scanning internal AppBuilder logs for errors...")
 
     # Resolve and validate the target repository for self-diagnosis issues.
     self_repo_name = resolve_self_diagnosis_repo(config)
@@ -1059,7 +1059,7 @@ def scan_self_logs(gh_current, config):
     if not self_repo_name:
         logger.warning(
             "Self-diagnosis repository is not configured. Set 'self_diagnosis_repo' in the "
-            "BugFixer settings (https://<this-host>/settings) to a valid, accessible "
+            "AppBuilder settings (https://<this-host>/settings) to a valid, accessible "
             "'owner/repo' GitHub repository where self-diagnosis issues should be filed. "
             "Skipping self-log scan until configured."
         )
@@ -1078,7 +1078,7 @@ def scan_self_logs(gh_current, config):
                 f"Self-diagnosis target repository '{self_repo_name}' was not found or is "
                 f"inaccessible (404 Not Found). The configured GITHUB_TOKEN may lack access, "
                 f"or the repository does not exist. Update 'self_diagnosis_repo' in the "
-                f"BugFixer settings (https://<this-host>/settings) to point at a valid, "
+                f"AppBuilder settings (https://<this-host>/settings) to point at a valid, "
                 f"accessible repository. Skipping self-log scan."
             )
         else:
@@ -1098,7 +1098,7 @@ def scan_self_logs(gh_current, config):
 
     log_path = get_log_path()
     if not os.path.exists(log_path):
-        logger.warning(f"BugFixer log file not found at {log_path}")
+        logger.warning(f"AppBuilder log file not found at {log_path}")
         update_task_state(task_id="SelfScan", action="end")
         return
 
@@ -1146,7 +1146,7 @@ def scan_self_logs(gh_current, config):
             "Update pending signal",
             "Triggering restart",
             # Hub agent lifecycle — expected during onboarding/approval/rotation,
-            # not a BugFixer bug.
+            # not a AppBuilder bug.
             "Hub agent",
             "APPROVAL_REQUIRED",
             "pending admin approval",
@@ -1158,9 +1158,9 @@ def scan_self_logs(gh_current, config):
 
         formatted_logs = []
         for line in new_text.splitlines():
-            # Match BugFixer's actual log format ("<ts> - BugFixer - ERROR - ...")
+            # Match AppBuilder's actual log format ("<ts> - AppBuilder - ERROR - ...")
             # AND the legacy "[ERROR]" bracket form. The bracket-only check missed
-            # every real error (the format uses " - ERROR - "), so BugFixer never
+            # every real error (the format uses " - ERROR - "), so AppBuilder never
             # surfaced its own errors as bugs — including 500s logged as
             # "UNCAUGHT EXCEPTION". Now it does (→ self-diagnosis repo).
             if (" - ERROR - " in line or " - CRITICAL - " in line
@@ -1169,7 +1169,7 @@ def scan_self_logs(gh_current, config):
                     continue
                 ts = line[:23] if len(line) > 23 else "Unknown"
                 formatted_logs.append({
-                    "module": "bugfixer-core",
+                    "module": "ab-core",
                     "timestamp": ts,
                     "log": line.strip()
                 })
@@ -1209,7 +1209,7 @@ def scan_self_logs(gh_current, config):
                 continue
             try:
                 main.create_automated_issue(gh_current, monitored_repos, repo_obj, error)
-                logger.info(f"Handled self-diagnosis issue for BugFixer: {error.get('title')}")
+                logger.info(f"Handled self-diagnosis issue for AppBuilder: {error.get('title')}")
             except GithubException as ge:
                 if ge.status == 404:
                     logger.error(
@@ -1228,7 +1228,7 @@ def scan_self_logs(gh_current, config):
         update_task_state(task_id="SelfScan", action="end")
 
 def _is_triage_only():
-    """Return True when BugFixer should analyse issues but not push any fix commits."""
+    """Return True when AppBuilder should analyse issues but not push any fix commits."""
     if state.get("blackout"):
         return True
     config = load_config()
@@ -1347,9 +1347,9 @@ def run_scan_cycle():
 
         main.verify_production_fixes(gh_current, processed)
 
-        # Self-log scan is ON by default (self-diagnosis: scan BugFixer's own
+        # Self-log scan is ON by default (self-diagnosis: scan AppBuilder's own
         # logs for errors + file them in self_diagnosis_repo). The Settings
-        # "Self-monitor BugFixer logs" toggle turns it OFF so BugFixer stops
+        # "Self-monitor AppBuilder logs" toggle turns it OFF so AppBuilder stops
         # monitoring/filing its own logs. Default True preserves existing
         # behavior for installs that never saved the key.
         if config.get("self_log_scan_enabled", True):
@@ -1387,7 +1387,7 @@ def run_scan_cycle():
                 logger.debug(f"Cleanup for {cleanup_id} failed: {cleanup_err}")
 
 # Captured at import (≈ process boot / post-restart). Used for the startup grace so
-# BugFixer doesn't hammer a not-yet-ready ollama (404 /api/chat) right after a reboot.
+# AppBuilder doesn't hammer a not-yet-ready ollama (404 /api/chat) right after a reboot.
 _BOOT_TIME = time.time()
 
 
@@ -1818,7 +1818,7 @@ def _diag_origin_version():
 # One-click local (CPU-only) LLM setup
 #
 # Installs Ollama (if missing), pulls a model, applies CPU tuning (systemd
-# override + a context-tuned derived model), wires it into BugFixer provider
+# override + a context-tuned derived model), wires it into AppBuilder provider
 # slot 4, restarts the ollama service, and verifies. Streams staged progress
 # into state["active_tasks"]["LocalLLMSetup"] so the UI can poll
 # /api/task-details?task_id=LocalLLMSetup. Idempotent: each stage skips when

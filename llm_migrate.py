@@ -46,7 +46,7 @@ import logging
 
 import model_registry
 
-logger = logging.getLogger("BugFixer")
+logger = logging.getLogger("AppBuilder")
 
 CONFIG_VERSION = 6
 

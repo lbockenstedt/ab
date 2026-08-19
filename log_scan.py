@@ -22,7 +22,7 @@ from main import (
 )
 
 # ── Local hub-log sync (keep pulled logs on disk instead of a live pull) ─────
-# BugFixer used to do a fresh GET_LOGS WebSocket pull on every consumer call
+# AppBuilder used to do a fresh GET_LOGS WebSocket pull on every consumer call
 # (scan, verify, chat, logs page) — a "live pull" that discarded the data each
 # cycle. This is now a SYNC model: pull ONCE per cycle, PERSIST the logs to
 # local per-module files (a bounded, deduped archive that survives restarts
@@ -182,15 +182,15 @@ def get_hub_state():
         return None
 
 
-# BugFixer's own operational self-reporting that carries an [ERROR] tag but is
+# AppBuilder's own operational self-reporting that carries an [ERROR] tag but is
 # NOT a product defect the code-fixing LLM can act on. Two families:
 #
 #  1. Fix-engine attempt mechanics, logged at ERROR so a within-run retry can
 #     still see the failing snippet — a non-matching edit anchor, an unparseable
 #     model reply, a rejected rewrite, giving up after N attempts. These are
 #     handled, expected control flow, not bugs. The self-log scanner used to
-#     hand them to the LLM and file phantom issues about BugFixer fixing its own
-#     fix attempts (e.g. bugfixer#834, created verbatim from a single "Edit
+#     hand them to the LLM and file phantom issues about AppBuilder fixing its own
+#     fix attempts (e.g. ab#834, created verbatim from a single "Edit
 #     search snippet not found ... skipping this edit" line). There is no code
 #     to fix, so the issue burns its retry budget and fails "AI generated
 #     invalid JSON format", then recurs the next edit anchor miss.
@@ -201,7 +201,7 @@ def get_hub_state():
 #     load_config already recovers from via its local/defaults fallback, and
 #     save_config already writes atomically to prevent. The scanner filed them
 #     as issues too, but their own triage can only ever conclude "non-actionable
-#     — ensure the file is valid JSON" (e.g. bugfixer#806); a code edit cannot
+#     — ensure the file is valid JSON" (e.g. ab#806); a code edit cannot
 #     fix a corrupt file on disk.
 #
 # The lines are still logged (humans and the Diagnostics view see them); they
@@ -269,7 +269,7 @@ def filter_error_logs(logs):
         if not error_pattern.search(text):
             continue
 
-        # Skip BugFixer's own operational chatter (fix-engine mechanics + config
+        # Skip AppBuilder's own operational chatter (fix-engine mechanics + config
         # I/O errors) so it can't seed phantom issues (see _SELF_SCAN_NOISE).
         if _SELF_SCAN_NOISE.search(text):
             continue
@@ -434,7 +434,7 @@ def verify_production_fixes(gh_current, processed):
                                 if days_clean >= days_required:
                                     logger.info(f"Verified: Issue {issue_id} has been clean for {days_clean} days. Closing issue.")
                                     try:
-                                        issue.create_comment(f"🤖 **BugFixer AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
+                                        issue.create_comment(f"🤖 **AppBuilder AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
                                     except Exception as ce:
                                         logger.warning(f"Could not post verification comment to {issue_id}: {ce}")
                                     issue.edit(state='closed')
@@ -466,7 +466,7 @@ def verify_production_fixes(gh_current, processed):
 # -> le and "storage" -> truenas — and those previously matched NOTHING (not the
 # static map, not a repo basename), so le/truenas errors fell through every resolver
 # and were silently dropped (no issue filed). module_types that DO equal their repo
-# basename (nw, bugfixer) are listed explicitly too, so this map is authoritative
+# basename (nw, ab) are listed explicitly too, so this map is authoritative
 # rather than relying on basename auto-match.
 MODULE_TYPE_REPO = {
     "firewall": "lbockenstedt/opnsense",
@@ -478,7 +478,7 @@ MODULE_TYPE_REPO = {
     "certificates": "lbockenstedt/le",
     "storage": "lbockenstedt/truenas",
     "nw": "lbockenstedt/nw",
-    "bugfixer": "lbockenstedt/bugfixer",
+    "ab": "lbockenstedt/ab",
     "dhcp": "lbockenstedt/dhcp",
     "dns": "lbockenstedt/dns",
     "hub": "lbockenstedt/lm",
@@ -486,7 +486,7 @@ MODULE_TYPE_REPO = {
 
 
 HEARTBEAT_STALE_S_DEFAULT = 300
-# After a reinstall (Hub or BugFixer), the agent reconnects and the Hub's
+# After a reinstall (Hub or AppBuilder), the agent reconnects and the Hub's
 # telemetry pipeline takes a minute or two to come back up: spokes reconnect
 # and the Hub's own [heartbeat] loop resumes. Triage fired in that window
 # files a false "missing heartbeat" issue for EVERY expected module — a flood
@@ -673,7 +673,7 @@ def scan_heartbeats(gh_current, config, hub_logs):
         # fetched above). Don't double-act:
         #   - manual_pause : admin paused recovery from the WebUI -> suppress.
         #   - in_progress  : hub is actively recovering (attempt n/3) -> suppress
-        #                    so bugfixer doesn't file a "missing heartbeat" while
+        #                    so ab doesn't file a "missing heartbeat" while
         #                    the hub is bringing the spoke back.
         #   - gave_up      : hub tried and couldn't (a restart structurally can't
         #                    fix it — e.g. venv/interpreter missing, broken
@@ -801,7 +801,7 @@ def scan_bugs(gh_current, config, hub_logs):
            "hub_logs_seen": len(hub_logs or []), "markers_seen": 0,
            "reports_total": None, "filed_this_cycle": 0, "note": "", "error": ""}
     # Feature requests are a parallel pipeline: same markers/fetch path, but each
-    # feature is GATED on admin approval in LM before bugfixer may file/work it.
+    # feature is GATED on admin approval in LM before ab may file/work it.
     # This surfaces "how many features are waiting on approval vs approved+filed"
     # on the Diagnostics page (the "LM Feature Request Ingestion" card).
     _fi = {"last_run": time.time(), "features_total": None, "awaiting_approval": 0,
@@ -856,7 +856,7 @@ def scan_bugs(gh_current, config, hub_logs):
         logger.warning("scan_bugs: no hub agent client; skipping bug-report filing.")
         return
 
-    # Reconcile against the hub's filed flag so a bugfixer restart (which
+    # Reconcile against the hub's filed flag so a ab restart (which
     # clears the in-memory _filed set) does not re-file reports already filed
     # in a prior process lifetime. _filed is the per-process dedup fast-path.
     if not hasattr(scan_bugs, "_filed"):
@@ -1034,7 +1034,7 @@ def scan_bugs(gh_current, config, hub_logs):
                 f"<!-- bug-report-id: {rid} -->\n"
                 f"_Full console log, raw DOM, and screenshot are stored on the hub "
                 f"(report id `{rid}`) and are NOT included in this public issue. "
-                f"BugFixer pulls them from the hub as fix context._\n"
+                f"AppBuilder pulls them from the hub as fix context._\n"
             )
             file_labels = ["automated-fix", (config.get("SCHEDULER_BUG_LABEL") or "bug").strip()]
         error_data = {"module": "hub", "title": title, "body": body, "repo": repo_name}
@@ -1050,7 +1050,7 @@ def scan_bugs(gh_current, config, hub_logs):
             # rather than filing a fresh one. Mark it "duplicate" (→ links the same
             # issue) instead of "filed" so the LM UI is honest about it. The hub's
             # MARK_BUG_FIXED cascade later flips every report on this issue_url to
-            # fixed once bugfixer closes it, so the issue_url must be recorded here.
+            # fixed once ab closes it, so the issue_url must be recorded here.
             was_dup = bool(getattr(issue, "_bf_was_duplicate", False))
             mark_msg = "MARK_BUG_DUPLICATE" if was_dup else "MARK_BUG_FILED"
             try:
@@ -1241,7 +1241,7 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
     """Tier-2 deep-triage entry point. The LM hub's per-module log sentinel flagged a
     real problem and shipped {module, offending log slice, its analysis} down to us.
     File a GitHub issue in the module's repo (deduped via create_automated_issue) so the
-    normal RepoScan -> process_single_issue fix pipeline engages; BugFixer's fix step can
+    normal RepoScan -> process_single_issue fix pipeline engages; AppBuilder's fix step can
     then pull ALL logs as needed. Returns (ok: bool, detail: str)."""
     config = config or load_config()
     module = (module or "hub").strip()
@@ -1328,14 +1328,14 @@ def scan_hub_logs(gh_current, config):
             actionable_errors = []
             # Hub-gated triage (default ON): the LM hub's per-module log sentinel now
             # owns first-pass hub-log analysis and escalates real problems back to us
-            # via file_escalated_issue. So BugFixer no longer scrubs+LLM-analyzes hub
+            # via file_escalated_issue. So AppBuilder no longer scrubs+LLM-analyzes hub
             # logs itself every cycle (the redundant "always processing logs" pass) —
             # it still syncs the mirror (fix context) and runs scan_bugs above. Skip the
             # scrub entirely when gated (no point). Set hub_gated_triage=false to restore
-            # BugFixer's standalone hub-log triage.
+            # AppBuilder's standalone hub-log triage.
             if config.get("hub_gated_triage", True):
                 logger.debug("Hub-log triage delegated to the LM hub sentinel "
-                             "(hub_gated_triage on); BugFixer only synced the mirror + bug reports.")
+                             "(hub_gated_triage on); AppBuilder only synced the mirror + bug reports.")
             else:
                 # Scrub to error-relevant entries only before paying for an LLM call:
                 # keeps the prompt small (avoids context-overflow 500s) and focuses the
@@ -1410,7 +1410,7 @@ def scan_hub_logs(gh_current, config):
                 except Exception as e:
                     logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
         else:
-            # Hub unreachable: sync_hub_logs() returned None — BugFixer cannot
+            # Hub unreachable: sync_hub_logs() returned None — AppBuilder cannot
             # read Hub logs this cycle (it did not pull, so the local mirror was
             # not refreshed either; scan does NOT fall back to stale local data,
             # which would risk re-filing already-handled errors). That IS "not connected to the Hub",

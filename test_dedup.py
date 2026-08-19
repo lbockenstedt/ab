@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Self-test for bugfixer/dedup.py — strengthens confidence in duplicate detection.
+"""Self-test for ab/dedup.py — strengthens confidence in duplicate detection.
 
-Run:  python3 bugfixer/test_dedup.py
+Run:  python3 ab/test_dedup.py
 
 Standalone: imports only ``dedup`` (stdlib-only, no app init, no GitHub/network).
 
@@ -35,7 +35,7 @@ from dedup import (
 # The exact boilerplate wrapper create_automated_issue (main.py) injects.
 _BOILERPLATE_BODY = (
     "**Automated Error Detection**\n\n"
-    "The BugFixer Hub analysis detected a potential issue in the logs:\n\n"
+    "The AppBuilder Hub analysis detected a potential issue in the logs:\n\n"
     "### Log Evidence:\n```\n{snippet}\n```\n\n"
     "This issue has been automatically created for fixing."
 )
@@ -84,7 +84,7 @@ def _check(label, condition):
 
 
 def main():
-    print("Running bugfixer dedup self-test...")
+    print("Running ab dedup self-test...")
     ok = True
 
     # (1) opnsense recurrence across cycles matches despite:

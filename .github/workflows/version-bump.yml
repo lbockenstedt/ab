@@ -57,7 +57,7 @@ jobs:
               # Hold at .98 awaiting a deliberate major (X.00 is set by hand via
               # scripts/set-version.sh). CLAMP rather than refuse: +2 preserves
               # parity, so a repo on an ODD minor jumps .97 -> .99, overshoots
-              # this guard and freezes ONE STEP EARLY, forever. lm/cs/bugfixer
+              # this guard and freezes ONE STEP EARLY, forever. lm/cs/ab
               # all sat at 0.97 for days doing exactly that -- every workflow run
               # green, every run a no-op, and the WebUI cache-bust token
               # (index.html ?v=<WebUI/VERSION>) frozen with it, so no browser

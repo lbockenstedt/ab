@@ -3,7 +3,7 @@
 pre-review (wired into pr_review.py's findings list) and, by extension,
 feature auto-drive's built PRs.
 
-Run:  python3 bugfixer/test_check_tooltips.py
+Run:  python3 ab/test_check_tooltips.py
 
 Standalone: imports only check_tooltips (no app/main init).
 """
@@ -24,7 +24,7 @@ class _FakeFile:
 
 
 def main():
-    print("Running bugfixer check_tooltips self-test...")
+    print("Running ab check_tooltips self-test...")
     ok = True
 
     # --- find_missing_tooltips (single-file patch) --------------------------

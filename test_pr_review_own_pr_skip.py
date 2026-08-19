@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Self-test pinning that pr_review._review_one's "skip BugFixer's own AI Fix
+"""Self-test pinning that pr_review._review_one's "skip AppBuilder's own AI Fix
 PR" check does NOT match feature-auto-drive PRs.
 
-Run:  python3 bugfixer/test_pr_review_own_pr_skip.py
+Run:  python3 ab/test_pr_review_own_pr_skip.py
 
 Standalone: the predicate under test is two string literals + startswith
 checks (pr_review.py:692), extracted verbatim rather than reimplemented so a
 future edit to the real check is what this test actually exercises.
 
 Regression guard: _review_one skips a PR when its title starts "AI Fix #" or
-its head branch starts "ai-fix-issue-" (BugFixer's own bug-fix PRs, already
+its head branch starts "ai-fix-issue-" (AppBuilder's own bug-fix PRs, already
 vetted by the fix panel when opened — re-reviewing them is redundant).
 feature_build.py deliberately titles feature PRs "AI Feature #N" on branch
 "ai-feature-issue-N" — SIMILAR but NOT matching those prefixes — specifically

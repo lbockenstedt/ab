@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Self-test for model_registry.py — the capability/cost-tier registry for
-BugFixer's LLM model-selection picker.
+AppBuilder's LLM model-selection picker.
 
-Run:  python3 bugfixer/test_model_registry.py
+Run:  python3 ab/test_model_registry.py
 
 Standalone: imports only model_registry (no app/main init).
 """
@@ -17,7 +17,7 @@ def _check(label, cond):
 
 
 def main():
-    print("Running bugfixer model_registry self-test...")
+    print("Running ab model_registry self-test...")
     ok = True
 
     # --- glob matching + most-specific-wins --------------------------------

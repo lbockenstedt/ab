@@ -1,10 +1,10 @@
 """
-skills_loader.py — BugFixer loads the repo-committed Claude skills ("agents") from
+skills_loader.py — AppBuilder loads the repo-committed Claude skills ("agents") from
 the LM repo (.claude/skills) so its fix / build / PR-review work follows the same
 recipes + boundaries a human invoking the skill would.
 
 Single source of truth: the skills live in lbockenstedt/lm/.claude/skills (see
-lm/docs/agents-and-skills.md). BugFixer reads them via the GitHub contents API,
+lm/docs/agents-and-skills.md). AppBuilder reads them via the GitHub contents API,
 caches with a TTL, and exposes skills_context() to inject a compact "follow these"
 block into fix prompts.
 

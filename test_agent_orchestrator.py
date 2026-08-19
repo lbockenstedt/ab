@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Self-test for agent_orchestrator.py — BugFixer's multi-agent request
+"""Self-test for agent_orchestrator.py — AppBuilder's multi-agent request
 orchestrator (plan -> parallel fan-out over distinct endpoints -> merge).
 
-Run:  python3 bugfixer/test_agent_orchestrator.py
+Run:  python3 ab/test_agent_orchestrator.py
 
 Standalone: imports only agent_orchestrator + model_selection (no app/main
 init). All LLM/selection I/O is faked, so nothing hits the network.
@@ -86,7 +86,7 @@ def _fake_select(candidates):
 
 
 def main():
-    print("Running bugfixer agent_orchestrator self-test...")
+    print("Running ab agent_orchestrator self-test...")
     ok = True
 
     # --- Planning ---------------------------------------------------------- #

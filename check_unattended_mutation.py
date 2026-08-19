@@ -4,7 +4,7 @@ UNATTENDED, machine-driven data-mutation path (a background loop that deletes/
 purges/destroys something) with no accompanying test.
 
 Motivating case: lm#151 added an automatic 15-min sweep that deletes client
-registry records with no matching VM. BugFixer's own skeptical review panel
+registry records with no matching VM. AppBuilder's own skeptical review panel
 correctly rejected it (55%) over a real safety-rail gap in that code — but the
 gap was the kind of thing that only became verifiably fixed once a UNIT TEST
 was written pinning the exact guard behavior. A one-line typo fix and an

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for claude_cli_native_tools.build_command / extract_text.
 
-Run:  python3 bugfixer/test_claude_cli_native_tools.py
+Run:  python3 ab/test_claude_cli_native_tools.py
 
 Standalone: imports only claude_cli_native_tools (no app/main init — see that
 module's docstring for why llm_client.py itself can't be imported outside the
@@ -20,7 +20,7 @@ def _check(label, condition):
 
 
 def main():
-    print("Running bugfixer claude_cli_native_tools self-test...")
+    print("Running ab claude_cli_native_tools self-test...")
     ok = True
 
     # --- build_command --------------------------------------------------

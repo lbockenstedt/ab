@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ 'Set up BugFixer' if setup_mode else 'Sign in — BugFixer' }}</title>
+    <title>{{ 'Set up AppBuilder' if setup_mode else 'Sign in — AppBuilder' }}</title>
     <link rel="icon" href="/favicon.ico">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -17,7 +17,7 @@
 <body class="min-h-screen flex items-center justify-center p-6">
     <div class="card w-full max-w-sm p-8">
         <div class="mb-6">
-            <h1 class="text-xl font-bold text-[#263040]">BugFixer</h1>
+            <h1 class="text-xl font-bold text-[#263040]">AppBuilder</h1>
             {% if setup_mode %}
             <p class="text-sm text-slate-500 mt-1">First run — create the initial admin account.</p>
             {% else %}
@@ -69,7 +69,7 @@
 
         <p class="text-[11px] text-slate-400 mt-6 leading-relaxed">
             Every account has full admin access. Locked out? From a shell on this host:
-            <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/bugfixer'); import auth; auth.set_password('user','newpass')"</code>
+            <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; auth.set_password('user','newpass')"</code>
         </p>
     </div>
 </body>

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Self-test for feature_boundary.py — the deterministic Stage A prefilter
-for BugFixer's feature auto-drive classifier, and the boundary_hits() reuse
+for AppBuilder's feature auto-drive classifier, and the boundary_hits() reuse
 that gates auto-merge against a real PR diff.
 
-Run:  python3 bugfixer/test_feature_boundary.py
+Run:  python3 ab/test_feature_boundary.py
 
 Standalone: imports only feature_boundary (no app/main init).
 """
@@ -19,7 +19,7 @@ def _check(label, condition):
 
 
 def main():
-    print("Running bugfixer feature_boundary self-test...")
+    print("Running ab feature_boundary self-test...")
     ok = True
 
     boundaries = [
@@ -37,18 +37,18 @@ def main():
     # --- boundary_hits (path-based, used by the auto-merge gate) -----------
 
     ok &= _check("exact path match hits",
-                bool(fb.boundary_hits(["bugfixer/hub_agent.py"], boundaries)))
+                bool(fb.boundary_hits(["ab/hub_agent.py"], boundaries)))
     ok &= _check("exact path match reports the matched path",
-                fb.boundary_hits(["bugfixer/hub_agent.py"], boundaries)[0]["_matched_paths"]
-                == ["bugfixer/hub_agent.py"])
+                fb.boundary_hits(["ab/hub_agent.py"], boundaries)[0]["_matched_paths"]
+                == ["ab/hub_agent.py"])
     ok &= _check("unrelated path does not hit",
-                fb.boundary_hits(["bugfixer/routes.py"], boundaries) == [])
+                fb.boundary_hits(["ab/routes.py"], boundaries) == [])
     ok &= _check("disabled boundary never hits even with a matching path",
                 fb.boundary_hits(["anything.py"], boundaries) == [])
     ok &= _check("empty path list yields no hits",
                 fb.boundary_hits([], boundaries) == [])
     ok &= _check("empty boundary list yields no hits",
-                fb.boundary_hits(["bugfixer/hub_agent.py"], []) == [])
+                fb.boundary_hits(["ab/hub_agent.py"], []) == [])
     ok &= _check("multiple matching paths land in the same hit's _matched_paths",
                 sorted(fb.boundary_hits(
                     ["a/hub_agent.py", "lm/hub_agent.py", "unrelated.py"], boundaries
@@ -78,7 +78,7 @@ def main():
     ok &= _check("keyword matching is case-insensitive",
                 case["hard"] is True)
 
-    path_in_body = fb.prefilter("Fix", "See bugfixer/hub_agent.py for context.", boundaries)
+    path_in_body = fb.prefilter("Fix", "See ab/hub_agent.py for context.", boundaries)
     ok &= _check("a path token mentioned in the body also triggers the boundary",
                 path_in_body["hard"] is True)
 

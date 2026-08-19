@@ -1,5 +1,5 @@
 """
-model_selection.py — pure model-selection algorithm for BugFixer's LLM
+model_selection.py — pure model-selection algorithm for AppBuilder's LLM
 picker. No I/O, no config reads: given a candidate list (already resolved by
 the impure caller, llm_client.py's enumerate_candidates) and a performance
 snapshot (from llm_perf.py), decides which model to use for one call.

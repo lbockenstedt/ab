@@ -15,7 +15,7 @@ Deterministic and free: a real hit here is unambiguous, so findings are
 level="error"; it also means the LLM panel's own "undefined names" claims can
 be cross-checked against this pass when triaging its output by hand.
 
-Scope: Python files only (bugfixer's own runtime + this class of bug is what
+Scope: Python files only (ab's own runtime + this class of bug is what
 prompted the check). JS/TS is a separate, larger undertaking — not attempted
 here (see the state-logic panel in pr_review.py for the LLM-side JS coverage
 that already exists via the render-crash / syntax-error prompt).
@@ -54,7 +54,7 @@ def _fetch_full_content(repo, path, ref):
 
 def _run_ruff(source, filename_hint):
     """Run ruff on one file's content in isolation (no repo config picked up,
-    so bugfixer's OWN pyproject.toml/ruff.toml can't accidentally suppress or
+    so ab's OWN pyproject.toml/ruff.toml can't accidentally suppress or
     alter these specific rules for someone else's PR). Returns ruff's parsed
     JSON diagnostics list, or [] on any tooling failure (never raises — a
     missing/broken ruff binary must degrade to 'no findings', not crash the

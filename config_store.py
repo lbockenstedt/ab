@@ -1,4 +1,4 @@
-"""Persistent configuration + state-file storage for BugFixer.
+"""Persistent configuration + state-file storage for AppBuilder.
 
 Extracted verbatim from main.py: the config-path constants, chat-config defaults,
 and the load/save helpers for config, processed-issue history, update-recovery
@@ -22,7 +22,7 @@ from datetime import datetime
 from main import logger
 
 # Persistent Configuration Paths
-CONFIG_DIR = "/etc/bugfixer"
+CONFIG_DIR = "/etc/ab"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ENV_FILE = os.path.join(CONFIG_DIR, ".env")
 STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
@@ -67,7 +67,7 @@ CHAT_CONFIG_DEFAULTS = {
     "heartbeat_exclude": [],           # spoke_ids / module_types to skip (list).
     # API key required by the Anthropic-compatible LLM-router proxy (/v1/*, see
     # llm_proxy.py). Empty = proxy is open (a warning is logged per request).
-    # The BUGFIXER_PROXY_KEY env var overrides this when set.
+    # The AB_PROXY_KEY env var overrides this when set.
     "llm_proxy_api_key": "",
 }
 

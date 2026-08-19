@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test for llm_migrate.migrate() (LLM Selection Redesign, Phase 7).
 
-Run:  python3 bugfixer/test_llm_migrate.py
+Run:  python3 ab/test_llm_migrate.py
 
 llm_migrate imports only model_registry (no `main` side effects), so this can
 import and call it directly.

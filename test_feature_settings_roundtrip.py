@@ -3,7 +3,7 @@
 fields added in Phase 0 (skills_*) and Phase 1 (feature_drive_*,
 feature_boundaries) of the feature auto-drive plan.
 
-Run:  python3 bugfixer/test_feature_settings_roundtrip.py
+Run:  python3 ab/test_feature_settings_roundtrip.py
 
 routes.py cannot be imported directly (main.py's app-init side effects — see
 test_dismiss_background_retry.py's docstring), so this extracts save_settings

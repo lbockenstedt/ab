@@ -1,4 +1,4 @@
-"""Multi-provider LLM routing + circuit breakers for BugFixer.
+"""Multi-provider LLM routing + circuit breakers for AppBuilder.
 
 Extracted verbatim from main.py (highest-value split): the provider constants,
 message converters, per-provider config/rpm helpers, credit-exhaustion
@@ -52,8 +52,8 @@ GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com"
 # improve OpenRouter's own dashboard/rate-limit attribution — not required to work).
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://github.com/lbockenstedt/bugfixer",
-    "X-Title": "BugFixer",
+    "HTTP-Referer": "https://github.com/lbockenstedt/ab",
+    "X-Title": "AppBuilder",
 }
 LMSTUDIO_BASE_URL = "http://localhost:1234/v1"  # LM Studio local OpenAI-compatible server
 LMSTUDIO_DEFAULT_PORT = 1234
@@ -146,7 +146,7 @@ def _is_ollama(provider):
     local self-hosted case isn't forced to invent a dummy key. The vault keys
     credentials by provider name, so each ``ollama<N>`` carries its own base_url —
     letting a local instance and a remote instance coexist (e.g. ``ollama`` →
-    ``http://localhost:11434`` for the box running bugfixer, ``ollama2`` → a
+    ``http://localhost:11434`` for the box running ab, ``ollama2`` → a
     remote host on the LAN/cloud). Matching by prefix means adding further
     instances needs no code change here.
     """
@@ -183,7 +183,7 @@ def _ollama_base_url(provider, base_url):
             else "http://localhost:11434")
 
 
-#: Where Claude Code lands when it is NOT on the service PATH. bugfixer.service
+#: Where Claude Code lands when it is NOT on the service PATH. ab.service
 #: sets User= but no Environment=PATH=, so it inherits systemd's minimal default
 #: (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin). Claude Code's
 #: native installer puts the binary under ~/.local/bin and npm/nvm installs land
@@ -554,7 +554,7 @@ def _tool_spec(t):
     The converters below used to assume only the flat shape and did `t["name"]`
     directly, which KeyError'd('name') on every nested tool — breaking every
     non-Ollama reviewer (copilot, openai, anthropic, google) whenever the PR
-    pre-review panel's fetch_repo_file tool was in play (bugfixer#727)."""
+    pre-review panel's fetch_repo_file tool was in play (ab#727)."""
     fn = t.get("function")
     return fn if isinstance(fn, dict) else t
 
@@ -720,7 +720,7 @@ def validate_llm_config_on_startup():
             "!!  LLM CONFIGURATION WARNING  !!\n"
             "Neither LLM provider is fully configured.\n"
             "HOW TO FIX:\n"
-            "  1. Open the BugFixer dashboard: https://<this-host>/settings\n"
+            "  1. Open the AppBuilder dashboard: https://<this-host>/settings\n"
             "  2. Set LLM_PROVIDER_1, LLM_API_KEY_1, and LLM_MODEL_1\n"
             "  3. Optionally set LLM_PROVIDER_2, LLM_API_KEY_2, LLM_MODEL_2 for failover.\n"
             + "=" * 78
@@ -2148,7 +2148,7 @@ def _model_lock(key):
 
 
 def _iter_configured_endpoints(config):
-    """Every endpoint BugFixer knows about, read LIVE on every call (never
+    """Every endpoint AppBuilder knows about, read LIVE on every call (never
     frozen/persisted): config["llm_entries"] (the modern vault) plus the
     legacy LLM_PROVIDER_N/LLM_API_KEY_N/LLM_MODEL_N/LLM_BASE_URL_N/LLM_RPM_N
     env-var slots — re-reading live (rather than one-shot converting) means
@@ -2447,7 +2447,7 @@ _LOG_ANALYSIS_MAX_CHARS = 16000
 
 def analyze_logs(log_text, title="logs", task_id=None, requirements=None):
     """Ask the configured LLM whether anything is wrong in `log_text`, what it means,
-    and what to check — the shared brain behind BugFixer's Log Analysis panel AND the
+    and what to check — the shared brain behind AppBuilder's Log Analysis panel AND the
     LM hub's delegated ANALYZE_LOGS request. Returns the analysis string, which BEGINS
     with a machine-parseable `VERDICT: none|watch|escalate` line (see parse_log_verdict).
     Raises on LLM failure so callers can classify cooldown vs. error. Char-caps the tail.
