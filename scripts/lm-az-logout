@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -uo pipefail
+az logout --only-show-errors 2>/dev/null || true
+rm -rf /dev/shm/lm-ab-sp
+echo "lm-az-logout: SP context cleared"
