@@ -94,6 +94,41 @@ DEFAULT_BOUNDARIES = [
         "keywords": ["fernet", "encryption key", "data_dir"],
         "hard": True, "enabled": True,
     },
+    {
+        "id": "auth-onboarding",
+        "label": "Auth / sessions / OIDC / spoke onboarding",
+        "rule": "Never change login, session handling, OIDC/SSO, or the "
+                "spoke-onboarding / setup handshake (who is allowed in and how "
+                "a spoke first joins) without a human designing the change.",
+        "paths": ["**/auth.py", "**/auth*.py", "**/oidc.py", "**/*onboard*",
+                  "**/routes/setup*", "**/setup_routes*", "**/session*"],
+        "keywords": ["oidc", "sso", "onboarding", "login session", "session cookie",
+                     "enrollment token", "join token"],
+        "hard": True, "enabled": True,
+    },
+    {
+        "id": "installers",
+        "label": "Installers / provisioning / uninstall scripts",
+        "rule": "Never change fleet provisioning, install/uninstall, or "
+                "bootstrap scripts as a side effect of a feature — a bug here "
+                "can brick a host at install/upgrade time.",
+        "paths": ["**/install*.sh", "**/setup.sh", "**/uninstall*.sh",
+                  "**/bootstrap*.sh", "**/*_setup.py"],
+        "keywords": ["installer", "provisioning script", "systemd unit", "bootstrap"],
+        "hard": True, "enabled": True,
+    },
+    {
+        "id": "control-plane",
+        "label": "Hub↔spoke control plane / command dispatch",
+        "rule": "Never change the messaging control plane or how commands are "
+                "dispatched to spokes (what a hub can tell a fleet of spokes to "
+                "do) without a human designing the change.",
+        "paths": ["**/control_plane*", "**/messaging/**", "**/command_dispatch*",
+                  "**/hub_agent.py"],
+        "keywords": ["control plane", "command dispatch", "broadcast command",
+                     "remote command", "fleet command"],
+        "hard": True, "enabled": True,
+    },
 ]
 
 

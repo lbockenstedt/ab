@@ -104,6 +104,25 @@ def main():
     ok &= _check("None renders empty string, no crash",
                 fb.render_boundaries_for_prompt(None) == "")
 
+    # --- DEFAULT_BOUNDARIES covers the core hard-deny surfaces ---------------
+    # These must flag (auto-merge/auto-build → human) if a diff touches them.
+    defaults = fb.DEFAULT_BOUNDARIES
+    for path, expect_id in [
+        ("ab/auth.py", "auth-onboarding"),
+        ("ab/oidc.py", "auth-onboarding"),
+        ("lm/routes/onboarding.py", "auth-onboarding"),
+        ("ab/install.sh", "installers"),
+        ("lm/uninstall.sh", "installers"),
+        ("lm/messaging/control_plane.py", "control-plane"),
+        ("ab/hub_agent.py", "psk-hardcode"),
+        ("lm/watchdog.py", "self-update"),
+    ]:
+        hit_ids = {h["id"] for h in fb.boundary_hits([path], defaults)}
+        ok &= _check(f"DEFAULT_BOUNDARIES flags {path} (expects '{expect_id}')",
+                    expect_id in hit_ids)
+    ok &= _check("every DEFAULT_BOUNDARIES rule is hard + enabled (no soft/off core rule)",
+                all(b.get("hard") and b.get("enabled") for b in defaults))
+
     print()
     if ok:
         print("ALL CASES PASSED")
