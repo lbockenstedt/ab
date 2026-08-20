@@ -183,56 +183,22 @@ def _ensure_label(gh_repo, name):
 
 
 def bump_repo_version(repo_path):
-    """Increment the target repo's VERSION by bumping the LAST numeric run in place,
-    preserving its zero-pad width — EXACTLY mirroring the version-bump.yml CI so the
-    target's scheme is never clobbered.
+    """DISABLED — automatic VERSION bumping has been retired.
 
-    The fleet scheme is ``n.nn`` (e.g. ``0.01`` → ``0.02`` … ``0.99``; production is
-    set to ``1.00`` by hand). This function is scheme-agnostic and also handles
-    ``N.N.N`` (``0.0.1`` → ``0.0.2``) and legacy leading-dot (``.1219`` → ``.1220``).
+    The fleet no longer advances the ``VERSION`` file on every AI fix. Update
+    detection is now driven by the git commit HASH (the hub/spoke update pipeline
+    compares boot-time HEAD vs on-disk HEAD; a string VERSION compare could never
+    distinguish ahead-of-remote from up-to-date). ``VERSION`` is a static
+    hand-managed production milestone (``1.00``); an AI fix must not silently
+    push it to ``1.02``, ``1.04``, … which is what this function used to do
+    (``MAJOR.MINOR`` → ``minor + 2`` on every approved direct-push fix).
 
-    Previously it ONLY understood 3-part ``N.N.N`` and RESET every other scheme to
-    ``0.0.1`` — which silently clobbered a hub on the ``.NNNN`` scheme (``.1219`` →
-    ``0.0.1``). Incrementing the last run in place (zero-pad preserved) keeps
-    ``0.09`` → ``0.10``. It does NOT carry (``0.99`` → ``0.100``), exactly like the
-    CI — the ``1.00`` production milestone is set by hand, well before 0.99."""
-    version_file = os.path.join(repo_path, "VERSION")
-    current_version = ""
-    if os.path.exists(version_file):
-        try:
-            with open(version_file, "r") as f:
-                current_version = f.read().strip()
-        except Exception as e:
-            logger.error(f"Error reading version file: {e}")
-
-    stripped = current_version.strip()
-    m = re.match(r"^(\d+)\.(\d+)$", stripped)   # new MAJOR.MINOR scheme
-    nums = list(re.finditer(r"\d+", current_version))
-    if m:
-        major, minor = int(m.group(1)), int(m.group(2))
-        width = max(2, len(m.group(2)))
-        new_minor = minor + 2
-        if new_minor > 98:
-            new_version = stripped              # hold — never auto-cross a major (X.00 by hand)
-        else:
-            new_version = f"{major}.{str(new_minor).zfill(width)}"
-    elif not nums:
-        # No numeric segment yet — seed the MAJOR.MM scheme at the production baseline.
-        new_version = "1.00"
-    else:
-        last = nums[-1]
-        width = len(last.group())
-        # int(..., 10) avoids octal interpretation of a leading-zero run (e.g. "01").
-        val = int(last.group(), 10) + 1
-        new_version = current_version[:last.start()] + str(val).zfill(width) + current_version[last.end():]
-
-    try:
-        with open(version_file, "w") as f:
-            f.write(new_version + "\n")
-        return new_version
-    except Exception as e:
-        logger.error(f"Error writing version file: {e}")
-        return None
+    Kept as a no-op returning ``None`` so callers (fix_engine) still treat it as
+    "no version change" (``version_bumped`` stays False, the commit message gets
+    no ``(Version Bump to …)`` suffix, and the file is left untouched). Restore
+    the previous increment logic here if hand-managed versioning is ever
+    reinstated."""
+    return None
 
 
 def trigger_infrastructure_update():
