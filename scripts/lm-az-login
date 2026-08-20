@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Establish an authenticated az context as the LM automation service principal.
+# Zero persistent secret: the host proves it is LM-AB via its managed identity,
+# pulls the SP cert from LM-VAULT (only the LM subnet may), and logs in.
+# The cert lives only in /dev/shm (tmpfs/RAM, wiped on reboot), mode 0600.
+# Embedded IDs are public identifiers, not secrets. Run `lm-az-logout` to wipe.
+set -euo pipefail
+TID=2e5cab22-02d0-4fe4-8ceb-f9faa02999c1
+APPID=065fbdac-b265-4071-911b-21bc62c94d2b
+VAULT=LM-VAULT
+CERT=lm-ab-automation-sp
+DIR="/dev/shm/lm-ab-sp"
+PEM="$DIR/cert.pem"
+install -d -m 0700 "$DIR"
+umask 077
+az login --identity --only-show-errors >/dev/null
+az keyvault secret download --vault-name "$VAULT" --name "$CERT" --file "$PEM" --encoding utf-8 --overwrite --only-show-errors
+chmod 0600 "$PEM"
+az login --service-principal -u "$APPID" --certificate "$PEM" --tenant "$TID" --only-show-errors >/dev/null
+echo "lm-az-login: authenticated as SP $APPID (Virtual Machine Contributor on RG LM)"

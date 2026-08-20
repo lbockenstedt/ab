@@ -99,6 +99,8 @@ def main():
                 "datetime": __import__("datetime").datetime,
                 "update_task_state": lambda *a, **k: None,
                 "_parse_text_tool_calls": lambda text: (text, []),
+                "az_console": type("_AzStub", (), {"azure_enabled": staticmethod(lambda config: False)})(),
+                "AZURE_TOOLS": [],
             },
         )
 
@@ -161,6 +163,8 @@ def main():
             "_sanitize_tool_result": lambda out, config: out,
             "_trunc": lambda x, n=300: str(x)[:n],
             "_parse_text_tool_calls": lambda text: (text, []),
+            "az_console": type("_AzStub", (), {"azure_enabled": staticmethod(lambda config: False)})(),
+            "AZURE_TOOLS": [],
         },
     )
 
@@ -191,6 +195,8 @@ def main():
             "_sanitize_tool_result": lambda out, config: out,
             "_trunc": lambda x, n=300: str(x)[:n],
             "_parse_text_tool_calls": lambda text: (text, []),
+            "az_console": type("_AzStub", (), {"azure_enabled": staticmethod(lambda config: False)})(),
+            "AZURE_TOOLS": [],
         },
     )
     seen = {"tool": None, "final": None}

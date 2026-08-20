@@ -3,6 +3,8 @@ import json, os, re, threading, time, traceback, uuid
 from datetime import datetime
 from github import Github
 
+import az_console
+
 from main import (
     CHAT_HISTORY_FILE,
     _chat_lock,
@@ -94,6 +96,15 @@ def _build_chat_context_index_uncached(config, gh=None):
     lines.append("You have tools: list_repos, list_issues, get_issue, list_repo_files, "
                  "read_file, get_processed_issues, get_recent_errors, propose_fix. "
                  "Use them to answer precisely; do not guess issue/file contents.")
+    if config.get("CHAT_AZURE_ENABLED", False):
+        rg = config.get("AZURE_LM_RESOURCE_GROUP") or "LM"
+        mut = "mutation ENABLED" if config.get("CHAT_AZURE_ALLOW_MUTATION", False) else "read-only"
+        lines.append(f"Azure fleet tools are ON ({mut}) for resource group {rg}: "
+                     "azure_cli (control-plane, e.g. `vm list`/`vm get-instance-view`) and "
+                     "server_shell (run a command ON a VM, e.g. `systemctl status ab`, "
+                     "`journalctl -u ab -n 100 --no-pager`, `curl -s localhost/health`) — "
+                     "use these to diagnose the live LM servers and verify a change deployed "
+                     "and is functional with no new errors.")
     text = "\n".join(lines)
     # Defense-in-depth: never let a leaked token in an issue title reach the model.
     return _redact_text(text, _secret_denylist(config))
@@ -420,6 +431,34 @@ CHAT_TOOLS = [
 ]
 
 
+AZURE_TOOLS = [
+    {
+        "name": "azure_cli",
+        "description": "Run a read-only `az` (Azure CLI) command against the LM resource group to diagnose the live servers AppBuilder manages (e.g. list VMs, show a VM's power/agent state, list resources). Pass the arguments AFTER `az` as an array in `args` (argv form, e.g. [\"vm\",\"list\",\"-g\",\"LM\",\"-o\",\"table\"]). Read-only by default; mutating commands are refused unless the operator has enabled Azure mutation.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "args": {"type": "array", "items": {"type": "string"},
+                          "description": "az arguments AFTER 'az', argv form (no leading 'az')."},
+            },
+            "required": ["args"],
+        },
+    },
+    {
+        "name": "server_shell",
+        "description": "Run a shell command ON one LM server VM (via Azure run-command) to verify functionality and check for errors — e.g. `systemctl status ab`, `journalctl -u ab -n 100 --no-pager`, `curl -s localhost/health`. Read-only by default (status/logs/health only); state-changing commands are refused unless the operator has enabled Azure mutation. Use azure_cli first to see valid VM names (e.g. LM-HUB, LM-AB, LM-NETBOX).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "vm": {"type": "string", "description": "LM VM name, e.g. LM-HUB."},
+                "command": {"type": "string", "description": "The shell command to run on that VM."},
+            },
+            "required": ["vm", "command"],
+        },
+    },
+]
+
+
 def _tool_list_repos(gh, config, args):
     if gh is None:
         return {"error": "GitHub client unavailable (no token configured)."}
@@ -644,6 +683,33 @@ def _tool_propose_fix(gh, config, args):
     return descriptor
 
 
+def _tool_azure_cli(gh, config, args):
+    """Diagnose the live LM fleet with a read-only `az` command. argv is taken
+    from `args` (preferred) or a `command` string, which is shell-split. All
+    vetting/login/execution lives in az_console (default-deny mutation)."""
+    argv = args.get("args")
+    if argv is None and isinstance(args.get("command"), str):
+        import shlex
+        try:
+            argv = shlex.split(args["command"])
+        except ValueError:
+            return {"error": "could not parse the az command string"}
+    if isinstance(argv, str):
+        import shlex
+        argv = shlex.split(argv)
+    if not isinstance(argv, list) or not argv:
+        return {"error": "provide `args` as an array of az arguments (no leading 'az')"}
+    if argv and str(argv[0]).lower() == "az":
+        argv = argv[1:]
+    return az_console.run_az(argv, config)
+
+
+def _tool_server_shell(gh, config, args):
+    """Run a read-only shell command ON one LM VM to verify functionality /
+    inspect logs. Vetting + run-command execution lives in az_console."""
+    return az_console.run_server_shell(args.get("vm"), args.get("command"), config)
+
+
 CHAT_TOOL_EXECUTORS = {
     "list_repos": _tool_list_repos,
     "list_issues": _tool_list_issues,
@@ -653,6 +719,8 @@ CHAT_TOOL_EXECUTORS = {
     "get_processed_issues": _tool_get_processed_issues,
     "get_recent_errors": _tool_get_recent_errors,
     "propose_fix": _tool_propose_fix,
+    "azure_cli": _tool_azure_cli,
+    "server_shell": _tool_server_shell,
 }
 
 
@@ -864,7 +932,9 @@ def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
     from model_selection import LlmRequirements
     _status = status_cb or (lambda *_a, **_k: None)
     _tool_reqs = tool_requirements or LlmRequirements(complexity="medium", needs_tools=True, latency_sensitive=True)
-    tools = CHAT_TOOLS
+    # Azure fleet tools are advertised only when the operator has opted in, so a
+    # model on a host without the login helper isn't tempted to call them.
+    tools = CHAT_TOOLS + (AZURE_TOOLS if az_console.azure_enabled(config) else [])
     used_chars = 0
     final_text = None
     last_text = ""
@@ -1092,6 +1162,8 @@ __all__ = [
     '_tool_get_processed_issues',
     '_tool_get_recent_errors',
     '_tool_propose_fix',
+    '_tool_azure_cli',
+    '_tool_server_shell',
     '_set_chat_stream_status',
     '_finalize_chat_stream',
     '_set_chat_stream_error',
@@ -1105,5 +1177,6 @@ __all__ = [
     '_GH_TOKEN_RE',
     '_CHAT_FILE_SKIP',
     'CHAT_TOOLS',
+    'AZURE_TOOLS',
     'CHAT_TOOL_EXECUTORS',
 ]

@@ -1997,6 +1997,15 @@ async def settings_page(request: Request):
     # DEFAULT_ALLOWLIST"; an operator may narrow it to a subset.
     config.setdefault("feature_automerge_require_allowlist", True)
     config.setdefault("feature_automerge_allowlist", None)
+    # Azure fleet access for the chat agent (az_console). OFF by default; when
+    # on, the chat can diagnose the live LM servers via the secretless SP login
+    # helper. Mutation is separately gated and defaults OFF (read-only), so the
+    # safe default is diagnosis-only. Only available on LM-AB where the helper
+    # exists; elsewhere the tools report Azure access as unavailable.
+    config.setdefault("CHAT_AZURE_ENABLED", False)
+    config.setdefault("CHAT_AZURE_ALLOW_MUTATION", False)
+    config.setdefault("AZURE_LM_RESOURCE_GROUP", "LM")
+    config.setdefault("AZURE_LOGIN_HELPER", "/usr/local/bin/lm-az-login")
     config.setdefault("enabled_log_modules", [])
     # Module list for the per-module log-filing grid = the operator's module→repo
     # map keys (a module must map to a repo before its logs can be filed).
