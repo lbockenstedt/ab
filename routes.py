@@ -1989,6 +1989,14 @@ async def settings_page(request: Request):
     config.setdefault("feature_automerge_repos", [])
     config.setdefault("feature_automerge_min_confidence", 1.0)
     config.setdefault("feature_automerge_require_clean", True)
+    # DEFAULT-DENY allowlist gate (feature_allowlist): even a clean, high-
+    # confidence, boundary-free PR only auto-merges if its diff is a provably-
+    # additive shape (docs-only / log-only / tooltip-only). On by default so
+    # the safe fallback for anything behaviour-changing is human approval.
+    # `feature_automerge_allowlist` = None means "use feature_allowlist's
+    # DEFAULT_ALLOWLIST"; an operator may narrow it to a subset.
+    config.setdefault("feature_automerge_require_allowlist", True)
+    config.setdefault("feature_automerge_allowlist", None)
     config.setdefault("enabled_log_modules", [])
     # Module list for the per-module log-filing grid = the operator's module→repo
     # map keys (a module must map to a repo before its logs can be filed).
