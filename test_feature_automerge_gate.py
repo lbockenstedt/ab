@@ -19,6 +19,7 @@ import ast
 import sys
 
 import feature_boundary as real_feature_boundary
+import feature_allowlist as real_feature_allowlist
 
 
 def _load_ns():
@@ -30,7 +31,8 @@ def _load_ns():
             seg = ast.get_source_segment(src, node)
             break
     assert seg, "_automerge_decision not found in pr_review.py"
-    ns = {"feature_boundary": real_feature_boundary}
+    ns = {"feature_boundary": real_feature_boundary,
+          "feature_allowlist": real_feature_allowlist}
     exec(seg, ns)
     return ns
 
@@ -49,6 +51,10 @@ def _clean_config(**overrides):
         "feature_automerge_repos": ["owner/repo"],
         "feature_automerge_min_confidence": 0.90,
         "feature_automerge_require_clean": True,
+        # Existing cases below isolate ONE non-allowlist gate each, so keep the
+        # DEFAULT-DENY allowlist gate off in this baseline; it has its own
+        # dedicated section at the end of main(). (In production it defaults ON.)
+        "feature_automerge_require_allowlist": False,
         "feature_boundaries": [],
     }
     cfg.update(overrides)
@@ -169,6 +175,39 @@ def main():
                             _clean_config(feature_boundaries=[{**boundaries[0], "enabled": False}]),
                             _clean_pr_meta())
     ok &= _check("a DISABLED boundary rule never blocks even with a matching path", should is True)
+
+    # ── DEFAULT-DENY allowlist gate (feature_allowlist) ─────────────────────
+    # When require_allowlist is ON, a fully-cleared PR still only auto-merges
+    # if its diff is a provably-additive shape. This is the positive gate that
+    # makes "behaviour-changing -> human" mechanical, not trust-based.
+    docs_files = [{"path": "ab/docs/foo.md", "status": "modified",
+                   "additions": 2, "deletions": 1, "patch": "@@ -1 +1,2 @@\n-old\n+new\n+more\n"}]
+    code_files = [{"path": "ab/routes.py", "status": "modified", "additions": 5,
+                   "deletions": 0, "patch": "@@ -1 +1,5 @@\n+def handler():\n+    return do_thing()\n"}]
+    log_files = [{"path": "ab/routes.py", "status": "modified", "additions": 1,
+                  "deletions": 0, "patch": "@@ -1 +1,2 @@\n+    logger.info('started thing')\n"}]
+
+    should, reason = decide(_clean_rec(), ["ab/routes.py"],
+                            _clean_config(feature_automerge_require_allowlist=True),
+                            _clean_pr_meta())
+    ok &= _check("allowlist ON but NO changed_files supplied -> blocked (fail closed)", should is False)
+    should, reason = decide(_clean_rec(), ["ab/routes.py"],
+                            _clean_config(feature_automerge_require_allowlist=True),
+                            _clean_pr_meta(), None, code_files)
+    ok &= _check("allowlist ON + behaviour-changing code diff -> blocked (routes to human)", should is False)
+    should, reason = decide(_clean_rec(), ["ab/docs/foo.md"],
+                            _clean_config(feature_automerge_require_allowlist=True),
+                            _clean_pr_meta(), None, docs_files)
+    ok &= _check("allowlist ON + docs-only diff -> auto-merge approved", should is True)
+    should, reason = decide(_clean_rec(), ["ab/routes.py"],
+                            _clean_config(feature_automerge_require_allowlist=True),
+                            _clean_pr_meta(), None, log_files)
+    ok &= _check("allowlist ON + pure log-only diff -> auto-merge approved", should is True)
+    should, reason = decide(_clean_rec(), ["ab/docs/foo.md"],
+                            _clean_config(feature_automerge_require_allowlist=True,
+                                          feature_automerge_allowlist=["log-only"]),
+                            _clean_pr_meta(), None, docs_files)
+    ok &= _check("allowlist ON but docs-only NOT in the enabled subset -> blocked", should is False)
 
     print()
     if ok:

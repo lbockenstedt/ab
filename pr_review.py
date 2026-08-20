@@ -64,6 +64,7 @@ from datetime import timedelta
 from github_ops import get_monitored_repos
 from app_state import update_task_state, record_pr_review, update_pr_review, mark_pr_approved, state
 import feature_boundary
+import feature_allowlist
 from pr_actions import approve_pr, merge_pr
 from secrets_scan import check_secrets
 from check_tooltips import find_missing_tooltips_in_files
@@ -776,7 +777,7 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
 _FEATURE_DRIVE_MARKER_RE = re.compile(r"<!--\s*ab-feature-drive:\s*([^\s>]+)#(\d+)\s*-->")
 
 
-def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None):
+def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, changed_files=None):
     """Pure function — the SINGLE choke point for whether feature auto-drive
     auto-approves + auto-merges a PR instead of waiting for a human. Returns
     (should_merge: bool, reason: str).
@@ -862,6 +863,20 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None):
         ids = ", ".join(h.get("id", "?") for h in hits)
         return False, f"diff touches configured boundary path(s): {ids}"
 
+    # DEFAULT-DENY allowlist (feature_allowlist) — the positive counterpart to
+    # the boundary deny-list above. Even a fully-reviewed, boundary-clean, high-
+    # confidence PR only auto-merges if its diff is one of the small, provably-
+    # additive shapes the operator is willing to merge unattended (docs-only /
+    # log-only / tooltip-only). Everything behaviour-changing routes to a human.
+    # `changed_files` carries the per-file patch text this needs; when absent
+    # (a caller that only has path strings) classify() fails closed. This gate
+    # can only ever make auto-merge MORE restrictive.
+    if config.get("feature_automerge_require_allowlist", True):
+        verdict = feature_allowlist.classify(changed_files or [],
+                                             config.get("feature_automerge_allowlist"))
+        if not verdict.get("auto_approvable"):
+            return False, "not on additive auto-approve allowlist: " + verdict.get("reason", "")
+
     score = min(conf1, conf2)
     return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
 
@@ -879,7 +894,9 @@ def _maybe_auto_merge(gh, repo, pr, config):
     try:
         key = "%s#%s" % (repo.full_name, pr.number)
         rec = (state.get("pr_reviews") or {}).get(key) or {}
-        changed_paths = [f.filename for f in pr.get_files()]
+        pr_files = list(pr.get_files())
+        changed_paths = [f.filename for f in pr_files]
+        changed_files = feature_allowlist.files_from_pr_files(pr_files)
         marker_match = _FEATURE_DRIVE_MARKER_RE.search(pr.body or "")
         pr_meta = {
             "repo": repo.full_name,
@@ -889,7 +906,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
             "mergeable": getattr(pr, "mergeable", None),
         }
         state_flags = {"paused": bool(state.get("paused")), "blackout": bool(state.get("blackout"))}
-        should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags)
+        should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags, changed_files)
         if not should_merge:
             logger.debug("pr_review: auto-merge skipped for %s (%s)", key, reason)
             return
