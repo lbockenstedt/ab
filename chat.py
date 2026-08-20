@@ -29,6 +29,28 @@ _CHAT_INDEX_CACHE = {}            # key("gh"|"notoken") -> {"ts": float, "text":
 _CHAT_INDEX_LOCK = threading.Lock()
 
 
+# Appended to the grounded chat system prompt. AppBuilder's chat manages real
+# production systems, so a confident hallucination (a fabricated "security scan"
+# naming repos that don't exist, or invented results) is actively harmful. This
+# forces the model to stay grounded in what the tools actually returned.
+_CHAT_GROUNDING_RULE = (
+    "GROUNDING RULES (mandatory):\n"
+    "- You are AppBuilder (AB), an autonomous agent that manages a specific set "
+    "of real repositories and servers. The ONLY repositories you manage are "
+    "those returned by the list_repos tool — never reference placeholder or "
+    "example repos (e.g. octocat/Hello-World, exampleUser/ProjectX).\n"
+    "- State only facts you obtained from a tool call in THIS conversation. Never "
+    "invent repository names, file paths, file contents, commands, tool output, "
+    "or scan/audit results.\n"
+    "- To do real work (scan code, read a file, inspect an issue, diagnose a "
+    "server), you MUST call the appropriate tool and base your answer on its "
+    "actual result. If a needed tool or capability is unavailable, say so plainly "
+    "instead of describing hypothetical results.\n"
+    "- If you could not complete something, report what you actually did and what "
+    "remains — do not fill gaps with plausible-sounding fabrication."
+)
+
+
 def _build_chat_context_index_uncached(config, gh=None):
     lines = ["## AppBuilder Context (snapshot — may be up to ~60s stale; use tools for live detail)"]
     monitored = get_monitored_repos(config)
@@ -862,6 +884,22 @@ def _run_chat_reply_orchestrated(chat_id, config):
         import agent_orchestrator
         progress = {"parts": []}
 
+        # This path only runs when there is no GitHub token (no tool grounding),
+        # so the orchestrator can't scan anything — but it must at least KNOW
+        # which real repos/servers AB manages and must not fabricate. Prepend the
+        # AB context index + grounding rule so its agents answer about AB, not
+        # invented placeholder repos.
+        try:
+            index_text = build_chat_context_index(config, gh=None)
+        except Exception:
+            index_text = ""
+        grounded_request = request_text
+        if index_text:
+            grounded_request = (
+                f"{index_text}\n\n{_CHAT_GROUNDING_RULE}\n\n"
+                f"User request:\n{request_text}"
+            )
+
         def _progress(ev):
             kind = ev.get("event")
             if kind == "planned":
@@ -880,7 +918,7 @@ def _run_chat_reply_orchestrated(chat_id, config):
                 _set_chat_stream_status(chat_id, "Merging results…")
 
         result = agent_orchestrator.orchestrate(
-            request_text, config, progress_cb=_progress, task_id=chat_id,
+            grounded_request, config, progress_cb=_progress, task_id=chat_id,
         )
         final = result.final_text or ""
         # Only annotate when the request actually fanned out, so single-agent
@@ -1058,7 +1096,18 @@ def run_chat_reply(chat_id):
     """
     try:
         config = load_config()
-        if config.get("ORCHESTRATOR_ENABLED", False):
+        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+        gh = Github(token) if token else None
+
+        # The multi-agent orchestrator has NO tools and NO AppBuilder context —
+        # its agents answer from the raw prompt alone. When it front-ran chat it
+        # fabricated grounded work (e.g. a "security scan" that invented repos
+        # like octocat/Hello-World and fake npm-audit results instead of scanning
+        # the real monitored repos). It must therefore NEVER preempt the grounded
+        # tool loop below: only use it when there is genuinely no tool grounding
+        # available (no GitHub token) AND the operator opted in. Anything that can
+        # be grounded with real tools goes through run_agent_loop.
+        if gh is None and config.get("ORCHESTRATOR_ENABLED", False):
             if _run_chat_reply_orchestrated(chat_id, config):
                 return
             logger.warning("orchestrated chat turn failed; falling back to the standard path")
@@ -1077,12 +1126,9 @@ def run_chat_reply(chat_id):
             _set_chat_stream_error(chat_id, "Conversation not found")
             return
 
-        token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
-        gh = Github(token) if token else None
-
         # Index gives awareness even without tools; gh passed so issue titles fill in.
         index_text = build_chat_context_index(config, gh=gh)
-        system_prompt = base_system + "\n\n" + index_text
+        system_prompt = base_system + "\n\n" + index_text + "\n\n" + _CHAT_GROUNDING_RULE
         history = conv.get("messages", [])
         window = history[-window_size:]
         messages = [{"role": "system", "content": system_prompt}] + list(window)
