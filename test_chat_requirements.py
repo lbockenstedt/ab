@@ -37,7 +37,8 @@ def _load_ns(func_names, extra_ns):
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in func_names:
             segs.append(ast.get_source_segment(src, node))
-    ns = {"json": json, "logger": _NoLog(), "traceback": __import__("traceback")}
+    ns = {"json": json, "logger": _NoLog(), "traceback": __import__("traceback"),
+          "_CHAT_GROUNDING_RULE": "(grounding rules)"}
     ns.update(extra_ns)
     exec("\n\n".join(segs), ns)
     return ns
@@ -219,6 +220,72 @@ def main():
                  seen["tool"] is my_tool)
     ok &= _check("run_agent_loop: final_requirements passed through to the forced final turn",
                  seen["final"] is my_final)
+
+    # ---- orchestrator gating: must NOT preempt when tools are available ----
+    # Regression guard for the hallucination incident: the tool-less multi-agent
+    # orchestrator fabricated a "security scan" (invented repos/results) because
+    # it front-ran the grounded tool loop. run_chat_reply must only invoke the
+    # orchestrator when there is no GitHub token (no grounding possible); with a
+    # token present it must go straight to the grounded run_agent_loop.
+    def _make_gating_ns():
+        state = {"orchestrated": 0, "agent_loop": 0}
+
+        def _stub_orchestrated(chat_id, config):
+            state["orchestrated"] += 1
+            return True  # pretend it "handled" the turn
+
+        def _stub_agent_loop(*a, **k):
+            state["agent_loop"] += 1
+            return "grounded answer"
+
+        ns = _load_ns(
+            {"run_chat_reply"},
+            {
+                "load_config": lambda: {"CHAT_TOOLS_ENABLED": True, "CHAT_HISTORY_WINDOW": 20,
+                                        "ORCHESTRATOR_ENABLED": True,
+                                        "GITHUB_TOKEN": _make_gating_ns.token},
+                "load_chats": lambda: {},
+                "get_conversation": lambda store, chat_id: {"messages": [{"role": "user", "content": "scan all repos"}]},
+                "os": __import__("os"),
+                "Github": lambda token: object() if token else None,
+                "build_chat_context_index": lambda config, gh=None: "(index)",
+                "call_llm": lambda *a, **k: "x",
+                "run_agent_loop": _stub_agent_loop,
+                "_run_chat_reply_orchestrated": _stub_orchestrated,
+                "_run_chat_reply_simple": lambda chat_id, config: None,
+                "_register_fix_proposal": lambda *a, **k: None,
+                "_confirm_fix_marker": lambda d: "",
+                "CHAT_TOOLS": [{"type": "function", "function": {"name": "noop"}}],
+                "_set_chat_stream_status": lambda chat_id, msg: None,
+                "_set_chat_stream_error": lambda chat_id, msg: None,
+                "_finalize_chat_stream": lambda chat_id, reply: None,
+                "append_chat_message": lambda chat_id, msg: None,
+                "datetime": __import__("datetime").datetime,
+                "_parse_text_tool_calls": lambda text: (text, []),
+                "update_task_state": lambda *a, **k: None,
+                "az_console": type("_AzStub", (), {"azure_enabled": staticmethod(lambda config: False)})(),
+                "AZURE_TOOLS": [],
+            },
+        )
+        return ns, state
+
+    # token present -> grounded loop, orchestrator NOT invoked
+    _make_gating_ns.token = "tok"
+    ns_g1, st1 = _make_gating_ns()
+    ns_g1["run_chat_reply"]("cg1")
+    ok &= _check("orchestrator gating: token present -> orchestrator NOT invoked",
+                 st1["orchestrated"] == 0)
+    ok &= _check("orchestrator gating: token present -> grounded run_agent_loop used",
+                 st1["agent_loop"] == 1)
+
+    # no token -> orchestrator (opt-in) IS invoked, grounded loop not reached
+    _make_gating_ns.token = None
+    ns_g2, st2 = _make_gating_ns()
+    ns_g2["run_chat_reply"]("cg2")
+    ok &= _check("orchestrator gating: no token + enabled -> orchestrator invoked",
+                 st2["orchestrated"] == 1)
+    ok &= _check("orchestrator gating: no token -> grounded loop not reached",
+                 st2["agent_loop"] == 0)
 
     print()
     if ok:
