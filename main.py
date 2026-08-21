@@ -329,6 +329,51 @@ async def catch_exceptions_mid(request: Request, call_next):
             content={"message": "Internal Server Error. Check ab.log for details.", "error": str(e)}
         )
 
+
+from probe_signatures import looks_like_probe  # noqa: E402 — edge scanner classifier
+
+
+def _probe_client_ip(request: Request) -> str:
+    """Best-effort real client IP for a scanner report. If a front proxy stamped
+    X-Forwarded-For, the leftmost entry is the origin; else the direct peer."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return (request.client.host if request.client else "") or ""
+
+
+def _probe_detection_enabled() -> bool:
+    """Per-node toggle for edge HTTPS-port scanner detection. ON unless the
+    operator sets AB_PROBE_DETECTION to a falsey value (env is the reliable
+    per-node switch; inherently safe since it's report-only and the hub's
+    auto-block is itself opt-in and exempts trusted IPs)."""
+    v = str(os.environ.get("AB_PROBE_DETECTION", "")).strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+@app.middleware("http")
+async def detect_https_probe(request: Request, call_next):
+    # HTTPS-port scanner detection at the AppBuilder edge. A request for a path we
+    # never serve (PHP/dotfiles/DB-admin panels/app-server consoles) is a scanner
+    # fingerprinting THIS box, not a real client. Report it up the authenticated
+    # hub tunnel so the hub blocks the source centrally on the NSG, and answer a
+    # bare 404 instead of the SPA. Registered LAST so it is the OUTERMOST
+    # middleware (runs BEFORE require_login) — a scanner is caught pre-auth and
+    # never sees a login redirect. Shares the hub's scanner signatures
+    # (probe_signatures.looks_like_probe), so real in-app routes never trip it.
+    if _probe_detection_enabled() and looks_like_probe(request.url.path):
+        try:
+            from workers import _get_hub_agent_client
+            client = _get_hub_agent_client()
+            if client is not None:
+                client.report_probe(_probe_client_ip(request), request.url.path, request.method)
+        except Exception:  # noqa: BLE001 — telemetry must never break the request
+            logger.debug("probe report failed", exc_info=True)
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    return await call_next(request)
+
 # Shared mutable application state + task-state locks + update_task_state live in
 # app_state.py. Imported here (after config_store + llm_client names are already
 # re-exported into main's namespace, which app_state builds `state` from) and
