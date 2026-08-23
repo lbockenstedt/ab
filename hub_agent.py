@@ -428,6 +428,36 @@ class HubAgentClient:
         finally:
             self._pending.pop(msg_id, None)
 
+    def report_probe(self, source_ip: str, path: str, method: str) -> None:
+        """Fire-and-forget: relay a detected HTTPS-port scanner probe up to the
+        hub (``HTTP_PROBE_REPORT``) so it auto-blocks the source centrally on the
+        NSG — one deny protects every edge. Thread-safe: called from the FastAPI
+        request thread, it schedules the signed send on the agent's own loop. A
+        no-op when not connected/approved (best-effort; the hub also detects
+        probes on its own :443). The hub re-classifies the path server-side and
+        rate-caps this reporter, so a report can never be abused to block an
+        arbitrary victim."""
+        loop = self.loop
+        if loop is None or self._ws is None or self.signer is None or not self._approved:
+            return
+        data = {"source_ip": source_ip or "", "path": path, "method": method,
+                "node": self.spoke_id or "appbuilder"}
+
+        async def _send():
+            try:
+                msg = {"header": {"message_id": str(uuid.uuid4()),
+                                  "timestamp": round(time.time(), 6),
+                                  "sender_id": self.spoke_id, "destination_id": "hub"},
+                       "payload": {"type": "HTTP_PROBE_REPORT", "data": data}}
+                await self._ws.send(encode_frame(self.signer, msg))
+            except Exception as e:  # noqa: BLE001
+                logger.debug("HTTP_PROBE_REPORT send failed: %s", e)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_send(), loop)
+        except Exception:  # noqa: BLE001 — never break the request path over telemetry
+            pass
+
     async def _handle_analyze_logs(self, msg, data):
         """The LM hub has no LLM of its own, so it delegates Log Analysis to us (we
         own the models + already read hub logs). Run analyze_logs off the event-loop
