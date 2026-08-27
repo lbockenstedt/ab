@@ -166,7 +166,59 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 64000,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "enabled": True,
+     "notes": "generic fallback for Copilot models with no class rule below. Copilot is NOT "
+              "free — every call spends a premium request — so this stays 'cheap', never 'free'."},
+    # Per-model capability tiers for the GitHub Copilot roster. Copilot bills a
+    # premium request per call and the multiplier is PER MODEL, spanning ~80x:
+    # Opus 27x and GPT-5.5 57x at the top, GPT-4o / mini / Haiku 0.33x at the
+    # bottom. The single `*` rule above therefore priced Opus-via-Copilot the
+    # same as GPT-4o-via-Copilot, which broke the picker in BOTH directions:
+    # `cheap` made it reach for Opus on trivial work (burning the priciest
+    # request there is), while prefer_capable ranks frontier ABOVE cheap, so the
+    # strongest model was skipped for exactly the hard jobs it exists for. These
+    # mirror the anthropic/claude_cli ladders so one model is tiered the same way
+    # whichever provider serves it. More-specific match beats the generic `*`.
+    {"id": "copilot-opus", "provider": "copilot", "match": "*opus*", "label": "Claude Opus (via Copilot)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True,
+     "notes": "27x premium-request multiplier — the most expensive model Copilot serves. "
+              "frontier/large matches anthropic-opus and claude-cli-opus so the picker "
+              "RESERVES it for the hardest work instead of spending it on triage."},
+    {"id": "copilot-sonnet", "provider": "copilot", "match": "*sonnet*", "label": "Claude Sonnet (via Copilot)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "9x multiplier; frontier/large mirrors anthropic-sonnet"},
+    {"id": "copilot-haiku", "provider": "copilot", "match": "*haiku*", "label": "Claude Haiku (via Copilot)",
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "0.33x multiplier; cheap/medium mirrors anthropic-haiku"},
+    {"id": "copilot-gemini-pro", "provider": "copilot", "match": "*gemini*pro*", "label": "Gemini Pro (via Copilot)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "6x multiplier; frontier/large mirrors google-pro"},
+    # `gpt-5*mini*` is deliberately MORE specific than `gpt-5*` so gpt-5-mini
+    # (0.33x) stays cheap instead of inheriting the gpt-5 frontier tier.
+    {"id": "copilot-gpt5-mini", "provider": "copilot", "match": "gpt-5*mini*", "label": "GPT-5 mini (via Copilot)",
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "0.33x multiplier — the cheapest GPT-5 variant"},
+    {"id": "copilot-gpt5", "provider": "copilot", "match": "gpt-5*", "label": "GPT-5 class (via Copilot)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "6x base / 57x for GPT-5.5 — priced as frontier so it is reserved"},
+    {"id": "copilot-gpt4", "provider": "copilot", "match": "gpt-4*", "label": "GPT-4 class (via Copilot)",
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
+     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "0.33x multiplier (gpt-4o / gpt-4o-mini)"},
     {"id": "anthropic-haiku", "provider": "anthropic", "match": "*haiku*", "label": "Claude Haiku class",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 200000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -391,16 +443,15 @@ _CLAUDE_CLI_MODEL_RULE_IDS = frozenset({
 })
 
 
-def upgrade_claude_cli_model_rules(rules):
-    """Return (new_rules, added_ids): a COPY of `rules` with any missing
-    per-model claude_cli rules (_CLAUDE_CLI_MODEL_RULE_IDS) appended.
+def _append_missing_default_rules(rules, wanted_ids):
+    """Return (new_rules, added_ids): a COPY of `rules` with any DEFAULT rule
+    whose id is in `wanted_ids` appended when it is missing.
 
-    These categorize the claude_cli roster by model strength so Haiku (capped
-    at medium) is never treated like Opus/Sonnet (large) — the generic `*`
-    claude_cli rule alone gives every model the same large ceiling. Append-only
+    Shared by the per-model upgrade helpers (claude_cli, copilot). Append-only
     and skipped when the rule id already exists OR the operator already curated
-    a rule for that exact (provider, match). Never reorders or mutates existing
-    rules; the more-specific match wins by specificity (see resolve())."""
+    a rule for that exact (provider, match), so a hand-tuned registry is never
+    overridden. Never reorders or mutates existing rules; the more-specific
+    match wins by specificity (see resolve())."""
     rules = list(rules or [])
     existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
     existing_pairs = {
@@ -409,7 +460,7 @@ def upgrade_claude_cli_model_rules(rules):
     }
     added_ids = []
     for default in DEFAULT_MODEL_RULES:
-        if default.get("id") not in _CLAUDE_CLI_MODEL_RULE_IDS:
+        if default.get("id") not in wanted_ids:
             continue
         if default.get("id") in existing_ids:
             continue
@@ -422,6 +473,41 @@ def upgrade_claude_cli_model_rules(rules):
         existing_ids.add(default.get("id"))
         existing_pairs.add(pair)
     return rules, added_ids
+
+
+def upgrade_claude_cli_model_rules(rules):
+    """Return (new_rules, added_ids): a COPY of `rules` with any missing
+    per-model claude_cli rules (_CLAUDE_CLI_MODEL_RULE_IDS) appended.
+
+    These categorize the claude_cli roster by model strength so Haiku (capped
+    at medium) is never treated like Opus/Sonnet (large) — the generic `*`
+    claude_cli rule alone gives every model the same large ceiling."""
+    return _append_missing_default_rules(rules, _CLAUDE_CLI_MODEL_RULE_IDS)
+
+
+#: Per-model copilot capability rules (see DEFAULT_MODEL_RULES). Appended to an
+#: already-persisted registry for the same reason as the claude_cli set: without
+#: them the generic copilot `*` rule prices EVERY Copilot model as "cheap",
+#: including Claude Opus — whose Copilot premium-request multiplier (27x) makes
+#: it the single most expensive model available.
+_COPILOT_MODEL_RULE_IDS = frozenset({
+    "copilot-opus", "copilot-sonnet", "copilot-haiku", "copilot-gemini-pro",
+    "copilot-gpt5-mini", "copilot-gpt5", "copilot-gpt4",
+})
+
+
+def upgrade_copilot_model_rules(rules):
+    """Return (new_rules, added_ids): a COPY of `rules` with any missing
+    per-model copilot rules (_COPILOT_MODEL_RULE_IDS) appended.
+
+    An operator who configured Copilot before this ladder existed has the old
+    single `*` rule frozen into config["model_registry"], which (a) let the
+    cost-first picker spend a 27x Opus request on trivial work and (b) ranked
+    Opus BELOW frontier models under prefer_capable, skipping it for the hard
+    jobs it exists for. Append-only and idempotent, exactly like the claude_cli
+    upgrade — an operator's own copilot rule for the same match is left
+    untouched."""
+    return _append_missing_default_rules(rules, _COPILOT_MODEL_RULE_IDS)
 
 
 def upgrade_openrouter_free_router_rule(rules):

@@ -100,6 +100,25 @@ def main():
                 and reg.resolve("anthropic", "claude-sonnet-5", {})["cost_tier"] == "frontier"
                 and reg.resolve("anthropic", "claude-opus-4-8", {})["cost_tier"] == "frontier")
 
+    # --- copilot per-model ladder (Copilot is NOT free — premium request per
+    # call, multiplier is per-model: Opus 27x vs gpt-4o 0.33x) ---------------
+
+    ok &= _check("copilot opus/sonnet are frontier, haiku/gpt-4 are cheap",
+                reg.resolve("copilot", "claude-opus-4.6", {})["cost_tier"] == "frontier"
+                and reg.resolve("copilot", "claude-sonnet-4.6", {})["cost_tier"] == "frontier"
+                and reg.resolve("copilot", "claude-haiku-4.5", {})["cost_tier"] == "cheap"
+                and reg.resolve("copilot", "gpt-4o", {})["cost_tier"] == "cheap")
+    ok &= _check("copilot Opus is tiered the SAME as anthropic/claude_cli Opus (frontier+large)",
+                reg.resolve("copilot", "claude-opus-4.6", {})["cost_tier"]
+                == reg.resolve("anthropic", "claude-opus-4-8", {})["cost_tier"]
+                == reg.resolve("claude_cli", "opus", {})["cost_tier"] == "frontier"
+                and reg.resolve("copilot", "claude-opus-4.6", {})["max_complexity"] == "large")
+    ok &= _check("copilot gpt-5-mini (0.33x) stays cheap — 'gpt-5*mini*' outranks 'gpt-5*'",
+                reg.resolve("copilot", "gpt-5-mini", {})["cost_tier"] == "cheap"
+                and reg.resolve("copilot", "gpt-5", {})["cost_tier"] == "frontier")
+    ok &= _check("copilot is never 'free' — an unmatched model still falls back to cheap",
+                reg.resolve("copilot", "some-unknown-model", {})["cost_tier"] == "cheap")
+
     # --- _model_param_b / _complexity_from_param_b (ollama size derivation) -
 
     ok &= _check("_model_param_b parses 'qwen2.5-coder:14b' -> 14.0",
@@ -343,6 +362,31 @@ def main():
     _, cc_own_added = reg.upgrade_claude_cli_model_rules(cc_own)
     ok &= _check("claude_cli per-model top-up never overrides an operator's own (provider, match) rule",
                 "claude-cli-haiku" not in cc_own_added)
+
+    # --- upgrade_copilot_model_rules: an install frozen with only the generic
+    # copilot `*` rule priced Opus (27x premium request) as "cheap" ----------
+
+    frozen_copilot = [{"id": "copilot", "provider": "copilot", "match": "*",
+                       "cost_tier": "cheap", "max_complexity": "large",
+                       "context_window": 64000, "enabled": True}]
+    ok &= _check("frozen generic copilot rule mis-prices Opus as cheap (the bug)",
+                reg.resolve("copilot", "claude-opus-4.6",
+                            {"model_registry": frozen_copilot})["cost_tier"] == "cheap")
+    cp_top, cp_added = reg.upgrade_copilot_model_rules(frozen_copilot)
+    ok &= _check("copilot top-up injects the per-model rules into a frozen registry",
+                "copilot-opus" in cp_added
+                and reg.resolve("copilot", "claude-opus-4.6",
+                                {"model_registry": cp_top})["cost_tier"] == "frontier")
+    _, cp_added2 = reg.upgrade_copilot_model_rules(cp_top)
+    ok &= _check("copilot top-up is idempotent — a second run adds nothing", not cp_added2)
+    _, cp_default_added = reg.upgrade_copilot_model_rules(reg.DEFAULT_MODEL_RULES)
+    ok &= _check("DEFAULT_MODEL_RULES already ships the copilot ladder — top-up is a no-op",
+                not cp_default_added)
+    cp_own = [{"id": "my-copilot-opus", "provider": "copilot", "match": "*opus*",
+               "cost_tier": "cheap", "max_complexity": "small", "enabled": True}]
+    _, cp_own_added = reg.upgrade_copilot_model_rules(cp_own)
+    ok &= _check("copilot top-up never overrides an operator's own (provider, match) rule",
+                "copilot-opus" not in cp_own_added)
 
     # --- OpenRouter Free Models Router rule + upgrade_openrouter_free_router_rule ---
 
