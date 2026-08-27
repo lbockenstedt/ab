@@ -266,6 +266,28 @@ def _notify_bug_fixed(issue):
         logger.debug(f"_notify_bug_fixed skipped: {e}")
 
 
+def _notify_bug_in_progress(issue):
+    """If a GitHub issue came from an LM 'File a Bug' report (hidden bug-report-id
+    marker in the body), tell the hub work has STARTED so the LM bug-reports UI
+    shows 'In Progress' (distinct from the passive 'Filed'). Best-effort +
+    non-fatal — a failure here must never block the actual fix."""
+    try:
+        m = _BUG_REPORT_ID_RE.search(getattr(issue, "body", "") or "")
+        if not m:
+            return
+        from hub_agent import hub_agent_client
+        if not hub_agent_client:
+            return
+        hub_agent_client.request_sync(
+            "MARK_BUG_IN_PROGRESS",
+            {"id": m.group(1), "issue_url": getattr(issue, "html_url", "") or ""},
+            timeout=10)
+        logger.info(f"MARK_BUG_IN_PROGRESS sent for bug-report {m.group(1)} "
+                    f"({getattr(issue, 'html_url', '')})")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_notify_bug_in_progress skipped: {e}")
+
+
 @contextlib.contextmanager
 def _authenticated_remote(remote, plain_url, token):
     """Re-embeds the GitHub token on a remote only for the duration of a push/pull,
@@ -2136,6 +2158,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             state["processed"] = processed
             update_task_state(task_id=issue_id, action="end")
             return False, f"Non-actionable: {request_msg}"
+
+        # Actionable → real fix work is about to begin (repo clone + LLM fix
+        # attempts). Tell the hub so an LM-filed bug report flips to "In Progress"
+        # (best-effort, never blocks the fix).
+        _notify_bug_in_progress(issue)
 
         # llm_preference maps straight onto the picker's restrict= hard filter —
         # "cloud"/"local"/"claude" narrow WHICH tier is eligible, same meaning as
