@@ -36,6 +36,13 @@ import llm_perf
 import model_registry
 import model_selection
 
+# Timeout support: Python 3.9 uses threading, Python 3.11+ uses contextlib.timeout
+try:
+    from contextlib import timeout
+    _TIMEOUT_AVAILABLE = True
+except ImportError:
+    _TIMEOUT_AVAILABLE = False
+
 # ============================================================================
 # Multi-Provider LLM Routing
 # ============================================================================
@@ -2036,6 +2043,14 @@ def _model_key(provider, base_url, model):
     return ((provider or "").lower().strip(), (base_url or "").strip().rstrip("/"), model or "")
 
 
+def _call_provider_wrapper(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                           usage_out, **kwargs):
+    """Wrapper function for threading-based timeout in Python 3.9 compatibility.
+    It captures the result from _call_provider into a mutable variable."""
+    usage_out["_result"] = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream,
+                                          task_id, config, usage_out=usage_out, **kwargs)
+
+
 def _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
                          **kwargs):
     """Wraps _call_provider with wire-latency timing + usage capture, then
@@ -2046,12 +2061,46 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
 
     On failure this re-raises unchanged and records nothing — a failed call
     has no latency signal worth ranking on, and _try_provider's existing
-    credit/rate-limit bookkeeping already covers that case."""
+    credit/rate-limit bookkeeping already covers that case.
+
+    Also wraps the underlying _call_provider call with a timeout to prevent
+    indefinite hangs on network or provider issues."""
     key = _model_key(provider, base_url, model)
     usage_out = {}
     t0 = time.monotonic()
-    result = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                            usage_out=usage_out, **kwargs)
+
+    # Extract timeout from config, defaulting to 900 seconds if not present
+    timeout_s = int(config.get("LLM_TIMEOUT", 900))
+
+    # Wrap the actual LLM call with a timeout to prevent hanging
+    # This catches cases where the provider never responds (stuck network,
+    # rate-limit cooldown that isn't being reported, etc.)
+    if _TIMEOUT_AVAILABLE:
+        # Python 3.11+: use contextlib.timeout for clean timeout handling
+        try:
+            with timeout(timeout_s):
+                result = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                                        usage_out=usage_out, **kwargs)
+        except TimeoutError:
+            logger.warning("%s/%s timed out after %d seconds — raising TimeoutError to trigger failover",
+                           provider, model, timeout_s)
+            raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
+    else:
+        # Python 3.9: use threading-based timeout (fallback)
+        thread = threading.Thread(target=_call_provider_wrapper,
+                                  args=(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                                        usage_out, **kwargs),
+                                  daemon=True)
+        thread.start()
+        thread.join(timeout=timeout_s)
+
+        if thread.is_alive():
+            logger.warning("%s/%s timed out after %d seconds — raising TimeoutError to trigger failover",
+                           provider, model, timeout_s)
+            thread.join()  # Give it a moment to clean up
+            raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
+        result = usage_out.get("_result")
+
     latency_ms_wire = (time.monotonic() - t0) * 1000.0
     try:
         out_tok = usage_out.get("output_tokens")
