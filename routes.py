@@ -2790,6 +2790,23 @@ async def copilot_models(provider: str = "copilot"):
         return {"models": [], "error": str(e)}
 
 
+def _refresh_llm_endpoints():
+    """Kick an immediate re-probe of the configured LLM endpoints.
+
+    Without this, `state["llm_endpoints_online"]` — which the header Providers
+    chip renders from — was only rebuilt by connectivity_worker's 15-minute
+    tick, so a just-added provider/model did not appear until then. Imported
+    lazily because workers imports main, and a module-level import here would
+    close an import cycle. Best-effort: never let a refresh failure break the
+    save that triggered it.
+    """
+    try:
+        from workers import refresh_llm_endpoints_async
+        refresh_llm_endpoints_async()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_refresh_llm_endpoints failed: {e}")
+
+
 @router.post("/api/llm/entries")
 async def create_llm_entry(request: Request):
     """Create a new named provider/model entry."""
@@ -2815,6 +2832,7 @@ async def create_llm_entry(request: Request):
     config = load_config()
     config.setdefault("llm_entries", []).append(entry)
     save_config(config)
+    _refresh_llm_endpoints()
     return {"status": "ok", "entry": entry}
 
 
@@ -2847,6 +2865,7 @@ async def update_llm_entry(entry_id: str, request: Request):
             if "enabled" in data:
                 e["enabled"] = bool(data.get("enabled"))
             save_config(config)
+            _refresh_llm_endpoints()
             return {"status": "ok", "entry": e}
     return JSONResponse(status_code=404, content={"error": "entry not found"})
 
@@ -2857,6 +2876,7 @@ async def delete_llm_entry(entry_id: str):
     config = load_config()
     config["llm_entries"] = [e for e in (config.get("llm_entries") or []) if e.get("id") != entry_id]
     save_config(config)
+    _refresh_llm_endpoints()
     return {"status": "ok"}
 
 
