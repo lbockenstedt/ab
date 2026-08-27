@@ -1554,6 +1554,16 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
                         enable_native_tools=_native,
                         json_schema=_FIX_GENERATION_JSON_SCHEMA,
                         requirements=requirements, used_model_out=used_model_out)
+    except (llm_client.LlmHumanEscalationNeeded, llm_client.LLMCreditExhausted):
+        # Typed control-flow signals from the picker must reach the fix loop's
+        # dedicated handlers with their type intact. Wrapping them in a bare
+        # Exception here erased LlmHumanEscalationNeeded's type, so the loop's
+        # `except LlmHumanEscalationNeeded` (which posts the clean "held for
+        # human review" note and stops) never fired — the escalation fell to the
+        # generic per-attempt error path, was retried, and finally surfaced as a
+        # raw, truncated "No candidate satisfies requirements (reqs=LlmRequire…"
+        # repr dumped onto the issue. Re-raise unchanged.
+        raise
     except Exception as e:
         raise Exception(f"Fix generation failed: {e}")
 
