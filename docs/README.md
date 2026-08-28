@@ -1,3 +1,8 @@
+---
+summary: "Doc index for the ab repo: links to this module's feature reference and the shared LM architecture/topology page."
+keywords: [ab, documentation, index]
+---
+
 # ab — docs
 
 This repo carries a copy of its LM feature page plus the shared topology page:
