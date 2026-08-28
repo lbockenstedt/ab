@@ -317,20 +317,32 @@ def main():
                 op_changed is False and op_out[0]["cost_tier"] == "cheap")
 
     # --- per-model claude_cli rules: a strength ladder (Haiku<Sonnet<Opus) ----
-    ok &= _check("claude_cli Haiku resolves to small (the light/cheap model)",
-                reg.resolve("claude_cli", "claude-haiku-4-5-20251001", {})["max_complexity"] == "small")
-    ok &= _check("claude_cli Sonnet resolves to medium (balanced)",
-                reg.resolve("claude_cli", "claude-sonnet-4-6", {})["max_complexity"] == "medium")
+    # The ladder is now carried by capability_rank, NOT by capping
+    # max_complexity. The cap was a hard filter, so it excluded Haiku/Sonnet
+    # from work they can do instead of ranking them below Opus — and on a
+    # claude_cli-only install that left complexity="large" with no candidate
+    # at all. Both now report their honest ceiling and mirror their anthropic
+    # twins; ordering is asserted via capability_rank below.
+    ok &= _check("claude_cli Haiku reports its honest ceiling (medium, mirrors anthropic-haiku)",
+                reg.resolve("claude_cli", "claude-haiku-4-5-20251001", {})["max_complexity"] == "medium")
+    ok &= _check("claude_cli Sonnet reports its honest ceiling (large, mirrors anthropic-sonnet)",
+                reg.resolve("claude_cli", "claude-sonnet-4-6", {})["max_complexity"] == "large")
+    ok &= _check("the Haiku<Sonnet<Opus ladder survives as capability_rank",
+                reg.capability_rank(reg.resolve("claude_cli", "claude-haiku-4-5-20251001", {}))
+                < reg.capability_rank(reg.resolve("claude_cli", "claude-sonnet-4-6", {}))
+                < reg.capability_rank(reg.resolve("claude_cli", "claude-opus-5", {})))
     ok &= _check("claude_cli Opus resolves to large (the hardest-work default)",
                 reg.resolve("claude_cli", "claude-opus-5", {})["max_complexity"] == "large")
     ok &= _check("an unrecognized claude_cli model falls back to the generic rule (large)",
                 reg.resolve("claude_cli", "claude-future-99", {})["max_complexity"] == "large")
     _h = reg.resolve("claude_cli", "claude-haiku-4-5-20251001", {})
-    ok &= _check("Haiku keeps the agentic caps (mutating agent) while capped at small",
+    ok &= _check("Haiku keeps the agentic caps (mutating agent)",
                 _h["supports_mutating_agent"] is True and _h["cost_tier"] == "frontier")
 
-    # feature_build (large + mutating) must escalate to Opus — Haiku (small) and
-    # Sonnet (medium) are both below the large ceiling, so only Opus qualifies.
+    # feature_build (large + mutating) must still escalate to Opus. This used to
+    # fall out of the hard complexity filter (only Opus was "large"); now all
+    # three qualify, and Opus wins because complexity="large" makes
+    # capability_rank the primary ordering key in _rank_tier.
     import model_selection as _sel
     def _cc_cand(m):
         return {"key": ("claude_cli", "", m), "provider": "claude_cli", "model": m,
@@ -353,9 +365,13 @@ def main():
     cc_top, cc_added = reg.upgrade_claude_cli_model_rules(frozen_generic)
     ok &= _check("claude_cli per-model top-up appends Haiku/Sonnet/Opus to a generic-only config",
                 set(cc_added) == {"claude-cli-haiku", "claude-cli-sonnet", "claude-cli-opus"})
-    ok &= _check("after top-up, Haiku resolves to small via the frozen config",
+    ok &= _check("after top-up, Haiku resolves via the frozen config and ranks below Opus",
                 reg.resolve("claude_cli", "claude-haiku-4-5-20251001",
-                            {"model_registry": cc_top})["max_complexity"] == "small")
+                            {"model_registry": cc_top})["max_complexity"] == "medium"
+                and reg.capability_rank(reg.resolve("claude_cli", "claude-haiku-4-5-20251001",
+                                                    {"model_registry": cc_top}))
+                    < reg.capability_rank(reg.resolve("claude_cli", "claude-opus-5",
+                                                      {"model_registry": cc_top})))
     _, cc_added2 = reg.upgrade_claude_cli_model_rules(cc_top)
     ok &= _check("claude_cli per-model top-up is idempotent — a second run adds nothing", cc_added2 == [])
     cc_own = [{"id": "my-haiku", "provider": "claude_cli", "match": "*haiku*", "cost_tier": "frontier",
@@ -508,14 +524,65 @@ def main():
               for m in ("claude-sonnet-5", "claude-opus-5")]
     _perf = {"copilot|x|claude-sonnet-5": {"n": 50, "tps": 80.0, "latency_ms": 4411},
              "copilot|x|claude-opus-5":   {"n": 50, "tps": 20.0, "latency_ms": 7414}}
-    def _pick(pc):
+    def _pick(complexity, pc):
         got = sel.select_model(
-            sel.LlmRequirements(complexity="large", prefer_capable=pc), _cands, _perf)
+            sel.LlmRequirements(complexity=complexity, prefer_capable=pc), _cands, _perf)
         return getattr(got, "model", None)
     ok &= _check("prefer_capable picks Opus over a MUCH faster Sonnet in the same tier",
-                _pick(True) == "claude-opus-5")
-    ok &= _check("without prefer_capable the tier is still ordered on speed (Sonnet wins)",
-                _pick(False) == "claude-sonnet-5")
+                _pick("medium", True) == "claude-opus-5")
+    ok &= _check("complexity=large alone also reaches for Opus (no prefer_capable needed)",
+                _pick("large", False) == "claude-opus-5")
+    # Below "large" and without prefer_capable, light work must still take the
+    # fastest model in the tier rather than reaching for the smartest.
+    ok &= _check("ordinary (non-large) work is still ordered on speed — Sonnet wins",
+                _pick("medium", False) == "claude-sonnet-5")
+
+    # capability_rank replaced max_complexity as the escalation mechanism. The
+    # cap was a HARD filter, so it EXCLUDED claude_cli Sonnet/Haiku from work
+    # they can do rather than ranking them second — and on a claude_cli-only
+    # install (session auth, no API keys) there was no Opus to escalate TO.
+    _cc = lambda m: {"key": f"claude_cli|x|{m}", "provider": "claude_cli", "model": m,
+                     "caps": reg.resolve("claude_cli", m, _cfg), "available": True}
+    ok &= _check("claude_cli Sonnet is no longer hard-excluded from complexity=large",
+                getattr(sel.select_model(sel.LlmRequirements(complexity="large"),
+                                         [_cc("claude-sonnet-5")], {}), "model", None)
+                    == "claude-sonnet-5")
+    ok &= _check("escalation still lands on Opus when it IS available",
+                getattr(sel.select_model(
+                    sel.LlmRequirements(complexity="large", prefer_capable=True),
+                    [_cc("claude-sonnet-5"), _cc("claude-haiku-4.5"), _cc("claude-opus-5")],
+                    {}), "model", None) == "claude-opus-5")
+
+    # Backfill migration: the ranks and the two lifted caps live ON rules an
+    # existing install already persisted, so an append-only top-up can't do it.
+    _frozen = [dict(r) for r in reg.DEFAULT_MODEL_RULES]
+    for _r in _frozen:
+        _r.pop("capability_rank", None)
+        if _r.get("id") == "claude-cli-sonnet":
+            _r["max_complexity"] = "medium"
+        if _r.get("id") == "claude-cli-haiku":
+            _r["max_complexity"] = "small"
+    _fixed, _bf = reg.backfill_capability_ranks(_frozen)
+    _, _bf2 = reg.backfill_capability_ranks(_fixed)
+    _byid = {r["id"]: r for r in _fixed}
+    ok &= _check("backfill repairs a frozen pre-capability_rank registry", _bf is True)
+    ok &= _check("backfill is idempotent — a second run changes nothing", _bf2 is False)
+    ok &= _check("backfill lifts the claude_cli sonnet/haiku max_complexity caps",
+                _byid["claude-cli-sonnet"]["max_complexity"] == "large"
+                and _byid["claude-cli-haiku"]["max_complexity"] == "medium")
+    ok &= _check("backfill restores Opus to the top rank on a frozen registry",
+                _byid["copilot-opus"]["capability_rank"] == 95)
+    ok &= _check("backfill never adds, drops or reorders rules",
+                [r["id"] for r in _fixed] == [r["id"] for r in _frozen])
+    _, _bf_default = reg.backfill_capability_ranks(reg.DEFAULT_MODEL_RULES)
+    ok &= _check("DEFAULT_MODEL_RULES already ship ranked — backfill is a no-op",
+                _bf_default is False)
+    _op = [{"id": "claude-cli-sonnet", "provider": "claude_cli", "match": "*sonnet*",
+            "cost_tier": "frontier", "max_complexity": "small",
+            "capability_rank": 10, "enabled": True}]
+    _, _op_changed = reg.backfill_capability_ranks(_op)
+    ok &= _check("backfill leaves an operator's own retuned rule alone",
+                _op_changed is False)
 
     print()
     if ok:

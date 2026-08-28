@@ -140,17 +140,23 @@ DEFAULT_MODEL_RULES = [
     # for feature_build and any large agentic/mutating task). More-specific
     # match beats the generic `*` above.
     {"id": "claude-cli-haiku", "provider": "claude_cli", "match": "*haiku*", "label": "Claude Haiku (via CLI)",
-     "cost_tier": "frontier", "max_complexity": "small", "context_window": 200000,
-     "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
-     "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "capability_rank": 55, "enabled": True,
-     "notes": "fastest/cheapest Claude — capped at small so it handles light agentic/tool "
-              "work; medium escalates to Sonnet and large/feature_build to Opus"},
-    {"id": "claude-cli-sonnet", "provider": "claude_cli", "match": "*sonnet*", "label": "Claude Sonnet (via CLI)",
      "cost_tier": "frontier", "max_complexity": "medium", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "capability_rank": 78, "enabled": True, "notes": "balanced Claude — medium agentic/mutating work; large escalates to Opus"},
+     "capability_rank": 55, "enabled": True,
+     "notes": "fastest Claude; medium mirrors anthropic-haiku. Preference for Sonnet/Opus "
+              "is carried by capability_rank (55 < 78 < 95) rather than a max_complexity "
+              "cap, which would hard-exclude it rather than rank it last"},
+    {"id": "claude-cli-sonnet", "provider": "claude_cli", "match": "*sonnet*", "label": "Claude Sonnet (via CLI)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
+     "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
+     "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
+     "capability_rank": 78, "enabled": True,
+     "notes": "balanced Claude; large mirrors anthropic-sonnet. Escalation to Opus is "
+              "expressed by capability_rank (95 > 78), NOT by capping max_complexity — "
+              "that is a hard filter, so the cap EXCLUDED Sonnet from large work instead "
+              "of ranking it second, and a claude_cli-only install had nothing left to "
+              "escalate TO"},
     {"id": "claude-cli-opus", "provider": "claude_cli", "match": "*opus*", "label": "Claude Opus (via CLI)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
@@ -634,6 +640,54 @@ def enable_ollama_cloud_tools(rules):
             r = {**r, "supports_tools": True}
             changed = True
         out.append(r)
+    return out, changed
+
+
+def backfill_capability_ranks(rules):
+    """Return (new_rules, changed): a COPY of `rules` with `capability_rank`
+    backfilled onto the shipped default rules, and the two claude_cli
+    max_complexity caps corrected.
+
+    An append-only top-up cannot do either job -- both live ON rules an existing
+    install already persisted, so a frozen registry would keep ordering the
+    frontier tier on raw speed (Sonnet beating Opus for the hardest work, since
+    within-tier perf scores are min-max normalised and the faster model takes
+    the whole range).
+
+    The max_complexity repair matters more than the ordering. claude_cli Sonnet
+    shipped capped at "medium" and Haiku at "small" to express "escalate to
+    Opus", but max_complexity is a HARD filter -- so the cap did not rank them
+    lower, it removed them. On a claude_cli-only install (session auth, no API
+    keys) a complexity="large" request matched NOTHING and select_model returned
+    None: there was no Opus to escalate to. capability_rank now carries that
+    preference without costing availability.
+
+    Scoped narrowly, exactly like enable_ollama_cloud_tools: only rules whose id
+    is one AppBuilder ships, only where the value still matches the stale
+    default we are replacing. An operator's own rule, or one they have already
+    retuned, is left untouched. Idempotent; never reorders, adds or removes."""
+    shipped_ranks = {r.get("id"): r.get("capability_rank")
+                     for r in DEFAULT_MODEL_RULES if r.get("capability_rank") is not None}
+    # (rule id -> the stale value we replace) — only corrected if unchanged.
+    stale_complexity = {"claude-cli-sonnet": ("medium", "large"),
+                        "claude-cli-haiku": ("small", "medium")}
+    out = []
+    changed = False
+    for r in rules or []:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        rid = r.get("id")
+        new = r
+        if rid in shipped_ranks and new.get("capability_rank") is None:
+            new = {**new, "capability_rank": shipped_ranks[rid]}
+            changed = True
+        if rid in stale_complexity:
+            was, now = stale_complexity[rid]
+            if new.get("max_complexity") == was:
+                new = {**new, "max_complexity": now}
+                changed = True
+        out.append(new)
     return out, changed
 
 

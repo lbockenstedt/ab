@@ -182,11 +182,19 @@ def _rank_tier(tier_candidates, perf, reqs, min_samples):
     # a full-range gap that no additive bonus could ever overcome. Copilot Opus
     # and Sonnet are both frontier/large, so before this the tier was ordered on
     # speed alone and Sonnet (much faster) always beat Opus for exactly the hard
-    # work Opus is reserved for. When the caller explicitly asked for the
-    # smartest option, capability is therefore the PRIMARY key and perf only
-    # breaks ties within an equal rank. Left off the default path on purpose:
-    # ordinary work should still take the fastest model in the chosen tier.
-    if reqs.prefer_capable:
+    # work Opus is reserved for.
+    #
+    # Capability therefore becomes the PRIMARY key for demanding work, with perf
+    # only breaking ties at equal rank. "Demanding" is either an explicit
+    # prefer_capable (the planner/router turn) or complexity="large" — the
+    # latter is what keeps feature_build landing on Opus now that the strength
+    # ladder is expressed as a rank instead of as a max_complexity cap that
+    # hard-excluded the smaller models.
+    #
+    # Everything below large still orders on speed, so light work keeps taking
+    # the fastest model in its tier rather than reaching for the smartest.
+    demanding = reqs.prefer_capable or reqs.complexity == "large"
+    if demanding:
         stats.sort(key=lambda s: (registry.capability_rank(s["c"].get("caps") or {}), s["score"]),
                    reverse=True)
     else:
