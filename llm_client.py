@@ -2314,15 +2314,21 @@ def _configured_entries(config):
 
 
 def _try_candidate(candidate, messages, tools, effective_stream, task_id, config, **kwargs):
-    """The requirements= path's per-candidate attempt — the identity-keyed
-    counterpart to _try_provider below. Deliberately a conservative subset
-    of _try_provider's error handling for this first phase: credit
-    exhaustion, rate-limit cooldown (incl. claude_cli session limits) are
-    covered (nothing here can leave a dead endpoint retried forever); the
-    provider-specific message-rewriting branches (ollama 404/403 detail,
-    tool-calling-400 retry-without-tools, routed-model retry) stay on the
-    slot-based path for now and can be ported here as a later phase converts
-    call sites that actually need them."""
+    """The requirements= path's per-candidate attempt. Covers credit
+    exhaustion and rate-limit cooldown (incl. claude_cli session limits), so
+    nothing here can leave a dead endpoint retried forever.
+
+    NOTE: this used to describe itself as a conservative subset of
+    _try_provider, with the provider-specific message-rewriting branches
+    (ollama 404/403 detail, tool-calling-400 retry-without-tools, routed-model
+    retry) "staying on the slot-based path for now". That path no longer
+    exists -- it was retired once the last call site moved here, and those
+    branches went with it rather than being ported. They are therefore absent
+    for EVERY provider, not parked somewhere else; treat their loss as a known
+    gap to re-implement here, not as a reason to under-declare a provider's
+    capabilities in model_registry (doing exactly that kept Copilot's
+    supports_tools False long after the fallback it was hedging against had
+    been deleted)."""
     provider, model, base_url, api_key = (candidate["provider"], candidate["model"],
                                           candidate["base_url"], candidate["api_key"])
     mk = candidate["key"]

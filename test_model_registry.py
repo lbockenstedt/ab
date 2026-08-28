@@ -584,6 +584,54 @@ def main():
     ok &= _check("backfill leaves an operator's own retuned rule alone",
                 _op_changed is False)
 
+    # ------------------------------------------------------ copilot tool support
+    # _request_copilot has always sent payload["tools"] and parsed tool_calls;
+    # the registry claiming otherwise made needs_tools (a HARD filter) drop
+    # every Copilot endpoint from every tool job.
+    ok &= _check("every shipped copilot rule advertises supports_tools",
+                all(r.get("supports_tools") is True
+                    for r in reg.DEFAULT_MODEL_RULES if r.get("provider") == "copilot"))
+    ok &= _check("copilot is selectable for a needs_tools job",
+                getattr(sel.select_model(
+                    sel.LlmRequirements(complexity="large", needs_tools=True),
+                    [{"key": "copilot|x|claude-opus-5", "provider": "copilot",
+                      "model": "claude-opus-5",
+                      "caps": reg.resolve("copilot", "claude-opus-5", _cfg),
+                      "available": True}], {}), "model", None) == "claude-opus-5")
+    # native_agentic_tools means "the provider runs its own agent loop with
+    # built-in Read/Grep/Glob" — true of the claude_cli harness, NOT of the
+    # Copilot chat-completions API that ab actually drives. Copilot CLI being
+    # agentic as a product says nothing about that surface.
+    _cp = reg.resolve("copilot", "claude-opus-5", _cfg)
+    _cli = reg.resolve("claude_cli", "claude-opus-5", _cfg)
+    ok &= _check("copilot does OpenAI-style tools but is NOT native-agentic",
+                _cp["supports_tools"] is True
+                and _cp["native_agentic_tools"] is False
+                and _cp["supports_mutating_agent"] is False)
+    ok &= _check("claude_cli is the inverse — native-agentic, no OpenAI tool schema",
+                _cli["supports_tools"] is False
+                and _cli["native_agentic_tools"] is True
+                and _cli["supports_mutating_agent"] is True)
+    _frozen_cp = [dict(r) for r in reg.DEFAULT_MODEL_RULES]
+    for _r in _frozen_cp:
+        if _r.get("provider") == "copilot":
+            _r["supports_tools"] = False
+    _cpf, _cpc = reg.enable_copilot_tools(_frozen_cp)
+    _, _cpc2 = reg.enable_copilot_tools(_cpf)
+    ok &= _check("copilot tools repair fixes a frozen registry and is idempotent",
+                _cpc is True and _cpc2 is False
+                and all(r["supports_tools"] for r in _cpf if r.get("provider") == "copilot"))
+    ok &= _check("copilot tools repair never adds, drops or reorders rules",
+                [r["id"] for r in _cpf] == [r["id"] for r in _frozen_cp])
+    _, _cp_default = reg.enable_copilot_tools(reg.DEFAULT_MODEL_RULES)
+    ok &= _check("DEFAULT_MODEL_RULES already ship copilot tools — repair is a no-op",
+                _cp_default is False)
+    _, _cp_op = reg.enable_copilot_tools(
+        [{"id": "my-copilot", "provider": "copilot", "match": "*",
+          "supports_tools": False, "enabled": True}])
+    ok &= _check("copilot tools repair leaves an operator's own rule alone",
+                _cp_op is False)
+
     print()
     if ok:
         print("ALL CASES PASSED")
