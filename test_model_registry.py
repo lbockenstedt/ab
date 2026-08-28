@@ -632,6 +632,128 @@ def main():
     ok &= _check("copilot tools repair leaves an operator's own rule alone",
                 _cp_op is False)
 
+    # ── speed_tier: the declared speed class that routes latency-sensitive work ──
+    ok &= _check("every shipped rule declares a valid speed_tier",
+                all(r.get("speed_tier") in reg.SPEED_RANK for r in reg.DEFAULT_MODEL_RULES))
+    ok &= _check("speed_rank orders fast < standard < slow",
+                reg.speed_rank({"speed_tier": "fast"}) < reg.speed_rank({"speed_tier": "standard"})
+                < reg.speed_rank({"speed_tier": "slow"}))
+    # A rule with no explicit value must still order sensibly, or an operator's
+    # own rule would be treated as exactly as fast as everything else.
+    ok &= _check("speed_tier falls back to a capability_rank-derived prior",
+                reg.speed_tier({"capability_rank": 95}) == "slow"
+                and reg.speed_tier({"capability_rank": 70}) == "standard"
+                and reg.speed_tier({"capability_rank": 30}) == "fast")
+    ok &= _check("speed_tier ignores a garbage value rather than trusting it",
+                reg.speed_tier({"speed_tier": "quick", "capability_rank": 95}) == "slow")
+    ok &= _check("the big reasoning models are not classed fast",
+                all(reg.speed_tier(reg.resolve(p, m, _cfg)) != "fast"
+                    for p, m in (("copilot", "claude-opus-5"), ("claude_cli", "claude-opus-5"),
+                                 ("ollama_cloud", "nemotron-3-ultra"))))
+    ok &= _check("the small/cheap models are classed fast",
+                all(reg.speed_tier(reg.resolve(p, m, _cfg)) == "fast"
+                    for p, m in (("copilot", "claude-haiku-4.5"), ("copilot", "gpt-4o-2024-08-06"),
+                                 ("google", "gemini-3.5-flash-lite"), ("openrouter", "openrouter/free"))))
+    ok &= _check("speed_tier is resolved as a capability, not dropped by resolve()",
+                reg.resolve("copilot", "claude-haiku-4.5", _cfg).get("speed_tier") == "fast")
+
+    # Ranking. The slow-class model is given the BETTER measured latency, so a
+    # pure perf sort would take it — proving the declared class actually leads.
+    _sp = [{"key": f"copilot|x|{m}", "provider": "copilot", "model": m,
+            "caps": reg.resolve("copilot", m, _cfg), "available": True}
+           for m in ("claude-opus-5", "claude-sonnet-5")]
+    _spperf = {"copilot|x|claude-opus-5":   {"n": 20, "tps": 90.0, "latency_ms": 1000},
+               "copilot|x|claude-sonnet-5": {"n": 20, "tps": 40.0, "latency_ms": 2500}}
+    _sppick = lambda **kw: getattr(
+        sel.select_model(sel.LlmRequirements(**kw), _sp, _spperf), "model", None)
+    ok &= _check("without latency_sensitive, measured perf still decides",
+                _sppick(complexity="small") == "claude-opus-5")
+    ok &= _check("latency_sensitive picks the FAST class over a better-measured slow one",
+                _sppick(complexity="small", latency_sensitive=True) == "claude-sonnet-5")
+    # Precedence: a stale speed flag must never flatten the escalation ladder
+    # for chat, builds, feature requests or bugfixes.
+    ok &= _check("complexity=large beats latency_sensitive",
+                _sppick(complexity="large", latency_sensitive=True) == "claude-opus-5")
+    ok &= _check("prefer_capable beats latency_sensitive",
+                _sppick(complexity="small", latency_sensitive=True,
+                        prefer_capable=True) == "claude-opus-5")
+    ok &= _check("prefer_capable_within_tier beats latency_sensitive",
+                _sppick(complexity="small", latency_sensitive=True,
+                        prefer_capable_within_tier=True) == "claude-opus-5")
+    # Cold start: with no samples every candidate sits on the tier MEDIAN, so
+    # before speed_tier a brand-new fast endpoint could not win on merit.
+    ok &= _check("latency_sensitive still works with ZERO perf samples",
+                getattr(sel.select_model(
+                    sel.LlmRequirements(complexity="small", latency_sensitive=True),
+                    _sp, {}), "model", None) == "claude-sonnet-5")
+
+    # Measured perf must still decide INSIDE a speed class — the class is a
+    # prior, not a replacement for data.
+    _tf = [{"key": f"copilot|x|{m}", "provider": "copilot", "model": m,
+            "caps": reg.resolve("copilot", m, _cfg), "available": True}
+           for m in ("claude-haiku-4.5", "gpt-4o-2024-08-06")]
+    _tfperf = {"copilot|x|claude-haiku-4.5":  {"n": 20, "tps": 50.0, "latency_ms": 2500},
+               "copilot|x|gpt-4o-2024-08-06": {"n": 20, "tps": 90.0, "latency_ms": 1000}}
+    ok &= _check("between two fast models the measurably faster one wins",
+                getattr(sel.select_model(
+                    sel.LlmRequirements(complexity="small", latency_sensitive=True),
+                    _tf, _tfperf), "model", None) == "gpt-4o-2024-08-06")
+    ok &= _check("prefer_capable_within_tier takes the stronger of the two instead",
+                getattr(sel.select_model(
+                    sel.LlmRequirements(complexity="small", prefer_capable_within_tier=True),
+                    _tf, _tfperf), "model", None) == "claude-haiku-4.5")
+
+    # "Free but capable" (log analysis): capability ordering INSIDE the tier the
+    # cost preference already chose, WITHOUT prefer_capable's tier inversion.
+    _mix = [{"key": f"{p}|x|{m}", "provider": p, "model": m,
+             "caps": reg.resolve(p, m, _cfg), "available": True}
+            for p, m in (("copilot", "claude-opus-5"), ("openrouter", "openrouter/free"))]
+    _mixperf = {"copilot|x|claude-opus-5":       {"n": 20, "tps": 90.0, "latency_ms": 1000},
+                "openrouter|x|openrouter/free":  {"n": 20, "tps": 30.0, "latency_ms": 2500}}
+    ok &= _check("prefer_capable_within_tier does NOT buy a more expensive tier",
+                getattr(sel.select_model(
+                    sel.LlmRequirements(complexity="small", prefer_capable_within_tier=True),
+                    _mix, _mixperf), "model", None) == "openrouter/free")
+    ok &= _check("prefer_capable, by contrast, DOES invert to the frontier tier",
+                getattr(sel.select_model(
+                    sel.LlmRequirements(complexity="small", prefer_capable=True),
+                    _mix, _mixperf), "model", None) == "claude-opus-5")
+
+    # The picker must be able to explain which axis ordered the tier.
+    _ex = sel.explain_selection(
+        sel.LlmRequirements(complexity="small", latency_sensitive=True), _sp, _spperf)
+    ok &= _check("explain_selection exposes speed and capability_rank per row",
+                all("speed" in r and "capability_rank" in r for r in _ex["rows"]))
+    ok &= _check("the selection reason names the axis that ordered the tier",
+                "ranked by speed" in (_ex["selected"] or {}).get("reason", ""))
+    ok &= _check("a capability-ordered pick says so instead",
+                "ranked by capability" in (sel.explain_selection(
+                    sel.LlmRequirements(complexity="large"), _sp, _spperf
+                )["selected"] or {}).get("reason", ""))
+
+    # Backfill migration: speed_tier lives ON already-persisted rules.
+    _frozen_sp = [dict(r) for r in reg.DEFAULT_MODEL_RULES]
+    for _r in _frozen_sp:
+        _r.pop("speed_tier", None)
+    _spf, _spc = reg.backfill_speed_tiers(_frozen_sp)
+    _, _spc2 = reg.backfill_speed_tiers(_spf)
+    ok &= _check("speed backfill repairs a frozen registry and is idempotent",
+                _spc is True and _spc2 is False
+                and all(r.get("speed_tier") in reg.SPEED_RANK for r in _spf))
+    ok &= _check("speed backfill never adds, drops or reorders rules",
+                [r["id"] for r in _spf] == [r["id"] for r in _frozen_sp])
+    _, _sp_default = reg.backfill_speed_tiers(reg.DEFAULT_MODEL_RULES)
+    ok &= _check("DEFAULT_MODEL_RULES already ship speed_tier — backfill is a no-op",
+                _sp_default is False)
+    _, _sp_op = reg.backfill_speed_tiers(
+        [{"id": "my-rule", "provider": "copilot", "match": "*", "enabled": True}])
+    ok &= _check("speed backfill leaves an operator's own rule alone", _sp_op is False)
+    _sp_tuned, _sp_tc = reg.backfill_speed_tiers(
+        [{"id": "copilot-opus", "provider": "copilot", "match": "*opus*",
+          "speed_tier": "fast", "enabled": True}])
+    ok &= _check("speed backfill never overwrites a value the operator retuned",
+                _sp_tc is False and _sp_tuned[0]["speed_tier"] == "fast")
+
     print()
     if ok:
         print("ALL CASES PASSED")

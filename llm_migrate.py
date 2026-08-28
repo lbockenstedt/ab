@@ -205,6 +205,13 @@ def upgrade_registry(config):
         logger.info("LLM registry: backfilled capability_rank and lifted the claude_cli "
                     "sonnet/haiku max_complexity caps (Opus now outranks Sonnet within "
                     "the frontier tier instead of losing to it on raw speed).")
+    _sped, _speeds = model_registry.backfill_speed_tiers(config["model_registry"])
+    if _speeds:
+        config["model_registry"] = _sped
+        changed = True
+        logger.info("LLM registry: backfilled speed_tier (latency-sensitive work such as "
+                    "chat now orders its tier fastest-first on a declared speed class, so a "
+                    "new fast endpoint is not starved by having no samples yet).")
     return config, changed
 
 

@@ -1321,7 +1321,10 @@
                                     <thead class="bg-slate-50 text-slate-500 uppercase"><tr>
                                         <th class="px-2 py-1 text-left">Provider</th><th class="px-2 py-1 text-left">Match</th>
                                         <th class="px-2 py-1 text-left">Cost</th><th class="px-2 py-1 text-left">Max</th>
-                                        <th class="px-2 py-1 text-right">Context</th><th class="px-2 py-1 text-center">Tools</th>
+                                        <th class="px-2 py-1 text-right">Context</th>
+                                        <th class="px-2 py-1 text-left" title="Declared speed class — the cold-start prior for latency-sensitive routing (chat). Measured tok/s still breaks ties inside a class.">Speed</th>
+                                        <th class="px-2 py-1 text-right" title="Relative strength WITHIN a cost tier (0-100). Orders demanding work (complexity=large, prefer_capable) — never filters.">Rank</th>
+                                        <th class="px-2 py-1 text-center">Tools</th>
                                         <th class="px-2 py-1 text-center">Agentic</th><th class="px-2 py-1 text-center">Struct</th>
                                         <th class="px-2 py-1 text-center">Batch</th><th class="px-2 py-1 text-left">Source</th>
                                     </tr></thead>
@@ -1333,6 +1336,8 @@
                                             <td class="px-2 py-1">{{ r.cost_tier }}</td>
                                             <td class="px-2 py-1">{{ r.max_complexity }}</td>
                                             <td class="px-2 py-1 text-right">{{ r.context_window }}</td>
+                                            <td class="px-2 py-1">{{ r.speed_tier }}</td>
+                                            <td class="px-2 py-1 text-right tabular-nums">{{ r.capability_rank }}</td>
                                             <td class="px-2 py-1 text-center">{{ '✓' if r.supports_tools else '' }}</td>
                                             <td class="px-2 py-1 text-center">{{ '✓' if r.native_agentic_tools else '' }}</td>
                                             <td class="px-2 py-1 text-center">{{ '✓' if r.supports_structured_output else '' }}</td>
@@ -2387,7 +2392,7 @@
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead class="text-left text-xs text-slate-500 uppercase tracking-wider">
-                            <tr><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3" title="Cost tier resolved from the Model Registry">Tier</th><th class="py-2 pr-3" title="Measured generation speed for this endpoint — median over completed generations, so idle time is excluded">tok/s</th><th class="py-2 pr-3" title="Median successful-call wire latency">Latency</th><th class="py-2 pr-3" title="Available, or the reason it is currently skipped (credit/rate cooldown, dead model)">Status</th><th class="py-2 pr-3" title="Number of measured generations">Runs</th></tr>
+                            <tr><th class="py-2 pr-3">Provider</th><th class="py-2 pr-3">Model</th><th class="py-2 pr-3" title="Cost tier resolved from the Model Registry">Tier</th><th class="py-2 pr-3" title="Declared speed class from the Model Registry — routes latency-sensitive work (chat) fastest-first, with measured tok/s breaking ties inside a class">Speed</th><th class="py-2 pr-3" title="Measured generation speed for this endpoint — median over completed generations, so idle time is excluded">tok/s</th><th class="py-2 pr-3" title="Median successful-call wire latency">Latency</th><th class="py-2 pr-3" title="Available, or the reason it is currently skipped (credit/rate cooldown, dead model)">Status</th><th class="py-2 pr-3" title="Number of measured generations">Runs</th></tr>
                         </thead>
                         <tbody id="diag-providers-body"></tbody>
                     </table>
@@ -3446,6 +3451,7 @@
                         + '<td class="py-2 pr-3 text-slate-700">' + (p.provider || '—') + '</td>'
                         + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + (p.model || '—') + '</td>'
                         + '<td class="py-2 pr-3 text-xs text-slate-500">' + (p.tier || '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs ' + (p.speed === 'fast' ? 'text-emerald-600' : 'text-slate-500') + '">' + (p.speed || '—') + '</td>'
                         // Throughput for THIS endpoint, keyed by ModelKey — the
                         // same (provider, base_url, model) reachable two ways is
                         // one figure. '—' when never measured, never 0.
@@ -3811,7 +3817,9 @@
                 body.innerHTML =
                     '<div class="overflow-x-auto"><table class="w-full text-sm">' +
                     '<thead><tr class="text-left text-xs uppercase tracking-wider text-slate-400 border-b border-slate-200">' +
-                    '<th class="py-2 pr-3">Endpoint</th><th class="py-2 pr-3">Tier</th><th class="py-2 pr-3 text-right">tok/s</th>' +
+                    '<th class="py-2 pr-3">Endpoint</th><th class="py-2 pr-3">Tier</th>' +
+                    '<th class="py-2 pr-3" title="Declared speed class from the Model Registry. Latency-sensitive work (chat) is routed fastest-first on this, with measured tok/s breaking ties — so a brand-new fast endpoint is not penalised for having no samples yet.">Speed</th>' +
+                    '<th class="py-2 pr-3 text-right">tok/s</th>' +
                     '<th class="py-2 pr-3 text-right">Latency</th><th class="py-2 pr-3 text-right">Runs</th>' +
                     '<th class="py-2 pr-3">Status</th><th class="py-2 w-1/4">Relative</th></tr></thead><tbody>' +
                     rows.map(r => {
@@ -3825,6 +3833,7 @@
                           '<td class="py-2 pr-3 font-mono text-xs ' + (isActive ? 'font-bold text-[#01A982]' : 'text-slate-700') + '">' +
                             _bfEsc(r.provider || '') + ' · ' + _bfEsc(r.model) + (isActive ? ' <span class="text-[10px] uppercase">active</span>' : '') + '</td>' +
                           '<td class="py-2 pr-3 text-xs text-slate-500">' + _bfEsc(r.tier || '—') + '</td>' +
+                          '<td class="py-2 pr-3 text-xs ' + (r.speed === 'fast' ? 'text-emerald-600' : 'text-slate-500') + '">' + _bfEsc(r.speed || '—') + '</td>' +
                           '<td class="py-2 pr-3 text-right tabular-nums font-semibold text-slate-800">' + (r.tps != null ? r.tps : '—') + '</td>' +
                           '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + lat + '</td>' +
                           '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + r.n + '</td>' +

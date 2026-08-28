@@ -308,8 +308,10 @@ def analyze_logs_for_errors(logs):
     as a hint only and is not required.
 
     Routed via requirements=LlmRequirements(complexity="small",
-    needs_structured_output=True) (LLM Selection Redesign Phase 5, site #14)
-    rather than the old task_kind="log_review" pool pin.
+    needs_structured_output=True, prefer_capable_within_tier=True) (LLM
+    Selection Redesign Phase 5, site #14) rather than the old
+    task_kind="log_review" pool pin -- i.e. the most capable FREE model, since
+    this runs unattended and triage quality matters more than latency.
     """
     if not logs: return []
 
@@ -328,8 +330,14 @@ def analyze_logs_for_errors(logs):
     )
     try:
         from model_selection import LlmRequirements
+        # prefer_capable_within_tier, NOT prefer_capable: log analysis runs
+        # constantly and unattended, so it must stay in the cheapest tier that
+        # qualifies -- but within that tier it wants the STRONGEST model, not the
+        # fastest weakest one. Triage quality is the whole point of the call, and
+        # nobody is waiting on the latency.
         reqs = LlmRequirements(complexity="small", needs_structured_output=True,
                                deprioritize_local=True,
+                               prefer_capable_within_tier=True,
                                min_context_tokens=len(prompt) // 4)
         res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.",
                        requirements=reqs)

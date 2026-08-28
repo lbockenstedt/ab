@@ -780,6 +780,7 @@ def _endpoint_perf_rows(config):
     raises — a stats field must never 500 the page."""
     try:
         import llm_client
+        import model_registry
         cands = llm_client._enumerate_candidates(config)
         perf = llm_client.get_llm_perf_snapshot()  # {(provider, base_url, model): {n, tps, latency_ms}}
     except Exception:
@@ -795,6 +796,8 @@ def _endpoint_perf_rows(config):
             "model": c.get("model"),
             "base_url": c.get("base_url"),
             "tier": (c.get("caps") or {}).get("cost_tier"),
+            "speed": model_registry.speed_tier(c.get("caps") or {}),
+            "capability_rank": model_registry.capability_rank(c.get("caps") or {}),
             "n": p.get("n") or 0,
             "tps": round(tps, 1) if tps is not None else None,
             "latency_ms": round(latency, 1) if latency is not None else None,
@@ -2097,12 +2100,15 @@ async def settings_page(request: Request):
     _curated, _mr_or_router = _registry.upgrade_openrouter_free_router_rule(_curated)
     _curated, _mr_cp_tools = _registry.enable_copilot_tools(_curated)
     _curated, _mr_ranks = _registry.backfill_capability_ranks(_curated)
+    _curated, _mr_speeds = _registry.backfill_speed_tiers(_curated)
     _registry_rules_json = json.dumps(_curated, indent=2)
     _auto = config.get("model_registry_auto") or []
     _registry_preview = (
         [{"provider": r.get("provider"), "match": r.get("match"),
           "cost_tier": r.get("cost_tier"), "max_complexity": r.get("max_complexity"),
           "context_window": r.get("context_window"),
+          "speed_tier": _registry.speed_tier(r),
+          "capability_rank": _registry.capability_rank(r),
           "supports_tools": r.get("supports_tools"),
           "native_agentic_tools": r.get("native_agentic_tools"),
           "supports_structured_output": r.get("supports_structured_output"),
@@ -2112,6 +2118,8 @@ async def settings_page(request: Request):
         [{"provider": r.get("provider"), "match": r.get("model"),
           "cost_tier": r.get("cost_tier"), "max_complexity": r.get("max_complexity"),
           "context_window": r.get("context_window"),
+          "speed_tier": _registry.speed_tier(r),
+          "capability_rank": _registry.capability_rank(r),
           "supports_tools": r.get("supports_tools"),
           "native_agentic_tools": r.get("native_agentic_tools"),
           "supports_structured_output": r.get("supports_structured_output"),
@@ -2514,6 +2522,8 @@ async def save_settings(request: Request):
             config_data["model_registry"], _ = _registry_save.enable_copilot_tools(
                 config_data["model_registry"])
             config_data["model_registry"], _ = _registry_save.backfill_capability_ranks(
+                config_data["model_registry"])
+            config_data["model_registry"], _ = _registry_save.backfill_speed_tiers(
                 config_data["model_registry"])
 
     config_data["feature_build_timeout_s"] = int(data.get("feature_build_timeout_s")) \

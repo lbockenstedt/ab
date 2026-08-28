@@ -61,7 +61,7 @@ COST_TIER_RANK = {"free": 0, "cheap": 1, "frontier": 2, "unknown": 3}
 _CAP_FIELDS = (
     "cost_tier", "max_complexity", "context_window", "supports_tools",
     "native_agentic_tools", "supports_mutating_agent", "supports_structured_output",
-    "supports_batch", "supports_streaming", "capability_rank",
+    "supports_batch", "supports_streaming", "capability_rank", "speed_tier",
 )
 
 #: Fallback `capability_rank` derived from max_complexity, for any rule that
@@ -80,6 +80,39 @@ _CAPABILITY_RANK_BY_COMPLEXITY = {"trivial": 10, "small": 30, "medium": 50, "lar
 #:
 #: Deliberately NOT the premium-request multiplier: that would rank GPT-5.5
 #: (57x) above Opus (27x), which is a price signal, not a capability one.
+#: Declared speed class, the cold-start prior for "how fast is this model".
+#: Ranking still refines with MEASURED tok/s + latency (llm_perf); this exists
+#: because a brand-new endpoint has no samples yet, and because latency data
+#: alone cannot distinguish "big model, inherently slow" from "fast model
+#: having a bad minute".
+SPEED_RANK = {"fast": 0, "standard": 1, "slow": 2}
+
+#: Fallback speed derived from capability_rank for rules that predate the
+#: field: bigger/stronger models are, as a prior, slower.
+_SPEED_BY_CAPABILITY_RANK = ((85, "slow"), (60, "standard"))
+
+
+def speed_tier(caps):
+    """The declared speed class for a resolved capability dict.
+
+    Falls back to a capability_rank-derived prior when a rule carries no
+    explicit value, so an un-annotated registry still orders sensibly instead
+    of treating every model as equally fast."""
+    raw = (caps or {}).get("speed_tier")
+    if isinstance(raw, str) and raw.strip().lower() in SPEED_RANK:
+        return raw.strip().lower()
+    rank = capability_rank(caps)
+    for floor, tier in _SPEED_BY_CAPABILITY_RANK:
+        if rank >= floor:
+            return tier
+    return "fast"
+
+
+def speed_rank(caps):
+    """SPEED_RANK for a capability dict — lower is faster."""
+    return SPEED_RANK.get(speed_tier(caps), 1)
+
+
 def capability_rank(caps):
     """The 0-100 within-tier capability score for a resolved capability dict.
 
@@ -112,22 +145,22 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "max_complexity is refined per-model by parameter count in resolve()"},
+     "speed_tier": "fast", "enabled": True, "notes": "max_complexity is refined per-model by parameter count in resolve()"},
     {"id": "ollama2-local", "provider": "ollama2", "match": "*", "label": "Self-hosted Ollama (2nd endpoint / GPU)",
      "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "second local Ollama endpoint (e.g. a GPU box); free, mirrors ollama-local"},
+     "speed_tier": "fast", "enabled": True, "notes": "second local Ollama endpoint (e.g. a GPU box); free, mirrors ollama-local"},
     {"id": "lmstudio-local", "provider": "lmstudio", "match": "*", "label": "Self-hosted LM Studio",
      "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "speed_tier": "fast", "enabled": True, "notes": ""},
     {"id": "claude-cli", "provider": "claude_cli", "match": "*", "label": "Claude CLI (session auth)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "capability_rank": 70, "enabled": True,
+     "capability_rank": 70, "speed_tier": "slow", "enabled": True,
      "notes": "session auth (no API key), but every call bills the operator's Anthropic "
               "account — cost_tier=frontier so the picker RESERVES it (free/GPU wins first, "
               "claude_cli is used only when a call needs its native_agentic_tools/"
@@ -143,7 +176,7 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "medium", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "capability_rank": 55, "enabled": True,
+     "capability_rank": 55, "speed_tier": "fast", "enabled": True,
      "notes": "fastest Claude; medium mirrors anthropic-haiku. Preference for Sonnet/Opus "
               "is carried by capability_rank (55 < 78 < 95) rather than a max_complexity "
               "cap, which would hard-exclude it rather than rank it last"},
@@ -151,7 +184,7 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "capability_rank": 78, "enabled": True,
+     "capability_rank": 78, "speed_tier": "standard", "enabled": True,
      "notes": "balanced Claude; large mirrors anthropic-sonnet. Escalation to Opus is "
               "expressed by capability_rank (95 > 78), NOT by capping max_complexity — "
               "that is a hard filter, so the cap EXCLUDED Sonnet from large work instead "
@@ -161,14 +194,14 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "capability_rank": 95, "enabled": True,
+     "capability_rank": 95, "speed_tier": "slow", "enabled": True,
      "notes": "most capable Claude — the ONLY claude_cli model at large complexity, so it is "
               "the default for feature_build and the hardest large agentic/mutating work"},
     {"id": "ollama-cloud", "provider": "ollama_cloud", "match": "*", "label": "Ollama Cloud",
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True,
+     "speed_tier": "standard", "enabled": True,
      "notes": "the one ollama* provider that takes a key. supports_tools=True: "
               "_request_ollama sets payload['tools'] and parses tool_calls for cloud "
               "exactly as for local (identical wire protocol), and every model in the "
@@ -182,13 +215,13 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "speed_tier": "fast", "enabled": True, "notes": ""},
     {"id": "openrouter-free-router", "provider": "openrouter", "match": "openrouter/free",
      "label": "OpenRouter Free Models Router",
      "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True,
+     "speed_tier": "fast", "enabled": True,
      "notes": "the 'openrouter/free' Free Models Router auto-routes each call to whatever "
               ":free model is currently available/capable, transparently absorbing per-model "
               "rate-limits + outages. Its id has no ':free' suffix so it would otherwise fall "
@@ -198,17 +231,17 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "less specific than openrouter-free's *:free pattern"},
+     "speed_tier": "standard", "enabled": True, "notes": "less specific than openrouter-free's *:free pattern"},
     {"id": "groq", "provider": "groq", "match": "*", "label": "Groq",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "speed_tier": "fast", "enabled": True, "notes": ""},
     {"id": "copilot", "provider": "copilot", "match": "*", "label": "GitHub Copilot",
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True,
+     "speed_tier": "standard", "enabled": True,
      "notes": "generic fallback for Copilot models with no class rule below. Copilot is NOT "
               "free — every call spends a premium request — so this stays 'cheap', never 'free'."},
     # Per-model capability tiers for the GitHub Copilot roster. Copilot bills a
@@ -225,7 +258,7 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "capability_rank": 95, "enabled": True,
+     "capability_rank": 95, "speed_tier": "slow", "enabled": True,
      "notes": "27x premium-request multiplier — the most expensive model Copilot serves. "
               "frontier/large matches anthropic-opus and claude-cli-opus so the picker "
               "RESERVES it for the hardest work instead of spending it on triage."},
@@ -233,69 +266,69 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "capability_rank": 78, "enabled": True, "notes": "9x multiplier; frontier/large mirrors anthropic-sonnet"},
+     "capability_rank": 78, "speed_tier": "standard", "enabled": True, "notes": "9x multiplier; frontier/large mirrors anthropic-sonnet"},
     {"id": "copilot-haiku", "provider": "copilot", "match": "*haiku*", "label": "Claude Haiku (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "capability_rank": 55, "enabled": True, "notes": "0.33x multiplier; cheap/medium mirrors anthropic-haiku"},
+     "capability_rank": 55, "speed_tier": "fast", "enabled": True, "notes": "0.33x multiplier; cheap/medium mirrors anthropic-haiku"},
     {"id": "copilot-gemini-pro", "provider": "copilot", "match": "*gemini*pro*", "label": "Gemini Pro (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "capability_rank": 80, "enabled": True, "notes": "6x multiplier; frontier/large mirrors google-pro"},
+     "capability_rank": 80, "speed_tier": "standard", "enabled": True, "notes": "6x multiplier; frontier/large mirrors google-pro"},
     # `gpt-5*mini*` is deliberately MORE specific than `gpt-5*` so gpt-5-mini
     # (0.33x) stays cheap instead of inheriting the gpt-5 frontier tier.
     {"id": "copilot-gpt5-mini", "provider": "copilot", "match": "gpt-5*mini*", "label": "GPT-5 mini (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "capability_rank": 50, "enabled": True, "notes": "0.33x multiplier — the cheapest GPT-5 variant"},
+     "capability_rank": 50, "speed_tier": "fast", "enabled": True, "notes": "0.33x multiplier — the cheapest GPT-5 variant"},
     {"id": "copilot-gpt5", "provider": "copilot", "match": "gpt-5*", "label": "GPT-5 class (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "capability_rank": 85, "enabled": True, "notes": "6x base / 57x for GPT-5.5 — priced as frontier so it is reserved"},
+     "capability_rank": 85, "speed_tier": "slow", "enabled": True, "notes": "6x base / 57x for GPT-5.5 — priced as frontier so it is reserved"},
     {"id": "copilot-gpt4", "provider": "copilot", "match": "gpt-4*", "label": "GPT-4 class (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "capability_rank": 45, "enabled": True, "notes": "0.33x multiplier (gpt-4o / gpt-4o-mini)"},
+     "capability_rank": 45, "speed_tier": "fast", "enabled": True, "notes": "0.33x multiplier (gpt-4o / gpt-4o-mini)"},
     {"id": "anthropic-haiku", "provider": "anthropic", "match": "*haiku*", "label": "Claude Haiku class",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 200000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "capability_rank": 55, "enabled": True, "notes": ""},
+     "capability_rank": 55, "speed_tier": "fast", "enabled": True, "notes": ""},
     {"id": "anthropic-sonnet", "provider": "anthropic", "match": "*sonnet*", "label": "Claude Sonnet class",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "capability_rank": 78, "enabled": True, "notes": ""},
+     "capability_rank": 78, "speed_tier": "standard", "enabled": True, "notes": ""},
     {"id": "anthropic-opus", "provider": "anthropic", "match": "*opus*", "label": "Claude Opus class",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "capability_rank": 95, "enabled": True, "notes": ""},
+     "capability_rank": 95, "speed_tier": "slow", "enabled": True, "notes": ""},
     {"id": "google-flash", "provider": "google", "match": "*flash*", "label": "Gemini Flash class",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 1000000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": False,
-     "enabled": True, "notes": "supports_streaming=False -- _request_google hardcodes stream=False"},
+     "speed_tier": "fast", "enabled": True, "notes": "supports_streaming=False -- _request_google hardcodes stream=False"},
     {"id": "google-pro", "provider": "google", "match": "*pro*", "label": "Gemini Pro class",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 2000000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": False,
-     "capability_rank": 80, "enabled": True, "notes": "supports_streaming=False -- _request_google hardcodes stream=False"},
+     "capability_rank": 80, "speed_tier": "standard", "enabled": True, "notes": "supports_streaming=False -- _request_google hardcodes stream=False"},
     {"id": "openai-mini", "provider": "openai", "match": "*mini*", "label": "OpenAI mini class",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 128000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "speed_tier": "fast", "enabled": True, "notes": ""},
     {"id": "openai-gpt", "provider": "openai", "match": "gpt-*", "label": "OpenAI GPT class",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 128000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "capability_rank": 85, "enabled": True, "notes": ""},
+     "capability_rank": 85, "speed_tier": "slow", "enabled": True, "notes": ""},
 
     # --- Capable self-hosted models -------------------------------------
     # The generic `ollama`/`ollama2` defaults are deliberately conservative
@@ -315,32 +348,32 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "free", "max_complexity": "large", "context_window": 262144,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "strong local coder with native tool-calling + long context"},
+     "speed_tier": "standard", "enabled": True, "notes": "strong local coder with native tool-calling + long context"},
     {"id": "ollama2-qwen3-coder", "provider": "ollama2", "match": "qwen3-coder*", "label": "Qwen3-Coder (GPU)",
      "cost_tier": "free", "max_complexity": "large", "context_window": 262144,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "strong local coder with native tool-calling + long context"},
+     "speed_tier": "standard", "enabled": True, "notes": "strong local coder with native tool-calling + long context"},
     {"id": "ollama-llama33", "provider": "ollama", "match": "llama3.3*", "label": "Llama 3.3 (self-hosted)",
      "cost_tier": "free", "max_complexity": "large", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "native tool-calling; capable general planner/coordinator"},
+     "speed_tier": "standard", "enabled": True, "notes": "native tool-calling; capable general planner/coordinator"},
     {"id": "ollama2-llama33", "provider": "ollama2", "match": "llama3.3*", "label": "Llama 3.3 (GPU)",
      "cost_tier": "free", "max_complexity": "large", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "native tool-calling; capable general planner/coordinator"},
+     "speed_tier": "standard", "enabled": True, "notes": "native tool-calling; capable general planner/coordinator"},
     {"id": "ollama-gemma4", "provider": "ollama", "match": "gemma4*", "label": "Gemma 4 (self-hosted)",
      "cost_tier": "free", "max_complexity": "large", "context_window": 131072,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "capable reasoning + JSON; tools left off (Gemma native tool-calling is unreliable)"},
+     "speed_tier": "fast", "enabled": True, "notes": "capable reasoning + JSON; tools left off (Gemma native tool-calling is unreliable)"},
     {"id": "ollama2-gemma4", "provider": "ollama2", "match": "gemma4*", "label": "Gemma 4 (GPU)",
      "cost_tier": "free", "max_complexity": "large", "context_window": 131072,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "capable reasoning + JSON; tools left off (Gemma native tool-calling is unreliable)"},
+     "speed_tier": "fast", "enabled": True, "notes": "capable reasoning + JSON; tools left off (Gemma native tool-calling is unreliable)"},
     # --- Ollama Cloud per-model ladder ------------------------------------
     # The generic ollama-cloud `*` rule gives EVERY cloud model max_complexity
     # "large". That is right for the frontier-class cloud models (nemotron-3-
@@ -356,25 +389,25 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "smallest cloud tier (e.g. nemotron-3-nano:30b) -- fast/cheap, not a large-job model"},
+     "speed_tier": "fast", "enabled": True, "notes": "smallest cloud tier (e.g. nemotron-3-nano:30b) -- fast/cheap, not a large-job model"},
     {"id": "ollama-cloud-flash", "provider": "ollama_cloud", "match": "*flash*",
      "label": "Ollama Cloud (flash class)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "latency-optimised cloud variants (e.g. deepseek-v4-flash, glm-5.3-flash)"},
+     "speed_tier": "fast", "enabled": True, "notes": "latency-optimised cloud variants (e.g. deepseek-v4-flash, glm-5.3-flash)"},
     {"id": "ollama-cloud-20b", "provider": "ollama_cloud", "match": "*:20b*",
      "label": "Ollama Cloud (20B class)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "e.g. gpt-oss:20b -- the small open-weight cloud tier"},
+     "speed_tier": "standard", "enabled": True, "notes": "e.g. gpt-oss:20b -- the small open-weight cloud tier"},
     {"id": "ollama-cloud-ultra", "provider": "ollama_cloud", "match": "*ultra*",
      "label": "Ollama Cloud (ultra class)",
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 262144,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True,
+     "speed_tier": "slow", "enabled": True,
      "notes": "nemotron-3-ultra: 550B total / 55B active MoE, explicitly built for "
               "long-running agents across hundreds of tool calls. Stated as an explicit "
               "rule (rather than inheriting `*`) so the flagship is not silently "
@@ -733,6 +766,40 @@ def backfill_capability_ranks(rules):
                 new = {**new, "max_complexity": now}
                 changed = True
         out.append(new)
+    return out, changed
+
+
+def backfill_speed_tiers(rules):
+    """Return (new_rules, changed): a COPY of `rules` with `speed_tier`
+    backfilled onto the shipped default rules.
+
+    speed_tier lives ON rules an existing install already persisted, so an
+    append-only top-up cannot deliver it -- a frozen registry would fall back to
+    the capability_rank-derived prior for every endpoint and lose the hand-set
+    distinctions inside a rank band (Haiku and gpt-4o share a band with models
+    that are not latency-oriented at all).
+
+    Without it, latency_sensitive work (chat's first turn) orders on measured
+    perf alone, which starves a brand-new fast endpoint: with no samples it sits
+    on the tier MEDIAN and loses to any already-measured slower peer.
+
+    Scoped exactly like backfill_capability_ranks: only rules whose id is one
+    AppBuilder ships, only where no explicit value is set. Operator rules and
+    retuned values are untouched. Idempotent; never reorders, adds or removes."""
+    shipped = {r.get("id"): r.get("speed_tier")
+               for r in DEFAULT_MODEL_RULES if r.get("speed_tier")}
+    out = []
+    changed = False
+    for r in rules or []:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        rid = r.get("id")
+        if rid in shipped and not r.get("speed_tier"):
+            out.append({**r, "speed_tier": shipped[rid]})
+            changed = True
+        else:
+            out.append(r)
     return out, changed
 
 

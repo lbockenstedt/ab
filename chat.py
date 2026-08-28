@@ -966,10 +966,31 @@ def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
         stay cost-first (medium, latency-sensitive); the LLM router passes a
         stronger requirement (large + prefer_capable) so agentic diagnosis gets
         a smarter model. tool_requirements MUST keep needs_tools=True.
+
+        When neither is supplied, the loop self-escalates: it starts fastest-in-
+        tier and switches to most-capable-in-tier after
+        `chat_escalate_after_iters` (default 2) tool rounds, so a hard question
+        is not answered by the fast model forever. See the loop preamble.
     """
     from model_selection import LlmRequirements
+    import dataclasses as _dc
     _status = status_cb or (lambda *_a, **_k: None)
     _tool_reqs = tool_requirements or LlmRequirements(complexity="medium", needs_tools=True, latency_sensitive=True)
+    # In-loop escalation. The first turns are latency_sensitive so the dashboard
+    # feels instant, but a question that is still calling tools after several
+    # rounds is, empirically, one that needs more reasoning than the fastest
+    # model in the tier has. From that point on, order the SAME tier by
+    # capability instead of speed and stop optimising for latency.
+    #
+    # Deliberately prefer_capable_within_tier, not prefer_capable: this is the
+    # dashboard's cost-first chat, so escalating must not start spending on the
+    # frontier tier. (llm_proxy's agentic path is the one that does that, and it
+    # passes its own tool_requirements.) Skipped entirely when the caller steered
+    # selection itself or the operator pinned a model -- neither wants us
+    # second-guessing the pick.
+    _escalate_after = max(1, int((config or {}).get("chat_escalate_after_iters", 2) or 2))
+    _can_escalate = tool_requirements is None and not (config or {}).get("chat_pin")
+    _escalated = False
     # Azure fleet tools are advertised only when the operator has opted in, so a
     # model on a host without the login helper isn't tempted to call them.
     tools = CHAT_TOOLS + (AZURE_TOOLS if az_console.azure_enabled(config) else [])
@@ -977,6 +998,12 @@ def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
     final_text = None
     last_text = ""
     for iteration in range(max_iter):
+        if _can_escalate and not _escalated and iteration >= _escalate_after:
+            _tool_reqs = _dc.replace(_tool_reqs, latency_sensitive=False,
+                                     prefer_capable_within_tier=True)
+            _escalated = True
+            logger.info("Chat agent loop still working after %d tool rounds; escalating model "
+                        "selection from fastest-in-tier to most-capable-in-tier.", iteration)
         _status("Thinking…" if iteration == 0 else "Working…")
         try:
             result = call_llm("", messages=messages, task_id=task_id, tools=tools, stream=False, requirements=_tool_reqs)
@@ -1061,6 +1088,13 @@ def run_agent_loop(messages, config, gh, *, task_id, max_iter=6,
                 _status("Summarizing…")
                 messages.append({"role": "system", "content": "You have gathered enough information from the tools. Do NOT call any more tools. Write your final answer to the user now, in plain text."})
                 _final_reqs = final_requirements or LlmRequirements(complexity="medium", latency_sensitive=True)
+                # We only reach this branch by exhausting max_iter without a
+                # written answer, so the loop already proved it was hard. If the
+                # tool turns escalated, the synthesis that has to make sense of
+                # them should not drop back to the fastest weakest model.
+                if _escalated and final_requirements is None:
+                    _final_reqs = _dc.replace(_final_reqs, latency_sensitive=False,
+                                              prefer_capable_within_tier=True)
                 forced = call_llm("", messages=messages, task_id=task_id, requirements=_final_reqs)
                 if isinstance(forced, dict):
                     forced = forced.get("text") or ""

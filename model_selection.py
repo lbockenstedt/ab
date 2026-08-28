@@ -41,7 +41,11 @@ class LlmRequirements:
     min_context_tokens: int = 0                # HARD filter: context_window >= this * 1.25
     batch_ok: bool = False                     # consumed by the caller (llm_client), not this module
     needs_streaming: bool = False              # SOFT preference
-    latency_sensitive: bool = False            # informational; ranking already favors low latency
+    latency_sensitive: bool = False            # SOFT: order the chosen tier FASTEST-first
+                                               # (declared speed_tier, then measured perf).
+                                               # For chat's first turn, which must feel instant
+                                               # and can escalate afterwards. Yields to a
+                                               # capability request — see _rank_tier.
     must_escalate_to_human: bool = False       # consumed by the caller when select_model returns None
     restrict: str | None = None                # "local"|"cloud"|"claude" — HARD filter
     pin_key: str | None = None                 # exact ModelKey "provider|base_url|model" — HARD pin (chat_pin)
@@ -49,6 +53,13 @@ class LlmRequirements:
     prefer_capable: bool = False               # invert tier preference: pick the SMARTEST tier
                                                # first (frontier>cheap>free) instead of cheapest —
                                                # for the planner/router turn ("fast AND smart")
+    prefer_capable_within_tier: bool = False   # SOFT: order by capability_rank INSIDE whichever
+                                               # tier the cost preference already chose, WITHOUT
+                                               # inverting that preference. This is the "free but
+                                               # capable" knob: prefer_capable would spend frontier
+                                               # money, plain cheapest-first would take the fastest
+                                               # weakest model in the free tier. Log analysis wants
+                                               # neither — it wants the best FREE model.
     deprioritize_local: bool = False           # SOFT within-tier bias: rank no-key/local endpoints
                                                # (self-hosted GPU, LM Studio, claude_cli session) LAST
                                                # so offloadable work (log review, batch) prefers a
@@ -191,11 +202,30 @@ def _rank_tier(tier_candidates, perf, reqs, min_samples):
     # ladder is expressed as a rank instead of as a max_complexity cap that
     # hard-excluded the smaller models.
     #
-    # Everything below large still orders on speed, so light work keeps taking
-    # the fastest model in its tier rather than reaching for the smartest.
-    demanding = reqs.prefer_capable or reqs.complexity == "large"
+    # prefer_capable_within_tier asks for the same capability-primary ordering
+    # WITHOUT prefer_capable's tier inversion, which is how "free but capable"
+    # work (log analysis) gets the strongest model in the free tier instead of
+    # the fastest weakest one.
+    #
+    # Everything below large orders on SPEED. latency_sensitive makes that
+    # explicit and adds the declared speed_tier as the primary key, ahead of the
+    # measured score: a brand-new fast endpoint has no samples yet and would
+    # otherwise sit on the tier median, and measured latency alone cannot tell
+    # "inherently big and slow" apart from "fast model having a bad minute".
+    # The measured score still breaks ties inside a speed class, so real data
+    # decides between two fast models.
+    #
+    # Precedence is deliberate: capability WINS over latency_sensitive. A caller
+    # that asks for speed and then escalates (chat) must actually get a stronger
+    # model on the escalated call, so the escalation ladder for chat, builds,
+    # feature requests and bugfixes cannot be flattened by a stale speed flag.
+    demanding = (reqs.prefer_capable or reqs.prefer_capable_within_tier
+                 or reqs.complexity == "large")
     if demanding:
         stats.sort(key=lambda s: (registry.capability_rank(s["c"].get("caps") or {}), s["score"]),
+                   reverse=True)
+    elif reqs.latency_sensitive:
+        stats.sort(key=lambda s: (-registry.speed_rank(s["c"].get("caps") or {}), s["score"]),
                    reverse=True)
     else:
         stats.sort(key=lambda s: s["score"], reverse=True)
@@ -272,6 +302,13 @@ def _select_pass(reqs, candidates, perf, slow_factor, min_samples, allow_unknown
         other_tiers = [c for name, group in tiers.items() if name != tier_name for c in group]
         alternatives = survivors[1:] + other_tiers
         reason = f"tier={tier_name}, complexity>={reqs.complexity}"
+        # Name the axis that actually ordered the tier, so an operator reading
+        # Diagnostics can tell "picked for speed" from "picked for strength".
+        _bcaps = best.get("caps") or {}
+        if reqs.prefer_capable or reqs.prefer_capable_within_tier or reqs.complexity == "large":
+            reason += f", ranked by capability (rank={registry.capability_rank(_bcaps)})"
+        elif reqs.latency_sensitive:
+            reason += f", ranked by speed (speed={registry.speed_tier(_bcaps)})"
         if allow_unknown:
             reason += " (permissive pass: unclassified models admitted)"
         return Selection(
@@ -355,7 +392,8 @@ def explain_selection(reqs, candidates, perf=None, tuning=None):
 
         {"selected": {key, provider, model, tier, reason}|None,
          "permissive": bool,        # True if the winner came from the unclassified-admitting pass
-         "rows": [{key, provider, model, tier, status, reason, n, tps, latency_ms}, ...]}
+         "rows": [{key, provider, model, tier, speed, capability_rank,
+                    status, reason, n, tps, latency_ms}, ...]}
 
     Rows are ordered selected → alternatives (rank order) → excluded."""
     perf = perf or {}
@@ -375,6 +413,8 @@ def explain_selection(reqs, candidates, perf=None, tuning=None):
         row = {
             "key": key, "provider": c.get("provider"), "model": c.get("model"),
             "tier": caps.get("cost_tier"),
+            "speed": registry.speed_tier(caps),
+            "capability_rank": registry.capability_rank(caps),
             "n": s.get("n", 0) or 0, "tps": s.get("tps"), "latency_ms": s.get("latency_ms"),
         }
         if key == winner_key:
