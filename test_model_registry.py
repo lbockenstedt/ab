@@ -400,9 +400,19 @@ def main():
     ok &= _check("ollama_cloud frontier-class models still inherit the generic large default",
                 reg.resolve("ollama_cloud", "kimi-k3", {})["max_complexity"] == "large"
                 and reg.resolve("ollama_cloud", "mistral-large-3:675b", {})["max_complexity"] == "large")
-    ok &= _check("ollama_cloud context_window stays pinned to ollama_num_ctx (32768), not the "
-                 "model's advertised window — it is a hard selection filter, not a prompt budget",
-                reg.resolve("ollama_cloud", "nemotron-3-ultra", {})["context_window"] == 32768)
+    ok &= _check("ollama_cloud context_window is authoritative and per-class: ultra gets the "
+                 "largest window, the small tiers the common cloud floor",
+                reg.resolve("ollama_cloud", "nemotron-3-ultra", {})["context_window"] == 262144
+                and reg.resolve("ollama_cloud", "gpt-oss:20b", {})["context_window"] == 131072
+                and reg.resolve("ollama_cloud", "kimi-k3", {})["context_window"] == 131072)
+    ok &= _check("every ollama_cloud rule now beats the old flat 32768 local default",
+                all(r.get("context_window", 0) > 32768
+                    for r in reg.DEFAULT_MODEL_RULES
+                    if r.get("provider") == "ollama_cloud"))
+    ok &= _check("the generic local ollama rule keeps its 32768 window — the cloud context "
+                 "change must not move the shared-GPU local default",
+                reg.resolve("ollama", "some-unlisted-model", {})["context_window"] == 32768
+                and reg.resolve("ollama_cloud", "nemotron-3-ultra", {})["context_window"] != 32768)
 
     frozen_oc = [{"id": "ollama-cloud", "provider": "ollama_cloud", "match": "*",
                   "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,

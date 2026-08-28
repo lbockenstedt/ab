@@ -115,13 +115,19 @@ def main():
     # call. qa_failed and invalid_json were the two that silently skipped it.
     src = open("fix_engine.py").read()
     for kind in ("invalid_json", "review_rejected", "low_confidence", "qa_failed", "error"):
-        anchor = f'"kind": "{kind}"'
-        idx = src.find(anchor)
+        # The branch is anchored either by an inline literal (`"kind": "qa_failed"`)
+        # or, where the kind is chosen by a preceding if/elif chain, by the
+        # assignment that feeds it (`_kind = "invalid_json"`). Accept both: the
+        # property under guard is "a reset happens before the retry", and pinning
+        # only the literal form made a pure refactor look like a missing reset.
+        anchors = [i for i in (src.find(f'"kind": "{kind}"'), src.find(f'_kind = "{kind}"')) if i != -1]
         found = False
-        if idx != -1:
+        for idx in anchors:
             nxt = src.find("next_attempt_requirements", idx)
             window = src[idx:nxt] if nxt != -1 else src[idx:idx + 1200]
-            found = 'reset("--hard", "HEAD")' in window
+            if 'reset("--hard", "HEAD")' in window:
+                found = True
+                break
         ok &= _check(f"{kind}: working tree reset before the next attempt", found)
 
     print("\nALL CASES PASSED" if ok else "\nSOME CASES FAILED")

@@ -1684,11 +1684,31 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
     # Ollama defaults num_ctx to ~2048, which the fix prompt (windowed file + issue body
     # + context) blows past → 400 "prompt is longer than the context length". These
     # coder models support 32k+, so raise the window. Configurable via ollama_num_ctx
-    # (default 16384 — comfortably fits fix/log prompts; raise for very large ones).
-    try:
-        _num_ctx = int(config.get("ollama_num_ctx", 32768) or 32768)
-    except (TypeError, ValueError):
-        _num_ctx = 32768
+    # (default 32768 — comfortably fits fix/log prompts; raise for very large ones).
+    #
+    # Cloud is derived from the model registry instead of that flat local default.
+    # num_ctx is what actually bounds the usable window, while the registry's
+    # context_window is a HARD selection filter in model_selection — so if the two
+    # disagree the picker either skips an endpoint that would have fit (window under-
+    # stated) or picks one whose prompt is then silently truncated (overstated). Reading
+    # the resolved capability here makes the registry the single source of truth and
+    # keeps them in sync by construction. Local ollama keeps the flat default: those
+    # models share one box whose memory is the real constraint, so a large num_ctx there
+    # is a resource decision, not a model-capability one.
+    _explicit_cloud_ctx = config.get("ollama_cloud_num_ctx")
+    if _is_ollama_cloud(provider) and not _explicit_cloud_ctx:
+        try:
+            _caps = model_registry.resolve(provider, model, config)
+            _num_ctx = int(_caps.get("context_window") or 0) or 32768
+        except Exception:  # noqa: BLE001 — capability lookup must never fail a call
+            _num_ctx = 32768
+    else:
+        _raw_ctx = _explicit_cloud_ctx if (_is_ollama_cloud(provider) and _explicit_cloud_ctx) \
+            else config.get("ollama_num_ctx", 32768)
+        try:
+            _num_ctx = int(_raw_ctx or 32768)
+        except (TypeError, ValueError):
+            _num_ctx = 32768
     _options = {"num_ctx": _num_ctx}
     # CPU thread count. On a CPU box the big models (e.g. 32b) are slow; give ollama more
     # threads (up to physical cores) to speed inference. 0 = let ollama decide (its
@@ -2046,9 +2066,19 @@ def _model_key(provider, base_url, model):
 def _call_provider_wrapper(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
                            usage_out, **kwargs):
     """Wrapper function for threading-based timeout in Python 3.9 compatibility.
-    It captures the result from _call_provider into a mutable variable."""
-    usage_out["_result"] = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream,
-                                          task_id, config, usage_out=usage_out, **kwargs)
+    It captures the result from _call_provider into a mutable variable.
+
+    Exceptions are captured too, not allowed to escape: this runs on a worker
+    thread, where a raised exception would just kill that thread and be lost.
+    _call_provider_timed re-raises it on the calling thread, so the contextlib
+    (3.11+) and threading (3.9) branches behave identically. Without this a
+    failing provider looks like a successful call returning None on 3.9, and
+    _try_provider's failover/credit/rate-limit handling never sees the error."""
+    try:
+        usage_out["_result"] = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream,
+                                              task_id, config, usage_out=usage_out, **kwargs)
+    except BaseException as e:  # noqa: BLE001 — re-raised verbatim on the caller's thread
+        usage_out["_exc"] = e
 
 
 def _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
@@ -2087,9 +2117,13 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
             raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
     else:
         # Python 3.9: use threading-based timeout (fallback)
+        # kwargs go through Thread's own `kwargs=` parameter — `**kwargs` cannot
+        # appear inside the args tuple literal (that is a SyntaxError in every
+        # Python version, which made this whole module un-importable).
         thread = threading.Thread(target=_call_provider_wrapper,
-                                  args=(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                                        usage_out, **kwargs),
+                                  args=(provider, model, api_key, base_url, messages, tools,
+                                        effective_stream, task_id, config, usage_out),
+                                  kwargs=kwargs,
                                   daemon=True)
         thread.start()
         thread.join(timeout=timeout_s)
@@ -2099,6 +2133,8 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
                            provider, model, timeout_s)
             thread.join()  # Give it a moment to clean up
             raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
+        if usage_out.get("_exc") is not None:
+            raise usage_out.pop("_exc")
         result = usage_out.get("_result")
 
     latency_ms_wire = (time.monotonic() - t0) * 1000.0
