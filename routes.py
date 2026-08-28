@@ -2906,6 +2906,60 @@ async def get_llm_config():
     }
 
 
+@router.get("/api/console/accounts")
+async def get_console_accounts():
+    """Get available usernames from vault and current console account selection."""
+    import auth as _a
+    config = load_config()
+
+    # Get all available usernames
+    users = _a.list_users()
+
+    # Get current selection
+    selected = (config.get("console_accounts") or []).copy()
+
+    return {
+        "available": users,
+        "selected": selected,
+    }
+
+
+@router.post("/api/console/accounts")
+async def save_console_accounts(request: Request):
+    """Save selected console account usernames and push to LM hub."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    selected = (data.get("selected") or []).copy()
+
+    # Validate all selected usernames exist
+    import auth as _a
+    all_users = {u["username"] for u in _a.list_users()}
+    invalid = [u for u in selected if u not in all_users]
+    if invalid:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid usernames: {', '.join(invalid)}"},
+        )
+
+    # Save to config
+    config = load_config()
+    config["console_accounts"] = selected
+    save_config(config)
+
+    # Relay to the LM hub, which owns the console module. Persisted above, so a
+    # dropped relay is never data loss — the next save re-pushes it.
+    try:
+        from hub_agent import hub_agent_client
+        if hub_agent_client:
+            hub_agent_client.send_console_accounts(selected)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Failed to push console accounts to hub: %s", e)
+
+    return {"status": "ok", "selected": selected}
+
+
 @router.post("/api/local-llm/setup")
 async def local_llm_setup(request: Request):
     """Kick off the one-click local (CPU-only) LLM setup in the background.

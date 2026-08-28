@@ -308,6 +308,9 @@ class HubAgentClient:
         logging.getLogger().addHandler(_relay_handler)
         self._install_uncaught_exception_relay()
 
+        # Console spokes registry for credential distribution (lm console module).
+        self._console_spokes: set = set()
+
     # -------------------------------------------------------------- log relay
 
     def _install_uncaught_exception_relay(self) -> None:
@@ -1196,6 +1199,14 @@ class HubAgentClient:
             await self._handle_escalate_log_issue(msg, data)
             return
 
+        if cmd_type in ("CONSOLE_SET_ACCOUNTS", "CONSOLE_SET_CREDENTIALS"):
+            # Console credential accounts pushed from LM hub. Distribute to all
+            # active console spokes via request-response on their control channels.
+            accounts = data.get("accounts") or []
+            if self._console_spokes:
+                await self._distribute_console_credentials(accounts)
+            return
+
         if cmd_type == "HUB_RESPONSE":
             corr_id = data.get("correlation_id")
             result = data.get("result")
@@ -1315,6 +1326,75 @@ class HubAgentClient:
             return
 
         logger.debug("Unhandled Hub message type: %s", cmd_type)
+
+    # ------------------------------------------------------------------- console
+
+    async def _distribute_console_credentials(self, accounts: list) -> None:
+        """Push console credential accounts to all connected console spokes.
+
+        Each console spoke receives a CONSOLE_SET_CREDENTIALS command via the
+        hub↔spoke control channel. The spoke uses these credentials for auto-login
+        when profiling a device via the console module.
+
+        This is a fire-and-forget broadcast: spokes that are offline or busy
+        will silently drop the message, and their subsequent console operations
+        simply won't use any credentials (fail open to profile without login).
+        """
+        logger.info("Distributing %d console accounts to %d spoke(s)", len(accounts), len(self._console_spokes))
+        if not self._ws or not self.signer:
+            logger.debug("No hub connection; skipping console credential distribution")
+            return
+        for spoke_id in self._console_spokes:
+            try:
+                msg = {
+                    "header": {
+                        "message_id": str(uuid.uuid4()),
+                        "timestamp": round(time.time(), 6),
+                        "sender_id": self.spoke_id,
+                        "destination_id": spoke_id,
+                    },
+                    "payload": {
+                        "type": "CONSOLE_SET_CREDENTIALS",
+                        "data": {"credentials": [{"username": u, "password": ""} for u in accounts]},
+                    },
+                }
+                await self._ws.send(encode_frame(self.signer, msg))
+                logger.debug("Sent CONSOLE_SET_CREDENTIALS to %s", spoke_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to send CONSOLE_SET_CREDENTIALS to %s: %s", spoke_id, e)
+
+    def send_console_accounts(self, accounts: list) -> None:
+        """Fire-and-forget: relay the operator's console account selection up to
+        the LM hub (``CONSOLE_SET_ACCOUNTS``), which owns the console module and
+        fans the list out to its own console spokes.
+
+        Thread-safe: called from the FastAPI request thread, it schedules the
+        signed send on the agent's own event loop (same pattern as
+        :meth:`report_probe`). A no-op when not connected/approved — the
+        selection is already persisted in config and is re-pushed on the next
+        save, so a dropped relay is never data loss.
+        """
+        loop = self.loop
+        if loop is None or self._ws is None or self.signer is None or not self._approved:
+            logger.debug("Hub agent not ready; console accounts not relayed")
+            return
+
+        async def _send():
+            try:
+                msg = {"header": {"message_id": str(uuid.uuid4()),
+                                  "timestamp": round(time.time(), 6),
+                                  "sender_id": self.spoke_id, "destination_id": "hub"},
+                       "payload": {"type": "CONSOLE_SET_ACCOUNTS",
+                                   "data": {"accounts": list(accounts)}}}
+                await self._ws.send(encode_frame(self.signer, msg))
+                logger.info("Console accounts relayed to hub: %s", accounts)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("CONSOLE_SET_ACCOUNTS send failed: %s", e)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_send(), loop)
+        except Exception:  # noqa: BLE001 — never fail the save over a relay
+            pass
 
 
 # Module-level singleton, started by AppBuilder at app startup if HUB_WS_URL is set.
