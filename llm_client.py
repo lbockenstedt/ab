@@ -2313,22 +2313,42 @@ def _configured_entries(config):
     ]
 
 
+#: Substrings that mark a 400 as "this endpoint won't accept the tools payload"
+#: rather than a genuine bad request. Kept deliberately narrow: a 400 we cannot
+#: attribute to tool calling must still fail loudly instead of silently
+#: downgrading a tool run into a plain completion.
+_TOOL_400_MARKERS = (
+    "tool", "function call", "function_call", "functions are not",
+    "does not support tools", "unsupported_parameter",
+)
+
+
+def _is_tool_unsupported_400(err_str):
+    """True when `err_str` looks like a 400 caused by the tools payload.
+
+    _llm_retry_post folds the response body into the message, so the provider's
+    own explanation ("model does not support tools", "unsupported_parameter:
+    tools", ...) is available here."""
+    if "400" not in err_str:
+        return False
+    low = err_str.lower()
+    return any(m in low for m in _TOOL_400_MARKERS)
+
+
 def _try_candidate(candidate, messages, tools, effective_stream, task_id, config, **kwargs):
     """The requirements= path's per-candidate attempt. Covers credit
-    exhaustion and rate-limit cooldown (incl. claude_cli session limits), so
-    nothing here can leave a dead endpoint retried forever.
+    exhaustion, rate-limit cooldown (incl. claude_cli session limits) and the
+    tool-calling-400 retry-without-tools fallback, so nothing here can leave a
+    dead endpoint retried forever or fail a whole run because one endpoint
+    rejects a tools payload it advertised support for.
 
-    NOTE: this used to describe itself as a conservative subset of
-    _try_provider, with the provider-specific message-rewriting branches
-    (ollama 404/403 detail, tool-calling-400 retry-without-tools, routed-model
-    retry) "staying on the slot-based path for now". That path no longer
-    exists -- it was retired once the last call site moved here, and those
-    branches went with it rather than being ported. They are therefore absent
-    for EVERY provider, not parked somewhere else; treat their loss as a known
-    gap to re-implement here, not as a reason to under-declare a provider's
-    capabilities in model_registry (doing exactly that kept Copilot's
-    supports_tools False long after the fallback it was hedging against had
-    been deleted)."""
+    The retry-without-tools branch was lost when the slot-based path
+    (_try_provider) was retired and its provider-specific error handling was
+    deleted rather than ported -- leaving it absent for EVERY provider. It is
+    re-implemented here because a registry flag can only ever say whether an
+    endpoint *should* accept tools; this is the runtime net for when it does
+    not. Still missing from the old path and worth porting later: the ollama
+    404/403 message detail and the routed-model retry."""
     provider, model, base_url, api_key = (candidate["provider"], candidate["model"],
                                           candidate["base_url"], candidate["api_key"])
     mk = candidate["key"]
@@ -2354,6 +2374,26 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
                 _cb_trip(_MODEL_RATE_CB, mk, f"Rate-limited: {err_str[:120]}",
                          _RATELIMIT_COOLDOWN_SECONDS, "rate_limit", provider)
                 return None, "rate_limited"
+            if tools and _is_tool_unsupported_400(err_str):
+                # One retry without the tools payload. Better a usable plain
+                # answer than failing the run: callers that asked for tools
+                # (fix_engine's review loop) already scrape tool calls out of
+                # the TEXT when the structured field is absent, so the degraded
+                # result can still drive their loop.
+                logger.warning("%s/%s rejected the tools payload (400); retrying without tools. %s",
+                               provider, model, err_str[:200])
+                try:
+                    degraded = _call_provider_timed(provider, model, api_key, base_url, messages, None,
+                                                    effective_stream, task_id, config, **kwargs)
+                except Exception as e2:  # noqa: BLE001 — the retry is best-effort
+                    return None, e2
+                # Preserve the tools-call CONTRACT: with tools= set, providers
+                # return {"text", "tool_calls"}; without it they return a bare
+                # string. Handing that string back would change the return type
+                # under the caller purely because of a transport failure.
+                if not isinstance(degraded, dict):
+                    degraded = {"text": str(degraded or ""), "tool_calls": None}
+                return degraded, None
             return None, e
 
 

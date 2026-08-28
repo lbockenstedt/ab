@@ -27,13 +27,13 @@ def _load_ns():
     want_funcs = {
         "_endpoint_key", "_cb_trip", "_cb_remaining", "_model_lock",
         "_iter_configured_endpoints", "_enumerate_candidates", "_configured_entries",
-        "_try_candidate", "_call_llm_with_requirements",
+        "_try_candidate", "_call_llm_with_requirements", "_is_tool_unsupported_400",
         "_model_key", "get_llm_perf_snapshot", "_get_llm_perf_store",
         "_provider_configured", "_provider_is_nokey", "_is_ollama", "_is_ollama_cloud", "_is_lmstudio",
         "_routed_model_dead", "_get_category_semaphore",
     }
     want_assign = {
-        "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS",
+        "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_TOOL_400_MARKERS",
         "_ENDPOINT_CB_LOCK", "_ENDPOINT_CREDIT_CB", "_MODEL_RATE_CB",
         "_MODEL_LOCKS_LOCK", "_MODEL_LOCKS",
         "_LLM_PERF_STORE", "_LLM_PERF_LOCK",
@@ -196,6 +196,60 @@ def main():
     ok &= _check("a 429 trips the per-MODEL rate CB (not the endpoint credit CB)",
                 ns["_cb_remaining"](ns["_MODEL_RATE_CB"], candidate["key"]) > 0
                 and ns["_cb_remaining"](ns["_ENDPOINT_CREDIT_CB"], ns["_endpoint_key"]("anthropic", "")) == 0)
+
+    # --- _try_candidate: tool-calling 400 retries once WITHOUT tools -----------
+    # This net was deleted with the old slot path, leaving every provider
+    # exposed; it matters more now that Copilot advertises tool support.
+    ns["_ENDPOINT_CREDIT_CB"].clear()
+    ns["_MODEL_RATE_CB"].clear()
+    _tools = [{"type": "function", "function": {"name": "read_file"}}]
+
+    ok &= _check("a tools-shaped 400 is recognised",
+                ns["_is_tool_unsupported_400"](
+                    "400 Client Error: Bad Request for url: x - model does not support tools")
+                is True)
+    ok &= _check("an unrelated 400 is NOT treated as a tools problem "
+                "(must fail loudly, not silently downgrade)",
+                ns["_is_tool_unsupported_400"](
+                    "400 Client Error: Bad Request - context length exceeded") is False)
+    ok &= _check("a non-400 tools error is not swallowed by the tools branch",
+                ns["_is_tool_unsupported_400"]("500 tool explosion") is False)
+
+    _seen = {"n": 0}
+    def _fail_first_with_tools(p, m):
+        _seen["n"] += 1
+        return Exception("400 Bad Request - unsupported_parameter: tools") if _seen["n"] == 1 else None
+    ns["_test_calls"]["raise_exc"] = _fail_first_with_tools
+    ns["_test_calls"]["provider_calls"].clear()
+    result, err = ns["_try_candidate"](candidate, [], _tools, True, None, {})
+    ok &= _check("a tool-calling 400 retries the SAME endpoint instead of failing",
+                err is None and len(ns["_test_calls"]["provider_calls"]) == 2)
+    ok &= _check("the degraded retry preserves the tools-call return CONTRACT "
+                "({text, tool_calls}), not a bare string",
+                isinstance(result, dict) and result.get("tool_calls") is None
+                and "ok from" in result.get("text", ""))
+    ok &= _check("a tool-calling 400 does NOT trip a circuit breaker "
+                "(the endpoint is healthy, it just refused the payload)",
+                ns["_cb_remaining"](ns["_MODEL_RATE_CB"], candidate["key"]) == 0
+                and ns["_cb_remaining"](ns["_ENDPOINT_CREDIT_CB"],
+                                        ns["_endpoint_key"]("anthropic", "")) == 0)
+
+    # No tools sent -> nothing to drop, so the 400 must propagate as a failure.
+    _seen["n"] = 0
+    ns["_test_calls"]["provider_calls"].clear()
+    result, err = ns["_try_candidate"](candidate, [], None, True, None, {})
+    ok &= _check("without tools, a 400 is NOT retried and is reported as an error",
+                result is None and err is not None
+                and len(ns["_test_calls"]["provider_calls"]) == 1)
+
+    # If the retry ALSO fails, surface that error rather than looping.
+    ns["_test_calls"]["raise_exc"] = lambda p, m: Exception(
+        "400 Bad Request - unsupported_parameter: tools")
+    ns["_test_calls"]["provider_calls"].clear()
+    result, err = ns["_try_candidate"](candidate, [], _tools, True, None, {})
+    ok &= _check("a retry that also fails is reported, and is attempted only once",
+                result is None and err is not None
+                and len(ns["_test_calls"]["provider_calls"]) == 2)
 
     # --- _call_llm_with_requirements: end-to-end selection + success -----------
 
