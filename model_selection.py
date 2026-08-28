@@ -177,7 +177,20 @@ def _rank_tier(tier_candidates, perf, reqs, min_samples):
             if registry.is_nokey_provider(s["c"].get("provider")):
                 s["score"] -= _LOCAL_OFFLOAD_PENALTY
 
-    stats.sort(key=lambda s: s["score"], reverse=True)
+    # Capability ordering. Perf scores are min-max normalised WITHIN the tier,
+    # so between two candidates the faster one takes 1.0 and the slower 0.0 —
+    # a full-range gap that no additive bonus could ever overcome. Copilot Opus
+    # and Sonnet are both frontier/large, so before this the tier was ordered on
+    # speed alone and Sonnet (much faster) always beat Opus for exactly the hard
+    # work Opus is reserved for. When the caller explicitly asked for the
+    # smartest option, capability is therefore the PRIMARY key and perf only
+    # breaks ties within an equal rank. Left off the default path on purpose:
+    # ordinary work should still take the fastest model in the chosen tier.
+    if reqs.prefer_capable:
+        stats.sort(key=lambda s: (registry.capability_rank(s["c"].get("caps") or {}), s["score"]),
+                   reverse=True)
+    else:
+        stats.sort(key=lambda s: s["score"], reverse=True)
     return stats
 
 

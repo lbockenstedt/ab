@@ -61,8 +61,35 @@ COST_TIER_RANK = {"free": 0, "cheap": 1, "frontier": 2, "unknown": 3}
 _CAP_FIELDS = (
     "cost_tier", "max_complexity", "context_window", "supports_tools",
     "native_agentic_tools", "supports_mutating_agent", "supports_structured_output",
-    "supports_batch", "supports_streaming",
+    "supports_batch", "supports_streaming", "capability_rank",
 )
+
+#: Fallback `capability_rank` derived from max_complexity, for any rule that
+#: predates the field (operator-authored rules, auto-discovery stubs). Keeps an
+#: un-ranked registry behaving exactly as it did before the field existed.
+_CAPABILITY_RANK_BY_COMPLEXITY = {"trivial": 10, "small": 30, "medium": 50, "large": 70}
+
+#: Neither cost_tier nor max_complexity can express "Opus is stronger than
+#: Sonnet": both are `frontier`/`large`, and eight default rules collapse onto
+#: that same pair. Tier decides WHICH BUDGET to spend and max_complexity is a
+#: HARD filter (raise it and a model is excluded from work it could do), so
+#: neither can carry a within-tier ordering. `capability_rank` is that missing
+#: axis: 0-100, higher = smarter, compared ONLY between models already in the
+#: same tier. It is a pure ranking hint — it never filters, so a wrong value
+#: costs ordering, never availability.
+#:
+#: Deliberately NOT the premium-request multiplier: that would rank GPT-5.5
+#: (57x) above Opus (27x), which is a price signal, not a capability one.
+def capability_rank(caps):
+    """The 0-100 within-tier capability score for a resolved capability dict.
+
+    Falls back to a max_complexity-derived default when the rule carries no
+    explicit rank, so a registry written before this field existed keeps its
+    previous relative ordering instead of collapsing to zero."""
+    raw = (caps or {}).get("capability_rank")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return _CAPABILITY_RANK_BY_COMPLEXITY.get((caps or {}).get("max_complexity"), 0)
+    return max(0, min(100, int(raw)))
 
 # A model that matches no curated rule at all — sorts LAST on cost (after
 # frontier) so it's genuinely last-resort, but starts at max_complexity=
@@ -100,7 +127,7 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "enabled": True,
+     "capability_rank": 70, "enabled": True,
      "notes": "session auth (no API key), but every call bills the operator's Anthropic "
               "account — cost_tier=frontier so the picker RESERVES it (free/GPU wins first, "
               "claude_cli is used only when a call needs its native_agentic_tools/"
@@ -116,19 +143,19 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "small", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "enabled": True,
+     "capability_rank": 55, "enabled": True,
      "notes": "fastest/cheapest Claude — capped at small so it handles light agentic/tool "
               "work; medium escalates to Sonnet and large/feature_build to Opus"},
     {"id": "claude-cli-sonnet", "provider": "claude_cli", "match": "*sonnet*", "label": "Claude Sonnet (via CLI)",
      "cost_tier": "frontier", "max_complexity": "medium", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "enabled": True, "notes": "balanced Claude — medium agentic/mutating work; large escalates to Opus"},
+     "capability_rank": 78, "enabled": True, "notes": "balanced Claude — medium agentic/mutating work; large escalates to Opus"},
     {"id": "claude-cli-opus", "provider": "claude_cli", "match": "*opus*", "label": "Claude Opus (via CLI)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": False, "native_agentic_tools": True, "supports_mutating_agent": True,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": False,
-     "enabled": True,
+     "capability_rank": 95, "enabled": True,
      "notes": "most capable Claude — the ONLY claude_cli model at large complexity, so it is "
               "the default for feature_build and the hardest large agentic/mutating work"},
     {"id": "ollama-cloud", "provider": "ollama_cloud", "match": "*", "label": "Ollama Cloud",
@@ -192,7 +219,7 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True,
+     "capability_rank": 95, "enabled": True,
      "notes": "27x premium-request multiplier — the most expensive model Copilot serves. "
               "frontier/large matches anthropic-opus and claude-cli-opus so the picker "
               "RESERVES it for the hardest work instead of spending it on triage."},
@@ -200,49 +227,49 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "9x multiplier; frontier/large mirrors anthropic-sonnet"},
+     "capability_rank": 78, "enabled": True, "notes": "9x multiplier; frontier/large mirrors anthropic-sonnet"},
     {"id": "copilot-haiku", "provider": "copilot", "match": "*haiku*", "label": "Claude Haiku (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "0.33x multiplier; cheap/medium mirrors anthropic-haiku"},
+     "capability_rank": 55, "enabled": True, "notes": "0.33x multiplier; cheap/medium mirrors anthropic-haiku"},
     {"id": "copilot-gemini-pro", "provider": "copilot", "match": "*gemini*pro*", "label": "Gemini Pro (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "6x multiplier; frontier/large mirrors google-pro"},
+     "capability_rank": 80, "enabled": True, "notes": "6x multiplier; frontier/large mirrors google-pro"},
     # `gpt-5*mini*` is deliberately MORE specific than `gpt-5*` so gpt-5-mini
     # (0.33x) stays cheap instead of inheriting the gpt-5 frontier tier.
     {"id": "copilot-gpt5-mini", "provider": "copilot", "match": "gpt-5*mini*", "label": "GPT-5 mini (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "0.33x multiplier — the cheapest GPT-5 variant"},
+     "capability_rank": 50, "enabled": True, "notes": "0.33x multiplier — the cheapest GPT-5 variant"},
     {"id": "copilot-gpt5", "provider": "copilot", "match": "gpt-5*", "label": "GPT-5 class (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "6x base / 57x for GPT-5.5 — priced as frontier so it is reserved"},
+     "capability_rank": 85, "enabled": True, "notes": "6x base / 57x for GPT-5.5 — priced as frontier so it is reserved"},
     {"id": "copilot-gpt4", "provider": "copilot", "match": "gpt-4*", "label": "GPT-4 class (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "0.33x multiplier (gpt-4o / gpt-4o-mini)"},
+     "capability_rank": 45, "enabled": True, "notes": "0.33x multiplier (gpt-4o / gpt-4o-mini)"},
     {"id": "anthropic-haiku", "provider": "anthropic", "match": "*haiku*", "label": "Claude Haiku class",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 200000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "capability_rank": 55, "enabled": True, "notes": ""},
     {"id": "anthropic-sonnet", "provider": "anthropic", "match": "*sonnet*", "label": "Claude Sonnet class",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "capability_rank": 78, "enabled": True, "notes": ""},
     {"id": "anthropic-opus", "provider": "anthropic", "match": "*opus*", "label": "Claude Opus class",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 200000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "capability_rank": 95, "enabled": True, "notes": ""},
     {"id": "google-flash", "provider": "google", "match": "*flash*", "label": "Gemini Flash class",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 1000000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -252,7 +279,7 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 2000000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": False,
-     "enabled": True, "notes": "supports_streaming=False -- _request_google hardcodes stream=False"},
+     "capability_rank": 80, "enabled": True, "notes": "supports_streaming=False -- _request_google hardcodes stream=False"},
     {"id": "openai-mini", "provider": "openai", "match": "*mini*", "label": "OpenAI mini class",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 128000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -262,7 +289,7 @@ DEFAULT_MODEL_RULES = [
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 128000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": True, "supports_streaming": True,
-     "enabled": True, "notes": ""},
+     "capability_rank": 85, "enabled": True, "notes": ""},
 
     # --- Capable self-hosted models -------------------------------------
     # The generic `ollama`/`ollama2` defaults are deliberately conservative
