@@ -191,6 +191,13 @@ def upgrade_registry(config):
         changed = True
         logger.info("LLM registry: enabled supports_tools on the ollama_cloud rule "
                     "(the client has always sent tools; the flag was wrong).")
+    _ranked, _ranks = model_registry.backfill_capability_ranks(config["model_registry"])
+    if _ranks:
+        config["model_registry"] = _ranked
+        changed = True
+        logger.info("LLM registry: backfilled capability_rank and lifted the claude_cli "
+                    "sonnet/haiku max_complexity caps (Opus now outranks Sonnet within "
+                    "the frontier tier instead of losing to it on raw speed).")
     return config, changed
 
 
