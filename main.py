@@ -391,6 +391,17 @@ try:
     if _migrated:
         save_config(_cfg)
         logger.info("LLM config migrated to schema v2 and persisted.")
+    # Registry top-ups run UNCONDITIONALLY, outside migrate()'s version gate:
+    # migrate() short-circuits once llm_config_version == CONFIG_VERSION, so on
+    # every already-migrated install (i.e. every boot after the first) the
+    # top-ups nested inside it never executed. A registry frozen before a
+    # capability ladder shipped therefore kept resolving stale tiers — e.g.
+    # Copilot Opus staying "cheap" — no matter how often AppBuilder restarted.
+    # Each helper is append-only, idempotent, and skips operator-curated rules.
+    _cfg2, _upgraded = llm_migrate.upgrade_registry(_cfg)
+    if _upgraded:
+        save_config(_cfg2)
+        logger.info("LLM model registry topped up with new default rules and persisted.")
 except Exception as me:
     logger.warning(f"LLM config migration skipped (non-fatal): {me}")
 
