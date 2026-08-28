@@ -163,6 +163,29 @@ def approve_pr(gh, repo_name, number, *, actor="human"):
     return repo, pr
 
 
+def _delete_pr_branch(repo, pr):
+    """Delete the merged PR's head branch so AppBuilder doesn't leave stale
+    ``ai-fix-issue-*`` branches piling up after every merge (GitHub's own
+    "delete branch on merge" only fires for the web UI, not the API merge
+    ``merge_pr`` performs). Only same-repo branches are removed — a fork head
+    lives in someone else's repo and isn't ours to delete — and any failure is
+    logged, never raised, so branch cleanup can't turn a successful merge into
+    an error."""
+    head = getattr(pr, "head", None)
+    head_repo = getattr(head, "repo", None)
+    if not head or not head_repo or head_repo.full_name != repo.full_name:
+        return
+    ref = head.ref
+    if ref == repo.default_branch:
+        return
+    try:
+        repo.get_git_ref("heads/%s" % ref).delete()
+        logger.info(f"pr_actions: {repo.full_name} deleted merged branch {ref}")
+    except GithubException as e:
+        logger.info(f"pr_actions: {repo.full_name} could not delete branch {ref} "
+                    f"(already gone or protected): {e}")
+
+
 def merge_pr(gh, repo_name, number):
     """Returns (status_code, response_dict) — the exact shape routes.py's
     prior _do_merge closure returned, just relocated so both the human route
@@ -214,6 +237,7 @@ def merge_pr(gh, repo_name, number):
         res = pr.merge()  # retry once, now that the branch carries the base
         logger.info(f"pr_actions: {repo_name} #{number} merged after auto-resolving conflicts")
     update_pr_review(repo_name, number, merged=True)
+    _delete_pr_branch(repo, pr)
     logger.info(f"pr_actions: {repo_name} #{number} MERGED")
     return 200, {"status": "success", "merged": bool(getattr(res, "merged", True)),
                 "message": getattr(res, "message", "merged")}
