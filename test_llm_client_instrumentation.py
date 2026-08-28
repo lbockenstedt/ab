@@ -67,6 +67,15 @@ class _FakeConfigStore:
         self.LLM_PERF_FILE = path
 
 
+class _StubLogger:
+    """No-op logger for the extracted timeout branches (they log on expiry)."""
+
+    def _noop(self, *a, **k):
+        pass
+
+    debug = info = warning = error = exception = _noop
+
+
 def _load_timed_ns(perf_path):
     """Extracts the whole perf-telemetry block added in Phase 3
     (_get_llm_perf_store/get_llm_perf_snapshot/_model_key/
@@ -76,14 +85,15 @@ def _load_timed_ns(perf_path):
     src = open("llm_client.py").read()
     tree = ast.parse(src)
     names = {"_LLM_PERF_STORE", "_LLM_PERF_LOCK", "_llm_perf_last_save", "_LLM_PERF_SAVE_INTERVAL"}
-    fn_names = {"_get_llm_perf_store", "get_llm_perf_snapshot", "_model_key", "_call_provider_timed"}
+    fn_names = {"_get_llm_perf_store", "get_llm_perf_snapshot", "_model_key", "_call_provider_timed",
+                "_call_provider_wrapper"}
     segs = []
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(getattr(t, "id", "") in names for t in node.targets):
             segs.append(ast.get_source_segment(src, node))
         elif isinstance(node, ast.FunctionDef) and node.name in fn_names:
             segs.append(ast.get_source_segment(src, node))
-    assert len(segs) == 4 + 4, f"expected 4 globals + 4 functions, found {len(segs)} segments"
+    assert len(segs) == 4 + 5, f"expected 4 globals + 5 functions, found {len(segs)} segments"
 
     calls = {"provider_calls": []}
 
@@ -101,6 +111,14 @@ def _load_timed_ns(perf_path):
         "llm_perf": llm_perf, "config_store": _FakeConfigStore(perf_path),
         "threading": threading, "time": time,
         "_call_provider": _call_provider_stub,
+        # _call_provider_timed wraps the call in a timeout. Pin the threading
+        # fallback (the Python 3.9 branch) rather than contextlib.timeout: it is
+        # the branch that spawns a Thread and marshals args/kwargs, so it is the
+        # one worth exercising here. `logger` is stubbed because the timeout
+        # branches log on expiry.
+        "_TIMEOUT_AVAILABLE": False,
+        "timeout": None,
+        "logger": _StubLogger(),
     }
     exec("\n\n".join(segs), ns)
     ns["_test_calls"] = calls

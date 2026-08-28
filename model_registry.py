@@ -132,20 +132,19 @@ DEFAULT_MODEL_RULES = [
      "notes": "most capable Claude — the ONLY claude_cli model at large complexity, so it is "
               "the default for feature_build and the hardest large agentic/mutating work"},
     {"id": "ollama-cloud", "provider": "ollama_cloud", "match": "*", "label": "Ollama Cloud",
-     "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
+     "cost_tier": "cheap", "max_complexity": "large", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True,
      "notes": "the one ollama* provider that takes a key. supports_tools=True: "
               "_request_ollama sets payload['tools'] and parses tool_calls for cloud "
               "exactly as for local (identical wire protocol), and every model in the "
-              "current cloud library is tool-native. context_window is deliberately "
-              "ollama_num_ctx (default 32768), NOT the model's advertised window: "
-              "_request_ollama sends options.num_ctx, so that is the real usable "
-              "window regardless of model capability. Raising this without raising "
-              "ollama_num_ctx would let the picker select this endpoint for a job "
-              "whose prompt then gets silently truncated -- context_window is a HARD "
-              "selection filter (see model_selection), not a prompt budget."},
+              "current cloud library is tool-native. context_window is AUTHORITATIVE "
+              "for cloud: _request_ollama derives options.num_ctx from this value, so "
+              "the hard selection filter in model_selection and the window actually "
+              "requested on the wire cannot desync. 131072 is the common floor across "
+              "the current cloud library; per-model rules below raise it where the "
+              "model genuinely supports more. Override with ollama_cloud_num_ctx."},
     {"id": "openrouter-free", "provider": "openrouter", "match": "*:free", "label": "OpenRouter free models",
      "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -316,29 +315,30 @@ DEFAULT_MODEL_RULES = [
     # qwen3.5) but wrong for the small/fast end of the library, which the `*`
     # rule would otherwise let the picker choose for the hardest jobs. These
     # rules only DOWNGRADE that end; the flagship models keep the `*` default.
-    # context_window stays at the generic ollama_num_ctx value on purpose --
-    # see the ollama-cloud rule's notes.
+    # context_window here is authoritative: _request_ollama derives the cloud
+    # options.num_ctx from the resolved capability, so these values are what is
+    # actually requested on the wire -- see the ollama-cloud rule's notes.
     {"id": "ollama-cloud-nano", "provider": "ollama_cloud", "match": "*nano*",
      "label": "Ollama Cloud (nano class)",
-     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 32768,
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True, "notes": "smallest cloud tier (e.g. nemotron-3-nano:30b) -- fast/cheap, not a large-job model"},
     {"id": "ollama-cloud-flash", "provider": "ollama_cloud", "match": "*flash*",
      "label": "Ollama Cloud (flash class)",
-     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 32768,
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True, "notes": "latency-optimised cloud variants (e.g. deepseek-v4-flash, glm-5.3-flash)"},
     {"id": "ollama-cloud-20b", "provider": "ollama_cloud", "match": "*:20b*",
      "label": "Ollama Cloud (20B class)",
-     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 32768,
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 131072,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True, "notes": "e.g. gpt-oss:20b -- the small open-weight cloud tier"},
     {"id": "ollama-cloud-ultra", "provider": "ollama_cloud", "match": "*ultra*",
      "label": "Ollama Cloud (ultra class)",
-     "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
+     "cost_tier": "cheap", "max_complexity": "large", "context_window": 262144,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True,
@@ -347,7 +347,10 @@ DEFAULT_MODEL_RULES = [
               "rule (rather than inheriting `*`) so the flagship is not silently "
               "downgraded if the generic cloud default is ever retuned. Cheap+large is "
               "intentional: cost_tier tracks PRICE, not capability, so the cost-first "
-              "picker reaches this frontier-grade model early -- which is the point."},
+              "picker reaches this frontier-grade model early -- which is the point. "
+              "262144 is the window Ollama Cloud serves; the model card advertises up "
+              "to 1M, so this is the deliberately conservative end of the reported "
+              "range -- understating only forgoes capacity, overstating truncates."},
 ]
 
 
