@@ -9,6 +9,7 @@ Standalone: imports only model_registry (no app/main init).
 import sys
 
 import model_registry as reg
+import model_selection as sel
 
 
 def _check(label, cond):
@@ -464,6 +465,57 @@ def main():
     ok &= _check("post-top-up, openrouter/free resolves free (offload prefers it over the GPU)",
                 reg.resolve("openrouter", "openrouter/free", {"model_registry": routed})["cost_tier"]
                     == "free")
+
+    # ---------------------------------------------------------- capability_rank
+    # cost_tier and max_complexity cannot express "Opus beats Sonnet": both are
+    # frontier/large. capability_rank is the within-tier ordering axis.
+    _cfg = {}
+    _rank = lambda p, m: reg.capability_rank(reg.resolve(p, m, _cfg))
+    for _p in ("copilot", "anthropic", "claude_cli"):
+        ok &= _check(f"{_p}: Opus outranks Sonnet on capability_rank",
+                    _rank(_p, "claude-opus-5") > _rank(_p, "claude-sonnet-5"))
+    ok &= _check("Opus carries the SAME capability_rank whichever provider serves it",
+                len({_rank(p, "claude-opus-5")
+                     for p in ("copilot", "anthropic", "claude_cli")}) == 1)
+    ok &= _check("Opus is the ceiling — no default rule outranks it",
+                max(reg.capability_rank(r) for r in reg.DEFAULT_MODEL_RULES)
+                    == _rank("copilot", "claude-opus-5"))
+    ok &= _check("capability_rank never exceeds a cheaper tier's job: it is compared "
+                "only within a tier, so Opus stays frontier (reserved), not promoted",
+                reg.resolve("copilot", "claude-opus-5", _cfg)["cost_tier"] == "frontier")
+    # Backward compatibility: a rule written before the field existed must keep
+    # its previous relative order rather than collapsing to zero.
+    ok &= _check("a rule with no capability_rank falls back to a max_complexity default",
+                reg.capability_rank({"max_complexity": "large"}) >
+                reg.capability_rank({"max_complexity": "medium"}) >
+                reg.capability_rank({"max_complexity": "trivial"}))
+    ok &= _check("a non-numeric/bool capability_rank falls back rather than crashing",
+                reg.capability_rank({"max_complexity": "large", "capability_rank": True})
+                    == reg.capability_rank({"max_complexity": "large"})
+                and reg.capability_rank({"max_complexity": "large",
+                                         "capability_rank": "high"})
+                    == reg.capability_rank({"max_complexity": "large"}))
+    ok &= _check("capability_rank is clamped to 0..100",
+                reg.capability_rank({"capability_rank": 999}) == 100
+                and reg.capability_rank({"capability_rank": -5}) == 0)
+
+    # The behaviour the axis exists for. Perf scores are min-max normalised
+    # within a tier, so the faster model takes the full 1.0 and the slower 0.0:
+    # before capability became the primary key, Sonnet's speed always beat Opus
+    # for precisely the hard work Opus is reserved for.
+    _cands = [{"key": f"copilot|x|{m}", "provider": "copilot", "model": m,
+               "caps": reg.resolve("copilot", m, _cfg), "available": True}
+              for m in ("claude-sonnet-5", "claude-opus-5")]
+    _perf = {"copilot|x|claude-sonnet-5": {"n": 50, "tps": 80.0, "latency_ms": 4411},
+             "copilot|x|claude-opus-5":   {"n": 50, "tps": 20.0, "latency_ms": 7414}}
+    def _pick(pc):
+        got = sel.select_model(
+            sel.LlmRequirements(complexity="large", prefer_capable=pc), _cands, _perf)
+        return getattr(got, "model", None)
+    ok &= _check("prefer_capable picks Opus over a MUCH faster Sonnet in the same tier",
+                _pick(True) == "claude-opus-5")
+    ok &= _check("without prefer_capable the tier is still ordered on speed (Sonnet wins)",
+                _pick(False) == "claude-sonnet-5")
 
     print()
     if ok:
