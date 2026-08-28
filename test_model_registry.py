@@ -388,6 +388,48 @@ def main():
     ok &= _check("copilot top-up never overrides an operator's own (provider, match) rule",
                 "copilot-opus" not in cp_own_added)
 
+    # --- ollama_cloud: tools flag + per-model ladder ------------------------
+
+    ok &= _check("ollama_cloud advertises tool support (the client has always sent tools)",
+                reg.resolve("ollama_cloud", "nemotron-3-ultra", {})["supports_tools"] is True)
+    ok &= _check("ollama_cloud small tiers are capped at medium; ultra stays large",
+                reg.resolve("ollama_cloud", "nemotron-3-nano:30b", {})["max_complexity"] == "medium"
+                and reg.resolve("ollama_cloud", "gpt-oss:20b", {})["max_complexity"] == "medium"
+                and reg.resolve("ollama_cloud", "glm-5.3-flash", {})["max_complexity"] == "medium"
+                and reg.resolve("ollama_cloud", "nemotron-3-ultra", {})["max_complexity"] == "large")
+    ok &= _check("ollama_cloud frontier-class models still inherit the generic large default",
+                reg.resolve("ollama_cloud", "kimi-k3", {})["max_complexity"] == "large"
+                and reg.resolve("ollama_cloud", "mistral-large-3:675b", {})["max_complexity"] == "large")
+    ok &= _check("ollama_cloud context_window stays pinned to ollama_num_ctx (32768), not the "
+                 "model's advertised window — it is a hard selection filter, not a prompt budget",
+                reg.resolve("ollama_cloud", "nemotron-3-ultra", {})["context_window"] == 32768)
+
+    frozen_oc = [{"id": "ollama-cloud", "provider": "ollama_cloud", "match": "*",
+                  "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
+                  "supports_tools": False, "enabled": True}]
+    ok &= _check("a frozen ollama-cloud rule wrongly reports no tool support (the bug)",
+                reg.resolve("ollama_cloud", "nemotron-3-ultra",
+                            {"model_registry": frozen_oc})["supports_tools"] is False)
+    oc_fixed, oc_changed = reg.enable_ollama_cloud_tools(frozen_oc)
+    ok &= _check("enable_ollama_cloud_tools repairs the frozen rule in place",
+                oc_changed is True
+                and reg.resolve("ollama_cloud", "nemotron-3-ultra",
+                                {"model_registry": oc_fixed})["supports_tools"] is True)
+    _, oc_changed2 = reg.enable_ollama_cloud_tools(oc_fixed)
+    ok &= _check("enable_ollama_cloud_tools is idempotent", oc_changed2 is False)
+    oc_own = [{"id": "my-cloud", "provider": "ollama_cloud", "match": "*",
+               "supports_tools": False, "enabled": True}]
+    _, oc_own_changed = reg.enable_ollama_cloud_tools(oc_own)
+    ok &= _check("enable_ollama_cloud_tools leaves an operator's own ollama_cloud rule alone",
+                oc_own_changed is False)
+    oc_top, oc_added = reg.upgrade_ollama_cloud_model_rules(frozen_oc)
+    ok &= _check("ollama_cloud per-model top-up injects the ladder into a frozen registry",
+                "ollama-cloud-nano" in oc_added
+                and reg.resolve("ollama_cloud", "nemotron-3-nano:30b",
+                                {"model_registry": oc_top})["max_complexity"] == "medium")
+    _, oc_added2 = reg.upgrade_ollama_cloud_model_rules(oc_top)
+    ok &= _check("ollama_cloud per-model top-up is idempotent", not oc_added2)
+
     # --- OpenRouter Free Models Router rule + upgrade_openrouter_free_router_rule ---
 
     # Injected into a frozen config that predates the rule (append-only).

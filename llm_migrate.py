@@ -123,6 +123,77 @@ def _seed_registry_stubs(config):
     return len(seen), classified, len(seen) - classified
 
 
+def upgrade_registry(config):
+    """Apply every idempotent, append-only model_registry top-up to *config*.
+
+    Returns (config, changed). Split out of migrate() and called
+    UNCONDITIONALLY at startup, because migrate() short-circuits on
+    ``llm_config_version == CONFIG_VERSION`` — so on any already-migrated
+    install (i.e. every install after its first boot) these top-ups never ran.
+    That is why a registry frozen before a ladder existed kept resolving with
+    the stale tiers no matter how many times AppBuilder restarted.
+
+    Every helper here is append-only, idempotent, and skips rules the operator
+    curated themselves, so running this on every boot is safe.
+    """
+    if not isinstance(config, dict) or not isinstance(config.get("model_registry"), list):
+        return config, False
+    changed = False
+    # Local/free registry top-up: a config["model_registry"] frozen before a
+    # local/free provider gained its DEFAULT rule (the `ollama2` GPU-endpoint
+    # gap) would classify that endpoint as `unknown` instead of `free`.
+    # Idempotent + append-only; see model_registry.upgrade_local_free_rules.
+    _topped, _added = model_registry.upgrade_local_free_rules(config["model_registry"])
+    if _added:
+        config["model_registry"] = _topped
+        changed = True
+        logger.info("LLM registry: added missing local/free rules %s.", _added)
+    _topped, _added_cap = model_registry.upgrade_capable_local_rules(config["model_registry"])
+    if _added_cap:
+        config["model_registry"] = _topped
+        changed = True
+        logger.info("LLM registry: added capable self-hosted model rules %s.", _added_cap)
+    _repaired, _reclassified = model_registry.reclassify_claude_cli_paid(config["model_registry"])
+    if _reclassified:
+        config["model_registry"] = _repaired
+        changed = True
+        logger.info("LLM registry: reclassified claude_cli free -> frontier (bills the "
+                    "operator's Anthropic account).")
+    _topped, _added_cc = model_registry.upgrade_claude_cli_model_rules(config["model_registry"])
+    if _added_cc:
+        config["model_registry"] = _topped
+        changed = True
+        logger.info("LLM registry: added per-model claude_cli capability rules %s "
+                    "(Haiku=medium, Sonnet/Opus=large).", _added_cc)
+    _topped, _added_copilot = model_registry.upgrade_copilot_model_rules(config["model_registry"])
+    if _added_copilot:
+        config["model_registry"] = _topped
+        changed = True
+        logger.info("LLM registry: added per-model copilot capability rules %s "
+                    "(Opus/Sonnet/GPT-5=frontier, Haiku/GPT-4/mini=cheap).",
+                    _added_copilot)
+    _topped, _added_router = model_registry.upgrade_openrouter_free_router_rule(config["model_registry"])
+    if _added_router:
+        config["model_registry"] = _topped
+        changed = True
+        logger.info("LLM registry: added the OpenRouter Free Models Router rule "
+                    "(openrouter/free -> free tier).")
+
+    _topped, _added_oc = model_registry.upgrade_ollama_cloud_model_rules(config["model_registry"])
+    if _added_oc:
+        config["model_registry"] = _topped
+        changed = True
+        logger.info("LLM registry: added per-model ollama_cloud capability rules %s "
+                    "(nano/flash/20b=medium, ultra=large).", _added_oc)
+    _repaired, _oc_tools = model_registry.enable_ollama_cloud_tools(config["model_registry"])
+    if _oc_tools:
+        config["model_registry"] = _repaired
+        changed = True
+        logger.info("LLM registry: enabled supports_tools on the ollama_cloud rule "
+                    "(the client has always sent tools; the flag was wrong).")
+    return config, changed
+
+
 def migrate(config):
     """Upgrade *config* in place to schema version 2. Returns (config, changed)."""
     if not isinstance(config, dict):
@@ -149,40 +220,7 @@ def migrate(config):
     # llm_slots is fully consumed now.
     config.pop("llm_slots", None)
 
-    # Local/free registry top-up: a config["model_registry"] frozen before a
-    # local/free provider gained its DEFAULT rule (the `ollama2` GPU-endpoint
-    # gap) would classify that endpoint as `unknown` instead of `free`.
-    # Idempotent + append-only; see model_registry.upgrade_local_free_rules.
-    if isinstance(config.get("model_registry"), list):
-        _topped, _added = model_registry.upgrade_local_free_rules(config["model_registry"])
-        if _added:
-            config["model_registry"] = _topped
-            logger.info("LLM registry: added missing local/free rules %s during migration.", _added)
-        _topped, _added_cap = model_registry.upgrade_capable_local_rules(config["model_registry"])
-        if _added_cap:
-            config["model_registry"] = _topped
-            logger.info("LLM registry: added capable self-hosted model rules %s during migration.", _added_cap)
-        _repaired, _reclassified = model_registry.reclassify_claude_cli_paid(config["model_registry"])
-        if _reclassified:
-            config["model_registry"] = _repaired
-            logger.info("LLM registry: reclassified claude_cli free -> frontier (bills the "
-                        "operator's Anthropic account) during migration.")
-        _topped, _added_cc = model_registry.upgrade_claude_cli_model_rules(config["model_registry"])
-        if _added_cc:
-            config["model_registry"] = _topped
-            logger.info("LLM registry: added per-model claude_cli capability rules %s "
-                        "(Haiku=medium, Sonnet/Opus=large) during migration.", _added_cc)
-        _topped, _added_copilot = model_registry.upgrade_copilot_model_rules(config["model_registry"])
-        if _added_copilot:
-            config["model_registry"] = _topped
-            logger.info("LLM registry: added per-model copilot capability rules %s "
-                        "(Opus/Sonnet/GPT-5=frontier, Haiku/GPT-4/mini=cheap) during migration.",
-                        _added_copilot)
-        _topped, _added_router = model_registry.upgrade_openrouter_free_router_rule(config["model_registry"])
-        if _added_router:
-            config["model_registry"] = _topped
-            logger.info("LLM registry: added the OpenRouter Free Models Router rule "
-                        "(openrouter/free -> free tier) during migration.")
+    config, _ = upgrade_registry(config)
 
     # 6: capability seeding + one summary line.
     try:

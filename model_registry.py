@@ -133,9 +133,19 @@ DEFAULT_MODEL_RULES = [
               "the default for feature_build and the hardest large agentic/mutating work"},
     {"id": "ollama-cloud", "provider": "ollama_cloud", "match": "*", "label": "Ollama Cloud",
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
-     "enabled": True, "notes": "the one ollama* provider that takes a key"},
+     "enabled": True,
+     "notes": "the one ollama* provider that takes a key. supports_tools=True: "
+              "_request_ollama sets payload['tools'] and parses tool_calls for cloud "
+              "exactly as for local (identical wire protocol), and every model in the "
+              "current cloud library is tool-native. context_window is deliberately "
+              "ollama_num_ctx (default 32768), NOT the model's advertised window: "
+              "_request_ollama sends options.num_ctx, so that is the real usable "
+              "window regardless of model capability. Raising this without raising "
+              "ollama_num_ctx would let the picker select this endpoint for a job "
+              "whose prompt then gets silently truncated -- context_window is a HARD "
+              "selection filter (see model_selection), not a prompt budget."},
     {"id": "openrouter-free", "provider": "openrouter", "match": "*:free", "label": "OpenRouter free models",
      "cost_tier": "free", "max_complexity": "medium", "context_window": 32768,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -299,6 +309,45 @@ DEFAULT_MODEL_RULES = [
      "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": True, "supports_batch": False, "supports_streaming": True,
      "enabled": True, "notes": "capable reasoning + JSON; tools left off (Gemma native tool-calling is unreliable)"},
+    # --- Ollama Cloud per-model ladder ------------------------------------
+    # The generic ollama-cloud `*` rule gives EVERY cloud model max_complexity
+    # "large". That is right for the frontier-class cloud models (nemotron-3-
+    # ultra, the kimi-k2/k3 and deepseek-v4-pro class, mistral-large-3,
+    # qwen3.5) but wrong for the small/fast end of the library, which the `*`
+    # rule would otherwise let the picker choose for the hardest jobs. These
+    # rules only DOWNGRADE that end; the flagship models keep the `*` default.
+    # context_window stays at the generic ollama_num_ctx value on purpose --
+    # see the ollama-cloud rule's notes.
+    {"id": "ollama-cloud-nano", "provider": "ollama_cloud", "match": "*nano*",
+     "label": "Ollama Cloud (nano class)",
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 32768,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "smallest cloud tier (e.g. nemotron-3-nano:30b) -- fast/cheap, not a large-job model"},
+    {"id": "ollama-cloud-flash", "provider": "ollama_cloud", "match": "*flash*",
+     "label": "Ollama Cloud (flash class)",
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 32768,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "latency-optimised cloud variants (e.g. deepseek-v4-flash, glm-5.3-flash)"},
+    {"id": "ollama-cloud-20b", "provider": "ollama_cloud", "match": "*:20b*",
+     "label": "Ollama Cloud (20B class)",
+     "cost_tier": "cheap", "max_complexity": "medium", "context_window": 32768,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True, "notes": "e.g. gpt-oss:20b -- the small open-weight cloud tier"},
+    {"id": "ollama-cloud-ultra", "provider": "ollama_cloud", "match": "*ultra*",
+     "label": "Ollama Cloud (ultra class)",
+     "cost_tier": "cheap", "max_complexity": "large", "context_window": 32768,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "enabled": True,
+     "notes": "nemotron-3-ultra: 550B total / 55B active MoE, explicitly built for "
+              "long-running agents across hundreds of tool calls. Stated as an explicit "
+              "rule (rather than inheriting `*`) so the flagship is not silently "
+              "downgraded if the generic cloud default is ever retuned. Cheap+large is "
+              "intentional: cost_tier tracks PRICE, not capability, so the cost-first "
+              "picker reaches this frontier-grade model early -- which is the point."},
 ]
 
 
@@ -508,6 +557,54 @@ def upgrade_copilot_model_rules(rules):
     upgrade — an operator's own copilot rule for the same match is left
     untouched."""
     return _append_missing_default_rules(rules, _COPILOT_MODEL_RULE_IDS)
+
+
+#: Per-model ollama_cloud capability rules (see DEFAULT_MODEL_RULES). Appended
+#: to an already-persisted registry so the small end of the cloud library
+#: (nano / flash / 20b) stops inheriting the generic `*` rule's "large"
+#: ceiling, and so the nemotron-3-ultra flagship is pinned explicitly.
+_OLLAMA_CLOUD_MODEL_RULE_IDS = frozenset({
+    "ollama-cloud-nano", "ollama-cloud-flash", "ollama-cloud-20b",
+    "ollama-cloud-ultra",
+})
+
+
+def upgrade_ollama_cloud_model_rules(rules):
+    """Return (new_rules, added_ids): a COPY of `rules` with any missing
+    per-model ollama_cloud rules (_OLLAMA_CLOUD_MODEL_RULE_IDS) appended.
+
+    Append-only and idempotent, exactly like the claude_cli and copilot
+    upgrades; an operator's own rule for the same (provider, match) wins."""
+    return _append_missing_default_rules(rules, _OLLAMA_CLOUD_MODEL_RULE_IDS)
+
+
+def enable_ollama_cloud_tools(rules):
+    """Return (new_rules, changed): a COPY of `rules` with the shipped
+    ollama_cloud rule's supports_tools flipped False -> True.
+
+    An append-only top-up cannot fix this: the stale flag lives ON the existing
+    "ollama-cloud" rule, so a frozen registry keeps claiming Ollama Cloud has
+    no tool support. That is factually wrong -- _request_ollama sets
+    payload["tools"] and parses tool_calls for the cloud endpoint over the same
+    wire protocol as the local one, and the current cloud library is tool-native
+    (nemotron-3-ultra is marketed for "hundreds of tool calls"). Left uncorrected
+    it makes model_selection filter Ollama Cloud out of every tool-requiring job.
+
+    Scoped deliberately narrowly: only the rule whose id is exactly
+    "ollama-cloud" (the one AppBuilder ships) AND whose supports_tools is still
+    False. An operator who added their own ollama_cloud rule, or who
+    deliberately turned tools off on some other rule, is left alone. Idempotent;
+    never reorders, adds, or removes rules."""
+    rules = list(rules or [])
+    changed = False
+    out = []
+    for r in rules:
+        if (isinstance(r, dict) and r.get("id") == "ollama-cloud"
+                and r.get("supports_tools") is False):
+            r = {**r, "supports_tools": True}
+            changed = True
+        out.append(r)
+    return out, changed
 
 
 def upgrade_openrouter_free_router_rule(rules):
