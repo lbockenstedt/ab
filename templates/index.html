@@ -300,32 +300,42 @@
                  title="LLM endpoints actively serving calls — click for the full providers table">
                 <span class="text-[10px] uppercase tracking-widest text-white/50">Providers</span>
                 {% if state.llm_endpoints_online %}
-                {% set used_eps = state.llm_endpoints_online | selectattr('used') | list %}
-                {% set online_eps = used_eps | selectattr('online') | list %}
-                {% if used_eps %}
+                {# Show EVERY configured endpoint, not only those that have already
+                   served a call. Filtering on `used` meant a newly added LLM (0 runs,
+                   not currently serving) stayed invisible here until it happened to be
+                   picked — indistinguishable from "my new provider never registered".
+                   Endpoints that are serving/have served sort first; the rest list as
+                   idle, so adding a provider gives immediate visible feedback. #}
+                {% set all_eps = state.llm_endpoints_online %}
+                {% set online_eps = all_eps | selectattr('online') | list %}
+                {% set sorted_eps = (all_eps | selectattr('used') | list) + (all_eps | rejectattr('used') | list) %}
+                {% if all_eps %}
                 <span class="inline-flex items-center gap-1.5">
-                    <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if online_eps|length == used_eps|length else ('bg-amber-400' if online_eps|length else 'bg-red-400') }}"></span>
-                    <span class="text-xs font-semibold text-white/80 tabular-nums">{{ online_eps|length }}/{{ used_eps|length }}</span>
+                    <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if online_eps|length == all_eps|length else ('bg-amber-400' if online_eps|length else 'bg-red-400') }}"></span>
+                    <span class="text-xs font-semibold text-white/80 tabular-nums">{{ online_eps|length }}/{{ all_eps|length }}</span>
                 </span>
-                <!-- Hover detail: one line per endpoint currently serving. -->
+                <!-- Hover detail: one line per configured endpoint. -->
                 <div class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[220px] text-left normal-case tracking-normal">
-                    <div class="opacity-50 mb-1">Endpoints serving calls</div>
-                    {% for ep in used_eps %}
+                    <div class="opacity-50 mb-1">Configured LLM endpoints</div>
+                    {% for ep in sorted_eps %}
                     <div class="flex items-center gap-2 py-0.5">
                         <span class="w-1.5 h-1.5 rounded-full shrink-0 {{ 'bg-emerald-400' if ep.online else 'bg-red-400' }}"></span>
                         <span class="font-mono truncate">{{ ep.provider }} · {{ ep.model }}</span>
-                        <span class="opacity-50 ml-auto shrink-0">{{ (ep.runs ~ ' runs') if ep.runs else 'serving' }}</span>
+                        <span class="opacity-50 ml-auto shrink-0">{{ (ep.runs ~ ' runs') if ep.runs else ('serving' if ep.used else 'idle') }}</span>
                     </div>
                     {% endfor %}
                 </div>
                 {% else %}
-                <span class="text-[11px] text-white/40" title="No endpoint has served a call yet">—</span>
+                <span class="text-[11px] text-white/40" title="No LLM endpoints configured yet">—</span>
                 {% endif %}
                 {% else %}
-                {# Legacy fallback (no routable entries reported): collapse the
-                   configured slots to the same online/total count chip. #}
+                {# Startup-only fallback: fires just until connectivity_worker first
+                   populates llm_endpoints_online. Counts the legacy env-var slots,
+                   which now run 1-8 (code 1-4, log 5-6, review 7-8) — the old
+                   [1,2,3,4] literal under-reported an 8-slot config. Slots whose
+                   state keys are absent read as Undefined (falsy) and are skipped. #}
                 {% set slot_ns = namespace(total=0, online=0) %}
-                {% for n in [1, 2, 3, 4] %}
+                {% for n in [1, 2, 3, 4, 5, 6, 7, 8] %}
                 {% if state['provider_' ~ n ~ '_configured'] %}
                 {% set slot_ns.total = slot_ns.total + 1 %}
                 {% if state['provider_' ~ n ~ '_online'] %}{% set slot_ns.online = slot_ns.online + 1 %}{% endif %}

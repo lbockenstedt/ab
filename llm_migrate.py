@@ -172,6 +172,12 @@ def migrate(config):
             config["model_registry"] = _topped
             logger.info("LLM registry: added per-model claude_cli capability rules %s "
                         "(Haiku=medium, Sonnet/Opus=large) during migration.", _added_cc)
+        _topped, _added_copilot = model_registry.upgrade_copilot_model_rules(config["model_registry"])
+        if _added_copilot:
+            config["model_registry"] = _topped
+            logger.info("LLM registry: added per-model copilot capability rules %s "
+                        "(Opus/Sonnet/GPT-5=frontier, Haiku/GPT-4/mini=cheap) during migration.",
+                        _added_copilot)
         _topped, _added_router = model_registry.upgrade_openrouter_free_router_rule(config["model_registry"])
         if _added_router:
             config["model_registry"] = _topped

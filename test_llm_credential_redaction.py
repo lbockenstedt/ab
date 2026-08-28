@@ -78,6 +78,10 @@ def _load_ns():
     ns = {
         "logger": _NoLog(), "load_config": load_config, "save_config": save_config,
         "JSONResponse": _JSONResponse, "Request": _FakeRequest,
+        # Side-effect collaborator: the entry routes kick an endpoint re-probe so
+        # a newly added LLM shows in the header immediately. Stubbed out here —
+        # this test is about credential redaction, not connectivity probing.
+        "_refresh_llm_endpoints": lambda: None,
     }
     exec("\n\n".join(segs), ns)
     ns["_FakeRequest"] = _FakeRequest

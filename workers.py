@@ -22,6 +22,7 @@ import json
 import os
 import py_compile
 import requests
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -263,6 +264,31 @@ def _check_entries_online(config):
                     "base_url": base_url, "online": bool(online),
                     "used": bool(runs > 0 or is_active), "runs": runs})
     return out
+
+
+def refresh_llm_endpoints_async():
+    """Re-probe endpoints and refresh ``state["llm_endpoints_online"]`` now.
+
+    connectivity_worker only rebuilds that list every 15 minutes, so a newly
+    added LLM entry stayed absent from the header Providers chip until the next
+    tick — indistinguishable, to the user, from the new provider never having
+    registered at all. Called after any llm_entries create/update/delete so the
+    header reflects the change immediately.
+
+    Runs on a daemon thread: probing every endpoint is network I/O and must
+    never block the save request. Best-effort — a probe failure must not turn a
+    successful save into an error.
+    """
+    def _run():
+        try:
+            config = load_config()
+            endpoints = _check_entries_online(config)
+            state["llm_endpoints_online"] = endpoints
+            state["any_llm_online"] = any(e["online"] for e in endpoints)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"refresh_llm_endpoints_async failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def connectivity_worker():
