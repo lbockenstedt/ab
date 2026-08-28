@@ -206,7 +206,7 @@ DEFAULT_MODEL_RULES = [
      "enabled": True, "notes": ""},
     {"id": "copilot", "provider": "copilot", "match": "*", "label": "GitHub Copilot",
      "cost_tier": "cheap", "max_complexity": "large", "context_window": 64000,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "enabled": True,
      "notes": "generic fallback for Copilot models with no class rule below. Copilot is NOT "
@@ -223,7 +223,7 @@ DEFAULT_MODEL_RULES = [
     # whichever provider serves it. More-specific match beats the generic `*`.
     {"id": "copilot-opus", "provider": "copilot", "match": "*opus*", "label": "Claude Opus (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "capability_rank": 95, "enabled": True,
      "notes": "27x premium-request multiplier — the most expensive model Copilot serves. "
@@ -231,34 +231,34 @@ DEFAULT_MODEL_RULES = [
               "RESERVES it for the hardest work instead of spending it on triage."},
     {"id": "copilot-sonnet", "provider": "copilot", "match": "*sonnet*", "label": "Claude Sonnet (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "capability_rank": 78, "enabled": True, "notes": "9x multiplier; frontier/large mirrors anthropic-sonnet"},
     {"id": "copilot-haiku", "provider": "copilot", "match": "*haiku*", "label": "Claude Haiku (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "capability_rank": 55, "enabled": True, "notes": "0.33x multiplier; cheap/medium mirrors anthropic-haiku"},
     {"id": "copilot-gemini-pro", "provider": "copilot", "match": "*gemini*pro*", "label": "Gemini Pro (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "capability_rank": 80, "enabled": True, "notes": "6x multiplier; frontier/large mirrors google-pro"},
     # `gpt-5*mini*` is deliberately MORE specific than `gpt-5*` so gpt-5-mini
     # (0.33x) stays cheap instead of inheriting the gpt-5 frontier tier.
     {"id": "copilot-gpt5-mini", "provider": "copilot", "match": "gpt-5*mini*", "label": "GPT-5 mini (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "capability_rank": 50, "enabled": True, "notes": "0.33x multiplier — the cheapest GPT-5 variant"},
     {"id": "copilot-gpt5", "provider": "copilot", "match": "gpt-5*", "label": "GPT-5 class (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "capability_rank": 85, "enabled": True, "notes": "6x base / 57x for GPT-5.5 — priced as frontier so it is reserved"},
     {"id": "copilot-gpt4", "provider": "copilot", "match": "gpt-4*", "label": "GPT-4 class (via Copilot)",
      "cost_tier": "cheap", "max_complexity": "medium", "context_window": 64000,
-     "supports_tools": False, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "capability_rank": 45, "enabled": True, "notes": "0.33x multiplier (gpt-4o / gpt-4o-mini)"},
     {"id": "anthropic-haiku", "provider": "anthropic", "match": "*haiku*", "label": "Claude Haiku class",
@@ -637,6 +637,51 @@ def enable_ollama_cloud_tools(rules):
     for r in rules:
         if (isinstance(r, dict) and r.get("id") == "ollama-cloud"
                 and r.get("supports_tools") is False):
+            r = {**r, "supports_tools": True}
+            changed = True
+        out.append(r)
+    return out, changed
+
+
+def enable_copilot_tools(rules):
+    """Return (new_rules, changed): a COPY of `rules` with supports_tools
+    flipped False -> True on the copilot rules AppBuilder ships.
+
+    Same shape of bug as enable_ollama_cloud_tools, and the flag is equally
+    wrong: _request_copilot has always set payload["tools"] via
+    _tools_to_openai and parsed message.tool_calls back out, and the Copilot
+    chat/completions surface is OpenAI-compatible function calling. Copilot was
+    the ONLY provider whose client implements tools while the registry claimed
+    it could not, so model_selection's needs_tools HARD filter dropped every
+    Copilot endpoint from every tool-requiring job.
+
+    The flag was originally left False on the theory that the
+    tool-calling-400 retry-without-tools fallback existed only on the
+    slot-based path (_try_provider) and so Copilot would have no safety net.
+    That path no longer exists -- it was retired once the last call site moved
+    to the requirements path, and the fallback went with it. _try_candidate's
+    docstring still promises those branches "stay on the slot-based path for
+    now", which outlived the path itself. So no provider has that net today:
+    anthropic, google, groq, lmstudio, openai, openrouter and ollama_cloud all
+    advertise tools without it, and Copilot was being singled out for a
+    protection that is not there for anyone.
+
+    Deliberately does NOT touch native_agentic_tools or supports_mutating_agent.
+    Those mean "the provider runs its own agent loop with built-in
+    Read/Grep/Glob", which is true of claude_cli (a CLI harness) but not of
+    this provider: ab drives the Copilot chat-completions API and runs the tool
+    loop itself. Copilot CLI being agentic as a product says nothing about the
+    API surface ab actually calls.
+
+    Scoped narrowly like the ollama_cloud repair: only ids AppBuilder ships,
+    only where the flag is still False. Idempotent; never reorders or adds."""
+    shipped = {"copilot", "copilot-opus", "copilot-sonnet", "copilot-haiku",
+               "copilot-gemini-pro", "copilot-gpt5-mini", "copilot-gpt5", "copilot-gpt4"}
+    out = []
+    changed = False
+    for r in rules or []:
+        if (isinstance(r, dict) and r.get("id") in shipped
+                and r.get("provider") == "copilot" and r.get("supports_tools") is False):
             r = {**r, "supports_tools": True}
             changed = True
         out.append(r)

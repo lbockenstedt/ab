@@ -2095,6 +2095,7 @@ async def settings_page(request: Request):
     _curated, _mr_oc_models = _registry.upgrade_ollama_cloud_model_rules(_curated)
     _curated, _mr_oc_tools = _registry.enable_ollama_cloud_tools(_curated)
     _curated, _mr_or_router = _registry.upgrade_openrouter_free_router_rule(_curated)
+    _curated, _mr_cp_tools = _registry.enable_copilot_tools(_curated)
     _curated, _mr_ranks = _registry.backfill_capability_ranks(_curated)
     _registry_rules_json = json.dumps(_curated, indent=2)
     _auto = config.get("model_registry_auto") or []
@@ -2509,6 +2510,8 @@ async def save_settings(request: Request):
             config_data["model_registry"], _ = _registry_save.enable_ollama_cloud_tools(
                 config_data["model_registry"])
             config_data["model_registry"], _ = _registry_save.upgrade_openrouter_free_router_rule(
+                config_data["model_registry"])
+            config_data["model_registry"], _ = _registry_save.enable_copilot_tools(
                 config_data["model_registry"])
             config_data["model_registry"], _ = _registry_save.backfill_capability_ranks(
                 config_data["model_registry"])

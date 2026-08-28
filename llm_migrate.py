@@ -191,6 +191,13 @@ def upgrade_registry(config):
         changed = True
         logger.info("LLM registry: enabled supports_tools on the ollama_cloud rule "
                     "(the client has always sent tools; the flag was wrong).")
+    _cp_tools, _cp_changed = model_registry.enable_copilot_tools(config["model_registry"])
+    if _cp_changed:
+        config["model_registry"] = _cp_tools
+        changed = True
+        logger.info("LLM registry: enabled supports_tools on the copilot rules "
+                    "(_request_copilot has always sent tools; the flag was wrong, and it "
+                    "hard-excluded every Copilot endpoint from tool-requiring jobs).")
     _ranked, _ranks = model_registry.backfill_capability_ranks(config["model_registry"])
     if _ranks:
         config["model_registry"] = _ranked
