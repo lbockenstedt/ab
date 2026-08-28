@@ -754,6 +754,55 @@ def main():
     ok &= _check("speed backfill never overwrites a value the operator retuned",
                 _sp_tc is False and _sp_tuned[0]["speed_tier"] == "fast")
 
+    # ── Help-assistant role ladder ───────────────────────────────────────────
+    # The hub's Ask-AI loop tags each turn with a `role` and hub_agent.py maps it
+    # to requirements. Before this, EVERY turn routed identically (cost-first +
+    # latency_sensitive), so the free model both picked the tools and wrote the
+    # user-visible answer. These pin the three rungs against the real measured
+    # endpoint mix, because the mapping is only correct relative to a registry:
+    # the escalated rung in particular is a silent no-op unless complexity rises.
+    _ha = [("claude_cli", "claude-opus-5", 70.1, 110263, 19),
+           ("google", "gemini-3.5-flash-lite", 41.3, 233189, 2),
+           ("ollama_cloud", "nemotron-3-ultra", 16.1, 59989, 49),
+           ("openrouter", "openrouter/free", None, 9533, 50),
+           ("copilot", "claude-haiku-4.5", None, 9923, 5),
+           ("copilot", "claude-sonnet-5", None, 4411, 4),
+           ("copilot", "claude-opus-5", None, 7414, 4),
+           ("copilot", "gpt-4o-2024-08-06", None, 4453, 2)]
+    _hac = [{"key": f"{p}|x|{m}", "provider": p, "model": m,
+             "caps": reg.resolve(p, m, _cfg), "available": True}
+            for p, m, _t, _l, _n in _ha]
+    _hap = {f"{p}|x|{m}": {"n": n, "tps": t, "latency_ms": l}
+            for p, m, t, l, n in _ha}
+    _hapick = lambda **kw: getattr(
+        sel.select_model(sel.LlmRequirements(**kw), _hac, _hap), "model", None)
+    _r_tool = _hapick(complexity="medium", needs_tools=True, latency_sensitive=True)
+    _r_hard = _hapick(complexity="large", needs_tools=True,
+                      prefer_capable_within_tier=True)
+    _r_final = _hapick(complexity="large", needs_tools=False, prefer_capable=True)
+    ok &= _check("help role=tool stays on the cheap/fast model",
+                _r_tool == "openrouter/free")
+    ok &= _check("help role=final buys the strongest model",
+                _r_final == "claude-opus-5")
+    ok &= _check("help role=tool_hard escalates off the fast model",
+                _r_hard != _r_tool)
+    # The escalation is driven by max_complexity, which is a hard FILTER, not by
+    # capability_rank, which only orders (and is unset on several shipped rules).
+    # Asserting the ceiling is therefore asserting the actual mechanism: the
+    # escalated turn lands on a model that can take work the fast one cannot.
+    _hacap = lambda model: next(
+        reg.resolve(p, m, _cfg).get("max_complexity")
+        for p, m, _t, _l, _n in _ha if m == model)
+    ok &= _check("help role=tool_hard escalates past the fast model's ceiling",
+                _hacap(_r_tool) == "medium" and _hacap(_r_hard) == "large")
+    ok &= _check("help role=tool_hard stops SHORT of the frontier answer model",
+                _r_hard != _r_final)
+    # Regression: prefer_capable_within_tier ALONE cannot escalate a tier that
+    # holds a single endpoint — this is why the mapping raises complexity too.
+    ok &= _check("within-tier preference alone is a no-op in a one-model tier",
+                _hapick(complexity="medium", needs_tools=True,
+                        prefer_capable_within_tier=True) == _r_tool)
+
     print()
     if ok:
         print("ALL CASES PASSED")
