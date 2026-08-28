@@ -1244,8 +1244,51 @@ class HubAgentClient:
                 # tool set (if any) is caller-supplied by the hub itself, not fixed
                 # ahead of time -- so needs_tools mirrors whether the hub actually
                 # sent any this turn.
-                _help_ask_reqs = LlmRequirements(
-                    complexity="medium", needs_tools=bool(tools), latency_sensitive=True)
+                #
+                # ROLE-BASED ROUTING. Every turn used to be routed identically:
+                # cost-first + latency_sensitive, which resolves to the FREE tier --
+                # so the free model both picked the tools AND wrote the final prose.
+                # That is the wrong split. Choosing a tool and a query string is an
+                # easy, latency-critical job; turning the gathered docs/code into a
+                # correct answer is the hard one, and it happens ONCE per question.
+                #
+                # The hub tags each turn (it owns the loop, so only it knows which
+                # turn this is) and we map that to requirements:
+                #
+                #   tool       fastest capable model -- many of these per question
+                #   tool_hard  the loop is struggling: same tier, strongest model
+                #   final      the single synthesis turn: smartest available
+                #
+                # Not latency-free by accident: on the measured endpoints the free
+                # model is SLOWER than both Sonnet and Opus, so this is faster as
+                # well as better.
+                #
+                # Unknown/absent role falls back to the previous behaviour, so an
+                # older hub that doesn't send one keeps working unchanged.
+                _role = str(data.get("role") or "").strip().lower()
+                if _role == "final":
+                    # No tools on this turn by construction, and it is the answer the
+                    # user actually reads -- buy the best model available.
+                    _help_ask_reqs = LlmRequirements(
+                        complexity="large", needs_tools=bool(tools),
+                        prefer_capable=True)
+                elif _role == "tool_hard":
+                    # Escalated tool turn: the hub told us its searches aren't
+                    # landing. Raise complexity to "large" as well as asking for the
+                    # strongest model in tier -- the flag ALONE is not enough, because
+                    # max_complexity is a hard FILTER while capability_rank only
+                    # orders. With the free tier holding a single endpoint,
+                    # "best within tier" is a no-op there and the weak model would be
+                    # re-picked forever; raising complexity is what actually filters
+                    # it out and promotes a stronger one. Still not prefer_capable:
+                    # that jumps to the frontier tier, and several tool turns may
+                    # remain.
+                    _help_ask_reqs = LlmRequirements(
+                        complexity="large", needs_tools=bool(tools),
+                        prefer_capable_within_tier=True)
+                else:
+                    _help_ask_reqs = LlmRequirements(
+                        complexity="medium", needs_tools=bool(tools), latency_sensitive=True)
                 # call_llm does NOT return a (value, error) tuple — it returns the
                 # result directly (a {"text", "tool_calls"} dict when `tools` is
                 # passed, per _request_ollama et al.; a bare string otherwise) and
