@@ -50,6 +50,9 @@ CHAT_CONFIG_DEFAULTS = {
     "CHAT_INDEX_ISSUE_LIMIT": 8,       # Max open issues listed per repo in the system-prompt index.
     "CHAT_INDEX_CACHE_TTL": 60,        # Seconds to cache the GitHub issue index across turns.
     "CHAT_FIX_PROPOSAL_TTL": 600,      # Seconds a fix-proposal confirmation token stays valid.
+    # Console account selector for profiling. List of usernames from the vault
+    # that can be used for console profiling (auto-identify, credential login).
+    "console_accounts": [],             # List of username strings selected for console
     # AI fix-generation context bounds. apply_ai_fix used to concatenate every
     # relevant file in full, which blew past provider limits (groq 413 Payload
     # Too Large, ollama "Response ended prematurely", then truncated JSON →
