@@ -86,11 +86,16 @@ fi
 git config --system --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
 if [ ! -d "$INSTALL_DIR/.git" ]; then
     echo ">> Cloning AppBuilder to $INSTALL_DIR..."
-    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+    # AB_BRANCH lets a dev/qa host be provisioned straight onto its branch.
+    git clone --depth 1 --branch "${AB_BRANCH:-main}" "$REPO_URL" "$INSTALL_DIR"
 else
     echo ">> Updating existing install in $INSTALL_DIR..."
-    git -C "$INSTALL_DIR" fetch origin
-    git -C "$INSTALL_DIR" reset --hard origin/main
+    # Follow the branch the install is on so re-running the installer on a
+    # dev/qa host does not silently move it back to main.
+    BR=$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    case "$BR" in ""|HEAD) BR=main ;; esac
+    git -C "$INSTALL_DIR" fetch origin "$BR"
+    git -C "$INSTALL_DIR" reset --hard "origin/$BR"
 fi
 # svc_bg owns the whole tree (git clone/pull/push, the venv, claude creds in
 # ~svc_bg). Migrates an existing root-owned install on re-run.

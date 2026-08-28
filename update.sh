@@ -7,17 +7,22 @@ echo "🔄 Updating AppBuilder from GitHub..."
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$DIR"
 
-# 1. Fetch + hard-reset to origin/main. /opt/ab is a deployment mirror, so a
+# 1. Fetch + hard-reset to the deployed branch. /opt/ab is a deployment mirror, so a
 # plain `git pull` aborts on "local changes would be overwritten" if any tracked
 # file was dirtied at runtime. Reset is robust to that (matches the in-process
 # self-update). Any local changes are intentionally discarded.
 if [ -d ".git" ]; then
-    git fetch origin main
+    # Track the branch this deployment is checked out on rather than a hardcoded
+    # "main", so a dev/qa instance is not reset back onto main. Detached HEAD
+    # (or any failure) falls back to main.
+    BR=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    case "$BR" in ""|HEAD) BR=main ;; esac
+    git fetch origin "$BR"
     if ! git diff --quiet HEAD; then
         echo "⚠️  Local changes present — discarding (deployment mirror):"
         git status --porcelain
     fi
-    git reset --hard origin/main
+    git reset --hard "origin/$BR"
 else
     echo "❌ Error: This directory is not a git repository. Please run setup.sh first."
     exit 1
