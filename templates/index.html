@@ -811,7 +811,13 @@
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-2">
                 <div>
                     <p class="text-xs text-slate-400">Newest entries first · Fetched {{ hub_fetch_time or 'now' }}
-                        {% if hub_logs %} · {{ hub_logs|length }} entries{% endif %}
+                        {% if hub_logs %}
+                            {% if hub_logs_total and hub_logs_total > hub_logs|length %}
+                                · showing newest {{ hub_logs|length }} of {{ hub_logs_total }} entries
+                            {% else %}
+                                · {{ hub_logs|length }} entries
+                            {% endif %}
+                        {% endif %}
                         {% if hub_fetch_status %} · HTTP {{ hub_fetch_status }}{% endif %}
                     </p>
                 </div>
