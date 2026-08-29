@@ -637,25 +637,44 @@ PROMOTE_ROUTES = {
     ("dev", "main"): True,   # override: skips qa, still only opens a PR
 }
 
+#: Sentinel repo value meaning "every promotable repo". Deliberately not a
+#: valid GitHub name (no slash), so it can never collide with a real repo and
+#: cannot be mistaken for one by clean_repo_name().
+PROMOTE_ALL = "__all__"
+
+
+def _promotable_repos(cfg):
+    """(repos, default) — the repos the promotion controls may target.
+
+    Shared by the GET and the POST so the list the user picked from is exactly
+    the list a fan-out dispatches to; two copies of this would drift and the
+    'All' button would silently cover a different set than the dropdown showed.
+    """
+    from github_ops import get_monitored_repos
+    repos = sorted({clean_repo_name(r) for r in (get_monitored_repos(cfg) or []) if r})
+    try:
+        from main import resolve_self_diagnosis_repo
+        self_repo = clean_repo_name(resolve_self_diagnosis_repo(cfg) or "")
+    except Exception:  # noqa: BLE001
+        self_repo = ""
+    if self_repo and self_repo not in repos:
+        repos.append(self_repo)
+    return repos, self_repo
+
 
 @router.get("/api/promote/repos")
 async def promote_repos():
     """Repos the promotion buttons can target: everything AppBuilder already
-    monitors, plus its own self-diagnosis repo, which is used as the default
-    so the common case (promoting AppBuilder itself) needs no selection."""
+    monitors, plus its own self-diagnosis repo.
+
+    The default is the "all repos" sentinel — promotions are normally run
+    across the whole platform, and defaulting to a single repo made the common
+    case a per-repo chore that is easy to do half of."""
     try:
-        from github_ops import get_monitored_repos
         cfg = load_config()
-        repos = sorted({clean_repo_name(r) for r in (get_monitored_repos(cfg) or []) if r})
-        default = ""
-        try:
-            from main import resolve_self_diagnosis_repo
-            default = clean_repo_name(resolve_self_diagnosis_repo(cfg) or "")
-        except Exception:  # noqa: BLE001
-            default = ""
-        if default and default not in repos:
-            repos.append(default)
-        return {"status": "success", "repos": repos, "default": default or (repos[0] if repos else "")}
+        repos, self_repo = _promotable_repos(cfg)
+        return {"status": "success", "repos": repos, "self_repo": self_repo,
+                "all_value": PROMOTE_ALL, "default": PROMOTE_ALL}
     except Exception as e:  # noqa: BLE001
         logger.error("promote: could not list repos: %s", e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
@@ -665,20 +684,24 @@ async def promote_repos():
 async def promote_branch(request: Request):
     """Dispatch promote.yml for one repo to OPEN a promotion PR.
 
-    Body: {repo, source, target}. Only the three routes in PROMOTE_ROUTES are
-    accepted; anything else is a 400 rather than a dispatch, so this endpoint
-    can never be used to aim an arbitrary branch at main.
+    Body: {repo, source, target}. `repo` may be the PROMOTE_ALL sentinel to
+    fan out across every promotable repo. Only the three routes in
+    PROMOTE_ROUTES are accepted; anything else is a 400 rather than a dispatch,
+    so this endpoint can never be used to aim an arbitrary branch at main.
     """
     try:
         data = await request.json()
-        repo_name = clean_repo_name((data.get("repo") or "").strip())
+        raw_repo = (data.get("repo") or "").strip()
         source = (data.get("source") or "").strip().lower()
         target = (data.get("target") or "").strip().lower()
     except Exception:
         return JSONResponse(status_code=400,
                             content={"status": "error", "message": "repo + source + target required"})
 
-    if not repo_name:
+    is_all = raw_repo == PROMOTE_ALL
+    repo_name = "" if is_all else clean_repo_name(raw_repo)
+
+    if not is_all and not repo_name:
         return JSONResponse(status_code=400, content={"status": "error", "message": "No repository selected"})
     if (source, target) not in PROMOTE_ROUTES:
         allowed = ", ".join(f"{s} -> {t}" for s, t in PROMOTE_ROUTES)
@@ -693,7 +716,15 @@ async def promote_branch(request: Request):
     if not token:
         return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
 
-    def _do_dispatch():
+    if is_all:
+        targets, _ = _promotable_repos(config)
+        if not targets:
+            return JSONResponse(status_code=400, content={
+                "status": "error", "message": "No repositories are configured to promote"})
+    else:
+        targets = [repo_name]
+
+    def _do_dispatch(repo_name):
         repo = Github(token).get_repo(repo_name)
         wf = repo.get_workflow("promote.yml")
         # workflow_dispatch always runs the workflow file as it exists on the
@@ -722,20 +753,62 @@ async def promote_branch(request: Request):
                 f"GitHub rejected the workflow dispatch for {repo_name} (ref '{ref}').{extra}")
         return f"https://github.com/{repo_name}/actions/workflows/promote.yml"
 
-    try:
+    async def _dispatch(name):
         # PyGithub is synchronous — see pr_review_approve's note; offload so a
         # slow GitHub response can't stall the whole single-event-loop app.
-        url = await asyncio.get_event_loop().run_in_executor(None, _do_dispatch)
-        logger.warning(
-            "promote: %s %s -> %s dispatched via UI%s",
-            repo_name, source, target, " (OVERRIDE, skips qa)" if is_override else "")
-        return {"status": "success", "repo": repo_name, "source": source, "target": target,
-                "override": is_override, "url": url,
-                "message": (f"Promotion {source} → {target} started for {repo_name}. "
-                            f"It opens a pull request; it does not merge.")}
-    except Exception as e:  # noqa: BLE001
-        logger.error("promote failed for %s (%s -> %s): %s", repo_name, source, target, e)
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+        return await asyncio.get_event_loop().run_in_executor(None, _do_dispatch, name)
+
+    if not is_all:
+        try:
+            url = await _dispatch(repo_name)
+            logger.warning(
+                "promote: %s %s -> %s dispatched via UI%s",
+                repo_name, source, target, " (OVERRIDE, skips qa)" if is_override else "")
+            return {"status": "success", "repo": repo_name, "source": source, "target": target,
+                    "override": is_override, "url": url,
+                    "message": (f"Promotion {source} → {target} started for {repo_name}. "
+                                f"It opens a pull request; it does not merge.")}
+        except Exception as e:  # noqa: BLE001
+            logger.error("promote failed for %s (%s -> %s): %s", repo_name, source, target, e)
+            return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+    # Fan-out. One repo's failure must not abort the rest: a half-applied
+    # promotion across the platform is exactly the divergence these buttons
+    # exist to prevent, so every repo is attempted and the per-repo outcome is
+    # reported rather than collapsed into a single pass/fail.
+    results = []
+    for name in targets:
+        try:
+            url = await _dispatch(name)
+            results.append({"repo": name, "ok": True, "url": url})
+        except Exception as e:  # noqa: BLE001
+            logger.error("promote failed for %s (%s -> %s): %s", name, source, target, e)
+            results.append({"repo": name, "ok": False, "error": str(e)})
+
+    done = [r for r in results if r["ok"]]
+    failed = [r for r in results if not r["ok"]]
+    logger.warning("promote: %s -> %s dispatched via UI for %d/%d repos%s",
+                   source, target, len(done), len(results),
+                   " (OVERRIDE, skips qa)" if is_override else "")
+
+    if not done:
+        status, msg = "error", (
+            f"Promotion {source} → {target} failed for all {len(failed)} repositories.")
+    elif failed:
+        status, msg = "partial", (
+            f"Promotion {source} → {target} started for {len(done)} of {len(results)} "
+            f"repositories; {len(failed)} failed ({', '.join(r['repo'] for r in failed)}). "
+            f"It opens pull requests; it does not merge.")
+    else:
+        status, msg = "success", (
+            f"Promotion {source} → {target} started for all {len(done)} repositories. "
+            f"It opens pull requests; it does not merge.")
+
+    content = {"status": status, "repo": PROMOTE_ALL, "all": True, "source": source,
+               "target": target, "override": is_override, "results": results,
+               "succeeded": len(done), "failed": len(failed), "total": len(results),
+               "message": msg}
+    return content if status != "error" else JSONResponse(status_code=500, content=content)
 
 
 @router.post("/api/pr-review/reprocess")
