@@ -333,6 +333,76 @@ async def exchange_code(cfg: OidcConfig, discovery_doc: dict,
     return resp.json()
 
 
+# ── directory reads (app-only / client-credentials) ─────────────────────────
+
+async def fetch_app_token(cfg: OidcConfig, scope: str,
+                          http: httpx.AsyncClient | None = None) -> str:
+    """Mint an app-only (client-credentials) token for AppBuilder's own app
+    registration, for any resource the app holds a permission on.
+
+    Unlike the LM hub's equivalent this accepts EITHER credential type, because
+    AppBuilder supports a client secret as well as a cert ``client_assertion``
+    — refusing the secret here would make the group picker unavailable on a
+    secret-configured install that otherwise logs in fine."""
+    token_endpoint = (f"https://login.microsoftonline.com/{cfg.tenant_id}"
+                      "/oauth2/v2.0/token")
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": cfg.client_id,
+        "scope": scope,
+    }
+    if cfg.client_secret:
+        data["client_secret"] = cfg.client_secret
+    else:
+        data["client_assertion_type"] = \
+            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        data["client_assertion"] = build_client_assertion(cfg, token_endpoint)
+    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+        resp = await client.post(token_endpoint, data=data)
+    if resp.status_code != 200:
+        raise OidcError(f"app-token failed ({scope}): HTTP {resp.status_code}"
+                        f"{_entra_error_detail(resp)}")
+    tok = resp.json().get("access_token")
+    if not tok:
+        raise OidcError("app-token response had no access_token")
+    return tok
+
+
+async def fetch_directory_groups(cfg: OidcConfig,
+                                 http: httpx.AsyncClient | None = None,
+                                 limit: int = 2000) -> list:
+    """List the tenant's Entra groups as ``[{id, displayName}]`` so the admin
+    can PICK the allowed group instead of pasting its object ID.
+
+    The object IDs returned here are exactly what ``allowed_group`` matches at
+    login, which is the point: a group *name* silently matches nothing, so the
+    picker is what stops an admin from locking everyone out. Needs the Graph
+    ``Group.Read.All`` **application** permission with admin consent. Pages
+    ``@odata.nextLink`` up to ``limit``."""
+    token = await fetch_app_token(cfg, "https://graph.microsoft.com/.default",
+                                  http=http)
+    out: list = []
+    url = ("https://graph.microsoft.com/v1.0/groups"
+           "?$select=id,displayName&$top=999")
+    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+        while url:
+            resp = await client.get(url,
+                                    headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code != 200:
+                raise OidcError(f"Graph groups list failed: HTTP "
+                                f"{resp.status_code} — {resp.text[:200]}")
+            body = resp.json()
+            for v in body.get("value", []):
+                gid = v.get("id")
+                if gid:
+                    out.append({"id": gid,
+                                "displayName": v.get("displayName") or gid})
+                    if len(out) >= limit:
+                        return out
+            url = body.get("@odata.nextLink")
+    return out
+
+
 # ── id-token verification ───────────────────────────────────────────────────
 
 async def fetch_jwks(jwks_uri: str, http: httpx.AsyncClient | None = None) -> list:
