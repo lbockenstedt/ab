@@ -1,5 +1,5 @@
 """Hub log ingestion and scanning: error/heartbeat/bug detection and production-fix verification (extracted from main.py)."""
-import json, os, re, requests, time
+import json, os, re, requests, textwrap, time
 from datetime import datetime
 from github import Github, GithubException
 
@@ -1006,7 +1006,7 @@ def scan_bugs(gh_current, config, hub_logs):
             # ``automated-fix`` label → scan_repo_issues/process_single_issue
             # will NOT attempt to auto-implement it (a feature is a product
             # decision, not a fix). Severity/context still captured.
-            title = f"💡 Feature Request: {str(explanation)[:80].strip()}"
+            title = f"💡 Feature Request: {textwrap.shorten(str(explanation), width=80, placeholder=' …').strip()}"
             body = (
                 f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
                 f"### The request\n{explanation}\n\n"
@@ -1030,7 +1030,8 @@ def scan_bugs(gh_current, config, hub_logs):
             _msg = _err[6:].strip() if _err.lower().startswith("error:") else \
                 (_err or str(explanation).strip()[:200].strip())
             _err_line = f"**Error:** {_msg}\n\n" if _msg else ""
-            _summary = " ".join(_msg.split())[:80].strip()  # single-line, capped for the title
+            # single-line, word-boundary-truncated for the title (never cuts mid-word)
+            _summary = textwrap.shorten(_msg, width=80, placeholder=" …").strip()
             title = f"🤖 Bug Report - {_summary}" if _summary else "🤖 Bug Report"
             body = (
                 f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
