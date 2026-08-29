@@ -2359,6 +2359,21 @@ async def diagnostics_page(request: Request):
     })
 
 
+@router.get("/release")
+async def release_management_page(request: Request):
+    """Release Management view — the dev -> qa -> main promotion controls.
+
+    Moved out of the footer action bar: promotion is a deliberate release
+    decision, not a one-click global op sitting next to Restart/Blackout, and
+    the override needs room to explain itself. Every control here DISPATCHES
+    promote.yml, which opens a pull request; nothing on this page merges or
+    pushes to a branch."""
+    return templates.TemplateResponse(request=request, name="index.html", context={
+        "view": "release",
+        "state": state,
+    })
+
+
 @router.post("/save_settings")
 async def save_settings(request: Request):
     form_data = await request.form()
