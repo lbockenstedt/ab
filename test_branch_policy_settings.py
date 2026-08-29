@@ -53,8 +53,8 @@ def test_protected_branches_persist_as_a_list():
 
 
 def test_auto_prefixes_persist_as_a_list():
-    cfg = _save(auto_branch_prefixes="ai-fix-issue-, ai-feature-issue-")
-    assert cfg["auto_branch_prefixes"] == ["ai-fix-issue-", "ai-feature-issue-"]
+    cfg = _save(auto_branch_prefixes="bug/, ai-feature/")
+    assert cfg["auto_branch_prefixes"] == ["bug/", "ai-feature/"]
 
 
 def test_checked_box_enables_cleanup():
@@ -71,10 +71,10 @@ def test_saved_config_actually_governs_deletion():
     cfg = _save(
         delete_merged_branches="on",
         protected_branches="main, dev, qa",
-        auto_branch_prefixes="ai-fix-issue-",
+        auto_branch_prefixes="bug/",
     )
 
-    assert may_delete("ai-fix-issue-42", cfg)[0] is True
+    assert may_delete("bug/42-thing", cfg)[0] is True
 
     for shared in ("dev", "qa", "main"):
         ok, reason = may_delete(shared, cfg)
@@ -83,15 +83,15 @@ def test_saved_config_actually_governs_deletion():
 
 
 def test_disabling_cleanup_protects_even_auto_branches():
-    cfg = _save(delete_merged_branches=None, auto_branch_prefixes="ai-fix-issue-")
-    assert may_delete("ai-fix-issue-42", cfg)[0] is False
+    cfg = _save(delete_merged_branches=None, auto_branch_prefixes="bug/")
+    assert may_delete("bug/42-thing", cfg)[0] is False
 
 
 def test_saved_config_governs_force_push():
     """The same config must also stop fix_engine force-pushing a shared branch."""
     cfg = _save(protected_branches="main, dev, qa")
     assert may_force_push("dev", cfg)[0] is False
-    assert may_force_push("ai-fix-issue-42", cfg)[0] is True
+    assert may_force_push("bug/42-thing", cfg)[0] is True
 
 
 def test_blank_fields_fall_back_to_safe_defaults():

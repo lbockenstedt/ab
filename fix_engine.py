@@ -5,7 +5,7 @@ from github import Github, GithubException
 
 import feature_boundary
 import llm_client
-from branch_policy import may_force_push
+from branch_policy import auto_branch_name, integration_branch, may_force_push
 
 from main import (
     CHAT_CONFIG_DEFAULTS,
@@ -2238,7 +2238,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             last_failure = {}
             final_verdict = "Reject"
             final_confidence = 0.0
-            base_branch = config.get("default_branch", "main")
+            # dev, never main: this is both the direct-push target for a trusted
+            # repo and the base of any PR opened below. Work reaches main only
+            # by promotion (dev -> qa -> main), which the repo owner drives.
+            base_branch, base_why = integration_branch(config, repo_obj)
+            logger.info(f"fix_engine: integrating into {base_branch} -- {base_why}")
 
             # File-a-Bug enrichment: if this issue was filed from the WebUI "File
             # a Bug" button, its body carries a hidden <!-- bug-report-id: <id>
@@ -2656,7 +2660,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (boundary_pr_reason if boundary_forced_pr else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met"))
                 decision_reason = reason
                 logger.info(f"Decision: Pull Request. Reason: {reason}.")
-                target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
+                target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else auto_branch_name("bug", issue=issue)
                 try:
                     repo_git.git.checkout(target_branch)
                 except:
@@ -2676,7 +2680,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     logger.info(f"fix_engine: pushing {target_branch} without --force — {force_why}")
                 with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
                     repo_git.remotes.origin.push(target_branch, force=force_ok)
-                base_branch = config.get("default_branch", "main")
+                base_branch, _ = integration_branch(config, repo_obj)
 
                 existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
 
