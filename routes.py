@@ -2028,13 +2028,22 @@ async def settings_page(request: Request):
         from feature_boundary import DEFAULT_BOUNDARIES
         config["feature_boundaries"] = DEFAULT_BOUNDARIES
     # Auto-merge — the deliberate, narrowly-scoped invariant exception (see
-    # pr_review.py's module docstring + _automerge_decision). TWO independent
-    # kill switches (this toggle AND the per-repo allowlist below, which
-    # defaults to empty) plus a threshold that defaults to 1.0 — effectively
-    # OFF until an operator deliberately both enables it AND opts a repo in
-    # AND lowers the threshold. Global, not per-repo, to start.
+    # pr_review.py's module docstring + _automerge_decision). Several
+    # independent gates, all default-closed: this toggle, feature_drive_enabled,
+    # the per-repo allowlist, the per-target-branch allowlist, and the
+    # confidence threshold (defaults to 1.0) — effectively OFF until an
+    # operator deliberately enables it AND opts a repo in AND opts a target
+    # branch in AND lowers the threshold. Global, not per-repo, to start.
     config.setdefault("feature_automerge_enabled", False)
     config.setdefault("feature_automerge_repos", [])
+    # Opt-in allowlist of target branches auto-merge is permitted onto —
+    # defaults to empty, same philosophy as feature_automerge_repos. Since
+    # 2026-08-29 this (not PR authorship) is what keeps main structurally
+    # ineligible: ANY PR (human or bot) targeting an allowlisted branch (e.g.
+    # "dev") can clear _automerge_decision if both review panels approve at
+    # threshold; a PR targeting main, or any branch not listed here, never
+    # can. See pr_review._automerge_decision.
+    config.setdefault("feature_automerge_target_branches", [])
     config.setdefault("feature_automerge_min_confidence", 1.0)
     config.setdefault("feature_automerge_require_clean", True)
     # DEFAULT-DENY allowlist gate (feature_allowlist): even a clean, high-
@@ -2619,6 +2628,14 @@ async def save_settings(request: Request):
         if _r2 and _r2 not in _am_repos:
             _am_repos.append(_r2)
     config_data["feature_automerge_repos"] = list(dict.fromkeys(_am_repos))
+    # Target-branch allowlist — free-text comma/newline separated, same
+    # parsing style as _am_extra above. No checkbox list here (unlike repos,
+    # there's no cheap "known branches" enumeration without an extra GitHub
+    # API call per repo) — this is deliberately just a short opt-in list like
+    # ["dev"], not meant to hold many entries.
+    _am_branches_raw = data.get("feature_automerge_target_branches", "") or ""
+    _am_branches = [b.strip() for b in _am_branches_raw.replace("\n", ",").split(",") if b.strip()]
+    config_data["feature_automerge_target_branches"] = list(dict.fromkeys(_am_branches))
 
     # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical
     # always fix). Stops the fixer churning on log-scraped issues.
