@@ -591,91 +591,209 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     return review if isinstance(review, dict) else None
 
 
-def _render_state_panel(review):
-    """Render the state-logic panel section (empty list when no review) —
-    same rendering shape as _render_panel, distinct header/framing so the two
-    advisory panels are never confused for one combined verdict."""
-    if not review:
-        return []
-    if review.get("status"):
-        return [_STATE_PANEL_HEADER, "",
-                "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
-                ""]
-    verdict = str(review.get("verdict") or "—")
-    crit = review.get("critique", "").strip()
+#: Matches the "[reviewer-name] " tag fix_engine prefixes onto each critique
+#: when it joins them into the legacy single-string `critique` blob.
+_REVIEWER_TAG_RE = re.compile(r"^\[([^\]]{1,60})\]\s*")
+
+#: Splits that blob back apart. The lookahead for "[" matters: a critique's own
+#: prose can contain " | " (table rows, shell pipes, code snippets), and
+#: splitting on the bare separator would slice a single reviewer's text into
+#: fragments attributed to nobody.
+_REVIEWER_SPLIT_RE = re.compile(r"\s+\|\s+(?=\[[^\]]{1,60}\]\s)")
+
+#: An enumerated point inside a critique: "1.", "2)", "(3)", "-", "*", "•".
+#: Reviewers overwhelmingly write their findings as such a list, which the
+#: whitespace-collapsed blob renders as one unbroken paragraph.
+_ENUM_MARK_RE = re.compile(r"(?:(?<=^)|(?<=\s))(?:\(?\d{1,2}[\).:]|[-*\u2022])\s+")
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z(\"'`])")
+
+
+def _norm_conf_pct(value):
+    """Confidence as a "58%" string, or None when it isn't a usable number."""
     try:
         from fix_engine import _norm_confidence
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — never let comment rendering fail on this
         def _norm_confidence(v):
             c = float(v)
             return max(0.0, min(1.0, c / 100.0 if c > 1.0 else c))
     try:
-        conf_str = "%.0f%%" % (_norm_confidence(review.get("confidence")) * 100)
+        return "%.0f%%" % (_norm_confidence(value) * 100)
     except (TypeError, ValueError):
-        conf_str = "n/a"
-    vicon = "\U0001F7E2" if verdict == "Approve" else "\U0001F534"
+        return None
+
+
+def _reviewer_blocks(review):
+    """[(name, verdict|None, confidence|None, critique)] for one panel result.
+
+    Prefers the structured ``reviews`` list fix_engine now returns. Falls back
+    to parsing the legacy " | "-joined ``critique`` string so PRs reviewed
+    before that change — and any other producer of this shape — still render
+    per-reviewer rather than as one blob.
+    """
+    structured = review.get("reviews")
+    if isinstance(structured, list) and structured:
+        out = []
+        for r in structured:
+            if isinstance(r, dict):
+                out.append((str(r.get("reviewer") or "?"), r.get("verdict"),
+                            r.get("confidence"), str(r.get("critique") or "").strip()))
+        if out:
+            return out
+
+    text = str(review.get("critique") or "").strip()
+    if not text:
+        return []
+    blocks = []
+    for part in _REVIEWER_SPLIT_RE.split(text):
+        part = part.strip()
+        if not part:
+            continue
+        m = _REVIEWER_TAG_RE.match(part)
+        if m:
+            blocks.append((m.group(1), None, None, part[m.end():].strip()))
+        else:
+            # Untagged (a single-reviewer panel, or a caller that never tagged).
+            blocks.append((None, None, None, part))
+    return blocks
+
+
+def _structure_critique(text):
+    """(preamble, [points]) — turn one reviewer's prose into readable parts.
+
+    Reviewers write findings as enumerated lists that arrive whitespace-
+    collapsed into a single paragraph. Where that enumeration is present it is
+    the reviewer's OWN topic split, so it is used rather than invented. Where
+    it isn't, sentences are grouped into short paragraphs instead of guessing
+    at topics — a wrong split reads worse than no split.
+    """
+    text = " ".join((text or "").split())
+    if not text:
+        return "", []
+
+    marks = [m for m in _ENUM_MARK_RE.finditer(text)]
+    if len(marks) >= 2:
+        preamble = text[:marks[0].start()].strip(" :;,-")
+        points = []
+        for i, m in enumerate(marks):
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+            point = text[m.end():end].strip(" ;,")
+            if point:
+                points.append(point)
+        return preamble, points
+
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    if len(sentences) <= 2:
+        return text, []
+    # Two sentences per paragraph: enough to break the wall without severing
+    # a point from the sentence that qualifies it.
+    paras = [" ".join(sentences[i:i + 2]) for i in range(0, len(sentences), 2)]
+    return "", paras
+
+
+def _render_review_body(review, header, blurb):
+    """Shared renderer for both advisory panels.
+
+    Leads with the recommendation and the concerns behind it, then the
+    per-reviewer detail. Highlighting is driven by each reviewer's actual
+    verdict, never by keyword-sniffing their prose, so it cannot invent a
+    concern that no reviewer raised or miss one phrased unusually.
+    """
+    if not review:
+        return []
+    if review.get("status"):
+        return [header, "",
+                "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
+                ""]
+
+    verdict = str(review.get("verdict") or "—")
+    approved = verdict == "Approve"
+    conf_str = _norm_conf_pct(review.get("confidence")) or "n/a"
+    blocks = _reviewer_blocks(review)
+    dissenting = [b for b in blocks if b[1] and b[1] != "Approve"]
+    known_verdicts = [b for b in blocks if b[1]]
+
     out = [
-        _STATE_PANEL_HEADER, "",
-        "_Narrow-scope panel: state/status coverage + control-flow reachability "
-        "ONLY (see pr_review.py `_state_logic_review` for what it does/doesn't "
-        "check). Advisory — a human still approves/denies._",
-        "",
-        "%s **Advisory verdict: %s** · confidence **%s**" % (vicon, verdict, conf_str),
+        header, "",
+        blurb, "",
+        "%s **Recommendation: %s** · panel confidence **%s**" % (
+            "\U0001F7E2" if approved else "\U0001F534",     # 🟢 / 🔴
+            "APPROVE" if approved else "DENY",
+            conf_str),
         "",
     ]
-    if crit:
-        out += [crit, ""]
+
+    # ── concerns, up front ────────────────────────────────────────────────
+    if dissenting:
+        out += ["#### \u26A0\uFE0F Concerns (%d of %d reviewers did not approve)" % (
+            len(dissenting), len(known_verdicts)), ""]
+        for name, v_verdict, v_conf, crit in dissenting:
+            gist = _structure_critique(crit)
+            headline = (gist[1][0] if gist[1] else gist[0]) or "(no critique text returned)"
+            if len(headline) > 240:
+                headline = headline[:237].rstrip() + "…"
+            pct = _norm_conf_pct(v_conf)
+            out.append("- \U0001F534 **%s**%s — %s" % (
+                name or "reviewer", " (%s)" % pct if pct else "", headline))
+        out.append("")
+    elif known_verdicts:
+        out += ["#### \u2705 No objections", "",
+                "All %d reviewer(s) approved. Detail below." % len(known_verdicts), ""]
+    elif not approved:
+        # Legacy panel results (and any producer that doesn't report per-
+        # reviewer verdicts) still recommend DENY, so say what the concern is
+        # rather than silently showing none — but don't attribute it to a
+        # particular reviewer, which this shape genuinely cannot support.
+        out += ["#### \u26A0\uFE0F Concerns", "",
+                "The panel did not approve. Per-reviewer verdicts weren't recorded "
+                "for this review, so the objections are in the detail below.", ""]
+
+    # ── per-reviewer detail ───────────────────────────────────────────────
+    if blocks:
+        out += ["#### Reviewer detail", ""]
+        for name, v_verdict, v_conf, crit in blocks:
+            bits = []
+            if v_verdict:
+                bits.append("%s %s" % (
+                    "\U0001F7E2" if v_verdict == "Approve" else "\U0001F534", v_verdict))
+            pct = _norm_conf_pct(v_conf)
+            if pct:
+                bits.append("confidence %s" % pct)
+            suffix = " — %s" % " · ".join(bits) if bits else ""
+            out += ["**%s**%s" % (name or "Reviewer", suffix), ""]
+            preamble, points = _structure_critique(crit)
+            if preamble:
+                out += [preamble, ""]
+            for p in points:
+                out.append("- %s" % p)
+            if points:
+                out.append("")
+            if not preamble and not points:
+                out += ["_No critique text returned._", ""]
     return out
+
+
+def _render_state_panel(review):
+    """Render the state-logic panel section (empty list when no review) — same
+    shape as _render_panel, distinct header/framing so the two advisory panels
+    are never confused for one combined verdict."""
+    return _render_review_body(
+        review, _STATE_PANEL_HEADER,
+        "_Narrow-scope panel: state/status coverage + control-flow reachability "
+        "ONLY (see pr_review.py `_state_logic_review` for what it does/doesn't "
+        "check). Advisory — a human still approves/denies._")
 
 
 def _render_panel(review):
     """Render the advisory skeptical-panel section (empty list when no review)."""
-    if not review:
-        return []
-    if review.get("status"):
-        return [_PANEL_HEADER, "",
-                "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
-                ""]
-    verdict = str(review.get("verdict") or "—")
-    crit = review.get("critique", "").strip()
-    # Normalize defensively: review_fix already clamps to 0.0-1.0, but this value
-    # crosses a module boundary and rendering "confidence 9500%" on a public PR
-    # comment is the most visible way the scale bug can surface. Imported lazily —
-    # fix_engine imports late (see the review_fix call below), so a module-level
-    # import here would cycle.
-    try:
-        from fix_engine import _norm_confidence
-    except Exception:  # noqa: BLE001 — never let the comment render fail on this
-        def _norm_confidence(v):
-            c = float(v)
-            return max(0.0, min(1.0, c / 100.0 if c > 1.0 else c))
-    try:
-        conf_str = "%.0f%%" % (_norm_confidence(review.get("confidence")) * 100)
-    except (TypeError, ValueError):
-        conf_str = "n/a"
-    vicon = "\U0001F7E2" if verdict == "Approve" else "\U0001F534"  # 🟢 / 🔴
-    out = [
-        _PANEL_HEADER, "",
+    return _render_review_body(
+        review, _PANEL_HEADER,
         "_Cross-provider skeptical panel (same engine as the bot-fix reviewer) — "
-        "an **advisory** confidence signal. A human still approves/denies; this bot never does._",
-        "",
-        "%s **Advisory verdict: %s** · confidence **%s**" % (vicon, verdict, conf_str),
-        "",
-    ]
-    if crit:
-        out += [crit, ""]
-    return out
+        "an **advisory** confidence signal. A human still approves/denies; this "
+        "bot never does._")
 
 
 def _render(findings, head_sha, summary="", review=None, state_review=None):
-    lines = [
-        PR_REVIEW_MARKER,
-        "<!-- head: %s -->" % head_sha,
-        "## \U0001F916 AppBuilder PR pre-review",
-        "",
-        "_Automated pre-review — **informational only**. A human is the sole approver; this bot never approves, denies, or edits the branch._",
-        "",
-    ]
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,

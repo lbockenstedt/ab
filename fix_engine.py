@@ -1249,6 +1249,21 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     critiques = " | ".join(
         f"[{v.get('reviewer', '?')}] {v.get('critique', '')}" for v in votes
     )
+    # Structured counterpart to `critiques`. That string flattens every
+    # reviewer's prose into one " | "-joined blob and DROPS each reviewer's own
+    # verdict and confidence, so anything rendering it (the GitHub PR comment,
+    # the WebUI row) could only show a wall of text and could not say which
+    # reviewer objected or how strongly. Callers that want to present the panel
+    # readably use this; `critique` is kept unchanged for every existing caller.
+    reviews = [
+        {
+            "reviewer": v.get("reviewer", "?"),
+            "verdict": v.get("verdict"),
+            "confidence": v.get("confidence"),
+            "critique": v.get("critique", ""),
+        }
+        for v in votes
+    ]
 
     # If some reviewers were skipped, decide whether to proceed or queue.
     if failed_reviewers:
@@ -1269,6 +1284,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
                 "partial_confidence": avg_conf,
                 "partial_votes": votes,
                 "critique": critiques,
+                "reviews": reviews,
             }
 
     # If avg confidence >= 90%, approve regardless of vote split — high-confidence
@@ -1279,7 +1295,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         final_verdict = "Approve"
     else:
         final_verdict = "Reject"
-    return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques}
+    return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques,
+            "reviews": reviews}
 
 #: Failure kind -> operator-facing label. The pipeline knows precisely why it
 #: gave up; before this the UI showed a generic sentence and the reason lived
