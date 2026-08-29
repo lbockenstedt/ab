@@ -3406,9 +3406,20 @@
                     sel.innerHTML = '<option value="">No repos configured</option>';
                     return;
                 }
-                sel.innerHTML = repos.map(r =>
+                // "All repositories" leads and is the default: promotions are
+                // normally platform-wide, and defaulting to one repo made the
+                // common case a per-repo chore that is easy to do half of.
+                const allValue = (data && data.all_value) || '';
+                const opts = [];
+                if (allValue) {
+                    opts.push(`<option value="${allValue}"${data.default === allValue ? ' selected' : ''}>` +
+                              `All repositories (${repos.length})</option>`);
+                }
+                opts.push(...repos.map(r =>
                     `<option value="${r}"${r === data.default ? ' selected' : ''}>${r.split('/').pop()}</option>`
-                ).join('');
+                ));
+                sel.innerHTML = opts.join('');
+                sel.dataset.allValue = allValue;
                 sel.title = 'Which repository to promote (' + repos.length + ' monitored)';
             } catch (e) {
                 sel.innerHTML = '<option value="">Repo list unavailable</option>';
@@ -3419,23 +3430,29 @@
             const sel = document.getElementById('promote-repo');
             const repo = sel ? sel.value : '';
             if (!repo) { showToast('Pick a repository to promote first.', 'error'); return; }
+            const isAll = !!(sel && sel.dataset.allValue && repo === sel.dataset.allValue);
+            // What the confirmations name, so "All" can never be mistaken for
+            // a single repo in the prompt the user is agreeing to.
+            const label = isAll
+                ? `ALL ${sel.options.length - 1} repositories`
+                : repo;
 
             const isOverride = (source === 'dev' && target === 'main');
             if (isOverride) {
                 // Typed confirmation, not a plain confirm() — this route skips
                 // qa entirely, so it must not be reachable by a stray click.
                 const typed = window.prompt(
-                    `OVERRIDE — skip QA.\n\nThis opens a pull request from dev straight into main for ${repo}, ` +
+                    `OVERRIDE — skip QA.\n\nThis opens a pull request from dev straight into main for ${label}, ` +
                     `bypassing the qa gate. It opens a PR; it does NOT merge.\n\n` +
                     `Type PROMOTE to confirm:`);
                 if (typed !== 'PROMOTE') { showToast('Override cancelled — nothing was promoted.', 'info'); return; }
-            } else if (!window.confirm(`Open a promotion pull request ${source} → ${target} for ${repo}?\n\nThis does not merge.`)) {
+            } else if (!window.confirm(`Open a promotion pull request ${source} → ${target} for ${label}?\n\nThis does not merge.`)) {
                 return;
             }
 
             const btn = document.getElementById(PROMOTE_BTN_IDS[source + '>' + target]);
             if (btn) btn.disabled = true;
-            showToast(`Starting promotion ${source} → ${target} for ${repo}…`, 'info');
+            showToast(`Starting promotion ${source} → ${target} for ${label}…`, 'info');
             try {
                 const resp = await fetch('/api/promote', {
                     method: 'POST',
@@ -3447,8 +3464,18 @@
                     showToast('Promotion failed: ' + ((data && data.message) || resp.status), 'error');
                     return;
                 }
-                showToast((data && data.message) || 'Promotion started.', isOverride ? 'warn' : 'success');
-                if (data && data.url) window.open(data.url, '_blank', 'noopener');
+                // 'partial' means some repos dispatched and some did not --
+                // surface it as a warning rather than a success, so a
+                // half-applied platform promotion is never reported as done.
+                const tone = (data && data.status === 'partial') ? 'warn'
+                           : (isOverride ? 'warn' : 'success');
+                showToast((data && data.message) || 'Promotion started.', tone);
+                if (data && Array.isArray(data.results)) {
+                    // Never open one tab per repo; log the per-repo outcome instead.
+                    console.table(data.results);
+                } else if (data && data.url) {
+                    window.open(data.url, '_blank', 'noopener');
+                }
             } catch (e) {
                 showToast('Promotion failed: ' + (e.message || e), 'error');
             } finally {
