@@ -891,6 +891,7 @@
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in (SSO)</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-system" onclick="settingsTab('sec-system')">System</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
@@ -1772,6 +1773,72 @@
                     </section>
 
                     <!-- System Settings -->
+                    <section id="sec-sso" data-settings-section hidden>
+                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                            <i class="fab fa-microsoft text-slate-400"></i>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Microsoft Entra Sign-in (SSO)</h4>
+                        </div>
+                        <p class="text-xs text-slate-500 mb-2">
+                            Lets people sign in with their Microsoft work account instead of a local
+                            AppBuilder password. Everyone who signs in gets full admin rights &mdash;
+                            AppBuilder has no roles &mdash; so <strong>Allowed group</strong> below is the
+                            only thing limiting who can get in.
+                        </p>
+                        <p id="oidc-status" class="text-xs mb-4 text-slate-400">Loading&hellip;</p>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div class="space-y-2 md:col-span-2">
+                                <label class="flex items-center gap-2 text-sm font-medium text-slate-600">
+                                    <input type="checkbox" id="oidc-enabled" class="rounded">
+                                    Enable Microsoft sign-in
+                                </label>
+                                <p class="text-xs text-slate-400">Turning this off hides the "Sign in with Microsoft" button; local passwords keep working.</p>
+                            </div>
+                            <div class="space-y-2 md:col-span-2">
+                                <label class="text-sm font-medium text-slate-600">Allowed group (admin group)</label>
+                                <input type="text" id="oidc-allowed-group" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="00000000-0000-0000-0000-000000000000">
+                                <p class="text-xs text-slate-400">
+                                    Must be the group's <strong>object ID</strong> (a GUID), not its name &mdash; a
+                                    name silently matches nothing and locks everyone out. Comma-separate to allow
+                                    several groups. <strong>Leave blank and every user in the tenant can sign in as an admin.</strong>
+                                    Entra must also be configured to emit a <code>groups</code> claim, otherwise
+                                    every sign-in is rejected with a "read 0 groups" error.
+                                </p>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Directory (tenant) ID</label>
+                                <input type="text" id="oidc-tenant-id" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Application (client) ID</label>
+                                <input type="text" id="oidc-client-id" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2 md:col-span-2">
+                                <label class="text-sm font-medium text-slate-600">Redirect URI</label>
+                                <input type="text" id="oidc-redirect-uri" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="https://this-host/auth/oidc/callback">
+                                <p class="text-xs text-slate-400">Must match a redirect URI registered on the Entra app exactly.</p>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Client certificate path</label>
+                                <input type="text" id="oidc-cert-path" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="/etc/ab/oidc/client-cert.pem">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Client key path</label>
+                                <input type="text" id="oidc-key-path" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="/etc/ab/oidc/client-key.pem">
+                            </div>
+                            <div class="space-y-2 md:col-span-2">
+                                <label class="text-sm font-medium text-slate-600">Client secret <span class="text-slate-400 font-normal">(only if not using a certificate)</span></label>
+                                <div class="flex gap-2">
+                                    <input type="password" id="oidc-client-secret" autocomplete="new-password" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="Leave blank to keep the stored secret">
+                                    <button type="button" onclick="abOidcSecretClear()" class="px-3 py-2 rounded-md text-sm font-medium bg-slate-100 hover:bg-slate-200">Clear</button>
+                                </div>
+                                <p class="text-xs text-slate-400">A certificate is preferred. Leaving this blank never wipes the stored secret.</p>
+                            </div>
+                        </div>
+                        <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveOidcConfig(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save SSO settings</button>
+                        </div>
+                    </section>
+
                     <section id="sec-system" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-server text-slate-400"></i>
@@ -2628,6 +2695,10 @@
             });
             const main = document.querySelector('main');
             if (main) main.scrollTop = 0;
+            // The SSO section is not part of #settings-form (it has its own
+            // endpoint), so it has to fetch its own values when it becomes
+            // visible rather than being server-rendered like the other tabs.
+            if (secId === 'sec-sso') loadOidcConfig();
         };
         // On first paint, show only the first tab's section (the template renders
         // every section without `hidden` so the form is whole; this collapses the
@@ -2636,6 +2707,99 @@
             const first = document.querySelector('[data-tab]');
             if (first) settingsTab(first.getAttribute('data-tab'));
         })();
+
+        // ---- Microsoft Entra SSO settings ----
+        // These fields deliberately carry NO `name` attribute: #settings-form
+        // spans every tab and saveSettingsAjax posts the whole FormData to
+        // /save_settings, but OIDC is stored under config["oidc"] via its own
+        // secret-preserving endpoint. Naming them would post them to the wrong
+        // handler, which would drop them silently.
+        window.loadOidcConfig = async function () {
+            const status = document.getElementById('oidc-status');
+            try {
+                const r = await fetch('/setup/oidc-config');
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const d = await r.json();
+                const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+                set('oidc-tenant-id', d.tenant_id);
+                set('oidc-client-id', d.client_id);
+                set('oidc-redirect-uri', d.redirect_uri);
+                set('oidc-allowed-group', d.allowed_group);
+                set('oidc-cert-path', d.cert_path);
+                set('oidc-key-path', d.key_path);
+                const en = document.getElementById('oidc-enabled');
+                if (en) en.checked = !!d.enabled;
+                const sec = document.getElementById('oidc-client-secret');
+                if (sec) {
+                    sec.value = '';
+                    sec.placeholder = d.client_secret_configured
+                        ? 'A secret is stored — leave blank to keep it'
+                        : 'No secret stored';
+                }
+                if (status) {
+                    if (!d.enabled) {
+                        status.textContent = 'Microsoft sign-in is OFF.';
+                        status.className = 'text-xs mb-4 text-slate-500';
+                    } else if (!d.ready) {
+                        status.textContent = 'Enabled, but incomplete — a tenant ID, client ID, redirect URI and one credential are all required.';
+                        status.className = 'text-xs mb-4 text-amber-600';
+                    } else if (!d.allowed_group) {
+                        status.textContent = 'Active — but no allowed group is set, so ANY user in the tenant can sign in as an admin.';
+                        status.className = 'text-xs mb-4 text-amber-600';
+                    } else {
+                        status.textContent = 'Active — restricted to the allowed group.';
+                        status.className = 'text-xs mb-4 text-emerald-600';
+                    }
+                }
+            } catch (err) {
+                if (status) {
+                    status.textContent = 'Could not load SSO settings: ' + (err.message || err);
+                    status.className = 'text-xs mb-4 text-red-500';
+                }
+            }
+        };
+
+        window.abOidcSecretClear = function () {
+            const el = document.getElementById('oidc-client-secret');
+            if (!el) return;
+            if (!confirm('Clear the stored client secret? Sign-in will then need the certificate.')) return;
+            el.value = '__CLEAR__';
+            showToast('Secret will be cleared when you save.', 'info');
+        };
+
+        window.saveOidcConfig = async function (btn) {
+            const val = id => (document.getElementById(id) || {}).value || '';
+            const body = {
+                enabled: !!(document.getElementById('oidc-enabled') || {}).checked,
+                tenant_id: val('oidc-tenant-id').trim(),
+                client_id: val('oidc-client-id').trim(),
+                redirect_uri: val('oidc-redirect-uri').trim(),
+                allowed_group: val('oidc-allowed-group').trim(),
+                cert_path: val('oidc-cert-path').trim(),
+                key_path: val('oidc-key-path').trim(),
+                client_secret: val('oidc-client-secret'),
+            };
+            if (body.enabled && !body.allowed_group &&
+                !confirm('No allowed group is set. Every user in your Microsoft tenant will be able to sign in, and AppBuilder gives every signed-in user full admin rights. Save anyway?')) {
+                return;
+            }
+            if (btn) btn.disabled = true;
+            try {
+                const r = await fetch('/setup/oidc-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const d = await r.json();
+                if (!r.ok || d.status === 'error') throw new Error(d.message || ('HTTP ' + r.status));
+                showToast('SSO settings saved.', 'success');
+                loadOidcConfig();
+            } catch (err) {
+                showToast('Could not save SSO settings: ' + (err.message || err), 'error');
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        };
 
         // ---- LLM Router API key helpers ----
         // The field renders blank on purpose (the stored key is never sent to the
