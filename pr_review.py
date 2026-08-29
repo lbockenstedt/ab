@@ -14,7 +14,10 @@ INVARIANTS (see memory pr-gate-ab-prereview):
     broadened 2026-08-29): ``_maybe_auto_merge``/``_automerge_decision`` CAN
     approve+merge a PR unattended — but ONLY when its target branch is
     explicitly opted into ``feature_automerge_target_branches`` (defaults to
-    empty — opt-in, not opt-out; e.g. ["dev"], NEVER main), both review
+    empty — opt-in, not opt-out; e.g. ["dev", "qa"]). main/master (and the
+    configured ``default_branch``) are refused structurally, so listing one
+    there does nothing — merges into the release branch stay owner-only.
+    Beyond that gate: both review
     panels Approve above a configurable confidence floor, the diff is a
     provably-additive shape (``feature_allowlist``), the diff touches no
     configured boundary, and the repo is explicitly opted into
@@ -895,10 +898,23 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         return False, "feature_automerge_enabled is off"
     if pr_meta.get("repo") not in (config.get("feature_automerge_repos") or []):
         return False, "repo is not in feature_automerge_repos (opt-in, defaults to none)"
-    if pr_meta.get("base_ref") not in (config.get("feature_automerge_target_branches") or []):
+    # Structural refusal of the release branch, checked BEFORE the operator's
+    # allowlist so configuration cannot override it. The allowlist is a free-text
+    # field in Settings; both it and this function's docstring say "NEVER main",
+    # but saying it is not enforcing it — typing "main" into that box was enough
+    # to make an unattended merge onto the release branch eligible. Only the repo
+    # owner merges into main, so that invariant lives in code, not in guidance.
+    _base_ref = pr_meta.get("base_ref")
+    _release_branches = {"main", "master", (config.get("default_branch") or "main")}
+    if _base_ref in _release_branches:
+        return False, (f"target branch {_base_ref!r} is a release branch — never eligible for "
+                       "auto-merge at any confidence, even if listed in "
+                       "feature_automerge_target_branches (merges into it are owner-only)")
+
+    if _base_ref not in (config.get("feature_automerge_target_branches") or []):
         return False, ("target branch %r is not in feature_automerge_target_branches "
                         "(opt-in, defaults to none) — main (or any unlisted branch) is "
-                        "never eligible, regardless of author or confidence" % pr_meta.get("base_ref"))
+                        "never eligible, regardless of author or confidence" % _base_ref)
 
     if rec.get("merged") or rec.get("auto_merged"):
         return False, "already merged (idempotent no-op)"
