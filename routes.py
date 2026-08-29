@@ -2129,8 +2129,21 @@ async def settings_page(request: Request):
         p: {"base_url": v.get("base_url", ""), "has_key": bool(v.get("api_key"))}
         for p, v in (config.get("llm_credentials") or {}).items()
     }
+    # health: per-entry "is this failing right now" for the Settings badge —
+    # resolves the same provider/model/base_url an actual call would use (an
+    # entry's own base_url overrides its provider's shared credential, same
+    # fallback llm_client._iter_configured_endpoints applies) so the lookup
+    # key matches what _call_provider_timed records against. See
+    # llm_client.get_llm_entry_health's docstring for why this surfaces at
+    # all (lm#452/#469/#444 found stuck on a permanently-broken entry with
+    # no visible signal in the UI).
+    import llm_client as _llm_client
+    _llm_creds = config.get("llm_credentials") or {}
     _safe_llm_entries = [
-        {**e, "api_key": "", "has_key": bool(e.get("api_key"))}
+        {**e, "api_key": "", "has_key": bool(e.get("api_key")),
+         "health": _llm_client.get_llm_entry_health(
+             e.get("provider") or "openai", e.get("base_url") or (_llm_creds.get((e.get("provider") or "openai").lower().strip()) or {}).get("base_url", ""),
+             e.get("model") or "")}
         for e in (config.get("llm_entries") or [])
     ]
 
