@@ -2226,10 +2226,27 @@
                                     </label>
                                 </div>
                             </div>
+                            <div class="flex items-start gap-3 mt-2 p-3 rounded-lg bg-amber-50 border border-amber-200">
+                                <input type="checkbox" name="feature_automerge_require_allowlist" id="feature_automerge_require_allowlist" {{ 'checked' if settings.get('feature_automerge_require_allowlist', True) else '' }} class="w-4 h-4 mt-0.5 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="feature_automerge_require_allowlist" class="text-xs text-slate-700">
+                                    <span class="font-semibold">Only auto-merge provably-additive diffs</span> (docs-only / log-only / tooltip-only)
+                                    <span class="block text-amber-700 mt-1">On (default) is why a normal code change never auto-merges, however high its confidence — behaviour-changing diffs route to a human. <strong>Unticking this widens auto-merge to ANY diff</strong> that clears the other gates: both panels Approve above the confidence floor, no Tier-1 findings, no boundary touched, on an allowlisted branch in an allowlisted repo. main/master stay owner-only either way.</span>
+                                </label>
+                            </div>
                             <div class="space-y-2 mt-2">
                                 <label class="text-sm font-medium text-slate-600">Auto-Merge Target Branches <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
-                                <p class="text-xs text-red-600 font-medium">⚠️ This is what stands between "unattended merge" and "human required" now that PR authorship no longer matters. Add only lower-stakes branches that aren't wired to deploy/restart anything on push — e.g. <code>dev, qa</code>. Listing main/master (or the repo's default branch) has no effect: merges into the release branch are owner-only and are refused in code, at any confidence.</p>
-                                <input type="text" name="feature_automerge_target_branches" value="{{ settings.get('feature_automerge_target_branches', []) | join(', ') }}" placeholder="Branches allowed to receive auto-merges (comma-separated, e.g. dev, qa)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                                <p class="text-xs text-red-600 font-medium">⚠️ This is what stands between "unattended merge" and "human required" now that PR authorship no longer matters. Tick only lower-stakes branches that aren't wired to deploy/restart anything on push. main/master (and the repo's default branch) are not listed and cannot be added: merges into the release branch are owner-only and are refused in code, at any confidence.</p>
+                                {% if feature_automerge_branch_options %}
+                                <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
+                                    {% for branch in feature_automerge_branch_options %}
+                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982] truncate" title="{{ branch }}">
+                                        <input type="checkbox" name="feature_automerge_target_branches" value="{{ branch }}" {% if branch in feature_automerge_target_branches_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                        <span class="truncate">{{ branch }}</span>
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                                {% endif %}
+                                <input type="text" name="feature_automerge_target_branches_extra" placeholder="Additional branches (comma-separated)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2 mt-2">
                                 <label class="text-sm font-medium text-slate-600">Auto-Merge Repositories <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
