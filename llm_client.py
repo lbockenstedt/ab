@@ -2083,12 +2083,21 @@ _ENTRY_HEALTH = {}
 # flags an otherwise-fine entry; a hard config error fails every call, so it
 # crosses this within 2 attempts.
 _ENTRY_UNHEALTHY_THRESHOLD = 2
+# Once unhealthy, how long the picker keeps skipping the entry before trying
+# it again on its own (matches _CREDIT_COOLDOWN_SECONDS and the fix-review
+# retry cadence elsewhere in this app, so behavior stays consistent). Unlike
+# a rate/credit cooldown, a hard failure has no server-reported "retry after"
+# — this is a guess, not a real signal, so it errs long: a config error
+# (wrong model name) needs an operator anyway, and a real outage is rare
+# enough that checking hourly costs nothing.
+_ENTRY_UNHEALTHY_RETRY_SECONDS = 3600
 
 
 def _record_llm_success(key):
     with _ENTRY_HEALTH_LOCK:
         _ENTRY_HEALTH[key] = {"consecutive_failures": 0, "last_error": None,
-                              "last_error_at": None, "last_ok_at": datetime.now().isoformat()}
+                              "last_error_at": None, "last_ok_at": datetime.now().isoformat(),
+                              "retry_after": 0.0}
 
 
 def _record_llm_failure(key, exc):
@@ -2097,7 +2106,33 @@ def _record_llm_failure(key, exc):
         entry["consecutive_failures"] = entry.get("consecutive_failures", 0) + 1
         entry["last_error"] = str(exc)[:300]
         entry["last_error_at"] = datetime.now().isoformat()
+        if entry["consecutive_failures"] >= _ENTRY_UNHEALTHY_THRESHOLD:
+            entry["retry_after"] = time.time() + _ENTRY_UNHEALTHY_RETRY_SECONDS
         _ENTRY_HEALTH[key] = entry
+
+
+def _entry_is_unhealthy(key):
+    """The single source of truth for "unhealthy" — shared by
+    get_llm_entry_health (the Settings badge) and _enumerate_candidates (the
+    picker). Sharing this, rather than each computing its own threshold
+    check, is what makes routing self-healing rather than just visible:
+    lm#452/#469/#444 kept re-selecting a permanently-broken Copilot entry
+    every retry, because nothing EXCLUDED it from selection — a human had to
+    notice the badge and disable it by hand. Now the same signal that lights
+    the badge also removes the candidate from the picker's pool, the same
+    way an existing rate/credit cooldown already does.
+
+    TIMED, not permanent: past _ENTRY_UNHEALTHY_THRESHOLD consecutive
+    failures, the entry stays excluded only until its retry_after elapses —
+    excluding it from the pool means it can never be called again to record
+    a success, so a purely one-shot exclusion would be permanent for the
+    life of the process. After retry_after, one real attempt is allowed
+    through; if it fails again, _record_llm_failure extends the cooldown."""
+    with _ENTRY_HEALTH_LOCK:
+        entry = _ENTRY_HEALTH.get(key)
+    if not entry or entry.get("consecutive_failures", 0) < _ENTRY_UNHEALTHY_THRESHOLD:
+        return False
+    return time.time() < entry.get("retry_after", 0.0)
 
 
 def get_llm_entry_health(provider, base_url, model):
@@ -2107,12 +2142,12 @@ def get_llm_entry_health(provider, base_url, model):
     An entry with no recorded calls yet reads as healthy, not unhealthy —
     silence isn't failure."""
     key = _model_key(provider, base_url, model)
+    unhealthy = _entry_is_unhealthy(key)
     with _ENTRY_HEALTH_LOCK:
         entry = _ENTRY_HEALTH.get(key)
     if not entry:
         return {"unhealthy": False, "consecutive_failures": 0, "last_error": None, "last_error_at": None}
-    return {"unhealthy": entry.get("consecutive_failures", 0) >= _ENTRY_UNHEALTHY_THRESHOLD,
-            "consecutive_failures": entry.get("consecutive_failures", 0),
+    return {"unhealthy": unhealthy, "consecutive_failures": entry.get("consecutive_failures", 0),
             "last_error": entry.get("last_error"), "last_error_at": entry.get("last_error_at")}
 
 
@@ -2353,6 +2388,15 @@ def _enumerate_candidates(config):
             available, unavailable_reason = False, "rate_limited"
         elif _routed_model_dead(provider, model):
             available, unavailable_reason = False, "dead_model"
+        elif _entry_is_unhealthy(key):
+            # A hard error every call (e.g. a model/endpoint pairing the
+            # provider's API rejects outright) has no timed recovery like a
+            # rate/credit cooldown does — it stays excluded from the picker's
+            # pool until a call succeeds again (an operator fixes the entry,
+            # or the provider starts serving that model). See
+            # _entry_is_unhealthy's docstring for why this must share state
+            # with the Settings badge rather than compute its own check.
+            available, unavailable_reason = False, "hard_failing"
         candidates.append({
             "key": key, "provider": provider, "model": model, "base_url": base_url,
             "api_key": api_key, "rpm": rpm, "caps": caps,
