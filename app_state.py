@@ -68,7 +68,8 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
 _PR_REVIEWS_MAX = 100
 
 
-def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None, review2=None):
+def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None, review2=None,
+                     base_ref="", head_ref=""):
     """Persist a PR pre-review result so the UI can list/filter 'PRs Reviewed'.
     Bounded to the most recent _PR_REVIEWS_MAX. findings = list of {level,...} dicts.
 
@@ -140,6 +141,15 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "title": (title or "")[:120],
                 "url": url,
                 "head": head_sha,
+                # Which branch this PR would land on (and from where). In a
+                # dev -> qa -> main chain the target is the most important fact
+                # about a PR, and the list previously showed only "repo #N" —
+                # indistinguishable between a routine dev PR and one aimed at
+                # main. Falls back to "" for records written before this field
+                # existed, which the template treats as "unknown" rather than
+                # rendering an empty badge.
+                "base_ref": str(base_ref or "")[:120] or prev.get("base_ref", ""),
+                "head_ref": str(head_ref or "")[:120] or prev.get("head_ref", ""),
                 "summary": (summary or "")[:600],
                 "findings": len(findings or []),
                 "errors": levels["error"],

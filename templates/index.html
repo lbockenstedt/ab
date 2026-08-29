@@ -645,6 +645,14 @@
                     <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" data-pr-state="{% if pr.auto_merged %}auto_merged{% elif pr.merged %}merged{% elif pr.denied %}denied{% elif pr.closed %}closed{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
                         <td class="px-3 py-2 font-mono align-middle truncate">
                             <a href="{{ pr.url }}" target="_blank" class="text-indigo-600 hover:underline"><i class="fas fa-code-branch mr-1"></i>{{ pr.repo }} #{{ pr.number }}</a>
+                            {# Where this PR is HEADED. In a dev -> qa -> main chain the target
+                               branch is the most important fact about a PR, and this row used to
+                               show only repo #N -- a routine dev PR looked identical to one aimed
+                               at main. Records written before base_ref existed have no value, so
+                               the badge is omitted entirely rather than rendered blank. #}
+                            {% if pr.base_ref %}
+                            <span class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap {{ 'text-amber-800 bg-amber-100 border border-amber-300' if pr.base_ref in ('main', 'master') else 'text-slate-600 bg-slate-100' }}" title="This PR merges into {{ pr.base_ref }}{% if pr.head_ref %} from {{ pr.head_ref }}{% endif %}.{% if pr.base_ref in ('main', 'master') %} This is a protected branch.{% endif %}"><i class="fas fa-arrow-right-long mr-1"></i>{{ pr.base_ref }}</span>
+                            {% endif %}
                         </td>
                         <td class="px-3 py-2 text-right align-middle">
                             <div class="flex flex-wrap gap-1 justify-end items-center">
@@ -811,7 +819,13 @@
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-2">
                 <div>
                     <p class="text-xs text-slate-400">Newest entries first · Fetched {{ hub_fetch_time or 'now' }}
-                        {% if hub_logs %} · {{ hub_logs|length }} entries{% endif %}
+                        {% if hub_logs %}
+                            {% if hub_logs_total and hub_logs_total > hub_logs|length %}
+                                · showing newest {{ hub_logs|length }} of {{ hub_logs_total }} entries
+                            {% else %}
+                                · {{ hub_logs|length }} entries
+                            {% endif %}
+                        {% endif %}
                         {% if hub_fetch_status %} · HTTP {{ hub_fetch_status }}{% endif %}
                     </p>
                 </div>
@@ -2699,8 +2713,6 @@
         <div class="flex justify-between w-full items-center">
             <div class="flex items-center gap-4 opacity-70">
                 <span>© 2026 AppBuilder</span>
-                <span class="text-slate-400">|</span>
-                <span class="font-bold">Automated Issue Triage</span>
             </div>
             <div class="flex items-center gap-2">
                 <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')" class="inline">
