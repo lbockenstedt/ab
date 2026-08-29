@@ -200,13 +200,38 @@ def check_parity(repo_full_name, changed):
     # ---- dns / dhcp dual-module-copy advisories ---------------------------
     # These two modules deliberately exist in TWO shapes: a standalone repo
     # (dns / dhcp, root = the module) and a copy nested under lm/ (lm/dns/,
-    # lm/dhcp/). Unlike the single-file pairs above, ANY changed file inside
-    # the module maps 1:1 to its twin path in the other repo — one advisory
-    # per file (not one combined advisory) so _resolve_cross_repo_twins can
-    # verify/drop each individually against the twin repo's open PRs.
+    # lm/dhcp/). Unlike the single-file pairs above, a changed file inside the
+    # module's PAYLOAD maps 1:1 to its twin path in the other repo — one
+    # advisory per file (not one combined advisory) so _resolve_cross_repo_twins
+    # can verify/drop each individually against the twin repo's open PRs.
+    #
+    # ONLY THE PAYLOAD IS TWINNED. The two shapes do NOT have the same file
+    # set: of the 20 files in the dns repo only 4 have any counterpart under
+    # lm/dns, so mapping *every* changed path produced warnings naming files
+    # that cannot exist. The standalone repo owns its own CI, docs and tests;
+    # `lm/dns` is a subdirectory of the lm repo and can never have its own
+    # `.github/`. A PR that merely rolled shared CI plumbing into the dns repo
+    # was reported as three "twin NOT updated" WARNINGs for
+    # `lm/dns/.github/...` paths, none of which were real or actionable --
+    # and an advisory that cannot be satisfied trains people to ignore the
+    # ones that can.
+    #
+    # VERSION is excluded for the opposite reason: it exists on BOTH sides but
+    # must NEVER be synced. Each repo (and each branch) owns its own version
+    # sequence -- see promote.sh, which pins VERSION to the target branch.
     _DNS_DHCP_CAP = 15  # a module-wide rename/refactor could touch many files
+
+    def _is_twinned_module_path(rel):
+        """Is this module-relative path part of the shared payload?
+
+        Payload = the runtime code and its dependency list. Everything else
+        (VERSION, .github/, docs/, tests/, README/AGENTS/.gitignore/.env*) is
+        per-repo plumbing that legitimately differs between the two shapes.
+        """
+        return rel == "requirements.txt" or rel.startswith("src/")
+
     if is_dns:
-        for p in sorted(changed)[:_DNS_DHCP_CAP]:
+        for p in sorted(p for p in changed if _is_twinned_module_path(p))[:_DNS_DHCP_CAP]:
             findings.append({
                 "level": "advisory",
                 "title": "dns module twin lives in the lm repo",
@@ -216,7 +241,7 @@ def check_parity(repo_full_name, changed):
                 "twin": {"repo": "%s/lm" % owner, "path": "dns/%s" % p},
             })
     if is_dhcp:
-        for p in sorted(changed)[:_DNS_DHCP_CAP]:
+        for p in sorted(p for p in changed if _is_twinned_module_path(p))[:_DNS_DHCP_CAP]:
             findings.append({
                 "level": "advisory",
                 "title": "dhcp module twin lives in the lm repo",
@@ -226,7 +251,8 @@ def check_parity(repo_full_name, changed):
                 "twin": {"repo": "%s/lm" % owner, "path": "dhcp/%s" % p},
             })
     if is_lm:
-        _dns_changed = sorted(p for p in changed if p.startswith("dns/"))[:_DNS_DHCP_CAP]
+        _dns_changed = sorted(p for p in changed if p.startswith("dns/")
+                              and _is_twinned_module_path(p[len("dns/"):]))[:_DNS_DHCP_CAP]
         for p in _dns_changed:
             stripped = p[len("dns/"):]
             findings.append({
@@ -237,7 +263,8 @@ def check_parity(repo_full_name, changed):
                           "Ensure a matching dns PR." % (p, stripped),
                 "twin": {"repo": "%s/dns" % owner, "path": stripped},
             })
-        _dhcp_changed = sorted(p for p in changed if p.startswith("dhcp/"))[:_DNS_DHCP_CAP]
+        _dhcp_changed = sorted(p for p in changed if p.startswith("dhcp/")
+                               and _is_twinned_module_path(p[len("dhcp/"):]))[:_DNS_DHCP_CAP]
         for p in _dhcp_changed:
             stripped = p[len("dhcp/"):]
             findings.append({
@@ -745,6 +772,24 @@ def _twin_open_pr_touches(gh, twin_repo, twin_path, since=None):
     return False
 
 
+def _twin_path_exists(gh, twin_repo, twin_path):
+    """Does ``twin_path`` exist in ``twin_repo``? True / False / None (unknown).
+
+    The dual-copy shapes are not file-for-file identical, so a twin advisory
+    can name a path that simply has no counterpart. Escalating those to
+    "twin NOT updated" produces a WARNING no PR can ever satisfy."""
+    if not twin_repo or not twin_path:
+        return None
+    try:
+        gh.get_repo(twin_repo).get_contents(twin_path)
+        return True
+    except Exception as e:  # noqa: BLE001
+        if getattr(e, "status", None) == 404:
+            return False
+        logger.debug("pr_review twin-check: contents(%s:%s) failed: %s", twin_repo, twin_path, e)
+        return None
+
+
 def _resolve_cross_repo_twins(gh, findings, since=None):
     """Verify each cross-repo twin advisory against the OTHER repo.
 
@@ -755,6 +800,7 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
     Findings without a `twin` key pass through untouched; the key is stripped
     so the render/record layers never see it."""
     out = []
+    exists_cache = {}
     for f in (findings or []):
         twin = (f or {}).get("twin")
         if not twin:
@@ -762,6 +808,21 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
             continue
         f = dict(f)
         f.pop("twin", None)
+        # A path with no counterpart cannot be "not updated in lockstep", and
+        # scanning the twin repo's PRs for it would always come back False.
+        # Say what is actually true instead, and keep it an advisory: for a
+        # NEW shared file this is a genuine prompt to port it, and for a
+        # standalone-only file it is a harmless note -- neither is a WARNING.
+        key = (twin.get("repo", ""), twin.get("path", ""))
+        if key not in exists_cache:
+            exists_cache[key] = _twin_path_exists(gh, key[0], key[1])
+        if exists_cache[key] is False:
+            f["detail"] = ("`%s` does not exist in `%s`. Either this file is specific to "
+                           "this shape of the module (the two copies are not file-for-file "
+                           "identical), or it is new and still needs porting.\n\n"
+                           % (key[1], key[0])) + f.get("detail", "")
+            out.append(f)
+            continue
         verdict = _twin_open_pr_touches(gh, twin.get("repo", ""), twin.get("path", ""), since=since)
         if verdict is True:
             # Twin is being updated in a matching PR — no warning needed.
