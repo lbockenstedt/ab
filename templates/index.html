@@ -254,7 +254,7 @@
             <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
             <h1 class="text-white text-xl font-bold tracking-tight shrink-0">AppBuilder</h1>
             <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
-            <span class="text-white/80 text-base font-semibold tracking-tight truncate">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}Logs{% elif view == 'hub-logs' %}Hub Logs{% elif view == 'settings' %}Settings{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'chat' %}Chat{% else %}AppBuilder{% endif %}</span>
+            <span class="text-white/80 text-base font-semibold tracking-tight truncate">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}Logs{% elif view == 'hub-logs' %}Hub Logs{% elif view == 'settings' %}Settings{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'release' %}Release Management{% elif view == 'chat' %}Chat{% else %}AppBuilder{% endif %}</span>
         </div>
         <!-- Hub agent connection status — mirrors LM's header status pattern
              (w-2 h-2 rounded-full, green/amber/red/slate by agent state) with a
@@ -399,6 +399,9 @@
             </a>
             <a href="/diagnostics" class="nav-item {{ 'active' if view == 'diagnostics' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-stethoscope w-4 text-center"></i>Diagnostics
+            </a>
+            <a href="/release" class="nav-item {{ 'active' if view == 'release' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
+                <i class="fas fa-code-branch w-4 text-center"></i>Release Management
             </a>
             <a href="/chat" class="nav-item {{ 'active' if view == 'chat' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-comments w-4 text-center"></i>Chat
@@ -2325,6 +2328,76 @@
         </div>
         {% endif %}
 
+        {% if view == 'release' %}
+        <!-- Release Management — the dev -> qa -> main promotion controls.
+             Moved here from the footer action bar: promoting a branch is a
+             deliberate release decision, not a global one-click op belonging
+             beside Restart/Blackout, and the override needs room to state what
+             it skips. Every control DISPATCHES promote.yml, which OPENS a pull
+             request. Nothing on this page merges or pushes to a branch. -->
+        <div class="space-y-6 max-w-4xl">
+            <div class="rounded-xl border border-sky-200 bg-sky-50 p-4 flex gap-3">
+                <i class="fas fa-circle-info text-sky-600 mt-0.5"></i>
+                <div class="text-sm text-slate-700">
+                    <div class="font-semibold text-slate-800 mb-1">These buttons open pull requests — they never merge.</div>
+                    Each action dispatches the <code class="font-mono text-xs bg-white px-1 py-0.5 rounded border">promote.yml</code>
+                    workflow, which builds a promotion branch and opens a PR. You still review and merge it yourself.
+                    <code class="font-mono text-xs bg-white px-1 py-0.5 rounded border">VERSION</code> stays on the target
+                    branch's own sequence, so a version set on the source never leaks across.
+                </div>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-white p-4">
+                <label for="promote-repo" class="block text-xs uppercase tracking-widest text-slate-500 font-semibold mb-2">Repository</label>
+                <select id="promote-repo" title="Which repository to promote"
+                    class="w-full max-w-md bg-white text-sm text-slate-800 border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-[#01A982]">
+                    <option value="">Loading repos…</option>
+                </select>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-white divide-y divide-slate-100">
+                <div class="p-4 flex items-center justify-between gap-4">
+                    <div>
+                        <div class="font-semibold text-slate-800 text-sm">Dev &rarr; QA</div>
+                        <div class="text-xs text-slate-500 mt-0.5">Promote the finished dev cycle into qa for sign-off. The normal first step.</div>
+                    </div>
+                    <button onclick="promoteBranch('dev','qa')" id="promote-dev-qa"
+                        title="Open a pull request promoting dev into qa. Starts the promotion only — it does not merge."
+                        class="flex-none border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white text-xs uppercase tracking-widest font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                        <i class="fas fa-arrow-right mr-1"></i>Promote
+                    </button>
+                </div>
+                <div class="p-4 flex items-center justify-between gap-4">
+                    <div>
+                        <div class="font-semibold text-slate-800 text-sm">QA &rarr; Main</div>
+                        <div class="text-xs text-slate-500 mt-0.5">Release qa to production once it has signed off. The normal second step.</div>
+                    </div>
+                    <button onclick="promoteBranch('qa','main')" id="promote-qa-main"
+                        title="Open a pull request promoting qa into main. Starts the promotion only — it does not merge."
+                        class="flex-none border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white text-xs uppercase tracking-widest font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                        <i class="fas fa-arrow-right mr-1"></i>Promote
+                    </button>
+                </div>
+                <div class="p-4 flex items-center justify-between gap-4 bg-red-50/50">
+                    <div>
+                        <div class="font-semibold text-red-800 text-sm">
+                            <i class="fas fa-exclamation-triangle mr-1"></i>Dev &rarr; Main <span class="font-normal text-red-600">(override)</span>
+                        </div>
+                        <div class="text-xs text-red-700/80 mt-0.5">
+                            Skips qa entirely — for an urgent fix that cannot wait for a qa cycle.
+                            Unvalidated work goes straight at production. Requires a typed confirmation.
+                        </div>
+                    </div>
+                    <button onclick="promoteBranch('dev','main')" id="promote-dev-main"
+                        title="OVERRIDE: open a pull request promoting dev straight into main, skipping qa entirely. Requires typed confirmation. Opens a PR only — it does not merge."
+                        class="flex-none border border-red-500 bg-red-500/10 text-red-700 hover:bg-red-500 hover:text-white text-xs uppercase tracking-widest font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                        <i class="fas fa-exclamation-triangle mr-1"></i>Override
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
         {% if view == 'diagnostics' %}
         <div id="diag-root" class="space-y-6">
             <!-- Copy-raw button row — the "Diagnostics" title lives in the
@@ -2637,31 +2710,6 @@
                         <i class="fas fa-network-wired mr-1"></i>Hub Update
                     </button>
                 </form>
-                <!-- Branch promotion (dev -> qa -> main). Each button DISPATCHES
-                     promote.yml, which opens a pull request. None of them merge
-                     and none of them push to a branch. The dev -> main button is
-                     the override that skips qa: it is styled destructively and
-                     guarded by a typed confirmation. -->
-                <span class="border-l border-slate-600 h-4 mx-1"></span>
-                <select id="promote-repo" title="Which repository to promote"
-                    class="bg-slate-800 text-[10px] uppercase tracking-widest text-slate-300 border border-slate-500 rounded px-1 py-0.5 max-w-[150px] focus:outline-none focus:border-[#01A982]">
-                    <option value="">Loading repos…</option>
-                </select>
-                <button onclick="promoteBranch('dev','qa')" id="promote-dev-qa"
-                    title="Open a pull request promoting dev into qa. Starts the promotion only — it does not merge."
-                    class="text-[10px] uppercase tracking-widest opacity-70 hover:opacity-100 border border-[#01A982] text-[#01A982] px-2 py-0.5 rounded transition-all whitespace-nowrap">
-                    <i class="fas fa-arrow-right mr-1"></i>Dev&nbsp;&rarr;&nbsp;QA
-                </button>
-                <button onclick="promoteBranch('qa','main')" id="promote-qa-main"
-                    title="Open a pull request promoting qa into main. Starts the promotion only — it does not merge."
-                    class="text-[10px] uppercase tracking-widest opacity-70 hover:opacity-100 border border-[#01A982] text-[#01A982] px-2 py-0.5 rounded transition-all whitespace-nowrap">
-                    <i class="fas fa-arrow-right mr-1"></i>QA&nbsp;&rarr;&nbsp;Main
-                </button>
-                <button onclick="promoteBranch('dev','main')" id="promote-dev-main"
-                    title="OVERRIDE: open a pull request promoting dev straight into main, skipping qa entirely. Requires typed confirmation. Opens a PR only — it does not merge."
-                    class="text-[10px] uppercase tracking-widest opacity-80 hover:opacity-100 border border-red-500 bg-red-500/10 text-red-300 hover:bg-red-500/20 px-2 py-0.5 rounded transition-all whitespace-nowrap">
-                    <i class="fas fa-exclamation-triangle mr-1"></i>Dev&nbsp;&rarr;&nbsp;Main
-                </button>
                 <span class="border-l border-slate-600 h-4 mx-1"></span>
                 <button onclick="toggleBlackout()" id="blackout-btn" title="Triage only — no fix commits pushed"
                     class="text-[10px] uppercase tracking-widest px-2 py-0.5 rounded transition-all whitespace-nowrap {% if state.blackout %}opacity-100 border border-violet-400 text-violet-300{% else %}opacity-70 hover:opacity-100 border border-slate-500 hover:border-white{% endif %}">
@@ -3340,7 +3388,7 @@
             document.body.removeChild(textArea);
         }
 
-        // ---- Branch promotion (footer) ----
+        // ---- Branch promotion (Release Management view) ----
         // Dispatches promote.yml, which OPENS a promotion pull request. This
         // never merges and never pushes to a branch — the repo owner still
         // reviews and merges. dev -> main skips qa and therefore demands a

@@ -383,3 +383,63 @@ def test_promote_yml_case_pattern_has_no_shell_redirection():
         stripped = line.strip()
         if stripped.endswith(")") and "|" in stripped and not stripped.startswith("#"):
             assert "->" not in stripped, f"unquoted '->' in a case pattern is a syntax error: {stripped}"
+
+
+# --------------------------------------------------------------------------
+# Placement: the promotion controls live in the Release Management view,
+# not the footer action bar.
+# --------------------------------------------------------------------------
+def _index_html():
+    return open(os.path.join(ROOT, "templates", "index.html")).read()
+
+
+def _release_view_block(text):
+    """The markup between `{% if view == 'release' %}` and its `{% endif %}`."""
+    start = text.index("{% if view == 'release' %}")
+    end = text.index("{% endif %}", start)
+    return text[start:end]
+
+
+@pytest.mark.parametrize("btn_id", ["promote-dev-qa", "promote-qa-main", "promote-dev-main"])
+def test_each_promote_button_exists_exactly_once(btn_id):
+    """A stale duplicate left behind in the footer would give two elements the
+    same id -- getElementById would then drive only the first, and the visible
+    button would silently stop responding."""
+    assert _index_html().count(f'id="{btn_id}"') == 1
+
+
+@pytest.mark.parametrize("btn_id", ["promote-dev-qa", "promote-qa-main", "promote-dev-main"])
+def test_promote_buttons_live_in_the_release_view(btn_id):
+    assert f'id="{btn_id}"' in _release_view_block(_index_html()), (
+        f"{btn_id} is no longer inside the Release Management view block")
+
+
+def test_repo_selector_lives_in_the_release_view():
+    """loadPromoteRepos() early-returns when #promote-repo is absent, so a
+    selector left in the footer would populate on every page while the real
+    one on this view stayed empty."""
+    assert 'id="promote-repo"' in _release_view_block(_index_html())
+    assert _index_html().count('id="promote-repo"') == 1
+
+
+def test_footer_no_longer_carries_the_promotion_controls():
+    text = _index_html()
+    footer = text[text.index("<footer"):text.index("</footer>")]
+    for needle in ("promoteBranch(", 'id="promote-repo"'):
+        assert needle not in footer, (
+            f"{needle} is still in the footer action bar; it belongs in the Release view")
+
+
+def test_release_route_is_registered_and_renders_the_release_view():
+    src = open(os.path.join(ROOT, "routes.py")).read()
+    assert '@router.get("/release")' in src
+    m = re.search(r'@router\.get\("/release"\).*?"view":\s*"([a-z-]+)"', src, re.S)
+    assert m and m.group(1) == "release", "/release must render view='release'"
+
+
+def test_sidebar_links_to_release_management():
+    text = _index_html()
+    assert 'href="/release"' in text
+    assert "Release Management" in text
+    # The nav item must light up on the matching view, like every other entry.
+    assert "'active' if view == 'release'" in text
