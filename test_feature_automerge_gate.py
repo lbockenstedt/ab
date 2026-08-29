@@ -10,6 +10,15 @@ test_skills_loader.py's docstring), so this extracts _automerge_decision by
 source via ast and execs it with feature_boundary imported for real (pure,
 standalone — more faithful than reimplementing its matching logic here).
 
+UPDATED 2026-08-29: the containment used to be PR authorship (only PRs
+carrying the feature-drive marker were eligible — human PRs were
+structurally blocked by pr_meta["is_feature_drive"]). Now that more than one
+person works on this system, containment is by TARGET BRANCH instead:
+pr_meta["base_ref"] must be in feature_automerge_target_branches (opt-in,
+defaults to empty). ANY PR — human or bot — targeting an allowlisted branch
+(e.g. "dev") is now eligible if both panels approve at threshold; a PR
+targeting main, or any unlisted branch, never is, regardless of author.
+
 This is the single most safety-critical test in the whole feature auto-drive
 project: EVERY case must resolve to (False, reason) except the one fully-
 cleared, all-conditions-met case at the end. A False-negative here (a case
@@ -49,6 +58,7 @@ def _clean_config(**overrides):
         "feature_drive_enabled": True,
         "feature_automerge_enabled": True,
         "feature_automerge_repos": ["owner/repo"],
+        "feature_automerge_target_branches": ["dev"],
         "feature_automerge_min_confidence": 0.90,
         "feature_automerge_require_clean": True,
         # Existing cases below isolate ONE non-allowlist gate each, so keep the
@@ -72,8 +82,11 @@ def _clean_rec(**overrides):
 
 
 def _clean_pr_meta(**overrides):
-    meta = {"repo": "owner/repo", "is_feature_drive": True, "draft": False,
-            "state": "open", "mergeable": True}
+    # is_feature_drive defaults to False here deliberately — the clean/
+    # baseline case is now a HUMAN-authored PR to prove that's genuinely
+    # eligible, which is the whole point of this change.
+    meta = {"repo": "owner/repo", "base_ref": "dev", "is_feature_drive": False,
+            "draft": False, "state": "open", "mergeable": True}
     meta.update(overrides)
     return meta
 
@@ -83,9 +96,11 @@ def main():
     ns = _load_ns()
     decide = ns["_automerge_decision"]
 
-    # ── the all-clear case: everything below is a controlled regression from this ─
+    # ── the all-clear case: a HUMAN PR (is_feature_drive=False) to dev, everything
+    # else clean. This is the actual point of the 2026-08-29 change — prove it
+    # explicitly rather than just asserting it as a side effect. ─────────────
     should, reason = decide(_clean_rec(), ["some/file.py"], _clean_config(), _clean_pr_meta())
-    ok &= _check("all conditions cleared -> auto-merge approved", should is True)
+    ok &= _check("human PR, all conditions cleared -> auto-merge approved", should is True)
 
     # ── two independent kill switches ────────────────────────────────────────
     should, reason = decide(_clean_rec(), [], _clean_config(feature_drive_enabled=False), _clean_pr_meta())
@@ -99,10 +114,24 @@ def main():
     should, reason = decide(_clean_rec(), [], _clean_config(feature_automerge_repos=["other/repo"]), _clean_pr_meta())
     ok &= _check("repo present but a DIFFERENT one in the allowlist -> blocked", should is False)
 
-    # ── THE containment: missing marker means human PRs can NEVER auto-merge ─
-    should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(is_feature_drive=False))
-    ok &= _check("PR without the feature-drive marker -> blocked EVEN AT PERFECT CONFIDENCE "
-                "(this is what makes human PRs structurally ineligible)", should is False)
+    # ── THE containment (as of 2026-08-29): target branch, not authorship ───
+    should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(base_ref="main"))
+    ok &= _check("PR targeting main -> blocked EVEN AT PERFECT CONFIDENCE, "
+                "even from a feature-drive PR (this is what makes main structurally "
+                "ineligible now that authorship no longer gates)",
+                should is False and not decide(_clean_rec(), [], _clean_config(),
+                    _clean_pr_meta(base_ref="main", is_feature_drive=True))[0])
+    should, reason = decide(_clean_rec(), [], _clean_config(feature_automerge_target_branches=[]),
+                            _clean_pr_meta())
+    ok &= _check("target branch allowlist empty (default) -> blocked", should is False)
+    should, reason = decide(_clean_rec(), [], _clean_config(feature_automerge_target_branches=["staging"]),
+                            _clean_pr_meta())
+    ok &= _check("target branch not the specific one allowlisted -> blocked", should is False)
+    # ── explicit proof of the NEW capability: human PR to an allowlisted branch ─
+    should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(is_feature_drive=False, base_ref="dev"))
+    ok &= _check("human-authored PR (no feature-drive marker) targeting dev -> "
+                "NOW ELIGIBLE if everything else clears (the whole point of this change)",
+                should is True)
 
     # ── idempotency ──────────────────────────────────────────────────────────
     should, reason = decide(_clean_rec(merged=True), [], _clean_config(), _clean_pr_meta())
