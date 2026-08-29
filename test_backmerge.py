@@ -162,7 +162,7 @@ def test_backmerge_is_a_noop_when_the_target_is_already_current(tmp_path):
     res = _run_script(r, "main", "qa", "backmerge", out)
     assert res.returncode == 0, res.stderr
     assert "changed=false" in out.read_text()
-    assert "Nothing to carry" in res.stdout
+    assert "Nothing to backmerge" in res.stdout
 
 
 def test_backmerge_refuses_to_auto_resolve_a_real_conflict(tmp_path):
@@ -200,3 +200,17 @@ def test_promote_direction_still_works_after_the_label_change(tmp_path):
     assert res.returncode == 0, res.stderr
     assert "promote: dev -> qa" in _git(r, "log", "-1", "--pretty=%s")
     assert "feature.py" in _git(r, "ls-tree", "-r", "--name-only", "HEAD")
+
+
+def test_noop_message_keeps_the_string_promotion_selftest_matches(tmp_path):
+    """All 16 repos ship a promotion_selftest.sh that matches on the literal
+    "Nothing to promote". Renaming this message to a label-independent phrase
+    broke nw's CI on main, dev and a back-merge branch simultaneously. The
+    forward direction must keep emitting that exact string."""
+    r = _repo(tmp_path)
+    env = dict(os.environ, SRC="dev", TGT="qa", BR="promote/dev-to-qa",
+               GITHUB_OUTPUT=str(tmp_path / "out"))  # no LABEL -> 'promote'
+    res = subprocess.run(["bash", SCRIPT], cwd=r, env=env,
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert "Nothing to promote" in res.stdout
