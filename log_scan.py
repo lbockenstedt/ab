@@ -1027,8 +1027,13 @@ def scan_bugs(gh_current, config, hub_logs):
             # is the backup signal.
             _err = next((ln.strip() for ln in str(explanation).splitlines()
                          if ln.strip().lower().startswith("error:") and len(ln.strip()) > 6), "")
+            # Fallback (no "Error:"-prefixed line in explanation, the common WebUI
+            # case): per this block's own intent above ("the FULL error text still
+            # leads the body"), this must NOT truncate — a raw [:200] here used to
+            # cut the **Error:** line off mid-word (found on lm#444: "...continues
+            # to show data f"). Collapsed to one line (join/split), not capped.
             _msg = _err[6:].strip() if _err.lower().startswith("error:") else \
-                (_err or str(explanation).strip()[:200].strip())
+                (_err or " ".join(str(explanation).split()).strip())
             _err_line = f"**Error:** {_msg}\n\n" if _msg else ""
             # single-line, word-boundary-truncated for the title (never cuts mid-word)
             _summary = textwrap.shorten(_msg, width=80, placeholder=" …").strip()

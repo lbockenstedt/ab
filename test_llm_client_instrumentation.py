@@ -16,6 +16,7 @@ import ast
 import sys
 import threading
 import time
+from datetime import datetime
 
 import llm_perf
 
@@ -84,16 +85,19 @@ def _load_timed_ns(perf_path):
     exec'd together, unlike the single-function extractions elsewhere."""
     src = open("llm_client.py").read()
     tree = ast.parse(src)
-    names = {"_LLM_PERF_STORE", "_LLM_PERF_LOCK", "_llm_perf_last_save", "_LLM_PERF_SAVE_INTERVAL"}
+    names = {"_LLM_PERF_STORE", "_LLM_PERF_LOCK", "_llm_perf_last_save", "_LLM_PERF_SAVE_INTERVAL",
+              # per-entry health globals (_call_provider_timed records against these
+              # on every call — see llm_client.get_llm_entry_health's docstring)
+              "_ENTRY_HEALTH_LOCK", "_ENTRY_HEALTH", "_ENTRY_UNHEALTHY_THRESHOLD"}
     fn_names = {"_get_llm_perf_store", "get_llm_perf_snapshot", "_model_key", "_call_provider_timed",
-                "_call_provider_wrapper"}
+                "_call_provider_wrapper", "_record_llm_success", "_record_llm_failure"}
     segs = []
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(getattr(t, "id", "") in names for t in node.targets):
             segs.append(ast.get_source_segment(src, node))
         elif isinstance(node, ast.FunctionDef) and node.name in fn_names:
             segs.append(ast.get_source_segment(src, node))
-    assert len(segs) == 4 + 5, f"expected 4 globals + 5 functions, found {len(segs)} segments"
+    assert len(segs) == 7 + 7, f"expected 7 globals + 7 functions, found {len(segs)} segments"
 
     calls = {"provider_calls": []}
 
@@ -109,7 +113,7 @@ def _load_timed_ns(perf_path):
 
     ns = {
         "llm_perf": llm_perf, "config_store": _FakeConfigStore(perf_path),
-        "threading": threading, "time": time,
+        "threading": threading, "time": time, "datetime": datetime,
         "_call_provider": _call_provider_stub,
         # _call_provider_timed wraps the call in a timeout. Pin the threading
         # fallback (the Python 3.9 branch) rather than contextlib.timeout: it is
@@ -170,6 +174,8 @@ def main():
                     snap[key]["latency_ms"] is not None and snap[key]["latency_ms"] >= 15)
         ok &= _check("tps is derived from output_tokens / wall latency when no gen_duration_ms is given",
                     snap[key]["tps"] is not None and snap[key]["tps"] > 0)
+        ok &= _check("a successful call also records healthy entry health",
+                    key in tns["_ENTRY_HEALTH"] and tns["_ENTRY_HEALTH"][key]["consecutive_failures"] == 0)
 
         # --- server-measured gen_duration_ms is preferred over wall latency for tps
 
@@ -183,7 +189,9 @@ def main():
         ok &= _check("tps prefers the server-measured gen_duration_ms over inflated wall-clock latency",
                     snap2[key2]["tps"] is not None and snap2[key2]["tps"] > 1000)
 
-        # --- a failed call records nothing and re-raises -----------------------
+        # --- a failed call records no PERF sample but DOES record health -------
+        # (the health/perf split: perf is a ranking signal with no meaning for a
+        # failed call; health is exactly the opposite — see get_llm_entry_health)
 
         tns["_test_calls"]["raise_exc"] = RuntimeError("boom")
         threw = False
@@ -195,6 +203,10 @@ def main():
         snap3 = tns["get_llm_perf_snapshot"]()
         ok &= _check("a failed call adds no perf sample for a never-before-seen model",
                     ("openai", "", "gpt-9") not in snap3)
+        ok &= _check("but the failure IS recorded against entry health",
+                    ("openai", "", "gpt-9") in tns["_ENTRY_HEALTH"]
+                    and tns["_ENTRY_HEALTH"][("openai", "", "gpt-9")]["consecutive_failures"] == 1
+                    and "boom" in tns["_ENTRY_HEALTH"][("openai", "", "gpt-9")]["last_error"])
 
         # --- distinct base_urls for the same (provider, model) stay isolated ---
 
