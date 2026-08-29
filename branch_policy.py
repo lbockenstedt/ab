@@ -1,4 +1,5 @@
-"""Which branches AppBuilder is allowed to force-push or delete.
+"""Which branches AppBuilder is allowed to force-push or delete, and the
+canonical names it gives its own automation-driven branches.
 
 AppBuilder destroyed two long-lived branches in practice, from two different
 code paths that shared the same missing check:
@@ -12,25 +13,89 @@ code paths that shared the same missing check:
     in the meantime.
 
 The intent was only ever to clean up the throwaway branches AppBuilder itself
-creates (``ai-fix-issue-*``, ``ai-feature-issue-*``) so they don't pile up after
-every merge -- never to touch a branch a human works on.
+creates (``bug/*``, ``ai-feature/*``) so they don't pile up after every merge
+-- never to touch a branch a human works on.
 
 The policy here is therefore an ALLOWLIST, not a blocklist: a branch is
 deletable only if it positively looks like one AppBuilder created AND is not
 protected. Anything unrecognised is kept. Getting this wrong in the permissive
 direction destroys work; getting it wrong in the strict direction leaves a
 stale branch someone can delete in one click.
+
+NAMING (added 2026-08-29): bug-fix branches are named ``bug/<desc>`` or
+``bug/<issue-number>-<desc>`` when a GitHub issue exists; features use
+``ai-feature/`` the same way. NOT plain ``feature/`` -- that is the existing,
+heavily-used HUMAN branch-naming convention in this repo (37+ branches at the
+time of this change), so reusing it for AppBuilder's own branches would make
+automation-driven branches indistinguishable from human ones by prefix alone,
+directly defeating the point of a distinct prefix, and would make every
+existing human ``feature/*`` branch match ``is_auto_created()`` below --
+exactly the class of bug this module exists to prevent. AUTO_BRANCH_PREFIXES_BY_KIND
+is the single source of truth for both the prefixes recognised here and the
+names ``auto_branch_name()`` builds -- previously these were two hand-synced
+string literals in different files, held together only by a comment saying
+"keep in step".
 """
+
+import re
 
 # Names protected regardless of configuration. These are the long-lived
 # branches of the dev -> qa -> main promotion flow, plus the conventional names
 # other repos use for the same roles.
 DEFAULT_PROTECTED = ("main", "master", "dev", "qa", "staging", "release", "next")
 
+# The one place the "bug"/"feature" -> prefix mapping is defined. Both
+# DEFAULT_AUTO_PREFIXES (recognition) and auto_branch_name() (construction)
+# derive from this dict, so they cannot drift apart the way the old two
+# hardcoded literals (in fix_engine.py and feature_build.py) eventually would.
+AUTO_BRANCH_PREFIXES_BY_KIND = {
+    "bug": "bug/",
+    "feature": "ai-feature/",
+}
+
 # Prefixes of branches AppBuilder creates itself, and may therefore clean up.
-# Keep in step with fix_engine (``ai-fix-issue-{n}``) and feature_build
-# (``ai-feature-issue-{n}``).
-DEFAULT_AUTO_PREFIXES = ("ai-fix-issue-", "ai-feature-issue-")
+DEFAULT_AUTO_PREFIXES = tuple(AUTO_BRANCH_PREFIXES_BY_KIND.values())
+
+
+def slugify_branch_desc(text, max_len=50):
+    """Lowercase, hyphen-separated, git-ref-safe rendering of free text for
+    use as a branch-name description segment. Deliberately conservative:
+    collapses every run of non-alphanumeric characters to a single hyphen and
+    strips leading/trailing hyphens, so it can't produce a ref git rejects
+    (no spaces, no ``~^:?*[\\``, no leading/trailing/double dots) regardless
+    of what's in the source title. Falls back to "untitled" rather than
+    returning an empty segment, which would otherwise collapse the prefix's
+    trailing slash with the issue number into something like "bug/123-" or
+    (with no issue number at all) an invalid "bug/" with nothing after it."""
+    text = (text or "").lower().strip()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = text.strip("-")
+    return text[:max_len].rstrip("-") or "untitled"
+
+
+def auto_branch_name(kind, issue=None, description=None):
+    """The branch name AppBuilder gives its own automated work.
+
+    kind: "bug" or "feature" -- looked up in AUTO_BRANCH_PREFIXES_BY_KIND, so
+          an unrecognised kind raises KeyError immediately rather than
+          silently producing an unprefixed (and therefore unrecognisable-as-
+          AppBuilder's-own) branch name.
+    issue: a GitHub issue-like object (needs .number and .title) if this work
+           is driven by a real issue. When given, its number is embedded in
+           the name (e.g. "bug/123-null-pointer-in-parser") so the branch is
+           traceable back to the issue at a glance.
+    description: fallback text to slug when issue is None (or has no number)
+                 -- e.g. a chat-triggered fix with no filed issue yet. Falls
+                 back to issue.title if issue is given but description isn't.
+
+    Returns e.g. "bug/123-null-pointer-in-parser" with an issue, or
+    "bug/null-pointer-in-parser" without one.
+    """
+    prefix = AUTO_BRANCH_PREFIXES_BY_KIND[kind]
+    number = getattr(issue, "number", None) if issue is not None else None
+    title = description if description is not None else getattr(issue, "title", None)
+    slug = slugify_branch_desc(title)
+    return f"{prefix}{number}-{slug}" if number else f"{prefix}{slug}"
 
 
 def parse_names(value):

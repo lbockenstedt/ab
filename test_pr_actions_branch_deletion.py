@@ -77,7 +77,7 @@ def test_merging_a_pr_from_a_shared_branch_does_not_delete_it(ref):
     assert any("kept branch" in m for m in logged), "refusal must be logged"
 
 
-@pytest.mark.parametrize("ref", ["ai-fix-issue-25", "ai-feature-issue-7"])
+@pytest.mark.parametrize("ref", ["bug/25-thing", "ai-feature/7-thing"])
 def test_appbuilder_branches_are_still_cleaned_up(ref):
     repo = _Repo()
     delete_pr_branch, _ = _load_delete_pr_branch({})
@@ -96,14 +96,14 @@ def test_fork_head_is_never_touched():
     repo = _Repo()
     fork = _Repo(full_name="someone-else/ab")
     delete_pr_branch, _ = _load_delete_pr_branch({})
-    delete_pr_branch(repo, _PR("ai-fix-issue-25", fork))
+    delete_pr_branch(repo, _PR("bug/25-thing", fork))
     assert repo.deleted == [] and fork.deleted == []
 
 
 def test_cleanup_disabled_by_config_keeps_everything():
     repo = _Repo()
     delete_pr_branch, _ = _load_delete_pr_branch({"delete_merged_branches": False})
-    delete_pr_branch(repo, _PR("ai-fix-issue-25", repo))
+    delete_pr_branch(repo, _PR("bug/25-thing", repo))
     assert repo.deleted == []
 
 
@@ -115,5 +115,5 @@ def test_delete_failure_is_swallowed_not_raised():
 
     repo = _Boom()
     delete_pr_branch, logged = _load_delete_pr_branch({})
-    delete_pr_branch(repo, _PR("ai-fix-issue-25", repo))
+    delete_pr_branch(repo, _PR("bug/25-thing", repo))
     assert any("could not delete" in m for m in logged)

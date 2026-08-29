@@ -5,7 +5,7 @@ from github import Github, GithubException
 
 import feature_boundary
 import llm_client
-from branch_policy import may_force_push
+from branch_policy import auto_branch_name, may_force_push
 
 from main import (
     CHAT_CONFIG_DEFAULTS,
@@ -2656,7 +2656,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (boundary_pr_reason if boundary_forced_pr else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met"))
                 decision_reason = reason
                 logger.info(f"Decision: Pull Request. Reason: {reason}.")
-                target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else f"ai-fix-issue-{issue.number}"
+                target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else auto_branch_name("bug", issue=issue)
                 try:
                     repo_git.git.checkout(target_branch)
                 except:

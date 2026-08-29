@@ -35,7 +35,7 @@ import llm_client
 from model_selection import LlmRequirements, select_model
 import skills_loader
 import feature_boundary
-from branch_policy import may_force_push
+from branch_policy import auto_branch_name, may_force_push
 from github_ops import _ensure_label
 
 # Exactly one build at a time, globally — a mutating agentic build is
@@ -239,7 +239,7 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
             return False, "skill text unavailable"
 
         timeout_s = int(config.get("feature_build_timeout_s", 1800) or 1800)
-        branch_name = f"ai-feature-issue-{issue.number}"
+        branch_name = auto_branch_name("feature", issue=issue)
         base_branch = config.get("default_branch", "main")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -314,10 +314,11 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
             repo_git.index.commit(commit_msg)
 
             try:
-                # branch_name is always ai-feature-issue-<n>, so this normally
-                # force-pushes AppBuilder's own branch. The guard keeps that
-                # true if the naming ever changes -- force-pushing a shared
-                # branch discards other people's commits.
+                # branch_name comes from auto_branch_name("feature", ...), so
+                # this normally force-pushes AppBuilder's own branch. The
+                # guard keeps that true if the naming ever changes --
+                # force-pushing a shared branch discards other people's
+                # commits.
                 _force_ok, _force_why = may_force_push(
                     branch_name, config,
                     repo_default_branch=getattr(repo_obj, "default_branch", None))
