@@ -26,6 +26,8 @@ import os
 import sys
 import tempfile
 
+from branch_policy import parse_names as _parse_branch_names
+
 
 def _load_ns():
     src = open("routes.py").read()
@@ -74,6 +76,9 @@ def _load_ns():
         "logger": _NoLog(),
         "load_config": load_config, "save_config": save_config,
         "clean_repo_name": clean_repo_name, "parse_module_repo_map": parse_module_repo_map,
+        # Real implementation on purpose: the branch-policy parsing is shared
+        # with pr_actions, so the settings form must be tested against it.
+        "parse_branch_names": _parse_branch_names,
         "_reset_llm_semaphore": _reset_llm_semaphore,
         "validate_llm_config_on_startup": validate_llm_config_on_startup,
         "CHAT_CONFIG_DEFAULTS": {

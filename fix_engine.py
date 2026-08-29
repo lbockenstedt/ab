@@ -5,6 +5,7 @@ from github import Github, GithubException
 
 import feature_boundary
 import llm_client
+from branch_policy import may_force_push
 
 from main import (
     CHAT_CONFIG_DEFAULTS,
@@ -2660,8 +2661,21 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     repo_git.git.checkout(target_branch)
                 except:
                     repo_git.create_head(target_branch).checkout()
+                # A low-confidence fix targets the shared dev branch, so this
+                # push is NOT always to a throwaway AppBuilder branch. Force-
+                # pushing a shared branch rewrites it to whatever this working
+                # copy happens to hold, silently discarding anything that landed
+                # there in the meantime -- that is how a merged commit vanished
+                # from dev. Force only AppBuilder's own branches; on a protected
+                # branch push normally and let a rejection surface as an error
+                # rather than resolving it by destroying the other commits.
+                force_ok, force_why = may_force_push(
+                    target_branch, config,
+                    repo_default_branch=getattr(repo_obj, "default_branch", None))
+                if not force_ok:
+                    logger.info(f"fix_engine: pushing {target_branch} without --force — {force_why}")
                 with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
-                    repo_git.remotes.origin.push(target_branch, force=True)
+                    repo_git.remotes.origin.push(target_branch, force=force_ok)
                 base_branch = config.get("default_branch", "main")
 
                 existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)

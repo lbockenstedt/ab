@@ -778,32 +778,48 @@ _FEATURE_DRIVE_MARKER_RE = re.compile(r"<!--\s*ab-feature-drive:\s*([^\s>]+)#(\d
 
 
 def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, changed_files=None):
-    """Pure function — the SINGLE choke point for whether feature auto-drive
-    auto-approves + auto-merges a PR instead of waiting for a human. Returns
-    (should_merge: bool, reason: str).
+    """Pure function — the SINGLE choke point for whether the skeptical-review
+    pipeline auto-approves + auto-merges a PR instead of waiting for a human.
+    Returns (should_merge: bool, reason: str).
 
     THE INVARIANT THIS FUNCTION DELIBERATELY BREAKS: this module's own
     docstring (top of file) and routes.py's approve/merge routes say
     "AppBuilder never auto-approves"/"never auto-merges". This function is the
-    one narrow, deliberate exception — see pr_meta["is_feature_drive"] below,
-    which is what keeps a human-authored PR structurally ineligible no
-    matter how high its confidence.
+    deliberate exception.
+
+    UPDATED 2026-08-29: containment used to be *who authored the PR* —
+    pr_meta["is_feature_drive"] (the feature-drive marker) was what kept a
+    human-authored PR structurally ineligible no matter how high its
+    confidence. Now that more than one person works on this system, that's
+    no longer sufficient on its own: pr_meta["base_ref"] must ALSO be in
+    feature_automerge_target_branches (opt-in, defaults to empty — e.g.
+    ["dev"]). A PR targeting main, or any branch not on that list, is
+    blocked here regardless of author or confidence — combined with the
+    feature_allowlist gate below (only small, additive diff shapes qualify
+    unattended), this is what stands between "unattended merge" and "human
+    required" for a human-authored PR now. is_feature_drive is still
+    populated in pr_meta for logging/audit (which PRs were bot-authored vs
+    human); it no longer gates this decision on its own.
 
     ALL conditions below are required; on ANY missing/ambiguous/unexpected
     input this returns (False, reason) — it must never accidentally return
-    True. Every condition is independently gate-able (two kill switches:
+    True. Every condition is independently gate-able (kill switches:
     feature_drive_enabled and feature_automerge_enabled; plus paused/
-    blackout; plus a per-repo allowlist that defaults to empty).
+    blackout; plus a per-repo allowlist, a per-target-branch allowlist, and
+    the feature_allowlist diff-shape gate).
 
     rec: state["pr_reviews"]["repo#num"] — panel_*/panel2_*/errors/warnings/
          merged/auto_merged.
     changed_paths: the PR's REAL changed-file list (pr.get_files() filenames)
                    — the boundary check is against the actual diff, never a
                    pre-build prediction.
+    changed_files: normalised per-file records (see
+                   feature_allowlist.files_from_pr_files) for the diff-shape
+                   allowlist gate below; absent fails that gate closed.
     config: live config (feature_drive_enabled, feature_automerge_*,
             feature_boundaries).
-    pr_meta: {"repo": str, "is_feature_drive": bool, "draft": bool,
-              "state": "open"|"closed", "mergeable": bool|None}.
+    pr_meta: {"repo": str, "base_ref": str, "is_feature_drive": bool,
+              "draft": bool, "state": "open"|"closed", "mergeable": bool|None}.
     state_flags: {"paused": bool, "blackout": bool}.
     """
     state_flags = state_flags or {}
@@ -815,8 +831,10 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         return False, "feature_automerge_enabled is off"
     if pr_meta.get("repo") not in (config.get("feature_automerge_repos") or []):
         return False, "repo is not in feature_automerge_repos (opt-in, defaults to none)"
-    if not pr_meta.get("is_feature_drive"):
-        return False, "PR does not carry the feature-drive marker — human PRs are never auto-merged"
+    if pr_meta.get("base_ref") not in (config.get("feature_automerge_target_branches") or []):
+        return False, ("target branch %r is not in feature_automerge_target_branches "
+                        "(opt-in, defaults to none) — main (or any unlisted branch) is "
+                        "never eligible, regardless of author or confidence" % pr_meta.get("base_ref"))
 
     if rec.get("merged") or rec.get("auto_merged"):
         return False, "already merged (idempotent no-op)"
@@ -900,6 +918,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
         marker_match = _FEATURE_DRIVE_MARKER_RE.search(pr.body or "")
         pr_meta = {
             "repo": repo.full_name,
+            "base_ref": getattr(getattr(pr, "base", None), "ref", None),
             "is_feature_drive": bool(marker_match),
             "draft": bool(getattr(pr, "draft", False)),
             "state": (pr.state or "open"),
@@ -1044,10 +1063,11 @@ def _review_one(gh, repo, pr, config, force=False):
     # Runs on EVERY scan (not just non-cached ones) — a PR whose panels only
     # just cleared the confidence bar via the LAST scan's record shouldn't
     # have to wait for its head to move again before being picked up. Inert
-    # unless feature_drive_enabled AND feature_automerge_enabled AND the repo
-    # is in feature_automerge_repos (see _automerge_decision's own docstring
-    # for the full gate list) — a no-op read+return for every ordinary
-    # human-authored or auto-merge-disabled PR.
+    # unless feature_automerge_enabled AND the repo is in
+    # feature_automerge_repos AND the PR's target branch is in
+    # feature_automerge_target_branches (see _automerge_decision's own
+    # docstring for the full gate list) — a no-op read+return for every PR
+    # targeting main or any other non-allowlisted branch.
     _maybe_auto_merge(gh, repo, pr, config)
 
 
