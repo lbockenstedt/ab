@@ -1807,6 +1807,14 @@ async def get_logs(request: Request):
                                                "log_rows": log_rows, "state": state})
 
 
+#: get_hub_logs() reads + sorts EVERY line of the local per-module mirror
+#: (each file capped at HUB_LOG_MAX_LINES=20000, but there's no cap on how
+#: many module files exist — a fleet of ~40 agents was observed holding
+#: 575K+ total lines / 66MB). The page only ever displays "newest first", so
+#: there's no reason to render more than this many rows.
+HUB_LOGS_PAGE_LIMIT = 500
+
+
 @router.get("/hub-logs")
 async def get_hub_logs_page(request: Request):
     config = load_config()
@@ -1819,7 +1827,22 @@ async def get_hub_logs_page(request: Request):
     # the latest synced snapshot. Connectivity is reflected by whether the
     # mirror has recent data (and the Diagnostics card's hub status dot),
     # not by a per-view live probe.
-    logs = get_hub_logs()
+    #
+    # get_hub_logs() reads + sorts the WHOLE local mirror (hundreds of
+    # thousands of lines on a large fleet) — same class of bug the
+    # /api/hub-logs/raw docstring below already describes for a different
+    # call: uvicorn runs single-process/single-event-loop (no workers=), so
+    # calling this synchronously in the route froze EVERY concurrent
+    # request — not just this page — for as long as the read+sort+render
+    # took (observed: multiple minutes). run_in_executor moves the blocking
+    # work to a pool thread so the event loop stays free; the page itself
+    # still only ever needed the newest HUB_LOGS_PAGE_LIMIT rows, so the
+    # (still large) result is truncated to that after the sort rather than
+    # handing Jinja an unbounded table to render.
+    loop = asyncio.get_event_loop()
+    all_logs = await loop.run_in_executor(None, get_hub_logs)
+    total_logs = len(all_logs)
+    logs = all_logs[:HUB_LOGS_PAGE_LIMIT]
     if logs:
         fetch_status = 200
     else:
@@ -1831,7 +1854,8 @@ async def get_hub_logs_page(request: Request):
         request=request, name="index.html",
         context={"view": "hub-logs", "hub_logs": logs, "state": state,
                  "hub_fetch_time": fetch_time, "hub_fetch_error": fetch_error,
-                 "hub_fetch_status": fetch_status, "hub_url": hub_url},
+                 "hub_fetch_status": fetch_status, "hub_url": hub_url,
+                 "hub_logs_total": total_logs, "hub_logs_limit": HUB_LOGS_PAGE_LIMIT},
     )
 
 
