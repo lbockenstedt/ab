@@ -107,10 +107,13 @@ class _Github:
     def get_repo(self, name):
         if self._raises:
             raise self._raises
+        # Record which repo is being acted on so fan-out tests can assert the
+        # full target set and make individual repos fail.
+        self._wf.current_repo = name
         return _Repo(self._wf)
 
 
-def _load(workflow=None, token="tok", config=None):
+def _load(workflow=None, token="tok", config=None, repos=None):
     """Build a namespace and return (promote_branch, workflow, logger, ns)."""
     src = open(os.path.join(ROOT, "routes.py")).read()
     seg = _extract("promote_branch", src)
@@ -124,6 +127,12 @@ def _load(workflow=None, token="tok", config=None):
     ns_pre = {}
     exec(routes_seg.group(0), ns_pre)
 
+    # Same reasoning for the "all repos" sentinel: read the real value so a
+    # rename in routes.py cannot leave these tests asserting a dead string.
+    all_seg = re.search(r'^PROMOTE_ALL\s*=\s*.+$', src, re.M)
+    assert all_seg, "PROMOTE_ALL literal not found in routes.py"
+    exec(all_seg.group(0), ns_pre)
+
     ns = {
         "asyncio": asyncio,
         "os": os,
@@ -134,6 +143,8 @@ def _load(workflow=None, token="tok", config=None):
         "JSONResponse": _JSONResponse,
         "Request": object,
         "PROMOTE_ROUTES": ns_pre["PROMOTE_ROUTES"],
+        "PROMOTE_ALL": ns_pre["PROMOTE_ALL"],
+        "_promotable_repos": lambda cfg: (list(repos if repos is not None else []), ""),
     }
     exec(seg, ns)
     return ns["promote_branch"], wf, logger, ns
@@ -452,3 +463,154 @@ def test_sidebar_links_to_release_management():
     assert "Release Management" in text
     # The nav item must light up on the matching view, like every other entry.
     assert "'active' if view == 'release'" in text
+
+
+# --------------------------------------------------------------------------
+# "All repositories" fan-out
+# --------------------------------------------------------------------------
+class _FanWorkflow(_Workflow):
+    """Workflow stub that records the repo each dispatch was aimed at and can
+    be told to reject specific repos, so a partial failure can be exercised."""
+
+    def __init__(self, fail_repos=(), reject_repos=()):
+        super().__init__()
+        self.current_repo = None
+        self.fail_repos = set(fail_repos)
+        self.reject_repos = set(reject_repos)
+        self.repos = []
+
+    def create_dispatch(self, ref, inputs):
+        self.repos.append(self.current_repo)
+        self.calls.append((ref, inputs))
+        if self.current_repo in self.fail_repos:
+            raise RuntimeError(f"boom {self.current_repo}")
+        if self.current_repo in self.reject_repos:
+            return False
+        return True
+
+
+_ALL = ["o/a", "o/b", "o/c"]
+
+
+def _all_payload(source="dev", target="qa"):
+    _, _, _, ns = _load()
+    return {"repo": ns["PROMOTE_ALL"], "source": source, "target": target}
+
+
+def test_all_repos_dispatches_every_promotable_repo_exactly_once():
+    wf = _FanWorkflow()
+    res, wf, _ = _call(_all_payload(), workflow=wf, repos=_ALL)
+    assert not isinstance(res, _JSONResponse), res
+    assert res["status"] == "success"
+    assert wf.repos == _ALL
+    assert res["succeeded"] == 3 and res["failed"] == 0 and res["total"] == 3
+
+
+def test_all_repos_still_honours_the_route_allowlist():
+    """The sentinel must not become a way around PROMOTE_ROUTES."""
+    wf = _FanWorkflow()
+    res, wf, _ = _call(_all_payload(source="main", target="dev"), workflow=wf, repos=_ALL)
+    assert isinstance(res, _JSONResponse) and res.status_code == 400
+    assert wf.repos == [], "a disallowed route must dispatch nothing"
+
+
+def test_one_repo_failing_does_not_abort_the_rest():
+    """A half-applied promotion is the divergence these buttons exist to
+    prevent, so a mid-list failure must not stop the remaining repos."""
+    wf = _FanWorkflow(fail_repos={"o/b"})
+    res, wf, _ = _call(_all_payload(), workflow=wf, repos=_ALL)
+    assert wf.repos == _ALL, "later repos were skipped after one failed"
+    assert res["status"] == "partial"
+    assert res["succeeded"] == 2 and res["failed"] == 1
+    bad = [r for r in res["results"] if not r["ok"]]
+    assert [r["repo"] for r in bad] == ["o/b"]
+    assert "o/b" in res["message"]
+
+
+def test_all_repos_reports_error_when_every_repo_fails():
+    wf = _FanWorkflow(fail_repos=set(_ALL))
+    res, wf, _ = _call(_all_payload(), workflow=wf, repos=_ALL)
+    assert isinstance(res, _JSONResponse) and res.status_code == 500
+    assert res.content["status"] == "error"
+    assert res.content["failed"] == 3
+
+
+def test_all_repos_with_no_configured_repos_is_a_400_not_a_silent_success():
+    wf = _FanWorkflow()
+    res, wf, _ = _call(_all_payload(), workflow=wf, repos=[])
+    assert isinstance(res, _JSONResponse) and res.status_code == 400
+    assert wf.repos == []
+
+
+def test_dev_to_main_override_across_all_repos_surfaces_the_rejections():
+    """promote.yml only declares the `target` input in this repo; GitHub
+    rejects a dispatch carrying an undeclared input, and PyGithub returns
+    False rather than raising. The override across all repos must therefore
+    report those repos as failed instead of claiming success."""
+    wf = _FanWorkflow(reject_repos={"o/b", "o/c"})
+    res, wf, _ = _call(_all_payload(source="dev", target="main"), workflow=wf, repos=_ALL)
+    assert res["status"] == "partial"
+    assert res["succeeded"] == 1 and res["failed"] == 2
+    msgs = " ".join(r.get("error", "") for r in res["results"] if not r["ok"])
+    assert "promote.yml" in msgs, "the likely cause should be explained"
+
+
+def test_single_repo_response_shape_is_unchanged_by_the_fan_out():
+    """The fan-out must not alter the single-repo contract the UI relies on."""
+    res, _, _ = _call({"repo": "o/r", "source": "dev", "target": "qa"})
+    assert res["status"] == "success"
+    assert res["repo"] == "o/r" and "url" in res
+    assert "results" not in res and "all" not in res
+
+
+# --------------------------------------------------------------------------
+# The "All repositories" option is actually wired into the page
+# --------------------------------------------------------------------------
+def _index_html():
+    return open(os.path.join(ROOT, "templates", "index.html")).read()
+
+
+def test_repo_dropdown_offers_an_all_repositories_option():
+    html = _index_html()
+    assert "All repositories (" in html, "the All option is not rendered"
+    assert "data.all_value" in html, "the option must use the server's sentinel, not a hardcoded string"
+
+
+def test_all_repositories_is_selected_by_default_from_the_server_default():
+    html = _index_html()
+    assert "data.default === allValue" in html
+
+
+def test_confirmations_name_all_repositories_rather_than_a_single_repo():
+    """The typed override confirmation must not say a single repo name when
+    the action will fan out across every repo."""
+    html = _index_html()
+    assert "${label}" in html
+    assert "straight into main for ${repo}" not in html, \
+        "the override prompt still names a single repo"
+
+
+def test_a_partial_fan_out_is_not_reported_as_success():
+    html = _index_html()
+    assert "'partial'" in html
+
+
+def test_fan_out_does_not_open_one_browser_tab_per_repo():
+    html = _index_html()
+    assert "Array.isArray(data.results)" in html
+
+
+def test_get_repos_route_defaults_to_the_all_sentinel():
+    """The GET must hand back the sentinel as the default, otherwise the
+    dropdown's default and the POST's fan-out disagree."""
+    src = open(os.path.join(ROOT, "routes.py")).read()
+    seg = _extract("promote_repos", src)
+    assert '"default": PROMOTE_ALL' in seg
+
+
+def test_get_and_post_share_one_repo_list_helper():
+    """Two copies of the repo list would let 'All' cover a different set than
+    the dropdown showed."""
+    src = open(os.path.join(ROOT, "routes.py")).read()
+    for fn in ("promote_repos", "promote_branch"):
+        assert "_promotable_repos(" in _extract(fn, src), f"{fn} does not use the shared helper"
