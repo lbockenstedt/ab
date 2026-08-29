@@ -25,21 +25,34 @@ import sys
 
 def _extract_redaction_source(src):
     """The two redaction Assign statements live INSIDE settings_page's body
-    (a much larger function than this fix touches) — pull just their source
-    text out, unexecuted, so the caller can exec() it fresh with its own
-    `config` already bound instead of needing the whole route's dependencies
-    (GitHub repo fetch, DEFAULT_ENV, os.getenv, state, templates, ...)."""
+    (a much larger function than this fix touches) — pull the contiguous
+    slice of statements from the first through the last of them (inclusive),
+    unexecuted, so the caller can exec() it fresh with its own `config`
+    already bound instead of needing the whole route's dependencies
+    (GitHub repo fetch, DEFAULT_ENV, os.getenv, state, templates, ...).
+
+    A SLICE rather than just the two Assigns: _safe_llm_entries' health
+    lookup (see llm_client.get_llm_entry_health) needs a `_llm_creds` local
+    that lives between the two target Assigns in the real source — taking
+    the whole span keeps this test executing that REAL statement instead of
+    a reimplemented copy that could drift from it. The `import llm_client`
+    statement in that span is skipped (llm_client.py pulls in `main`'s
+    app-init side effects — the same reason routes.py itself can't be
+    imported here); the caller stubs `_llm_client` instead, since this test
+    is about api_key redaction, not the health lookup's own behavior (that's
+    test_llm_client_entry_health.py's job)."""
     tree = ast.parse(src)
-    lines = []
     for node in tree.body:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "settings_page":
-            for inner in ast.walk(node):
-                if isinstance(inner, ast.Assign):
-                    for t in inner.targets:
-                        if getattr(t, "id", "") in ("_safe_llm_credentials", "_safe_llm_entries"):
-                            lines.append(ast.get_source_segment(src, inner))
-    assert len(lines) == 2, f"expected 2 redaction statements in settings_page, found {len(lines)}"
-    return "\n".join(lines)
+            body = node.body
+            idxs = [i for i, stmt in enumerate(body) if isinstance(stmt, ast.Assign)
+                    and any(getattr(t, "id", "") in ("_safe_llm_credentials", "_safe_llm_entries")
+                            for t in stmt.targets)]
+            assert len(idxs) == 2, f"expected 2 redaction statements in settings_page, found {len(idxs)}"
+            span = [s for s in body[min(idxs):max(idxs) + 1]
+                    if not isinstance(s, (ast.Import, ast.ImportFrom))]
+            return "\n".join(ast.get_source_segment(src, s) for s in span)
+    raise AssertionError("settings_page not found in routes.py")
 
 
 def _load_ns():
@@ -120,7 +133,14 @@ def main():
              "base_url": "", "api_key": "", "escalation_models": ""},
         ],
     }
-    exec_ns = {"config": config}
+    class _StubLlmClient:
+        """This test is about api_key redaction, not the health lookup's own
+        behavior — see test_llm_client_entry_health.py for that."""
+        @staticmethod
+        def get_llm_entry_health(provider, base_url, model):
+            return {"unhealthy": False, "consecutive_failures": 0, "last_error": None, "last_error_at": None}
+
+    exec_ns = {"config": config, "_llm_client": _StubLlmClient()}
     exec(ns["_redaction_source"], exec_ns)
 
     ok &= _check("settings_page redaction: credential api_key is never the real secret",
@@ -139,6 +159,9 @@ def main():
                 exec_ns["_safe_llm_entries"][0]["model"] == "qwen"
                 and exec_ns["_safe_llm_entries"][0]["provider"] == "ollama"
                 and exec_ns["_safe_llm_entries"][0]["label"] == "x")
+    ok &= _check("settings_page redaction: each entry carries a health dict for the Settings badge",
+                exec_ns["_safe_llm_entries"][0]["health"] == {"unhealthy": False, "consecutive_failures": 0,
+                                                               "last_error": None, "last_error_at": None})
 
     # ── empty credentials/entries don't crash the redaction ─────────────────
     exec_ns2 = {"config": {}}

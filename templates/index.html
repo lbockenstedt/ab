@@ -1228,6 +1228,7 @@
                                         <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}{% if entry.enabled == False %} <span class="text-[10px] bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded align-middle">disabled</span>{% endif %}</span>
                                         <span class="text-xs text-slate-400">{{ entry.provider }} / {{ entry.model }}</span>
                                         {% if entry.rpm %}<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{{ entry.rpm }} RPM</span>{% endif %}
+                                        {% if entry.health and entry.health.unhealthy %}<span class="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-bold" title="{{ entry.health.consecutive_failures }} calls in a row failed{% if entry.health.last_error %} — {{ entry.health.last_error }}{% endif %}{% if entry.health.last_error_at %} (last: {{ entry.health.last_error_at }}){% endif %}">⚠ failing</span>{% endif %}
                                         <label class="flex items-center gap-1 text-[11px] text-slate-500" title="Enabled endpoints are ranked by the picker for every call.">
                                             <input type="checkbox" onchange="toggleEntryEnabled('{{ entry.id }}', this.checked)" {{ 'checked' if entry.enabled != False else '' }} class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
                                             on
