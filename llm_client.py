@@ -2063,6 +2063,59 @@ def _model_key(provider, base_url, model):
     return ((provider or "").lower().strip(), (base_url or "").strip().rstrip("/"), model or "")
 
 
+# ============================================================================
+# Per-entry health — lightweight in-memory failure/success tracking, keyed by
+# ModelKey. Feeds Settings' per-LLM-entry "failing" badge so a hard error a
+# provider's API returns on EVERY call (e.g. a model/endpoint pairing it
+# rejects outright, like GitHub Copilot 400ing a model unsupported on
+# /chat/completions) is visible without reading ab.log — found via lm#452/
+# #469/#444 sitting in an endless review-retry loop because one reviewer
+# entry was permanently broken and nothing surfaced that in the UI.
+#
+# Deliberately in-memory only (cleared on restart), same scope as the rate/
+# credit circuit breakers above — this answers "is it failing right now",
+# not a historical audit trail.
+# ============================================================================
+_ENTRY_HEALTH_LOCK = threading.Lock()
+_ENTRY_HEALTH = {}
+# Consecutive failures, with no success in between, before an entry is
+# reported unhealthy. >1 so a single transient blip (a network hiccup) never
+# flags an otherwise-fine entry; a hard config error fails every call, so it
+# crosses this within 2 attempts.
+_ENTRY_UNHEALTHY_THRESHOLD = 2
+
+
+def _record_llm_success(key):
+    with _ENTRY_HEALTH_LOCK:
+        _ENTRY_HEALTH[key] = {"consecutive_failures": 0, "last_error": None,
+                              "last_error_at": None, "last_ok_at": datetime.now().isoformat()}
+
+
+def _record_llm_failure(key, exc):
+    with _ENTRY_HEALTH_LOCK:
+        entry = dict(_ENTRY_HEALTH.get(key) or {"consecutive_failures": 0, "last_ok_at": None})
+        entry["consecutive_failures"] = entry.get("consecutive_failures", 0) + 1
+        entry["last_error"] = str(exc)[:300]
+        entry["last_error_at"] = datetime.now().isoformat()
+        _ENTRY_HEALTH[key] = entry
+
+
+def get_llm_entry_health(provider, base_url, model):
+    """Public accessor for the Settings UI. Returns
+    {"unhealthy": bool, "consecutive_failures": int, "last_error": str|None,
+    "last_error_at": str|None} for the given (provider, base_url, model).
+    An entry with no recorded calls yet reads as healthy, not unhealthy —
+    silence isn't failure."""
+    key = _model_key(provider, base_url, model)
+    with _ENTRY_HEALTH_LOCK:
+        entry = _ENTRY_HEALTH.get(key)
+    if not entry:
+        return {"unhealthy": False, "consecutive_failures": 0, "last_error": None, "last_error_at": None}
+    return {"unhealthy": entry.get("consecutive_failures", 0) >= _ENTRY_UNHEALTHY_THRESHOLD,
+            "consecutive_failures": entry.get("consecutive_failures", 0),
+            "last_error": entry.get("last_error"), "last_error_at": entry.get("last_error_at")}
+
+
 def _call_provider_wrapper(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
                            usage_out, **kwargs):
     """Wrapper function for threading-based timeout in Python 3.9 compatibility.
@@ -2089,9 +2142,12 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
     than calling _call_provider directly, so a sample lands regardless of
     which retry branch actually wins.
 
-    On failure this re-raises unchanged and records nothing — a failed call
-    has no latency signal worth ranking on, and _try_provider's existing
-    credit/rate-limit bookkeeping already covers that case.
+    On failure this re-raises unchanged after recording the failure against
+    the entry's health (see _record_llm_failure below, e.g. for Settings'
+    per-entry "failing" badge) — _try_provider's existing credit/rate-limit
+    bookkeeping is a separate, narrower signal (only trips on specific known
+    causes) and doesn't cover a hard per-call error like a model/endpoint
+    pairing the provider's API rejects outright.
 
     Also wraps the underlying _call_provider call with a timeout to prevent
     indefinite hangs on network or provider issues."""
@@ -2102,41 +2158,46 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
     # Extract timeout from config, defaulting to 900 seconds if not present
     timeout_s = int(config.get("LLM_TIMEOUT", 900))
 
-    # Wrap the actual LLM call with a timeout to prevent hanging
-    # This catches cases where the provider never responds (stuck network,
-    # rate-limit cooldown that isn't being reported, etc.)
-    if _TIMEOUT_AVAILABLE:
-        # Python 3.11+: use contextlib.timeout for clean timeout handling
-        try:
-            with timeout(timeout_s):
-                result = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                                        usage_out=usage_out, **kwargs)
-        except TimeoutError:
-            logger.warning("%s/%s timed out after %d seconds — raising TimeoutError to trigger failover",
-                           provider, model, timeout_s)
-            raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
-    else:
-        # Python 3.9: use threading-based timeout (fallback)
-        # kwargs go through Thread's own `kwargs=` parameter — `**kwargs` cannot
-        # appear inside the args tuple literal (that is a SyntaxError in every
-        # Python version, which made this whole module un-importable).
-        thread = threading.Thread(target=_call_provider_wrapper,
-                                  args=(provider, model, api_key, base_url, messages, tools,
-                                        effective_stream, task_id, config, usage_out),
-                                  kwargs=kwargs,
-                                  daemon=True)
-        thread.start()
-        thread.join(timeout=timeout_s)
+    try:
+        # Wrap the actual LLM call with a timeout to prevent hanging
+        # This catches cases where the provider never responds (stuck network,
+        # rate-limit cooldown that isn't being reported, etc.)
+        if _TIMEOUT_AVAILABLE:
+            # Python 3.11+: use contextlib.timeout for clean timeout handling
+            try:
+                with timeout(timeout_s):
+                    result = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
+                                            usage_out=usage_out, **kwargs)
+            except TimeoutError:
+                logger.warning("%s/%s timed out after %d seconds — raising TimeoutError to trigger failover",
+                               provider, model, timeout_s)
+                raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
+        else:
+            # Python 3.9: use threading-based timeout (fallback)
+            # kwargs go through Thread's own `kwargs=` parameter — `**kwargs` cannot
+            # appear inside the args tuple literal (that is a SyntaxError in every
+            # Python version, which made this whole module un-importable).
+            thread = threading.Thread(target=_call_provider_wrapper,
+                                      args=(provider, model, api_key, base_url, messages, tools,
+                                            effective_stream, task_id, config, usage_out),
+                                      kwargs=kwargs,
+                                      daemon=True)
+            thread.start()
+            thread.join(timeout=timeout_s)
 
-        if thread.is_alive():
-            logger.warning("%s/%s timed out after %d seconds — raising TimeoutError to trigger failover",
-                           provider, model, timeout_s)
-            thread.join()  # Give it a moment to clean up
-            raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
-        if usage_out.get("_exc") is not None:
-            raise usage_out.pop("_exc")
-        result = usage_out.get("_result")
+            if thread.is_alive():
+                logger.warning("%s/%s timed out after %d seconds — raising TimeoutError to trigger failover",
+                               provider, model, timeout_s)
+                thread.join()  # Give it a moment to clean up
+                raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
+            if usage_out.get("_exc") is not None:
+                raise usage_out.pop("_exc")
+            result = usage_out.get("_result")
+    except BaseException as e:
+        _record_llm_failure(key, e)
+        raise
 
+    _record_llm_success(key)
     latency_ms_wire = (time.monotonic() - t0) * 1000.0
     try:
         out_tok = usage_out.get("output_tokens")

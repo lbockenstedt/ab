@@ -615,6 +615,129 @@ async def pr_review_deny(request: Request):
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+# ---------------------------------------------------------------------------
+# Branch promotion (dev -> qa -> main), driven from the footer action bar.
+#
+# These endpoints only ever DISPATCH .github/workflows/promote.yml, which
+# prepares a `promote/<src>-to-<tgt>` branch and OPENS a pull request. Nothing
+# here merges, and nothing here pushes to a branch: the repo owner still
+# reviews and merges every promotion PR. (AppBuilder's unattended auto-merge
+# is a separate, opt-in path gated on `feature_automerge_target_branches` in
+# pr_review._automerge_decision -- untouched by this feature.)
+#
+# PROMOTE_ROUTES is the allowlist. It is checked here as well as in promote.yml
+# because AppBuilder's token is the repo owner's PAT and bypasses GitHub
+# rulesets -- server-side validation is the enforcement, not a convenience.
+# ---------------------------------------------------------------------------
+
+# (source, target) -> is this the qa-skipping override?
+PROMOTE_ROUTES = {
+    ("dev", "qa"): False,
+    ("qa", "main"): False,
+    ("dev", "main"): True,   # override: skips qa, still only opens a PR
+}
+
+
+@router.get("/api/promote/repos")
+async def promote_repos():
+    """Repos the promotion buttons can target: everything AppBuilder already
+    monitors, plus its own self-diagnosis repo, which is used as the default
+    so the common case (promoting AppBuilder itself) needs no selection."""
+    try:
+        from github_ops import get_monitored_repos
+        cfg = load_config()
+        repos = sorted({clean_repo_name(r) for r in (get_monitored_repos(cfg) or []) if r})
+        default = ""
+        try:
+            from main import resolve_self_diagnosis_repo
+            default = clean_repo_name(resolve_self_diagnosis_repo(cfg) or "")
+        except Exception:  # noqa: BLE001
+            default = ""
+        if default and default not in repos:
+            repos.append(default)
+        return {"status": "success", "repos": repos, "default": default or (repos[0] if repos else "")}
+    except Exception as e:  # noqa: BLE001
+        logger.error("promote: could not list repos: %s", e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@router.post("/api/promote")
+async def promote_branch(request: Request):
+    """Dispatch promote.yml for one repo to OPEN a promotion PR.
+
+    Body: {repo, source, target}. Only the three routes in PROMOTE_ROUTES are
+    accepted; anything else is a 400 rather than a dispatch, so this endpoint
+    can never be used to aim an arbitrary branch at main.
+    """
+    try:
+        data = await request.json()
+        repo_name = clean_repo_name((data.get("repo") or "").strip())
+        source = (data.get("source") or "").strip().lower()
+        target = (data.get("target") or "").strip().lower()
+    except Exception:
+        return JSONResponse(status_code=400,
+                            content={"status": "error", "message": "repo + source + target required"})
+
+    if not repo_name:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No repository selected"})
+    if (source, target) not in PROMOTE_ROUTES:
+        allowed = ", ".join(f"{s} -> {t}" for s, t in PROMOTE_ROUTES)
+        return JSONResponse(status_code=400, content={
+            "status": "error",
+            "message": f"'{source} -> {target}' is not a permitted promotion route (allowed: {allowed})"})
+
+    is_override = PROMOTE_ROUTES[(source, target)]
+
+    config = load_config()
+    token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
+
+    def _do_dispatch():
+        repo = Github(token).get_repo(repo_name)
+        wf = repo.get_workflow("promote.yml")
+        # workflow_dispatch always runs the workflow file as it exists on the
+        # ref it is dispatched from; the promotion logic lives on the default
+        # branch, which is also what promote.yml's concurrency note assumes.
+        ref = repo.default_branch
+        # Send `target` ONLY for the override. promote.yml in the sibling repos
+        # still has just the `source` input, and GitHub rejects a dispatch that
+        # carries an input the workflow does not declare -- so always sending
+        # `target` would break the ordinary dev->qa / qa->main buttons on every
+        # repo except this one. Omitting it reproduces the historical call
+        # exactly, and those repos keep working; dev->main is the only route
+        # that genuinely requires the newer workflow.
+        inputs = {"source": source}
+        if is_override:
+            inputs["target"] = target
+        ok = wf.create_dispatch(ref, inputs)
+        # PyGithub returns False rather than raising when GitHub rejects the
+        # dispatch. Treat that as a failure instead of reporting a false
+        # success -- for the override the likeliest cause is a promote.yml on
+        # that repo that predates the `target` input.
+        if ok is False:
+            extra = (" This repo's promote.yml may predate the 'target' input "
+                     "that the dev -> main override requires.") if is_override else ""
+            raise RuntimeError(
+                f"GitHub rejected the workflow dispatch for {repo_name} (ref '{ref}').{extra}")
+        return f"https://github.com/{repo_name}/actions/workflows/promote.yml"
+
+    try:
+        # PyGithub is synchronous — see pr_review_approve's note; offload so a
+        # slow GitHub response can't stall the whole single-event-loop app.
+        url = await asyncio.get_event_loop().run_in_executor(None, _do_dispatch)
+        logger.warning(
+            "promote: %s %s -> %s dispatched via UI%s",
+            repo_name, source, target, " (OVERRIDE, skips qa)" if is_override else "")
+        return {"status": "success", "repo": repo_name, "source": source, "target": target,
+                "override": is_override, "url": url,
+                "message": (f"Promotion {source} → {target} started for {repo_name}. "
+                            f"It opens a pull request; it does not merge.")}
+    except Exception as e:  # noqa: BLE001
+        logger.error("promote failed for %s (%s -> %s): %s", repo_name, source, target, e)
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @router.post("/api/pr-review/reprocess")
 async def pr_review_reprocess(request: Request):
     """Human 'Reprocess' for a reviewed PR — immediately re-runs the full
@@ -2129,8 +2252,21 @@ async def settings_page(request: Request):
         p: {"base_url": v.get("base_url", ""), "has_key": bool(v.get("api_key"))}
         for p, v in (config.get("llm_credentials") or {}).items()
     }
+    # health: per-entry "is this failing right now" for the Settings badge —
+    # resolves the same provider/model/base_url an actual call would use (an
+    # entry's own base_url overrides its provider's shared credential, same
+    # fallback llm_client._iter_configured_endpoints applies) so the lookup
+    # key matches what _call_provider_timed records against. See
+    # llm_client.get_llm_entry_health's docstring for why this surfaces at
+    # all (lm#452/#469/#444 found stuck on a permanently-broken entry with
+    # no visible signal in the UI).
+    import llm_client as _llm_client
+    _llm_creds = config.get("llm_credentials") or {}
     _safe_llm_entries = [
-        {**e, "api_key": "", "has_key": bool(e.get("api_key"))}
+        {**e, "api_key": "", "has_key": bool(e.get("api_key")),
+         "health": _llm_client.get_llm_entry_health(
+             e.get("provider") or "openai", e.get("base_url") or (_llm_creds.get((e.get("provider") or "openai").lower().strip()) or {}).get("base_url", ""),
+             e.get("model") or "")}
         for e in (config.get("llm_entries") or [])
     ]
 
