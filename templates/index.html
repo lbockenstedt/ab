@@ -2205,8 +2205,8 @@
                             <label class="text-sm font-semibold text-slate-700">Auto-Merge <span class="text-red-500 font-normal">(unattended — reviewed by both panels, but no human clicks Approve/Merge)</span></label>
                             <div class="flex items-center gap-3">
                                 <input type="checkbox" name="feature_automerge_enabled" id="feature_automerge_enabled" {{ 'checked' if settings.get('feature_automerge_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
-                                <label for="feature_automerge_enabled" class="text-xs font-medium text-slate-700" title="Off by default. Only ever applies to PRs carrying the feature-drive marker (feature_build.py's own PRs) — a human-authored PR can never be auto-merged, at any confidence.">
-                                    Enable auto-merge for feature-built PRs
+                                <label for="feature_automerge_enabled" class="text-xs font-medium text-slate-700" title="Off by default. Applies to ANY PR — human or feature-built — targeting a branch listed below. A PR targeting main, or any branch not listed, can never be auto-merged, at any confidence.">
+                                    Enable auto-merge onto allowlisted branches
                                 </label>
                             </div>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
@@ -2223,8 +2223,13 @@
                                 </div>
                             </div>
                             <div class="space-y-2 mt-2">
+                                <label class="text-sm font-medium text-slate-600">Auto-Merge Target Branches <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
+                                <p class="text-xs text-red-600 font-medium">⚠️ This is what stands between "unattended merge" and "human required" now that PR authorship no longer matters. Never add main/master here — only a lower-stakes branch (e.g. dev) that isn't wired to deploy/restart anything on push.</p>
+                                <input type="text" name="feature_automerge_target_branches" value="{{ settings.get('feature_automerge_target_branches', []) | join(', ') }}" placeholder="Branches allowed to receive auto-merges (comma-separated, e.g. dev)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                            </div>
+                            <div class="space-y-2 mt-2">
                                 <label class="text-sm font-medium text-slate-600">Auto-Merge Repositories <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
-                                <p class="text-xs text-red-600 font-medium">⚠️ A repo added here that restarts a live service on push (e.g. the LM hub) will restart it unattended the moment a feature PR auto-merges. Do not add such a repo casually.</p>
+                                <p class="text-xs text-red-600 font-medium">⚠️ A repo added here that restarts a live service on push (e.g. the LM hub) will restart it unattended the moment a PR to an allowlisted branch auto-merges. Do not add such a repo casually.</p>
                                 {% if feature_automerge_repo_options %}
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-40 overflow-y-auto">
                                     {% for repo in feature_automerge_repo_options %}
