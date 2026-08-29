@@ -441,7 +441,7 @@ except Exception as ve:
 # How far back to look at CLOSED issues when searching for a recurrence. The bot
 # previously only searched OPEN issues, so once a "fix" was merged and the issue
 # closed, the next cycle's identical error was filed as a brand-new issue +
-# spawned a new ai-fix-issue-* branch — the #25 -> #55 -> #78 -> #90 storm.
+# spawned a new bug/* branch — the #25 -> #55 -> #78 -> #90 storm.
 # Searching recently-closed issues lets us REOPEN the original instead.
 # When the target repo has no match and we fall back to searching the OTHER
 # monitored repos globally, require a stricter title-level signal to avoid
