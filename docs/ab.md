@@ -23,7 +23,7 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 ## Environment variables
 
 - `.env`: `GITHUB_TOKEN`, `LOCAL_OLLAMA_MODEL`, `CLOUD_OLLAMA_MODEL`, `LOCAL_OLLAMA_URL`, `CLOUD_OLLAMA_URL`, `POLL_INTERVAL_SECONDS`, `UPDATE_API_URL`, `LOG_FILE_PATH` (`/var/log/ab.log`).
-- `config.json`: `monitored_repos`, `trusted_repos`, `default_branch`, `self_diagnosis_repo`, `enabled_models`, `direct_push_enabled`, `dev_branch`, `repo_tests`, `GITHUB_TOKEN`, `monitored_labels` (default `["automated-fix"]`), `HUB_WS_URL`, `HUB_AGENT_ID` (default `ab`), `HUB_AGENT_SECRET`, `HUB_SECRET`, `refresh_status_seconds`, `refresh_logs_seconds`, `bug_report_enabled`, `bug_report_repo`, `TRIAGE_STRICTNESS`, `heartbeat_exclude`. LLM provider slots: `LLM_PROVIDER_N`, `LLM_API_KEY_N`, `LLM_MODEL_N`, `LLM_BASE_URL_N`, `LLM_RPM_N` (1-based; vault-based `llm_credentials`/`llm_entries`/`llm_slots` supported). Providers: openai, anthropic, google, groq, openrouter, ollama (local+cloud), lmstudio, claude_cli, copilot.
+- `config.json`: `monitored_repos`, `trusted_repos`, `default_branch`, `self_diagnosis_repo`, `enabled_models`, `direct_push_enabled`, `dev_branch`, `delete_merged_branches`, `protected_branches`, `auto_branch_prefixes`, `repo_tests`, `GITHUB_TOKEN`, `monitored_labels` (default `["automated-fix"]`), `HUB_WS_URL`, `HUB_AGENT_ID` (default `ab`), `HUB_AGENT_SECRET`, `HUB_SECRET`, `refresh_status_seconds`, `refresh_logs_seconds`, `bug_report_enabled`, `bug_report_repo`, `TRIAGE_STRICTNESS`, `heartbeat_exclude`. LLM provider slots: `LLM_PROVIDER_N`, `LLM_API_KEY_N`, `LLM_MODEL_N`, `LLM_BASE_URL_N`, `LLM_RPM_N` (1-based; vault-based `llm_credentials`/`llm_entries`/`llm_slots` supported). Providers: openai, anthropic, google, groq, openrouter, ollama (local+cloud), lmstudio, claude_cli, copilot.
 
 ## Install flags
 
@@ -57,6 +57,8 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 - **Reimplements lm-core signing** — `hub_agent.py::MessageSigner` mirrors `lm/core/src/security/signer.py` (HMAC-SHA256 canonical JSON) so it can talk to the hub without depending on lm-core.
 - **Watchdog rollback** — polls `/api/health` every 5s; rolls back via `update_state.json`/`update_pending` in `/etc/ab/` only on a failed auto-update.
 - **`SET_LOG_LEVEL`** — ab is in the hub's broadcast set, so the WebUI "Enable Debug" flips its log level too.
+- **Branch cleanup is an allowlist (`branch_policy.py`)** — post-merge deletion and force-push are both gated. A branch is touchable only if it *positively* matches an `auto_branch_prefixes` entry (default `ai-fix-issue-`, `ai-feature-issue-`) and is not in `protected_branches` (`main`/`master`/`dev`/`qa`/`staging`/`release`/`next` plus the configured default and dev branches are always protected). Anything unrecognised — `feature/*`, `promote/*` — is kept. Configured under Settings → GitHub & Repository Core; refusals are logged with a reason. This exists because the previous code guarded only the repo's default branch, so a low-confidence fix (which uses `dev` itself as the PR head) force-pushed and then **deleted `dev` and `qa`** on merge.
+- **Low-confidence fixes still target the default branch** — `fix_engine` opens those PRs `dev` → `main`, bypassing `qa`. Safe now (no force-push), but it sidesteps the dev→qa→main promotion model.
 
 ## Related pages
 
