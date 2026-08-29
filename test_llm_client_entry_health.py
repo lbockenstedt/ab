@@ -17,20 +17,23 @@ wired into _call_provider_timed (every LLM call in the app routes through
 it) so a hard-failing entry becomes visible without reading ab.log."""
 import ast
 import threading
+import time
 from datetime import datetime
 
 
 def _load_ns():
     src = open("llm_client.py").read()
     tree = ast.parse(src)
-    names = {"_model_key", "_record_llm_success", "_record_llm_failure", "get_llm_entry_health"}
-    ns = {"threading": threading, "datetime": datetime}
+    names = {"_model_key", "_record_llm_success", "_record_llm_failure",
+              "get_llm_entry_health", "_entry_is_unhealthy"}
+    ns = {"threading": threading, "datetime": datetime, "time": time}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:
             exec(ast.get_source_segment(src, node), ns)
         elif isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id in ("_ENTRY_HEALTH_LOCK", "_ENTRY_HEALTH",
-                                                  "_ENTRY_UNHEALTHY_THRESHOLD")
+                                                  "_ENTRY_UNHEALTHY_THRESHOLD",
+                                                  "_ENTRY_UNHEALTHY_RETRY_SECONDS")
             for t in node.targets
         ):
             exec(ast.get_source_segment(src, node), ns)
@@ -87,6 +90,22 @@ def main():
     other = get_health("ollama_cloud", "", "nemotron-3-ultra")
     ok &= _check("a distinct (provider, base_url, model) key is tracked independently",
                 not other["unhealthy"] and other["consecutive_failures"] == 0)
+
+    # ── timed recovery: unhealthy is not permanent (see _entry_is_unhealthy's
+    # docstring — a one-shot exclusion would be permanent, since an excluded
+    # entry can never be called again to record the success that clears it) ─
+    is_unhealthy = ns["_entry_is_unhealthy"]
+    retry_key = ("copilot", "", "gpt-5.5")
+    record_failure(retry_key, Exception("boom"))
+    record_failure(retry_key, Exception("boom again"))
+    ok &= _check("2 consecutive failures -> unhealthy", is_unhealthy(retry_key))
+    with ns["_ENTRY_HEALTH_LOCK"]:
+        ns["_ENTRY_HEALTH"][retry_key]["retry_after"] = time.time() + 3600
+    ok &= _check("still within the retry window -> stays unhealthy", is_unhealthy(retry_key))
+    with ns["_ENTRY_HEALTH_LOCK"]:
+        ns["_ENTRY_HEALTH"][retry_key]["retry_after"] = time.time() - 1
+    ok &= _check("retry_after elapsed -> no longer reported unhealthy (one fresh attempt allowed)",
+                not is_unhealthy(retry_key))
 
     print()
     if ok:
