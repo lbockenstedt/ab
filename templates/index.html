@@ -920,6 +920,30 @@
                                 <input type="text" name="UPDATE_API_URL" value="{{ settings.UPDATE_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
+                                <div class="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-3">
+                                    <label class="flex items-center gap-2 text-sm font-medium text-slate-700">
+                                        <input type="checkbox" name="delete_merged_branches" {% if settings.delete_merged_branches is not defined or settings.delete_merged_branches %}checked{% endif %} class="rounded border-slate-300 focus:ring-[#01A982]">
+                                        Delete AppBuilder's own branches after their PR merges
+                                    </label>
+                                    <p class="text-xs text-slate-500">
+                                        Cleanup is an allowlist: only branches matching a prefix below are ever deleted, and a
+                                        protected branch is never deleted or force-pushed even if it matches. Anything else is left alone.
+                                    </p>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div class="space-y-1">
+                                            <label class="text-sm font-medium text-slate-600">Protected branches (never delete or force-push)</label>
+                                            <input type="text" name="protected_branches" value="{{ (settings.protected_branches or []) | join(', ') }}" placeholder="main, master, dev, qa" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <p class="text-xs text-slate-500">Comma-separated. main, master, dev, qa, staging, release and next are always protected, as are the Default and Dev branches set here.</p>
+                                        </div>
+                                        <div class="space-y-1">
+                                            <label class="text-sm font-medium text-slate-600">Auto-created branch prefixes (safe to delete)</label>
+                                            <input type="text" name="auto_branch_prefixes" value="{{ (settings.auto_branch_prefixes or []) | join(', ') }}" placeholder="ai-fix-issue-, ai-feature-issue-" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <p class="text-xs text-slate-500">Comma-separated prefixes. Leave blank to use the defaults.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Monitored Repositories</label>
                                 {% if repo_options %}
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">

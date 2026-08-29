@@ -22,6 +22,8 @@ from github import GithubException
 from main import logger, state
 from app_state import update_pr_review
 from github_ops import _ensure_label
+from branch_policy import may_delete
+from config_store import load_config
 
 _APPROVE_LABEL = "ab-approved"
 
@@ -170,13 +172,22 @@ def _delete_pr_branch(repo, pr):
     ``merge_pr`` performs). Only same-repo branches are removed — a fork head
     lives in someone else's repo and isn't ours to delete — and any failure is
     logged, never raised, so branch cleanup can't turn a successful merge into
-    an error."""
+    an error.
+
+    What may be deleted is decided by ``branch_policy.may_delete``: an
+    ALLOWLIST of AppBuilder's own throwaway branches, never a shared one. This
+    used to guard only ``repo.default_branch``, which left ``dev`` and ``qa``
+    deletable — and a low-confidence fix opens its PR with ``dev`` as the head
+    branch, so merging it deleted ``dev`` outright."""
     head = getattr(pr, "head", None)
     head_repo = getattr(head, "repo", None)
     if not head or not head_repo or head_repo.full_name != repo.full_name:
         return
     ref = head.ref
-    if ref == repo.default_branch:
+    ok, why = may_delete(ref, load_config() or {},
+                         repo_default_branch=getattr(repo, "default_branch", None))
+    if not ok:
+        logger.info(f"pr_actions: {repo.full_name} kept branch {ref} — {why}")
         return
     try:
         repo.get_git_ref("heads/%s" % ref).delete()

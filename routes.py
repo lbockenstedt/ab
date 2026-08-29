@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from github import Github
 from app_state import mark_pr_approved, update_pr_review
 from pr_actions import approve_pr, merge_pr
+from branch_policy import parse_names as parse_branch_names
 from fastapi import APIRouter
 
 router = APIRouter()
@@ -2299,6 +2300,10 @@ async def save_settings(request: Request):
     updates = {
         "default_branch": lambda v: v,
         "dev_branch": lambda v: v,
+        # Branch-cleanup policy. Stored as lists so branch_policy can consume
+        # them directly; the form supplies a comma-separated string.
+        "protected_branches": parse_branch_names,
+        "auto_branch_prefixes": parse_branch_names,
         "GITHUB_TOKEN": lambda v: v,
         "LLM_PROVIDER_1": lambda v: v,
         "LLM_API_KEY_1": lambda v: v,
@@ -2377,6 +2382,9 @@ async def save_settings(request: Request):
                 config_data[key] = transform(val)
 
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
+    # Unchecked checkboxes are simply absent from the form, so an explicit
+    # comparison is what distinguishes "off" from "not submitted".
+    config_data["delete_merged_branches"] = data.get("delete_merged_branches") == "on"
     # Agentic LLM router (/v1/messages) toggles. agentic_default (OFF): route
     # every proxy request through AppBuilder's agent loop, not just model=
     # ab-agent. autofix_enabled (OFF, a second gate behind the required key):
