@@ -1794,14 +1794,25 @@
                                 <p class="text-xs text-slate-400">Turning this off hides the "Sign in with Microsoft" button; local passwords keep working.</p>
                             </div>
                             <div class="space-y-2 md:col-span-2">
-                                <label class="text-sm font-medium text-slate-600">Allowed group (admin group)</label>
-                                <input type="text" id="oidc-allowed-group" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="00000000-0000-0000-0000-000000000000">
+                                <label class="text-sm font-medium text-slate-600">Allowed groups (admin groups)</label>
+                                <div class="flex gap-2">
+                                    <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] hidden"></select>
+                                    <button type="button" id="oidc-group-btn" onclick="loadOidcGroupPicker()" class="px-3 py-2 rounded-md text-sm font-medium bg-slate-100 hover:bg-slate-200 whitespace-nowrap">Pick from Entra</button>
+                                </div>
+                                <p id="oidc-group-msg" class="text-xs text-amber-600 hidden"></p>
+                                <div id="oidc-group-chips" class="flex flex-wrap gap-2"></div>
+                                <input type="hidden" id="oidc-allowed-group">
+                                <details class="mt-1">
+                                    <summary class="text-xs text-slate-400 cursor-pointer select-none">Enter object IDs manually</summary>
+                                    <input type="text" id="oidc-allowed-group-manual" onchange="onOidcGroupManual(this)" class="w-full mt-2 p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] font-mono text-xs" placeholder="comma-separated group object IDs">
+                                </details>
                                 <p class="text-xs text-slate-400">
-                                    Must be the group's <strong>object ID</strong> (a GUID), not its name &mdash; a
-                                    name silently matches nothing and locks everyone out. Comma-separate to allow
-                                    several groups. <strong>Leave blank and every user in the tenant can sign in as an admin.</strong>
-                                    Entra must also be configured to emit a <code>groups</code> claim, otherwise
-                                    every sign-in is rejected with a "read 0 groups" error.
+                                    Membership in <strong>any</strong> listed group grants access. Matching is by
+                                    group <strong>object ID</strong>, never by name &mdash; which is why picking from
+                                    the list is safer than typing.
+                                    <strong>Leave empty and every user in the tenant can sign in as an admin.</strong>
+                                    Entra must also emit a <code>groups</code> claim, otherwise every sign-in is
+                                    rejected with a "read 0 groups" error.
                                 </p>
                             </div>
                             <div class="space-y-2">
@@ -2709,11 +2720,119 @@
         })();
 
         // ---- Microsoft Entra SSO settings ----
+        // The allowed-group list is held in a hidden input as a comma-separated
+        // string (the wire format save_oidc_config expects) and mirrored into
+        // chips + an optional manual field. Every node here is built with
+        // createElement/textContent rather than innerHTML: AppBuilder has no
+        // escapeHtml helper, and Entra group display names are free text.
+        let _abOidcGroupNames = {};
+
+        function _abOidcGroups() {
+            const el = document.getElementById('oidc-allowed-group');
+            return ((el && el.value) || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+        }
+
+        function _abOidcSetGroups(list) {
+            const uniq = [];
+            (list || []).forEach(g => { if (g && !uniq.includes(g)) uniq.push(g); });
+            const el = document.getElementById('oidc-allowed-group');
+            if (el) el.value = uniq.join(', ');
+            const manual = document.getElementById('oidc-allowed-group-manual');
+            if (manual) manual.value = uniq.join(', ');
+            _abOidcRenderChips(uniq);
+        }
+
+        function _abOidcRenderChips(list) {
+            const box = document.getElementById('oidc-group-chips');
+            if (!box) return;
+            box.textContent = '';
+            if (!list.length) {
+                const p = document.createElement('span');
+                p.className = 'text-xs text-amber-600';
+                p.textContent = 'No groups selected — any user in the tenant can sign in as an admin.';
+                box.appendChild(p);
+                return;
+            }
+            list.forEach(id => {
+                const chip = document.createElement('span');
+                chip.className = 'inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-slate-100 text-xs';
+                const label = document.createElement('span');
+                const nm = _abOidcGroupNames[id];
+                label.textContent = nm ? nm : id;
+                if (nm) label.title = id;
+                chip.appendChild(label);
+                const x = document.createElement('button');
+                x.type = 'button';
+                x.className = 'text-slate-400 hover:text-red-500 font-bold leading-none';
+                x.textContent = '\u00d7';
+                x.title = 'Remove ' + id;
+                x.onclick = () => _abOidcSetGroups(_abOidcGroups().filter(g => g !== id));
+                chip.appendChild(x);
+                box.appendChild(chip);
+            });
+        }
+
+        window.onOidcGroupManual = function (input) {
+            _abOidcSetGroups((input.value || '').split(/[\s,]+/));
+        };
+
+        // Appends (never replaces) so several groups can be allowed, matching
+        // enforce_allowed_group: membership in ANY listed group grants access.
+        window.onOidcGroupPick = function (sel) {
+            const id = sel.value;
+            if (!id) return;
+            const opt = sel.options[sel.selectedIndex];
+            if (opt) _abOidcGroupNames[id] = opt.getAttribute('data-name') || id;
+            _abOidcSetGroups(_abOidcGroups().concat([id]));
+            sel.value = '';
+        };
+
+        window.loadOidcGroupPicker = async function () {
+            const btn = document.getElementById('oidc-group-btn');
+            const sel = document.getElementById('oidc-group-select');
+            const msg = document.getElementById('oidc-group-msg');
+            if (!sel) return;
+            if (btn) { btn.disabled = true; btn.textContent = 'Loading\u2026'; }
+            try {
+                const r = await fetch('/setup/oidc/groups');
+                const d = await r.json().catch(() => ({}));
+                const groups = (d && d.groups) || [];
+                if (!groups.length) {
+                    if (msg) {
+                        msg.textContent = (d && d.warning) ||
+                            'No Entra groups returned — you can still enter object IDs manually.';
+                        msg.classList.remove('hidden');
+                    }
+                    sel.classList.add('hidden');
+                } else {
+                    sel.textContent = '';
+                    sel.appendChild(new Option('\u2014 select an Entra group \u2014', ''));
+                    groups.forEach(g => {
+                        const o = new Option(g.displayName + '  \u2014  ' + g.id, g.id);
+                        o.setAttribute('data-name', g.displayName);
+                        _abOidcGroupNames[g.id] = g.displayName;
+                        sel.appendChild(o);
+                    });
+                    sel.classList.remove('hidden');
+                    if (msg) msg.classList.add('hidden');
+                    // Names are known now, so redraw chips to show them.
+                    _abOidcRenderChips(_abOidcGroups());
+                }
+            } catch (err) {
+                if (msg) {
+                    msg.textContent = 'Failed to load Entra groups: ' + (err.message || err);
+                    msg.classList.remove('hidden');
+                }
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = 'Pick from Entra'; }
+            }
+        };
+
         // These fields deliberately carry NO `name` attribute: #settings-form
         // spans every tab and saveSettingsAjax posts the whole FormData to
-        // /save_settings, but OIDC is stored under config["oidc"] via its own
-        // secret-preserving endpoint. Naming them would post them to the wrong
-        // handler, which would drop them silently.
+        // /save_settings, but OIDC persists through its own secret-preserving
+        // endpoint. Naming them would post them to the wrong handler, which
+        // would drop them silently.
         window.loadOidcConfig = async function () {
             const status = document.getElementById('oidc-status');
             try {
@@ -2724,16 +2843,16 @@
                 set('oidc-tenant-id', d.tenant_id);
                 set('oidc-client-id', d.client_id);
                 set('oidc-redirect-uri', d.redirect_uri);
-                set('oidc-allowed-group', d.allowed_group);
                 set('oidc-cert-path', d.cert_path);
                 set('oidc-key-path', d.key_path);
+                _abOidcSetGroups(String(d.allowed_group || '').split(/[\s,]+/));
                 const en = document.getElementById('oidc-enabled');
                 if (en) en.checked = !!d.enabled;
                 const sec = document.getElementById('oidc-client-secret');
                 if (sec) {
                     sec.value = '';
                     sec.placeholder = d.client_secret_configured
-                        ? 'A secret is stored — leave blank to keep it'
+                        ? 'A secret is stored \u2014 leave blank to keep it'
                         : 'No secret stored';
                 }
                 if (status) {
@@ -2747,7 +2866,7 @@
                         status.textContent = 'Active — but no allowed group is set, so ANY user in the tenant can sign in as an admin.';
                         status.className = 'text-xs mb-4 text-amber-600';
                     } else {
-                        status.textContent = 'Active — restricted to the allowed group.';
+                        status.textContent = 'Active — restricted to the allowed groups.';
                         status.className = 'text-xs mb-4 text-emerald-600';
                     }
                 }
@@ -2769,18 +2888,19 @@
 
         window.saveOidcConfig = async function (btn) {
             const val = id => (document.getElementById(id) || {}).value || '';
+            const groups = _abOidcGroups();
             const body = {
                 enabled: !!(document.getElementById('oidc-enabled') || {}).checked,
                 tenant_id: val('oidc-tenant-id').trim(),
                 client_id: val('oidc-client-id').trim(),
                 redirect_uri: val('oidc-redirect-uri').trim(),
-                allowed_group: val('oidc-allowed-group').trim(),
+                allowed_group: groups.join(', '),
                 cert_path: val('oidc-cert-path').trim(),
                 key_path: val('oidc-key-path').trim(),
                 client_secret: val('oidc-client-secret'),
             };
-            if (body.enabled && !body.allowed_group &&
-                !confirm('No allowed group is set. Every user in your Microsoft tenant will be able to sign in, and AppBuilder gives every signed-in user full admin rights. Save anyway?')) {
+            if (body.enabled && !groups.length &&
+                !confirm('No allowed group is selected. Every user in your Microsoft tenant will be able to sign in, and AppBuilder gives every signed-in user full admin rights. Save anyway?')) {
                 return;
             }
             if (btn) btn.disabled = true;
