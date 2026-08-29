@@ -321,6 +321,51 @@ async def oidc_config_get():
     return out
 
 
+@router.get("/setup/oidc/groups")
+async def oidc_groups_list():
+    """List the tenant's Entra groups (id + displayName) for the allowed-group
+    picker, so an admin chooses a group by NAME instead of pasting a GUID.
+
+    ``allowed_group`` only ever matches group OBJECT IDs, so hand-entry is the
+    main way to lock every user out of AppBuilder; the picker removes that.
+    Degrades to ``{groups: [], warning}`` rather than erroring so the UI can
+    fall back to manual entry. Behind the normal session gate (``/setup/*`` is
+    not in the auth-exempt list)."""
+    import oidc as _o
+    cfg = _o.get_oidc_config()
+    if not (cfg.tenant_id and cfg.client_id):
+        return {"groups": [],
+                "warning": "Set the tenant ID and client ID first, then save."}
+    if not cfg.has_credential:
+        return {"groups": [],
+                "warning": "Set a client secret or certificate first, then save."}
+
+    def _friendly(msg: str) -> str:
+        low = msg.lower()
+        if ("authorization_requestdenied" in low or "insufficient privileges" in low
+                or " 403" in low):
+            return ("The app registration is missing the Microsoft Graph "
+                    "Group.Read.All (Application) permission with admin consent "
+                    "— add it under API permissions, grant admin consent, then "
+                    "retry. You can still type the group object ID by hand. "
+                    "(raw: " + msg[:160] + ")")
+        if " 401" in low or "invalid_client" in low:
+            return ("Entra rejected the app token — check the client secret, or "
+                    "that the certificate is uploaded and its thumbprint "
+                    "matches. (raw: " + msg[:160] + ")")
+        return msg
+
+    try:
+        groups = await _o.fetch_directory_groups(cfg)
+        groups.sort(key=lambda g: (g.get("displayName") or "").lower())
+        return {"groups": groups}
+    except _o.OidcError as e:
+        return {"groups": [], "warning": _friendly(str(e))}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("oidc: could not list directory groups")
+        return {"groups": [], "warning": _friendly(str(e))}
+
+
 @router.post("/setup/oidc-config")
 async def oidc_config_set(request: Request):
     """Persist the operator-editable OIDC config from the Settings UI."""
