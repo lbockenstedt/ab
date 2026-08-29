@@ -2309,6 +2309,31 @@ async def settings_page(request: Request):
     feature_automerge_repos_set = set(feature_automerge_repos)
     extra_am_repos = [r for r in feature_automerge_repos if r not in set(github_repos)]
     feature_automerge_repo_options = list(github_repos) + extra_am_repos
+    # feature_automerge_target_branches: same checkbox pattern as the repo
+    # selector above. The old free-text box carried a comment claiming there
+    # was no cheap way to enumerate branches — but the promotion chain itself
+    # (PROMOTE_ROUTES) is that enumeration, locally, with no GitHub API call.
+    # Release branches are deliberately EXCLUDED from the options: pr_review
+    # refuses main/master/default_branch structurally, so offering them as a
+    # tickable box would advertise a choice that can never take effect.
+    _am_release = {"main", "master", (config.get("default_branch") or "main")}
+    _am_chain = []
+    for _pr_src, _pr_dst in PROMOTE_ROUTES:
+        for _pr_b in (_pr_src, _pr_dst):
+            if _pr_b not in _am_chain:
+                _am_chain.append(_pr_b)
+    _am_dev = config.get("dev_branch") or "dev"
+    if _am_dev not in _am_chain:
+        _am_chain.append(_am_dev)
+    feature_automerge_branch_options = [b for b in _am_chain if b not in _am_release]
+    feature_automerge_target_branches = parse_branch_names(
+        config.get("feature_automerge_target_branches"))
+    # Keep any already-configured branch visible even if it isn't in the chain,
+    # so opening Settings can never silently drop a value the operator set.
+    for _am_b in feature_automerge_target_branches:
+        if _am_b not in feature_automerge_branch_options and _am_b not in _am_release:
+            feature_automerge_branch_options.append(_am_b)
+    feature_automerge_target_branches_set = set(feature_automerge_target_branches)
 
     # SECURITY: llm_credentials/llm_entries carry plaintext api_key values.
     # They used to flow into the template raw via the **config merge below,
@@ -2416,6 +2441,8 @@ async def settings_page(request: Request):
         "feature_drive_repo_options": feature_drive_repo_options,
         "feature_drive_repos_set": feature_drive_repos_set,
         "feature_automerge_repo_options": feature_automerge_repo_options,
+        "feature_automerge_branch_options": feature_automerge_branch_options,
+        "feature_automerge_target_branches_set": feature_automerge_target_branches_set,
         "feature_automerge_repos_set": feature_automerge_repos_set,
         "log_module_options": log_module_options,
         "state": state,
@@ -2840,6 +2867,13 @@ async def save_settings(request: Request):
     # ── Auto-merge (the deliberate invariant exception — see pr_review.py) ──
     config_data["feature_automerge_enabled"] = data.get("feature_automerge_enabled") == "on"
     config_data["feature_automerge_require_clean"] = data.get("feature_automerge_require_clean") == "on"
+    # The DEFAULT-DENY additive allowlist. Previously had no save handler at all,
+    # so it was pinned on and the only way to change it was hand-editing
+    # /etc/ab/config.json. Turning it OFF widens auto-merge from "docs/log/
+    # tooltip-only diffs" to ANY diff that clears the other gates, so it is the
+    # single most consequential switch in this block. main stays owner-only
+    # regardless — pr_review refuses release branches structurally.
+    config_data["feature_automerge_require_allowlist"] = data.get("feature_automerge_require_allowlist") == "on"
     _amc = str(data.get("feature_automerge_min_confidence") or "").strip()
     try:
         config_data["feature_automerge_min_confidence"] = max(0.0, min(1.0, float(_amc))) if _amc else 1.0
@@ -2860,13 +2894,25 @@ async def save_settings(request: Request):
         if _r2 and _r2 not in _am_repos:
             _am_repos.append(_r2)
     config_data["feature_automerge_repos"] = list(dict.fromkeys(_am_repos))
-    # Target-branch allowlist — free-text comma/newline separated, same
-    # parsing style as _am_extra above. No checkbox list here (unlike repos,
-    # there's no cheap "known branches" enumeration without an extra GitHub
-    # API call per repo) — this is deliberately just a short opt-in list like
-    # ["dev"], not meant to hold many entries.
-    _am_branches_raw = data.get("feature_automerge_target_branches", "") or ""
-    _am_branches = [b.strip() for b in _am_branches_raw.replace("\n", ",").split(",") if b.strip()]
+    # Target-branch allowlist — checkbox selector (options come from the
+    # promotion chain; see the GET above) plus a free-text field for anything
+    # outside it, mirroring the repo selector directly above. Release branches
+    # are stripped here as well as being excluded from the options and refused
+    # in pr_review: the form is not the only caller of this endpoint, so the
+    # invariant is re-asserted rather than assumed.
+    if hasattr(form_data, "getlist"):
+        _am_b_checked = form_data.getlist("feature_automerge_target_branches")
+    else:
+        _v3 = data.get("feature_automerge_target_branches")
+        _v3 = [_v3] if isinstance(_v3, str) else (_v3 or [])
+        _am_b_checked = list(_v3)
+    _am_branches_raw = data.get("feature_automerge_target_branches_extra", "") or ""
+    _am_branches = [b.strip() for b in _am_b_checked if b and str(b).strip()]
+    for _b3 in parse_branch_names(_am_branches_raw):
+        if _b3 not in _am_branches:
+            _am_branches.append(_b3)
+    _am_release_save = {"main", "master", (config_data.get("default_branch") or "main")}
+    _am_branches = [b for b in _am_branches if b not in _am_release_save]
     config_data["feature_automerge_target_branches"] = list(dict.fromkeys(_am_branches))
 
     # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical
