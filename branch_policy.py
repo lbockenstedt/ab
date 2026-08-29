@@ -202,3 +202,58 @@ def integration_branch(config=None, repo_obj=None):
                               f"{getattr(repo_obj, 'full_name', 'this repo')} -- falling back to "
                               f"'{fallback}'; create '{dev}' to restore the dev -> qa -> main flow")
     return dev, f"'{dev}' is the integration branch (dev -> qa -> main)"
+
+
+def may_direct_push(ref, config=None, repo_default_branch=None):
+    """(ok, reason) -- may AppBuilder push commits straight at this branch,
+    with no pull request?
+
+    Belt-and-braces backstop for ``fix_engine``'s trusted-repo direct-push
+    path. That path is already aimed at ``integration_branch()`` (``dev``),
+    but AppBuilder authenticates as the repo OWNER's PAT, which bypasses every
+    GitHub ruleset -- so if the target it computes ever drifts back to the
+    production branch, GitHub will NOT stop the push. Nothing else will either.
+    This function is that stop, in code.
+
+    Deliberately NOT ``is_protected`` wholesale. ``is_protected`` covers the
+    whole promotion flow (main/master/dev/qa/staging/release/next plus the
+    configured default/dev names) because force-pushing or DELETING any of
+    those destroys work. Direct-pushing is a different question: ``dev`` is
+    precisely where AppBuilder's trusted-repo flow is *supposed* to commit, so
+    refusing it wholesale would break the normal path this guard is meant to
+    leave alone.
+
+    The rule is therefore "protected, EXCEPT the integration branch":
+
+      * ``dev`` (or whatever ``dev_branch`` is configured to) -- ALLOWED. This
+        is the intended destination of a trusted, approved automated fix.
+      * ``main``/``master``, the repo's own default branch, and a configured
+        ``default_branch`` -- REFUSED. Production is reached by promotion PR
+        (dev -> qa -> main), never by a push from automation.
+      * ``qa``/``staging``/``release``/``next`` -- REFUSED. These are promotion
+        gates; a push straight at one strands the gate ahead of its source and
+        skips the review the gate exists to provide.
+      * anything else (``bug/*``, ``ai-feature/*``, a topic branch) -- ALLOWED;
+        pushing to AppBuilder's own working branch is the ordinary case.
+
+    A refusal is never fatal: callers log the reason and fall back to opening a
+    pull request, which is the outcome the promotion flow wants anyway.
+    """
+    cfg = config or {}
+    name = str(ref or "").strip()
+    if not name:
+        return False, "no branch name"
+
+    # Checked BEFORE is_protected: the integration branch is itself protected
+    # (against force-push/delete), but is the one branch a normal direct push
+    # is allowed to target.
+    dev, _dev_why = integration_branch(cfg)
+    if name.lower() == str(dev or "").strip().lower():
+        return True, f"'{name}' is the integration branch -- the intended target for automated commits"
+
+    if is_protected(name, cfg, repo_default_branch):
+        return False, (f"'{name}' is a protected branch -- automated commits reach it by "
+                       f"promotion PR (dev -> qa -> main), never by a direct push; "
+                       f"opening a pull request instead")
+
+    return True, f"'{name}' is not a protected branch"
