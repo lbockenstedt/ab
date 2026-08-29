@@ -55,11 +55,40 @@ def test_never_writes_to_main():
         assert bad not in text, f"backmerge.yml appears to write to main ({bad!r})"
 
 
-def test_opens_a_pr_and_never_merges():
+def test_opens_a_pr_and_merges_it_without_bypassing_anything():
+    """The gap only closes when the PR lands, so this workflow does merge --
+    but it must never do so by overriding the checks. `--admin` bypasses
+    branch protection outright, and `--squash`/`--rebase` would rewrite main's
+    commits onto the target and destroy the shared history that makes the next
+    promotion diff readable."""
     text = open(WF).read()
     assert "gh pr create" in text
-    for bad in ("gh pr merge", "--merge", "--squash", "--admin"):
-        assert bad not in text, f"backmerge.yml must not merge ({bad!r})"
+    assert "gh pr merge" in text, "the back-merge PR is never merged"
+    for bad in ("--admin", "--squash", "--rebase"):
+        assert bad not in text, f"backmerge.yml must not merge with {bad!r}"
+
+
+def test_merge_is_gated_on_checks_rather_than_unconditional():
+    """qa is check-gated so auto-merge covers it, but dev has no required
+    checks -- GitHub then refuses to arm auto-merge and the PR is mergeable
+    the instant it opens. Merging straight away would land it while its own
+    CI was still running, so the fallback path must wait and must bail out on
+    a failure."""
+    text = open(WF).read()
+    assert "--auto" in text, "native auto-merge is not used"
+    assert "statusCheckRollup" in text, "the fallback merge does not consult the checks"
+    for state in ("IN_PROGRESS", "QUEUED", "FAILURE"):
+        assert state in text, f"the fallback merge ignores {state} checks"
+
+
+def test_merge_step_runs_after_the_parked_run_is_released():
+    """A PR opened with GITHUB_TOKEN has its checks parked as action_required.
+    Arming auto-merge before releasing them would leave the PR waiting on a
+    check that never starts."""
+    names = [s.get("name", "") for s in _jobs()["steps"]]
+    release = next(i for i, n in enumerate(names) if "Release" in n)
+    merge = next(i for i, n in enumerate(names) if n.startswith("Merge"))
+    assert merge > release, "the merge step must come after the CI release step"
 
 
 def test_concurrency_is_job_level_so_the_matrix_is_visible():
@@ -214,3 +243,95 @@ def test_noop_message_keeps_the_string_promotion_selftest_matches(tmp_path):
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
     assert "Nothing to promote" in res.stdout
+
+
+# --------------------------------------------------------------------------
+# The merge step's shell, actually executed
+#
+# A grep over the YAML proves nothing about behaviour -- an earlier change in
+# this workflow shipped a bash syntax error that yaml.safe_load accepted
+# happily. These run the real step against a stub `gh` and assert what it does.
+# --------------------------------------------------------------------------
+_GH_STUB = r'''#!/usr/bin/env bash
+echo "$@" >> "$GH_LOG"
+case "$*" in
+  *"--auto"*)
+      [ "$AUTO_OK" = "1" ] && exit 0
+      echo "Pull request is in clean status" >&2; exit 1 ;;
+  *"--json state"*)
+      echo "${PR_STATE:-OPEN}" ;;
+  *"--json statusCheckRollup"*)
+      # Serve one rollup per call so a pending check can settle.
+      n=$(cat "$TICK" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$TICK"
+      eval "echo \"\${ROLLUP_$n:-\$ROLLUP_LAST}\"" ;;
+  *"pr merge"*)
+      [ "$MERGE_OK" = "1" ] && exit 0
+      echo "conflict" >&2; exit 1 ;;
+esac
+exit 0
+'''
+
+
+def _merge_step_script():
+    step = next(s for s in _jobs()["steps"] if s.get("name", "").startswith("Merge"))
+    return step["run"]
+
+
+def _run_merge_step(tmp_path, **env):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(_GH_STUB)
+    (bin_dir / "gh").chmod(0o755)
+    # Neutralise the poll delay so the wait loop is instant.
+    (bin_dir / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (bin_dir / "sleep").chmod(0o755)
+    log = tmp_path / "gh.log"
+    log.write_text("")
+    e = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+             GH_LOG=str(log), TICK=str(tmp_path / "tick"),
+             NUM="7", TGT="qa", GH_TOKEN="t",
+             AUTO_OK="0", MERGE_OK="1", ROLLUP_LAST="SUCCESS")
+    e.update({k: str(v) for k, v in env.items()})
+    res = subprocess.run(["bash", "-c", _merge_step_script()],
+                         cwd=tmp_path, env=e, capture_output=True, text=True)
+    return res, log.read_text()
+
+
+def test_merge_step_stops_at_auto_merge_when_github_arms_it(tmp_path):
+    """The qa path. Auto-merge is the whole mechanism -- the step must then do
+    nothing else, and must not fall through to a direct merge."""
+    res, log = _run_merge_step(tmp_path, AUTO_OK="1")
+    assert res.returncode == 0, res.stderr
+    assert "--auto" in log
+    assert log.count("pr merge") == 1, f"merged again after arming auto-merge:\n{log}"
+
+
+def test_merge_step_waits_for_running_checks_then_merges(tmp_path):
+    """The dev path. The PR is mergeable the moment it opens, so without the
+    wait this would land while its own CI was still running."""
+    res, log = _run_merge_step(tmp_path, ROLLUP_1="IN_PROGRESS", ROLLUP_2="QUEUED",
+                               ROLLUP_LAST="SUCCESS")
+    assert res.returncode == 0, res.stderr
+    assert log.count("statusCheckRollup") >= 3, "it did not wait for the checks"
+    assert "pr merge 7 --merge --delete-branch" in log
+
+
+def test_merge_step_refuses_to_merge_a_pr_with_failing_checks(tmp_path):
+    res, log = _run_merge_step(tmp_path, ROLLUP_LAST="SUCCESS,FAILURE")
+    assert res.returncode == 0, res.stderr
+    assert "pr merge 7 --merge" not in log, "merged a PR whose checks failed"
+    assert "failing checks" in res.stdout
+
+
+def test_merge_step_does_not_touch_an_already_merged_pr(tmp_path):
+    res, log = _run_merge_step(tmp_path, PR_STATE="MERGED")
+    assert res.returncode == 0, res.stderr
+    assert "pr merge 7 --merge --delete-branch" not in log
+
+
+def test_merge_step_leaves_a_conflicted_pr_open_instead_of_failing_the_run(tmp_path):
+    """A conflicting back-merge is a human's job. It must not fail the
+    workflow either -- the other target still needs its own PR handled."""
+    res, log = _run_merge_step(tmp_path, MERGE_OK="0")
+    assert res.returncode == 0, res.stderr
+    assert "stays open for a human" in res.stdout
