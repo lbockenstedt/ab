@@ -2228,8 +2228,8 @@
                             </div>
                             <div class="space-y-2 mt-2">
                                 <label class="text-sm font-medium text-slate-600">Auto-Merge Target Branches <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
-                                <p class="text-xs text-red-600 font-medium">⚠️ This is what stands between "unattended merge" and "human required" now that PR authorship no longer matters. Never add main/master here — only a lower-stakes branch (e.g. dev) that isn't wired to deploy/restart anything on push.</p>
-                                <input type="text" name="feature_automerge_target_branches" value="{{ settings.get('feature_automerge_target_branches', []) | join(', ') }}" placeholder="Branches allowed to receive auto-merges (comma-separated, e.g. dev)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                                <p class="text-xs text-red-600 font-medium">⚠️ This is what stands between "unattended merge" and "human required" now that PR authorship no longer matters. Add only lower-stakes branches that aren't wired to deploy/restart anything on push — e.g. <code>dev, qa</code>. Listing main/master (or the repo's default branch) has no effect: merges into the release branch are owner-only and are refused in code, at any confidence.</p>
+                                <input type="text" name="feature_automerge_target_branches" value="{{ settings.get('feature_automerge_target_branches', []) | join(', ') }}" placeholder="Branches allowed to receive auto-merges (comma-separated, e.g. dev, qa)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
                             </div>
                             <div class="space-y-2 mt-2">
                                 <label class="text-sm font-medium text-slate-600">Auto-Merge Repositories <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
