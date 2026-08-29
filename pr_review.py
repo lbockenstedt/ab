@@ -793,12 +793,39 @@ def _render_panel(review):
         "bot never does._")
 
 
-def _render(findings, head_sha, summary="", review=None, state_review=None):
+def _render_route(base_ref, head_ref, default_branch=""):
+    """The "where is this PR going" line.
+
+    GitHub shows base<-head at the top of the PR page, but this comment is also
+    read in email notifications and the WebUI, where that context is absent —
+    and in a dev -> qa -> main chain, which branch a PR targets is the single
+    most important thing about it. Protected targets are called out explicitly
+    so a PR aimed at main is never mistaken for a routine one.
+    """
+    base = str(base_ref or "").strip()
+    if not base:
+        return []
+    head = str(head_ref or "").strip()
+    protected = base.lower() in ("main", "master") or (
+        default_branch and base == default_branch)
+    line = "\U0001F500 **Merging into `%s`**" % base          # 🔀
+    if head:
+        line += " \u2190 `%s`" % head                          # ←
+    if protected:
+        line += "  \u2014 \u26A0\uFE0F **protected branch**"    # — ⚠️
+    return [line, ""]
+
+
+def _render(findings, head_sha, summary="", review=None, state_review=None,
+            base_ref="", head_ref="", default_branch=""):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
         "## \U0001F916 AppBuilder PR pre-review",
         "",
+    ]
+    lines += _render_route(base_ref, head_ref, default_branch)
+    lines += [
         "_Automated pre-review — **informational only**. A human is the sole approver; "
         "this bot never approves, denies, or edits the branch._",
         "",
@@ -1230,7 +1257,10 @@ def _review_one(gh, repo, pr, config, force=False):
         summary = _summarize_changes(pr, files, config, repo=repo)
         review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh)
         state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
-        body = _render(findings, head_sha, summary, review=review, state_review=state_review)
+        body = _render(findings, head_sha, summary, review=review, state_review=state_review,
+                       base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
+                       head_ref=_head_ref,
+                       default_branch=getattr(repo, "default_branch", "") or "")
         if existing:
             existing.edit(body)
             action = "updated"
@@ -1255,7 +1285,9 @@ def _review_one(gh, repo, pr, config, force=False):
     # this fixes the pre-existing gap where that panel's verdict was invisible
     # in AppBuilder's own UI for every PR, not just feature-built ones.
     record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha,
-                     summary=summary, review=review, review2=state_review)
+                     summary=summary, review=review, review2=state_review,
+                     base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
+                     head_ref=_head_ref)
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                     repo.full_name, pr.number, len(findings), action)

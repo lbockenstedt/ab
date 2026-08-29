@@ -30,7 +30,8 @@ def _load_ns():
     src = open("pr_review.py").read()
     tree = ast.parse(src)
     want_fn = {"_norm_conf_pct", "_reviewer_blocks", "_structure_critique",
-               "_render_review_body", "_render_panel", "_render_state_panel"}
+               "_render_review_body", "_render_panel", "_render_state_panel",
+               "_render_route", "_render"}
     want_as = {"_REVIEWER_TAG_RE", "_REVIEWER_SPLIT_RE", "_ENUM_MARK_RE",
                "_SENTENCE_SPLIT_RE", "_PANEL_HEADER", "_STATE_PANEL_HEADER"}
     segs = []
@@ -38,9 +39,14 @@ def _load_ns():
         if isinstance(n, ast.FunctionDef) and n.name in want_fn:
             segs.append(ast.get_source_segment(src, n))
         elif isinstance(n, ast.Assign):
-            for t in n.targets:
-                if getattr(t, "id", "") in want_as:
-                    segs.append(ast.get_source_segment(src, n))
+            t = n.targets[0]
+            # _render pulls in module constants (marker, headers, icons); take
+            # every module-level constant rather than enumerating them, so
+            # adding one to pr_review.py doesn't silently break this loader.
+            if isinstance(t, ast.Name) and (t.id.isupper() or t.id in want_as):
+                seg = ast.get_source_segment(src, n)
+                if seg:
+                    segs.append(seg)
     ns = {"re": re}
     exec("\n\n".join(segs), ns)
     missing = (want_fn | want_as) - set(ns)
@@ -148,6 +154,53 @@ def main():
     check("long headline is truncated in concerns", len(concern) < 300, len(concern))
     check("unenumerated prose is broken into paragraphs",
           lng.count("Sentence one is here. Sentence one is here.") > 1)
+
+    print("== PR routing line ==")
+    dev = NS["_render"]([], "abc123", base_ref="dev", head_ref="ux/foo")
+    check("names the target branch", "Merging into `dev`" in dev)
+    check("names the source branch", "\u2190 `ux/foo`" in dev)
+    check("routing is above the disclaimer",
+          dev.index("Merging into") < dev.index("informational only"))
+    check("routing is above the findings",
+          dev.index("Merging into") < dev.index("Tier-1"))
+    check("non-protected target carries no warning", "protected branch" not in dev)
+
+    for target in ("main", "master"):
+        prot = NS["_render"]([], "abc123", base_ref=target, head_ref="qa")
+        check("%s is flagged protected" % target, "protected branch" in prot)
+    named = NS["_render"]([], "abc123", base_ref="trunk", head_ref="qa",
+                          default_branch="trunk")
+    check("a non-standard default branch is flagged protected",
+          "protected branch" in named)
+    qa = NS["_render"]([], "abc123", base_ref="qa", head_ref="dev",
+                       default_branch="main")
+    check("qa is not flagged protected", "protected branch" not in qa)
+
+    bare = NS["_render"]([], "abc123")
+    check("missing refs emit no routing line", "Merging into" not in bare)
+    check("missing refs still render the comment", "Tier-1" in bare)
+    nohead = NS["_render"]([], "abc123", base_ref="dev")
+    check("target alone still renders", "Merging into `dev`" in nohead
+          and "\u2190" not in nohead)
+
+    # Everything above tests _render in isolation, which would still pass if the
+    # real caller never passed the refs — the line would just silently vanish in
+    # production. Pin the wiring at the one call site.
+    src = open("pr_review.py").read()
+    call = [n for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_render"]
+    check("exactly one _render call site", len(call) == 1, len(call))
+    kw = {k.arg: ast.dump(k.value) for k in call[0].keywords} if call else {}
+    check("call site passes a base_ref", "base_ref" in kw)
+    check("call site reads the PR's base ref, not a literal",
+          "base" in kw.get("base_ref", ""), kw.get("base_ref"))
+    check("call site passes a head_ref", "head_ref" in kw)
+    check("call site passes the repo default branch",
+          "default_branch" in kw and "default_branch" in kw["default_branch"])
+    check("missing refs still render the comment", "Tier-1" in bare)
+    nohead = NS["_render"]([], "abc123", base_ref="dev")
+    check("target alone still renders", "Merging into `dev`" in nohead
+          and "\u2190" not in nohead)
 
     print("== state panel shares the format ==")
     sout = "\n".join(NS["_render_state_panel"](MIXED))
