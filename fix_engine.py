@@ -1,5 +1,5 @@
 """AI fix pipeline: issue analysis, sandboxed fix generation/application, verification, and per-issue orchestration (extracted from main.py)."""
-import contextlib, git, json, os, re, requests, tempfile, threading, time, traceback
+import base64, contextlib, git, json, os, re, requests, tempfile, threading, time, traceback
 from datetime import datetime
 from github import Github, GithubException
 
@@ -669,17 +669,26 @@ def prepare_environment(repo_path):
 _REVIEW_TOOLS = [
     {"type": "function", "function": {
         "name": "fetch_repo_file",
-        "description": "Fetch the FULL content of a file from this repo at the "
+        "description": "Fetch the content of a file from this repo at the "
                         "commit being reviewed. Use this when the diff doesn't "
                         "show whether a referenced symbol (function, route, "
                         "constant) actually exists, or when the diff was "
                         "truncated and you need more of a file than you were "
                         "shown. Do not guess or default to rejecting when a "
                         "tool call would settle it — but don't call this for "
-                        "every trivial PR either; most reviews don't need it.",
+                        "every trivial PR either; most reviews don't need it. "
+                        "Large files are capped, so for anything big pass "
+                        "`pattern` to get the regions around a symbol instead "
+                        "of just the start of the file. The reply includes "
+                        "`total_lines` so you can tell how much you were shown.",
         "parameters": {"type": "object",
                        "properties": {"path": {"type": "string",
-                                                "description": "repo-relative file path"}},
+                                                "description": "repo-relative file path"},
+                                      "pattern": {"type": "string",
+                                                  "description": "optional literal substring "
+                                                  "(e.g. a function name) — returns the lines "
+                                                  "around each occurrence rather than the "
+                                                  "truncated head of the file"}},
                        "required": ["path"]},
     }},
 ]
@@ -747,31 +756,90 @@ def _parse_review_text_tool_calls(text):
     return _REVIEW_TOOLCALL_TAG_RE.sub("", text).strip(), calls
 
 
-def _fetch_repo_file_for_review(repo, head_sha, path):
-    """Executor for fetch_repo_file — read-only, bounded, never raises (a bad
-    path/binary/oversized file degrades to an {"error": ...} the reviewer can
-    react to instead of crashing the panel turn)."""
+def _repo_file_text(repo, head_sha, path, checkout_path=None):
+    """Resolve one file's text for the reviewer. Returns (text, error) — exactly
+    one is None.
+
+    Order matters, and it is LOCAL-FIRST on purpose:
+
+      1. ``checkout_path`` — the on-disk clone AppBuilder already has (the fix
+         pipeline works in one; the PR pre-review path clones at head_sha via
+         _ensure_review_checkout). Reading here has no size ceiling and costs
+         no API call.
+      2. Contents API — the fallback when no checkout could be arranged.
+      3. Git Blobs API — because the Contents API REFUSES to inline any file
+         over 1MB: it returns ``encoding: "none"`` with an empty ``content``,
+         so PyGithub's decoded_content raises "unsupported encoding: none".
+         That is what made every fix attempt on lm's WebUI/main.js (1.99MB)
+         impossible — the reviewer got "no fetchable content", never saw the
+         file, and the model invented search anchors that could not match.
+         The Blobs API has no such limit (100MB), so it recovers the exact
+         case the Contents API drops.
+    """
+    if checkout_path and os.path.isdir(checkout_path):
+        full = _safe_repo_target(checkout_path, path, what="read file")
+        if full and os.path.isfile(full):
+            try:
+                with open(full, encoding="utf-8") as fh:
+                    return fh.read(), None
+            except UnicodeDecodeError:
+                return None, f"{path} is not valid UTF-8 (binary file?)"
+            except Exception as e:  # noqa: BLE001 — fall through to the API
+                logger.info("review file read from checkout failed for %r (%s) — trying API",
+                            path, e)
+    if repo is None:
+        return None, f"{path} not found in the local checkout (and no API access)"
     try:
         c = repo.get_contents(path, ref=head_sha)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"could not fetch {path}@{head_sha}: {e}"}
-    # getattr(..., None) only swallows AttributeError (the directory-listing
-    # case, where `c` is a list). PyGithub's decoded_content property instead
-    # raises AssertionError ("unsupported encoding: none") when GitHub's
-    # Contents API doesn't inline the file (seen for files >1MB) — that
-    # escaped getattr entirely and broke this function's "never raises"
-    # contract, crashing the reviewer's whole tool-call turn (ab#753).
+        return None, f"could not fetch {path}@{head_sha}: {e}"
+    raw = None
     try:
         raw = c.decoded_content
-    except Exception as e:  # noqa: BLE001
-        return {"error": f"{path} has no fetchable content ({e})"}
+    except Exception:  # noqa: BLE001 — the >1MB "unsupported encoding: none" case
+        raw = None
     if raw is None:
-        return {"error": f"{path} has no fetchable content (directory or binary?)"}
+        sha = getattr(c, "sha", None)
+        if not sha:
+            return None, f"{path} has no fetchable content (directory or binary?)"
+        try:
+            blob = repo.get_git_blob(sha)
+            raw = base64.b64decode(blob.content or "")
+        except Exception as e:  # noqa: BLE001
+            return None, f"{path} has no fetchable content ({e})"
     try:
-        text = raw.decode("utf-8")
+        return raw.decode("utf-8"), None
     except UnicodeDecodeError:
-        return {"error": f"{path} is not valid UTF-8 (binary file?)"}
-    return {"path": path, "content": _trunc(text, _REVIEW_FILE_MAX_CHARS),
+        return None, f"{path} is not valid UTF-8 (binary file?)"
+
+
+def _fetch_repo_file_for_review(repo, head_sha, path, checkout_path=None, pattern=None):
+    """Executor for fetch_repo_file — read-only, bounded, never raises (a bad
+    path/binary/oversized file degrades to an {"error": ...} the reviewer can
+    react to instead of crashing the panel turn).
+
+    ``pattern`` exists because head-truncation is useless on a genuinely large
+    file: capped at _REVIEW_FILE_MAX_CHARS, a 1.99MB/30k-line file returns its
+    first ~1%, so a reviewer asking about a symbol at line 1669 was shown
+    nothing relevant and had to guess. With a pattern, the reviewer gets the
+    windows AROUND each match instead of the head, which is what makes an
+    exact, copyable search anchor available at all.
+    """
+    text, err = _repo_file_text(repo, head_sha, path, checkout_path)
+    if err:
+        return {"error": err}
+    total_lines = text.count("\n") + 1
+    if pattern:
+        windows = _targeted_file_context(text, [pattern], _REVIEW_FILE_MAX_CHARS)
+        if windows is None:
+            return {"path": path, "pattern": pattern, "total_lines": total_lines,
+                    "matches": 0,
+                    "error": f"pattern {pattern!r} not found in {path} "
+                             f"({total_lines} lines) — it does not appear in this file"}
+        return {"path": path, "pattern": pattern, "total_lines": total_lines,
+                "content": windows, "windowed": True}
+    return {"path": path, "total_lines": total_lines,
+            "content": _trunc(text, _REVIEW_FILE_MAX_CHARS),
             "truncated": len(text) > _REVIEW_FILE_MAX_CHARS}
 
 
@@ -902,9 +970,11 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
         "You have a fetch_repo_file tool that reads the ACTUAL file at this "
         "commit — use it to confirm whether a referenced symbol exists, or "
         "to see the rest of a file the diff cut off, INSTEAD OF rejecting "
-        "because you can't verify something. Most reviews won't need it; "
-        "use it when a specific, nameable uncertainty would change your "
-        "verdict, not as a first step."
+        "because you can't verify something. For a large file, pass its "
+        "`pattern` argument (a symbol name) to get the surrounding lines "
+        "rather than the truncated start of the file. Most reviews won't "
+        "need it; use it when a specific, nameable uncertainty would change "
+        "your verdict, not as a first step."
     )
     messages = [{"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}]
@@ -932,7 +1002,10 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
                 args = {}
             if name == "fetch_repo_file" and files_fetched < _REVIEW_TOOL_MAX_FILES:
                 files_fetched += 1
-                out = _fetch_repo_file_for_review(repo, head_sha, str(args.get("path") or ""))
+                out = _fetch_repo_file_for_review(
+                    repo, head_sha, str(args.get("path") or ""),
+                    checkout_path=repo_checkout_path,
+                    pattern=(str(args["pattern"]) if args.get("pattern") else None))
             elif name == "fetch_repo_file":
                 out = {"error": "file-fetch budget exhausted for this review (%d files) "
                                 "— decide from what you've already seen" % _REVIEW_TOOL_MAX_FILES}
@@ -1154,12 +1227,22 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     # docstring for why (claude_cli silently drops tools and got confused).
 
     # A local checkout for claude_cli reviewers' native Read/Grep/Glob/git
-    # tools (see _run_reviewer_turn / _ensure_review_checkout) — only worth
-    # acquiring (and, if cloned fresh, cleaning up) when a claude_cli
-    # reviewer is actually in the panel; every other provider ignores it.
+    # tools (see _run_reviewer_turn / _ensure_review_checkout), and — for any
+    # provider — a size-limit-free, API-call-free source for fetch_repo_file.
+    #
+    # Deliberately NOT acquired unconditionally: _ensure_review_checkout does a
+    # FULL clone (no --depth) when it has to make one, which is far too costly
+    # to pay on every PR pre-review. So:
+    #   * an EXISTING checkout (the bug-fix pipeline's working tree) is reused
+    #     whenever there is one — that path is free, it just returns repo_path;
+    #   * a fresh clone is still only made for claude_cli, which cannot work
+    #     without one.
+    # Every other reviewer falls back to the API, which now handles >1MB files
+    # via the Git Blobs API (see _repo_file_text), so nothing depends on this.
     checkout_path, checkout_is_temp = (None, False)
-    if any(((r.get("candidate") or {}).get("provider") or "").lower().strip() == "claude_cli"
-           for r in reviewers):
+    _wants_clone = any(((r.get("candidate") or {}).get("provider") or "").lower().strip() == "claude_cli"
+                       for r in reviewers)
+    if _wants_clone or (repo_path and os.path.isdir(repo_path)):
         checkout_path, checkout_is_temp = _ensure_review_checkout(repo_path, repo, head_sha, config)
 
     votes = []
@@ -1360,22 +1443,29 @@ def _norm_confidence(value):
     return max(0.0, min(1.0, c))
 
 
-def _safe_repo_target(repo_root, filepath):
+def _safe_repo_target(repo_root, filepath, what="apply fix"):
     """Resolve *filepath* under *repo_root*, rejecting absolute paths, ``..``
     traversal, and symlinks that escape the repo. Returns the absolute path or
     None (logging the reason). Shared by the full-file and targeted-edit apply
-    paths so both enforce identical containment."""
+    paths so both enforce identical containment.
+
+    ``what`` only labels the log lines. The reviewer's read-only file fetch
+    reuses this guard (one containment implementation, never a second copy to
+    drift), but a refused READ must not log "Refusing to apply fix …": those
+    ERROR lines are harvested verbatim by log_scan.py, which would then file a
+    write-failure bug for what was actually a reviewer asking for a bad path.
+    """
     if (not isinstance(filepath, str) or os.path.isabs(filepath)
             or ".." in filepath.replace("\\", "/").split("/")):
-        logger.error(f"Refusing to apply fix with unsafe path: {filepath!r}")
+        logger.error(f"Refusing to {what} with unsafe path: {filepath!r}")
         return None
     full_path = os.path.abspath(os.path.join(repo_root, filepath))
     try:
         if os.path.commonpath([repo_root, full_path]) != repo_root:
-            logger.error(f"Refusing to apply fix escaping repo root: {filepath!r}")
+            logger.error(f"Refusing to {what} escaping repo root: {filepath!r}")
             return None
     except ValueError:
-        logger.error(f"Refusing to apply fix with unresolvable path: {filepath!r}")
+        logger.error(f"Refusing to {what} with unresolvable path: {filepath!r}")
         return None
     if os.path.islink(full_path):
         try:
