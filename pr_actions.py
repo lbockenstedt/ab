@@ -167,7 +167,7 @@ def approve_pr(gh, repo_name, number, *, actor="human"):
 
 def _delete_pr_branch(repo, pr):
     """Delete the merged PR's head branch so AppBuilder doesn't leave stale
-    ``ai-fix-issue-*`` branches piling up after every merge (GitHub's own
+    ``bug/*``/``ai-feature/*`` branches piling up after every merge (GitHub's own
     "delete branch on merge" only fires for the web UI, not the API merge
     ``merge_pr`` performs). Only same-repo branches are removed — a fork head
     lives in someone else's repo and isn't ours to delete — and any failure is

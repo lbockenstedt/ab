@@ -17,7 +17,7 @@ Regression guards this pins:
   - the docs-completeness gate: no docs/*.md touched -> ONE corrective turn
     -> still none -> flags (not built), NO PR opened
   - when docs ARE present, the full commit->push->PR path runs, and the PR
-    is named/branched EXACTLY "AI Feature #N" / "ai-feature-issue-N" (the
+    is named/branched EXACTLY "AI Feature #N" / "ai-feature/N-<slug>" (the
     load-bearing detail that makes pr_review._review_one's "skip AppBuilder's
     own AI Fix PR" check NOT match — see test_pr_review_own_pr_skip.py)
   - ground truth for "what changed" is the REAL git diff, never the agent's
@@ -364,9 +364,9 @@ def main():
                 and _build_reqs.needs_mutating_agent is True)
     ok &= _check("commit message references the right issue number",
                 "AI Feature #7" in fake_repo_git.commits[0])
-    ok &= _check("branch created is ai-feature-issue-<N> (load-bearing for pr_review's own-PR skip)",
-                fake_repo_git.current_branch == "ai-feature-issue-7")
-    ok &= _check("push happened on that branch", fake_repo_git.remotes.origin.pushed == [("ai-feature-issue-7", True)])
+    ok &= _check("branch created is ai-feature/<N>-<slug> (load-bearing for pr_review's own-PR skip)",
+                fake_repo_git.current_branch == "ai-feature/7-add-a-clear-dongles-button")
+    ok &= _check("push happened on that branch", fake_repo_git.remotes.origin.pushed == [("ai-feature/7-add-a-clear-dongles-button", True)])
     ok &= _check("token was stripped back out after push (last set_url is the plain clone_url)",
                 fake_repo_git.remotes.origin.urls[-1] == repo.clone_url)
     ok &= _check("exactly one PR was created", len(repo.created_prs) == 1)

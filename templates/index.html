@@ -937,7 +937,7 @@
                                         </div>
                                         <div class="space-y-1">
                                             <label class="text-sm font-medium text-slate-600">Auto-created branch prefixes (safe to delete)</label>
-                                            <input type="text" name="auto_branch_prefixes" value="{{ (settings.auto_branch_prefixes or []) | join(', ') }}" placeholder="ai-fix-issue-, ai-feature-issue-" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="text" name="auto_branch_prefixes" value="{{ (settings.auto_branch_prefixes or []) | join(', ') }}" placeholder="bug/, ai-feature/" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <p class="text-xs text-slate-500">Comma-separated prefixes. Leave blank to use the defaults.</p>
                                         </div>
                                     </div>
