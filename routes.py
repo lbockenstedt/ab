@@ -1242,6 +1242,10 @@ def module_repo_map_suggest():
     except Exception as e:  # noqa: BLE001
         return {"error": f"module type map unavailable: {e}", "suggested": {}}
     cfg = load_config()
+    # Imported here rather than at module scope to match _promotable_repos, the
+    # only other caller. Without it this name resolves to a module global that
+    # does not exist, so every request to this endpoint raised NameError.
+    from github_ops import get_monitored_repos
     monitored = [clean_repo_name(r) for r in (get_monitored_repos(cfg) or []) if r]
     by_base = {}
     for r in monitored:
@@ -2291,7 +2295,14 @@ async def settings_page(request: Request):
     log_module_options = sorted(_mrm.keys()) if isinstance(_mrm, dict) else []
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
-    settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
+    # NEVER put the PAT itself in the render context. type="password" only masks
+    # the field on screen — the value still ships in the HTML, so it was
+    # readable via View Source, the DOM inspector, and anything that caches the
+    # page. The form shows only whether a token is saved; a blank submission
+    # leaves the stored one alone (see the settings save path).
+    settings["GITHUB_TOKEN"] = ""
+    settings["GITHUB_TOKEN_SET"] = bool(
+        config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", ""))
     settings["LLM_TIMEOUT"] = config.get("LLM_TIMEOUT") or settings.get("LLM_TIMEOUT", "900")
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
@@ -2588,7 +2599,9 @@ async def save_settings(request: Request):
         # them directly; the form supplies a comma-separated string.
         "protected_branches": parse_branch_names,
         "auto_branch_prefixes": parse_branch_names,
-        "GITHUB_TOKEN": lambda v: v,
+        # GITHUB_TOKEN is handled after this loop: the form no longer renders
+        # the saved PAT, so an empty field means "unchanged", not "clear it".
+        # Leaving it here would let a plain Save wipe the token.
         "LLM_PROVIDER_1": lambda v: v,
         "LLM_API_KEY_1": lambda v: v,
         "LLM_MODEL_1": lambda v: v,
@@ -2664,6 +2677,12 @@ async def save_settings(request: Request):
                 config_data[key] = []
             else:
                 config_data[key] = transform(val)
+
+    # Secret field, write-only in the UI. Only overwrite the stored PAT when the
+    # operator actually typed a new one.
+    _submitted_token = str(data.get("GITHUB_TOKEN") or "").strip()
+    if _submitted_token:
+        config_data["GITHUB_TOKEN"] = _submitted_token
 
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     # Unchecked checkboxes are simply absent from the form, so an explicit
