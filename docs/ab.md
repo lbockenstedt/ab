@@ -46,6 +46,8 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   - Endpoints: `GET /auth/oidc/enabled` (login page probe), `GET /auth/oidc/login` (→ Entra), `GET /auth/oidc/callback` (verifies id-token signature/issuer/audience/nonce, provisions the user, issues a session). The id-token is verified against the Entra JWKS; MFA is enforced by Entra Conditional Access, not in-token.
   - Entra users are provisioned into `users.json` as passwordless `auth_type:"entra"` accounts (keyed by email/UPN, else `oid`), so they can only ever SSO in and can never password-log-in. A local password account is never silently converted.
   - Redirect URI to register in Entra: `https://<host>/auth/oidc/callback`.
+- **LLM router API key** (`llm_proxy.py`) — the `/v1/*` endpoints are exempt from the session middleware (`main._AUTH_EXEMPT_PREFIX`) and do their own key check, so they are the one surface the WebUI login does **not** protect. They **fail closed**: with no key configured every request is refused with `401`. Set it in **Settings → Automation → LLM Router API Key** (a *Generate* button mints a 32-byte base64url key client-side), or via `AB_PROXY_KEY` / `llm_proxy_api_key`; the env var wins. Clients send `x-api-key` or `Authorization: Bearer`.
+  - The stored key is redacted out of the template context in `settings_page` (the whole config is otherwise merged in via `{**settings, **config}`), so it is never embedded in the served HTML. The input therefore renders blank, and because Settings is ONE form that submits every field from any tab, a blank value means **keep the stored key** — clearing is explicit, via the `__CLEAR__` sentinel the *Clear* button sets.
 
 ## Notable behaviors & gotchas
 

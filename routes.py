@@ -2135,7 +2135,12 @@ async def settings_page(request: Request):
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
         "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"],
-                     "llm_credentials": _safe_llm_credentials, "llm_entries": _safe_llm_entries},
+                     "llm_credentials": _safe_llm_credentials, "llm_entries": _safe_llm_entries,
+                     # SECURITY: same rule as llm_credentials above -- the raw
+                     # proxy key must never be embedded in the served HTML, so
+                     # the field renders from a presence flag only.
+                     "llm_proxy_api_key": "",
+                     "llm_proxy_api_key_configured": bool(config.get("llm_proxy_api_key"))},
         "registry_rules_json": _registry_rules_json,
         "registry_preview": _registry_preview,
         "registry_unclassified": _registry_unclassified,
@@ -2329,10 +2334,26 @@ async def save_settings(request: Request):
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     # Agentic LLM router (/v1/messages) toggles. agentic_default (OFF): route
     # every proxy request through AppBuilder's agent loop, not just model=
-    # ab-agent. autofix_enabled (OFF, safe for an open/keyless proxy):
+    # ab-agent. autofix_enabled (OFF, a second gate behind the required key):
     # let the agentic router trigger real fixes — still panel + boundary gated.
     config_data["llm_proxy_agentic_default"] = data.get("llm_proxy_agentic_default") == "on"
     config_data["llm_proxy_autofix_enabled"] = data.get("llm_proxy_autofix_enabled") == "on"
+    # LLM router API key. /v1/* bypasses the WebUI session middleware and does
+    # its own key check, and llm_proxy._authorized now FAILS CLOSED, so this is
+    # the only thing standing between the router (and the agentic fix pipeline
+    # behind it) and anyone who can reach the host.
+    #
+    # Same secret discipline as the OIDC client_secret and the llm_credentials
+    # api_keys: the field is never rendered with its real value, so a blank
+    # submit means "operator did not retype it" and must KEEP the stored key
+    # rather than wipe it -- otherwise saving any other Automation setting
+    # would silently disable authentication. Clearing is explicit.
+    if "llm_proxy_api_key" in data:
+        _pk = str(data.get("llm_proxy_api_key") or "")
+        if _pk.strip() == "__CLEAR__":
+            config_data["llm_proxy_api_key"] = ""
+        elif _pk.strip():
+            config_data["llm_proxy_api_key"] = _pk.strip()
     # PR pre-review toggle (default OFF): comment parity/drift findings on open PRs.
     config_data["pr_review_enabled"] = data.get("pr_review_enabled") == "on"
     # Advisory skeptical-panel sub-option (unifies PR review with the AI-fix reviewer).
