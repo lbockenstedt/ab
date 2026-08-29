@@ -92,21 +92,116 @@ _SHELL_READ_BINARIES = {
     "ls", "stat", "ps", "top", "df", "du", "free", "uptime", "uname", "hostname",
     "date", "whoami", "id", "env", "printenv", "ss", "netstat", "ip", "curl",
     "wget", "ping", "dig", "nslookup", "docker", "podman", "echo", "which",
-    "find", "wc", "sort", "uniq", "awk", "sed", "true", "test", "pgrep",
+    "find", "wc", "sort", "uniq", "true", "test", "pgrep",
+}
+# Binaries that are general-purpose interpreters: being on the "read-only" list
+# is meaningless for them because their *script argument* can spawn anything
+# (`awk 'BEGIN{system("id")}'`, `sed '1e id'`). Never allowlist these.
+_SHELL_INTERPRETERS = {
+    "awk", "gawk", "mawk", "nawk", "sed", "perl", "python", "python3", "ruby",
+    "sh", "bash", "zsh", "dash", "ksh", "lua", "node", "php", "tclsh", "expect",
+    "xargs", "eval", "exec", "nc", "ncat", "netcat", "socat", "ssh", "telnet",
+}
+# `find` actions that execute or write. `find` itself only reads.
+_FIND_ACTION_FLAGS = {
+    "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls", "-fprint",
+    "-fprint0", "-fprintf",
+}
+# curl/wget flags that write to disk, upload, or read a config file of flags.
+_FETCH_WRITE_FLAGS = {
+    "-o", "--output", "-O", "--remote-name", "--output-dir", "-K", "--config",
+    "-T", "--upload-file", "-d", "--data", "--data-binary", "--data-raw",
+    "-F", "--form", "-X", "--request", "--trace", "--trace-ascii", "--dump-header",
+    "-D", "--cookie-jar", "-c", "--post-file", "--input-file", "-i", "--body-file",
+}
+# Hosts a fetch may target in read-only mode: loopback only. Anything else can
+# exfiltrate to an attacker or hit the cloud instance-metadata endpoint to steal
+# the VM's managed-identity token.
+_FETCH_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1", "0.0.0.0"}
+# docker/podman subcommands that only inspect state.
+_CONTAINER_READ_SUBCMDS = {
+    "ps", "images", "image", "logs", "inspect", "stats", "version", "info",
+    "top", "port", "diff", "history", "events",
 }
 # systemctl/service subcommands that are read-only (status/show only).
 _SYSTEMCTL_READ_SUBCMDS = {"status", "is-active", "is-enabled", "is-failed", "show",
                            "list-units", "list-unit-files", "cat", "get-default",
                            "is-system-running", "list-dependencies", "list-timers",
                            "list-sockets", "show-environment"}
-# Hard mutation markers refused anywhere in read-only mode.
-_SHELL_MUTATION_MARKERS = [
-    ">", ">>", "|&", "rm ", "mv ", "cp ", "tee ", "dd ", "mkfs", "chmod", "chown",
-    "kill", "reboot", "shutdown", "poweroff", "halt", "apt", "yum", "dnf", "pip ",
-    "npm ", "git ", "truncate", "ln ", "mount", "umount", "sysctl -w", "iptables",
-    "useradd", "userdel", "passwd", "crontab", "at ",
-]
+# Hard mutation markers refused anywhere in read-only mode. Split by how they
+# must be matched: shell operators are raw substrings, but command names must be
+# matched as whole tokens — a substring test wrongly rejects `cat` (contains
+# "at "), `ss -tlnp | grep tcp` (contains "cp ") and `add`/`dd`.
+_SHELL_MUTATION_OPERATORS = [">", ">>", "|&"]
+_SHELL_MUTATION_COMMANDS = {
+    "rm", "mv", "cp", "tee", "dd", "mkfs", "chmod", "chown", "kill", "pkill",
+    "killall", "reboot", "shutdown", "poweroff", "halt", "apt", "apt-get", "yum",
+    "dnf", "pip", "pip3", "npm", "git", "truncate", "ln", "mount", "umount",
+    "sysctl", "iptables", "nft", "useradd", "userdel", "usermod", "groupadd",
+    "passwd", "crontab", "at", "insmod", "modprobe", "swapoff", "fdisk",
+    "parted", "mkswap", "setenforce", "sudo", "su", "install", "patch", "tar",
+    "unzip", "gunzip", "openssl", "curlftpfs",
+}
+# Command substitution / process substitution smuggle a second command inside an
+# otherwise-innocent one (`cat $(curl evil)`), so they are refused outright.
+_SHELL_SUBSTITUTION = ["`", "$(", "${", "<(", ">("]
 _SED_INPLACE_RE = re.compile(r"\bsed\b[^|;]*\s-\w*i")  # sed -i (in-place edit)
+
+
+def _fetch_target_ok(tok):
+    """True if a curl/wget URL/host argument points at loopback."""
+    raw = tok
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    raw = raw.split("/", 1)[0].split("?", 1)[0]
+    if "@" in raw:  # user:pass@host
+        raw = raw.rsplit("@", 1)[1]
+    if raw.startswith("["):  # bracketed IPv6
+        host = raw.split("]", 1)[0] + "]"
+    else:
+        host = raw.split(":", 1)[0]
+    return host.lower() in _FETCH_ALLOWED_HOSTS
+
+
+def _vet_binary_args(binary, toks):
+    """Per-binary argument vetting for read-only mode. Being an allowlisted
+    binary is not enough: several read-only tools can execute or write when
+    given the right flags. Returns (ok, reason)."""
+    args = toks[1:]
+    if binary == "find":
+        for a in args:
+            if a.lower() in _FIND_ACTION_FLAGS:
+                return False, (f"find '{a}' executes or writes; enable "
+                               f"CHAT_AZURE_ALLOW_MUTATION to permit it")
+        return True, ""
+    if binary in ("curl", "wget"):
+        for a in args:
+            if a.split("=", 1)[0] in _FETCH_WRITE_FLAGS:
+                return False, (f"{binary} '{a}' writes, uploads or sends a request "
+                               f"body; enable CHAT_AZURE_ALLOW_MUTATION to permit it")
+        targets = [a for a in args if not a.startswith("-")]
+        if not targets:
+            return False, f"{binary} needs an explicit loopback URL in read-only mode"
+        for t in targets:
+            if not _fetch_target_ok(t):
+                return False, (f"{binary} may only fetch loopback URLs in read-only "
+                               f"mode (got '{t}'); enable CHAT_AZURE_ALLOW_MUTATION "
+                               f"to reach other hosts")
+        return True, ""
+    if binary in ("docker", "podman"):
+        sub = next((a for a in args if not a.startswith("-")), "")
+        if sub.lower() not in _CONTAINER_READ_SUBCMDS:
+            return False, (f"{binary} '{sub or '(none)'}' is not a read-only "
+                           f"subcommand (allowed: ps/images/logs/inspect/stats/…)")
+        return True, ""
+    if binary == "env":
+        # Bare `env` prints the environment; `env FOO=bar cmd` runs a command.
+        for a in args:
+            if not a.startswith("-") or "=" in a:
+                return False, ("env may only print the environment in read-only "
+                               "mode (no VAR=value assignments, no command)")
+        return True, ""
+    return True, ""
 
 
 def vet_shell_command(cmd, allow_mutation=False):
@@ -119,10 +214,15 @@ def vet_shell_command(cmd, allow_mutation=False):
     if allow_mutation:
         return True, "mutation allowed (bounded by the service principal's RBAC scope)"
     low = cmd.lower()
-    for marker in _SHELL_MUTATION_MARKERS:
-        if marker in low:
-            return False, (f"'{marker.strip()}' indicates a state change; enable "
+    for op in _SHELL_MUTATION_OPERATORS:
+        if op in low:
+            return False, (f"'{op}' redirects output, which is a state change; enable "
                            f"CHAT_AZURE_ALLOW_MUTATION to permit it")
+    for sub in _SHELL_SUBSTITUTION:
+        if sub in cmd:
+            return False, (f"'{sub}' (command/process substitution) can run an "
+                           f"arbitrary nested command; enable CHAT_AZURE_ALLOW_MUTATION "
+                           f"to permit it")
     if _SED_INPLACE_RE.search(low):
         return False, "in-place sed edit (sed -i) is a mutation; enable CHAT_AZURE_ALLOW_MUTATION"
     # Split into segments on ; | && || and vet each segment's leading binary.
@@ -137,10 +237,20 @@ def vet_shell_command(cmd, allow_mutation=False):
             return False, "could not parse shell command safely"
         if not toks:
             continue
-        binary = os.path.basename(toks[0])
+        binary = os.path.basename(toks[0]).lower()
+        if binary in _SHELL_INTERPRETERS:
+            return False, (f"'{binary}' is a general-purpose interpreter and can run "
+                           f"arbitrary commands regardless of its arguments; enable "
+                           f"CHAT_AZURE_ALLOW_MUTATION for arbitrary commands")
+        if binary in _SHELL_MUTATION_COMMANDS:
+            return False, (f"'{binary}' changes state; enable "
+                           f"CHAT_AZURE_ALLOW_MUTATION to permit it")
         if binary not in _SHELL_READ_BINARIES:
             return False, (f"'{binary}' is not an allowlisted read-only command; "
                            f"enable CHAT_AZURE_ALLOW_MUTATION for arbitrary commands")
+        ok, why = _vet_binary_args(binary, toks)
+        if not ok:
+            return False, why
         if binary in ("systemctl", "service"):
             sub = next((t for t in toks[1:] if not t.startswith("-")), "")
             # `service <name> status` puts the subcommand last; accept either order.
