@@ -10,15 +10,17 @@ keyed by head SHA so it never spams) plus a NON-required informational
 INVARIANTS (see memory pr-gate-ab-prereview):
   * NEVER approves/denies a PR and NEVER pushes to the branch. It posts findings
     as a comment; only a human approves/denies.
-    ONE DELIBERATE, NARROWLY-SCOPED EXCEPTION (added for feature auto-drive):
-    ``_maybe_auto_merge``/``_automerge_decision`` CAN approve+merge a PR
-    unattended — but ONLY a PR carrying the ``ab-feature-drive`` marker
-    (feature_build.py's own PRs), and only when both review panels Approve
-    above a configurable confidence floor, the diff touches no configured
-    boundary, and the repo is explicitly opted into
-    ``feature_automerge_repos`` (defaults to empty — opt-in, not opt-out). A
-    human-authored PR can NEVER match the marker, so it can never be
-    auto-merged at any confidence. See ``_automerge_decision``'s own
+    ONE DELIBERATE, NARROWLY-SCOPED EXCEPTION (added for feature auto-drive,
+    broadened 2026-08-29): ``_maybe_auto_merge``/``_automerge_decision`` CAN
+    approve+merge a PR unattended — but ONLY when its target branch is
+    explicitly opted into ``feature_automerge_target_branches`` (defaults to
+    empty — opt-in, not opt-out; e.g. ["dev"], NEVER main), both review
+    panels Approve above a configurable confidence floor, the diff is a
+    provably-additive shape (``feature_allowlist``), the diff touches no
+    configured boundary, and the repo is explicitly opted into
+    ``feature_automerge_repos``. This is no longer gated by PR authorship —
+    a human-authored PR targeting an allowlisted branch CAN be auto-merged
+    now, same as a bot-authored one. See ``_automerge_decision``'s own
     docstring for the complete, exhaustive gate list.
   * The status check is informational only (always `success`, count in the
     description). It must stay a NON-required check so it can never block a merge.
@@ -65,6 +67,7 @@ from github_ops import get_monitored_repos
 from app_state import update_task_state, record_pr_review, update_pr_review, mark_pr_approved, state
 import feature_boundary
 import feature_allowlist
+from branch_policy import AUTO_BRANCH_PREFIXES_BY_KIND
 from pr_actions import approve_pr, merge_pr
 from secrets_scan import check_secrets
 from check_tooltips import find_missing_tooltips_in_files
@@ -956,18 +959,19 @@ def _review_one(gh, repo, pr, config, force=False):
         return  # skip WIP drafts
     # Skip AppBuilder's OWN AI-fix PRs — they were already vetted by the fix panel
     # when it opened them; pre-reviewing them is redundant and clutters the bot's
-    # own fix backlog. Signals: title "AI Fix #N" and head branch "ai-fix-issue-N"
-    # (fix_engine.create_pull). AppBuilder commits under the operator's token, so
-    # author can't distinguish it — use the title/branch signal.
+    # own fix backlog. Signals: title "AI Fix #N" and head branch "bug/..."
+    # (fix_engine.create_pull, via branch_policy.auto_branch_name("bug", ...)).
+    # AppBuilder commits under the operator's token, so author can't distinguish
+    # it — use the title/branch signal.
     # DELIBERATELY does not match feature_build.py's PRs ("AI Feature #N" /
-    # "ai-feature-issue-N") — those have NOT been vetted by any panel yet (the
+    # "ai-feature/...") — those have NOT been vetted by any panel yet (the
     # build agent has no reviewer), so they MUST fall through to a real
-    # review here. Do not widen this prefix (e.g. to "AI " or "ai-") without
+    # review here. Do not widen this prefix (e.g. to match both kinds) without
     # checking test_pr_review_own_pr_skip.py — a match here silently disables
     # review for the entire feature auto-drive pipeline, with no error anywhere.
     _title = pr.title or ""
     _head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
-    if _title.startswith("AI Fix #") or _head_ref.startswith("ai-fix-issue-"):
+    if _title.startswith("AI Fix #") or _head_ref.startswith(AUTO_BRANCH_PREFIXES_BY_KIND["bug"]):
         logger.info("pr_review: skipping AppBuilder's own fix PR %s #%s", repo.full_name, pr.number)
         return
     head_sha = pr.head.sha

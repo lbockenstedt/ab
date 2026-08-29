@@ -9,8 +9,10 @@ protects `main` and nothing else, while a low-confidence fix opens its PR with
 import pytest
 
 from branch_policy import (
+    AUTO_BRANCH_PREFIXES_BY_KIND,
     DEFAULT_AUTO_PREFIXES,
     DEFAULT_PROTECTED,
+    auto_branch_name,
     auto_branch_prefixes,
     is_auto_created,
     is_protected,
@@ -45,14 +47,14 @@ def test_regression_low_confidence_fix_pr_from_dev_does_not_delete_dev():
 
 # ── the branches cleanup was actually for ───────────────────────────────────
 
-@pytest.mark.parametrize("ref", ["ai-fix-issue-25", "ai-fix-issue-1234", "ai-feature-issue-7"])
+@pytest.mark.parametrize("ref", ["bug/25-null-pointer", "bug/1234-typo", "ai-feature/7-new-dashboard"])
 def test_appbuilder_branches_are_deletable(ref):
     ok, why = may_delete(ref, {})
     assert ok, why
     assert is_auto_created(ref)
 
 
-@pytest.mark.parametrize("ref", ["ai-fix-issue-25", "ai-feature-issue-7"])
+@pytest.mark.parametrize("ref", ["bug/25-null-pointer", "ai-feature/7-new-dashboard"])
 def test_appbuilder_branches_may_be_force_pushed(ref):
     ok, _ = may_force_push(ref, {})
     assert ok
@@ -62,12 +64,35 @@ def test_appbuilder_branches_may_be_force_pushed(ref):
 
 @pytest.mark.parametrize("ref", [
     "feature/new-ui", "hotfix", "promote/dev-to-qa", "promote/qa-to-main",
-    "copilot/fix-thing", "lrb-scratch", "v2.00", "",
+    "copilot/fix-thing", "lrb-scratch", "v2.00", "", "fix/some-bug",
 ])
 def test_unrecognised_branches_are_kept(ref):
     ok, why = may_delete(ref, {})
     assert not ok, f"{ref!r} is not an AppBuilder branch and must be kept"
     assert why
+
+
+# ── THE reason bug/ and ai-feature/ were chosen over plain feature/ ─────────
+
+@pytest.mark.parametrize("ref", [
+    "feature/agentic-llm-router", "feature/router-capable-model", "feature/x",
+])
+def test_human_feature_branches_are_never_touched(ref):
+    """37+ existing human branches use plain feature/ in this repo. If
+    AppBuilder's own prefix were ever changed back to "feature/", every one
+    of these becomes deletable — this is the exact class of bug
+    branch_policy.py exists to prevent. Pinned here so a future change can't
+    reintroduce it silently.
+
+    NOTE: may_force_push is deliberately NOT asserted here — unlike
+    may_delete, it only checks is_protected, not is_auto_created (a
+    pre-existing, separate design gap: it's a blocklist, not an allowlist,
+    for this one function). Not exploitable via either of its two real call
+    sites today since both only ever pass a protected name or a freshly
+    auto_branch_name()-constructed one — but worth knowing this function
+    alone would currently say True for an arbitrary unprotected human branch."""
+    assert not is_auto_created(ref)
+    assert not may_delete(ref, {})[0]
 
 
 def test_promotion_branches_survive():
@@ -104,19 +129,19 @@ def test_repo_default_branch_is_protected_even_if_unusual():
 
 def test_cleanup_can_be_disabled_entirely():
     cfg = {"delete_merged_branches": False}
-    ok, why = may_delete("ai-fix-issue-9", cfg)
+    ok, why = may_delete("bug/9-thing", cfg)
     assert not ok
     assert "disabled" in why
 
 
 def test_cleanup_is_enabled_by_default():
-    assert may_delete("ai-fix-issue-9", {})[0]
+    assert may_delete("bug/9-thing", {})[0]
 
 
 def test_custom_auto_prefixes_replace_the_defaults():
     cfg = {"auto_branch_prefixes": ["bot/"]}
     assert may_delete("bot/thing", cfg)[0]
-    assert not may_delete("ai-fix-issue-9", cfg)[0], "defaults must not leak in"
+    assert not may_delete("bug/9-thing", cfg)[0], "defaults must not leak in"
     assert auto_branch_prefixes(cfg) == ("bot/",)
 
 
@@ -137,8 +162,10 @@ def test_branch_matching_is_case_insensitive_and_trims_whitespace():
 def test_defaults_cover_the_promotion_flow():
     for b in ("main", "dev", "qa"):
         assert b in DEFAULT_PROTECTED
-    assert "ai-fix-issue-" in DEFAULT_AUTO_PREFIXES
-    assert "ai-feature-issue-" in DEFAULT_AUTO_PREFIXES
+    assert "bug/" in DEFAULT_AUTO_PREFIXES
+    assert "ai-feature/" in DEFAULT_AUTO_PREFIXES
+    assert "feature/" not in DEFAULT_AUTO_PREFIXES, \
+        "feature/ is the human convention; it must never become auto-deletable"
 
 
 def test_protected_branches_returns_lowercased_set():
@@ -152,3 +179,63 @@ def test_none_and_empty_inputs_are_refused_not_crashed():
         assert not may_force_push(bad, {})[0]
     assert not is_auto_created(None)
     assert not is_protected(None)
+
+
+# ── auto_branch_name — construction, not just recognition ───────────────────
+
+class _FakeIssue:
+    def __init__(self, number, title):
+        self.number = number
+        self.title = title
+
+
+def test_auto_branch_name_bug_with_issue():
+    name = auto_branch_name("bug", issue=_FakeIssue(123, "Null pointer in the parser!"))
+    assert name == "bug/123-null-pointer-in-the-parser"
+    assert is_auto_created(name)
+
+
+def test_auto_branch_name_feature_with_issue():
+    name = auto_branch_name("feature", issue=_FakeIssue(7, "New dashboard"))
+    assert name == "ai-feature/7-new-dashboard"
+    assert is_auto_created(name)
+
+
+def test_auto_branch_name_without_an_issue_number_omits_it():
+    """The user's own spec: include the issue number IF one exists. A
+    chat-triggered fix with no filed issue yet still needs a valid name."""
+    name = auto_branch_name("bug", description="stale cache on the settings page")
+    assert name == "bug/stale-cache-on-the-settings-page"
+    assert "None" not in name
+    assert is_auto_created(name)
+
+
+def test_auto_branch_name_issue_number_zero_is_falsy_but_valid():
+    """GitHub issue numbers are never 0, but guard the falsy-vs-missing
+    distinction explicitly rather than relying on that being true forever."""
+    name = auto_branch_name("bug", issue=_FakeIssue(0, "edge case"))
+    assert name == "bug/edge-case"  # 0 treated as "no number", not "0-edge-case"
+
+
+def test_auto_branch_name_slug_strips_unsafe_characters():
+    name = auto_branch_name("bug", issue=_FakeIssue(1, "Fix: crash on `~^:?*[` chars!!!"))
+    assert name == "bug/1-fix-crash-on-chars"
+
+
+def test_auto_branch_name_empty_title_falls_back_not_crashes():
+    name = auto_branch_name("bug", issue=_FakeIssue(5, ""))
+    assert name == "bug/5-untitled"
+
+
+def test_auto_branch_name_unknown_kind_raises_rather_than_silently_unprefixed():
+    with pytest.raises(KeyError):
+        auto_branch_name("chore", description="something")
+
+
+def test_auto_branch_name_prefixes_match_the_recognition_table():
+    """The construction side and the recognition side must be the same
+    source, not two literals that happen to agree today."""
+    for kind, prefix in AUTO_BRANCH_PREFIXES_BY_KIND.items():
+        name = auto_branch_name(kind, description="x")
+        assert name.startswith(prefix)
+        assert is_auto_created(name)
