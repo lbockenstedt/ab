@@ -593,7 +593,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
             if existing_issue and was_closed:
                 # The matching issue was closed (typically the bot merged a "fix"
                 # for it). Reopen it and record the recurrence instead of filing a
-                # brand-new issue + spawning another ai-fix-issue-* branch. This
+                # brand-new issue + spawning another bug/* branch. This
                 # is the core fix for the recurring-error storm.
                 logger.info(
                     f"Recurring CLOSED issue #{existing_issue.number} in "
