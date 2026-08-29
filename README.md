@@ -72,11 +72,13 @@ export ANTHROPIC_API_KEY="<your-proxy-key>"   # matches AB_PROXY_KEY / llm_proxy
 claude
 ```
 
-**Auth:** the `/v1/*` endpoints are exempt from the WebUI login and do their own
-API-key check. Set a key via the `AB_PROXY_KEY` env var or the
-`llm_proxy_api_key` config value; clients send it as `x-api-key` or
-`Authorization: Bearer`. If no key is configured the endpoint is **open** (a warning
-is logged per request) — fine on a trusted LAN, but set a key for anything exposed.
+**Auth: a token is required.** The `/v1/*` endpoints are exempt from the WebUI
+login and do their own API-key check, and they **fail closed** — with no key
+configured every request is refused with `401`. Set a key in
+**Settings → Automation → LLM Router API Key** (there is a *Generate* button; the
+value is stored redacted and never re-displayed), or via the `AB_PROXY_KEY` env
+var / `llm_proxy_api_key` config value. `AB_PROXY_KEY` wins if both are set.
+Clients send it as `x-api-key` or `Authorization: Bearer`.
 
 Endpoints: `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`.
 

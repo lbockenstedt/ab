@@ -12,10 +12,14 @@ JSON, or a synthetic SSE stream when the client asks for ``stream: true``).
 
 Auth: the WebUI's session middleware is bypassed for ``/v1/*`` (see main's
 ``_AUTH_EXEMPT_PREFIX``); this router does its own API-key check instead. Set a
-key via the ``AB_PROXY_KEY`` env var or the ``llm_proxy_api_key`` config
-value and clients must send it as ``x-api-key`` or ``Authorization: Bearer``.
-With no key configured the endpoint is open (a warning is logged) — fine for a
-trusted LAN, but set a key for anything exposed.
+key in Settings > Automation ("LLM Router API Key"), or via the ``AB_PROXY_KEY``
+env var / ``llm_proxy_api_key`` config value, and clients must send it as
+``x-api-key`` or ``Authorization: Bearer``.
+
+A token is REQUIRED. This endpoint FAILS CLOSED: with no key configured every
+request is refused (401). It previously defaulted to open-with-a-log-warning,
+which on a ``0.0.0.0`` bind meant anyone who could reach the host could drive
+the router — and, with the agentic toggles on, the fix pipeline behind it.
 
 Tool use round-trips: Anthropic ``tools`` / ``tool_use`` / ``tool_result``
 blocks map onto the internal OpenAI-style ``tools`` param and tool-call return
@@ -23,6 +27,7 @@ shape (``{"text", "tool_calls"}``), so an agentic client's tool loop works
 through the proxy.
 """
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -84,7 +89,8 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
     process_single_issue pipeline (full autonomy) — which clones, fixes, runs
     tests, and gates the merge through the review panel, with core-systems
     diffs forced to a human-reviewed PR (never direct-push). Defaults OFF so an
-    open/keyless proxy never mutates without an explicit operator opt-in."""
+    proxy never mutates without an explicit operator opt-in (defence in depth:
+    the key check already refuses unauthenticated callers)."""
     repo = descriptor.get("repo")
     number = descriptor.get("number")
     pref = descriptor.get("llm_preference")
@@ -253,13 +259,27 @@ def _presented_key(request: Request) -> str:
 
 
 def _authorized(request: Request) -> bool:
+    """True only when the caller presented the configured key.
+
+    FAILS CLOSED. This used to return True when no key was configured, which
+    left /v1/* -- an endpoint that is exempt from the WebUI session middleware
+    (see main._AUTH_EXEMPT_PREFIX) and bound on 0.0.0.0 -- reachable by anyone
+    who could route to the host, with only a log warning. That is an LLM router
+    that can also drive the agentic fix pipeline, so "open by default" was the
+    wrong default. With no key configured every request is now REFUSED and the
+    operator is told to set one in Settings."""
     want = _configured_key()
     if not want:
-        logger.warning("LLM proxy request served with NO api key configured — "
-                       "endpoint is open. Set AB_PROXY_KEY or "
-                       "llm_proxy_api_key to require authentication.")
-        return True
-    return _presented_key(request) == want
+        logger.warning("LLM proxy request REFUSED: no api key configured. Set "
+                       "one in Settings > Automation (LLM Router API), or via "
+                       "the AB_PROXY_KEY env var / llm_proxy_api_key config.")
+        return False
+    presented = _presented_key(request)
+    if not presented:
+        return False
+    # Constant-time: the key is a bearer credential, so avoid leaking a prefix
+    # match through comparison timing.
+    return hmac.compare_digest(presented, want)
 
 
 # ── Request translation (Anthropic -> internal) ─────────────────────────────
