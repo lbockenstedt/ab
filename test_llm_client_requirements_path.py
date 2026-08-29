@@ -31,6 +31,10 @@ def _load_ns():
         "_model_key", "get_llm_perf_snapshot", "_get_llm_perf_store",
         "_provider_configured", "_provider_is_nokey", "_is_ollama", "_is_ollama_cloud", "_is_lmstudio",
         "_routed_model_dead", "_get_category_semaphore",
+        # per-entry health (lm#452/#469/#444: a hard-failing entry must be
+        # EXCLUDED from the picker's pool, not just visible in Settings —
+        # see _entry_is_unhealthy's docstring in llm_client.py)
+        "_record_llm_failure", "_record_llm_success", "_entry_is_unhealthy",
     }
     want_assign = {
         "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_TOOL_400_MARKERS",
@@ -41,6 +45,8 @@ def _load_ns():
         "_CREDIT_COOLDOWN_SECONDS", "_RATELIMIT_COOLDOWN_SECONDS",
         "_ROUTED_404", "_ROUTED_404_LOCK",
         "OLLAMA_CLOUD_PROVIDER", "OLLAMA_CLOUD_BASE_URL",
+        "_ENTRY_HEALTH_LOCK", "_ENTRY_HEALTH", "_ENTRY_UNHEALTHY_THRESHOLD",
+        "_ENTRY_UNHEALTHY_RETRY_SECONDS",
     }
     segs = []
     for node in tree.body:
@@ -159,6 +165,55 @@ def main():
     ns["_cb_trip"](ns["_ENDPOINT_CREDIT_CB"], ns["_endpoint_key"]("ollama", ""), "bogus", 3600, "credit", "ollama")
     ok &= _check("a credit trip against a no-key local provider is ignored, not recorded",
                 ns["_endpoint_key"]("ollama", "") not in ns["_ENDPOINT_CREDIT_CB"])
+
+    # --- a hard-failing entry (lm#452/#469/#444's actual regression) is -------
+    # --- EXCLUDED from the picker's pool, not just flagged in Settings -------
+
+    hard_cfg = {"llm_entries": [_entry("e1", "copilot", "grok-4.6", base_url="")]}
+    hard_key = ns["_model_key"]("copilot", "", "grok-4.6")
+    hard_candidates_before = ns["_enumerate_candidates"](hard_cfg)
+    ok &= _check("before any failure, the entry is a normal available candidate",
+                len(hard_candidates_before) == 1 and hard_candidates_before[0]["available"] is True)
+
+    ns["_record_llm_failure"](hard_key, Exception('400 unsupported_api_for_model'))
+    ok &= _check("one failure alone does not exclude the candidate (avoids a one-off blip)",
+                ns["_enumerate_candidates"](hard_cfg)[0]["available"] is True)
+
+    ns["_record_llm_failure"](hard_key, Exception('400 unsupported_api_for_model (again)'))
+    hard_candidates_after = ns["_enumerate_candidates"](hard_cfg)
+    ok &= _check("after 2 consecutive failures, the SAME entry that keeps 400ing is excluded "
+                "from the pool — the actual fix for lm#452/#469/#444 (a broken reviewer no "
+                "longer burns both panel slots every retry)",
+                len(hard_candidates_after) == 1 and hard_candidates_after[0]["available"] is False
+                and hard_candidates_after[0]["unavailable_reason"] == "hard_failing")
+
+    ns["_record_llm_success"](hard_key)
+    ok &= _check("a success (e.g. after an operator fixes the model name) clears the exclusion "
+                "immediately — no need to wait out the hourly retry window",
+                ns["_enumerate_candidates"](hard_cfg)[0]["available"] is True)
+
+    # Timed recovery: re-trip it, then simulate the retry window elapsing —
+    # this is what lets the picker try it again on its own even if nobody
+    # fixes it (see _entry_is_unhealthy's docstring: a one-shot exclusion
+    # would be permanent, since an excluded entry can never be called again
+    # to record the success that would clear it).
+    ns["_record_llm_failure"](hard_key, Exception("boom"))
+    ns["_record_llm_failure"](hard_key, Exception("boom again"))
+    ok &= _check("re-tripped: excluded again", ns["_enumerate_candidates"](hard_cfg)[0]["available"] is False)
+    with ns["_ENTRY_HEALTH_LOCK"]:
+        ns["_ENTRY_HEALTH"][hard_key]["retry_after"] = ns["time"].time() - 1  # already elapsed
+    ok &= _check("once retry_after has elapsed, the picker allows one fresh attempt again",
+                ns["_enumerate_candidates"](hard_cfg)[0]["available"] is True)
+
+    # A distinct model at the same provider is unaffected by the broken one
+    # (a fresh key — not grok-4.6, which already carries state from above).
+    unrelated_cfg = {"llm_entries": [_entry("e1", "copilot", "gpt-5.5"),
+                                     _entry("e2", "copilot", "gpt-4o-2024-08-06")]}
+    ns["_record_llm_failure"](ns["_model_key"]("copilot", "", "gpt-5.5"), Exception("x"))
+    ns["_record_llm_failure"](ns["_model_key"]("copilot", "", "gpt-5.5"), Exception("x"))
+    unrelated_candidates = {c["model"]: c["available"] for c in ns["_enumerate_candidates"](unrelated_cfg)}
+    ok &= _check("a broken model does not drag down an unrelated model on the same provider",
+                unrelated_candidates == {"gpt-5.5": False, "gpt-4o-2024-08-06": True})
 
     # --- _configured_entries feeds safety_floor ---------------------------------
 
