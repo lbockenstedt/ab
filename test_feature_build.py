@@ -29,6 +29,7 @@ import sys
 
 from github import GithubException
 
+import branch_policy as real_branch_policy
 import feature_boundary as real_feature_boundary
 
 
@@ -132,6 +133,18 @@ def _load_ns():
         "_authenticated_remote": _authenticated_remote,
         "skills_loader": _FakeSkillsLoader(),
         "feature_boundary": real_feature_boundary,  # pure/standalone — used for real
+        # branch_policy's helpers are pure functions of their arguments, so the
+        # real ones are used rather than stubs — same rationale as
+        # feature_boundary above. Their ABSENCE was silently defeating this
+        # file: build_feature calls auto_branch_name() before the build agent
+        # runs, so every case that got that far died with
+        # NameError: name 'auto_branch_name' is not defined, which
+        # build_feature's broad `except Exception` recorded as a generic
+        # "Unexpected error" -> feature_failed. The docs-gate cases below then
+        # asserted against a run that never reached the docs gate at all.
+        "auto_branch_name": real_branch_policy.auto_branch_name,
+        "integration_branch": real_branch_policy.integration_branch,
+        "may_force_push": real_branch_policy.may_force_push,
         "call_llm": call_llm,
         "GithubException": GithubException,
         "git": real_git,  # patched per-test-case via _patch_clone(); real module otherwise
