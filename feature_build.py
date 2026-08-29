@@ -35,7 +35,7 @@ import llm_client
 from model_selection import LlmRequirements, select_model
 import skills_loader
 import feature_boundary
-from branch_policy import auto_branch_name, may_force_push
+from branch_policy import auto_branch_name, integration_branch, may_force_push
 from github_ops import _ensure_label
 
 # Exactly one build at a time, globally — a mutating agentic build is
@@ -240,7 +240,9 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
 
         timeout_s = int(config.get("feature_build_timeout_s", 1800) or 1800)
         branch_name = auto_branch_name("feature", issue=issue)
-        base_branch = config.get("default_branch", "main")
+        # dev, never main -- features promote dev -> qa -> main like everything else.
+        base_branch, base_why = integration_branch(config, repo_obj)
+        logger.info(f"feature_build: targeting {base_branch} -- {base_why}")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             checkout_path = os.path.join(tmp_dir, "repo")

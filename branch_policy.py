@@ -172,3 +172,33 @@ def may_force_push(ref, config=None, repo_default_branch=None):
         return False, (f"'{name}' is a protected branch -- force-pushing it would "
                        f"discard commits made since this working copy was created")
     return True, f"'{name}' is not protected"
+
+
+def integration_branch(config=None, repo_obj=None):
+    """The branch AppBuilder integrates its work into -- always ``dev``.
+
+    Changes reach production one way: dev -> qa -> main, one deliberate
+    promotion at a time. AppBuilder previously took ``default_branch`` as its
+    base, which is ``main``, so every automated fix either opened a PR straight
+    into main or (on a trusted repo with an approving review) pushed to main
+    directly, bypassing qa and the repo owner entirely.
+
+    ``dev`` is therefore not merely the default here, it is the rule: this
+    never returns the default/production branch while a dev branch exists.
+    The only fallback is a repo that genuinely has no dev branch, where the
+    alternative would be to fail outright; that case is reported so it can be
+    fixed by creating the branch.
+    """
+    cfg = config or {}
+    dev = (cfg.get("dev_branch") or "dev").strip() or "dev"
+
+    if repo_obj is not None:
+        try:
+            repo_obj.get_branch(dev)
+        except Exception:
+            fallback = (cfg.get("default_branch")
+                        or getattr(repo_obj, "default_branch", None) or "main")
+            return fallback, (f"'{dev}' does not exist in "
+                              f"{getattr(repo_obj, 'full_name', 'this repo')} -- falling back to "
+                              f"'{fallback}'; create '{dev}' to restore the dev -> qa -> main flow")
+    return dev, f"'{dev}' is the integration branch (dev -> qa -> main)"
