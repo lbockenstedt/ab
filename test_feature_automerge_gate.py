@@ -127,6 +127,42 @@ def main():
     should, reason = decide(_clean_rec(), [], _clean_config(feature_automerge_target_branches=["staging"]),
                             _clean_pr_meta())
     ok &= _check("target branch not the specific one allowlisted -> blocked", should is False)
+
+    # ── release branches are refused STRUCTURALLY, not just by omission ─────
+    # The cases above only prove main is blocked when it is absent from the
+    # allowlist. That is containment by configuration: the allowlist is a
+    # free-text Settings field, so a single typo used to make an unattended
+    # merge onto the release branch eligible. These pin that main/master/the
+    # configured default_branch are refused EVEN WHEN EXPLICITLY LISTED —
+    # merges into the release branch are owner-only, and that now lives in code.
+    for _br in ("main", "master"):
+        should, reason = decide(_clean_rec(), [],
+                                _clean_config(feature_automerge_target_branches=["dev", "qa", _br]),
+                                _clean_pr_meta(base_ref=_br))
+        ok &= _check(f"{_br} EXPLICITLY listed in feature_automerge_target_branches -> "
+                     "still blocked (config cannot override the release-branch refusal)",
+                     should is False and "release branch" in reason)
+    should, reason = decide(_clean_rec(), [],
+                            _clean_config(feature_automerge_target_branches=["release"],
+                                          default_branch="release"),
+                            _clean_pr_meta(base_ref="release"))
+    ok &= _check("a non-'main' default_branch, explicitly listed -> still blocked "
+                 "(the refusal follows default_branch, not the literal name 'main')",
+                 should is False and "release branch" in reason)
+
+    # ── the qa/dev chain stays eligible: the refusal must not over-reach ────
+    for _br in ("dev", "qa"):
+        should, reason = decide(_clean_rec(), [],
+                                _clean_config(feature_automerge_target_branches=["dev", "qa"]),
+                                _clean_pr_meta(base_ref=_br))
+        ok &= _check(f"{_br} listed -> ALLOWED (release-branch refusal does not "
+                     "over-block the non-release chain)", should is True)
+    should, reason = decide(_clean_rec(), [],
+                            _clean_config(feature_automerge_target_branches=["dev", "qa"],
+                                          default_branch="release"),
+                            _clean_pr_meta(base_ref="qa"))
+    ok &= _check("qa still allowed when default_branch is some other branch entirely",
+                 should is True)
     # ── explicit proof of the NEW capability: human PR to an allowlisted branch ─
     should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(is_feature_drive=False, base_ref="dev"))
     ok &= _check("human-authored PR (no feature-drive marker) targeting dev -> "
