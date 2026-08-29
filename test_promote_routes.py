@@ -323,8 +323,17 @@ def test_main_allowlist_is_exactly_qa_and_the_two_promote_branches():
         ["qa", "promote/qa-to-main", "promote/dev-to-main"])
 
 
-def test_qa_allowlist_was_not_widened():
-    assert sorted(_branch_flow_allowlists()["qa"]) == sorted(["dev", "promote/dev-to-qa"])
+def test_qa_allowlist_is_exactly_dev_the_promote_branch_and_the_backmerge():
+    """backmerge/main-to-qa is the one addition, and it cannot skip a step: it
+    runs the REVERSE direction, carrying main back down to qa."""
+    assert sorted(_branch_flow_allowlists()["qa"]) == sorted(
+        ["dev", "promote/dev-to-qa", "backmerge/main-to-qa"])
+
+
+def test_nothing_is_ever_backmerged_into_main():
+    assert not [b for b in _branch_flow_allowlists()["main"] if b.startswith("backmerge/")], (
+        "main takes changes only by promotion; a backmerge/* head into main "
+        "would be a route around dev -> qa -> main")
 
 
 def test_main_allowlist_uses_exact_names_not_globs():
