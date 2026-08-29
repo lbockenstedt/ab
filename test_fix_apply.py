@@ -16,6 +16,7 @@ window the file around issue identifiers, and accept targeted search/replace
 edits that scale to any file size.
 """
 import ast
+import base64
 import json
 import os
 import re
@@ -32,7 +33,8 @@ def _load_funcs():
             "parse_and_apply", "_claim_issue", "_release_issue",
             "_robust_json_loads", "_sanitize_json_string_newlines",
             "_relax_json_fix_strings",
-            "_fetch_repo_file_for_review", "_snippet_language_mismatch_hint",
+            "_fetch_repo_file_for_review", "_repo_file_text",
+            "_snippet_language_mismatch_hint",
             "_relaxed_edit_span"}
     want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
                     "_JSON_BAD_ESCAPE_RE", "_JS_ONLY_TOKENS_RE", "_PY_ONLY_TOKENS_RE",
@@ -56,7 +58,8 @@ def _load_funcs():
         def __getattr__(self, _):
             return lambda *a, **k: None
 
-    ns = {"os": os, "json": json, "re": re, "threading": threading, "logger": _L()}
+    ns = {"os": os, "json": json, "re": re, "threading": threading,
+          "base64": base64, "logger": _L()}
     exec("\n\n".join(segs), ns)
     ns["_captured_errors"] = captured_errors
     return ns
