@@ -28,6 +28,22 @@ name: promote
 #
 # CI is unaffected -- ci.yml still runs on every dev push and on every PR, so
 # day-to-day feedback stays automatic. Only the decision to promote is manual.
+#
+# THIS WORKFLOW NEVER MERGES. Every route it supports ends at an OPEN PR that a
+# human merges. That includes the dev -> main override below.
+#
+# ROUTES (allowlisted in "Resolve source and target"):
+#   dev -> qa     normal    (source: dev)                  -- the default
+#   qa  -> main   normal    (source: qa)
+#   dev -> main   OVERRIDE  (source: dev, target: main)    -- skips qa
+#
+# The dev -> main route exists for an urgent fix that cannot wait for a qa
+# cycle. It is NOT a hole in the promotion order: it produces the single
+# well-known branch name `promote/dev-to-main`, which branch-flow.yml allows
+# into main *by that exact name only*. An arbitrary branch aimed at main is
+# still rejected. The trade-off is deliberate and visible -- the run logs a
+# warning, and the WebUI button that dispatches it is styled as destructive and
+# requires a typed confirmation.
 
 on:
   workflow_dispatch:
@@ -38,6 +54,17 @@ on:
         default: dev
         type: choice
         options: [dev, qa]
+      # Optional. 'auto' keeps the historical behaviour exactly: dev -> qa,
+      # qa -> main, so existing callers that pass only `source` are unchanged.
+      # Setting it explicitly is what makes the dev -> main override
+      # expressible (source: dev, target: main) -- the emergency path that
+      # skips qa. Still only ever OPENS a PR; see the note below.
+      target:
+        description: 'Target branch (auto = the normal next step)'
+        required: false
+        default: auto
+        type: choice
+        options: [auto, qa, main]
 
 permissions:
   contents: write
@@ -45,10 +72,13 @@ permissions:
   actions: write   # to release the promotion PR's own CI run (see last step)
 
 concurrency:
-  # Keyed off the branch being promoted, not the ref the run was dispatched
-  # from -- a manual run is always dispatched from the default branch, so
-  # github.ref_name would collapse dev->qa and qa->main into one queue.
-  group: promote-${{ github.event.inputs.source || github.ref_name }}
+  # Keyed off the branch being promoted AND the target, not the ref the run was
+  # dispatched from -- a manual run is always dispatched from the default
+  # branch, so github.ref_name would collapse dev->qa and qa->main into one
+  # queue. The target is part of the key because dev now has two possible
+  # destinations (qa, and main via the override): without it, a dev->main run
+  # would queue behind an unrelated dev->qa run building a different branch.
+  group: promote-${{ github.event.inputs.source || github.ref_name }}-to-${{ github.event.inputs.target || 'auto' }}
   cancel-in-progress: false
 
 jobs:
@@ -64,11 +94,36 @@ jobs:
         id: route
         run: |
           src="${{ github.event.inputs.source || github.ref_name }}"
+          tgt_in="${{ github.event.inputs.target || 'auto' }}"
+
+          # The normal next hop, used when target is 'auto'/absent.
           case "$src" in
-            dev) tgt=qa ;;
-            qa)  tgt=main ;;
+            dev) auto_tgt=qa ;;
+            qa)  auto_tgt=main ;;
             *)   echo "::error::$src is not a promotable branch"; exit 1 ;;
           esac
+
+          if [ -z "$tgt_in" ] || [ "$tgt_in" = "auto" ]; then
+            tgt="$auto_tgt"
+          else
+            tgt="$tgt_in"
+          fi
+
+          # Allowlist the routes that may exist, rather than trusting the two
+          # inputs independently. dev->main is deliberately present: it is the
+          # documented override for an urgent fix that cannot wait for a qa
+          # cycle. It still only opens a PR into main -- nothing here merges.
+          # NB the ':' separator: a case pattern like `dev->qa` is a bash
+          # SYNTAX error, because '>' is parsed as a redirection.
+          case "$src:$tgt" in
+            dev:qa|qa:main) ;;
+            dev:main)
+              echo "::warning title=Skipping qa::Promoting dev straight to main (override path). This opens a PR; it does not merge." ;;
+            *)
+              echo "::error::'$src -> $tgt' is not a permitted promotion route (allowed: dev->qa, qa->main, dev->main)"
+              exit 1 ;;
+          esac
+
           echo "src=$src" >> "$GITHUB_OUTPUT"
           echo "tgt=$tgt" >> "$GITHUB_OUTPUT"
           echo "branch=promote/$src-to-$tgt" >> "$GITHUB_OUTPUT"

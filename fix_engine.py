@@ -5,7 +5,7 @@ from github import Github, GithubException
 
 import feature_boundary
 import llm_client
-from branch_policy import auto_branch_name, integration_branch, may_force_push
+from branch_policy import auto_branch_name, integration_branch, may_direct_push, may_force_push
 
 from main import (
     CHAT_CONFIG_DEFAULTS,
@@ -2600,6 +2600,24 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
             logger.info(f"Deployment decision for {repo_name}: DirectPushSetting={direct_push_setting}, IsTrusted={is_trusted}, IsOwner={is_owner}, BoundaryForcedPR={boundary_forced_pr} -> can_direct_push={can_direct_push}")
 
+            # Last line of defence before any push to a shared branch.
+            # base_branch comes from integration_branch() and so should be
+            # 'dev', but AppBuilder authenticates as the repo owner's PAT and
+            # therefore bypasses every GitHub ruleset -- if that target ever
+            # drifts to main, nothing on GitHub's side would reject the push.
+            # Refuse it here and fall through to the PR path, which is the
+            # outcome the dev -> qa -> main flow wants anyway.
+            direct_push_refused_reason = None
+            if can_direct_push:
+                _dp_ok, _dp_why = may_direct_push(
+                    base_branch, config,
+                    repo_default_branch=getattr(repo_obj, "default_branch", None))
+                if not _dp_ok:
+                    logger.warning(
+                        f"Direct push REFUSED for {repo_name}: {_dp_why}. Falling back to a pull request.")
+                    direct_push_refused_reason = f"Direct push refused: {_dp_why}"
+                    can_direct_push = False
+
 
             version_bumped = False
             new_v = None
@@ -2657,7 +2675,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 _trigger_spoke_updates(config)
                 _wait_for_spokes_online(config, min_count=1, timeout=90)
             else:
-                reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (boundary_pr_reason if boundary_forced_pr else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met"))
+                reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (boundary_pr_reason if boundary_forced_pr else (direct_push_refused_reason if direct_push_refused_reason else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met")))
                 decision_reason = reason
                 logger.info(f"Decision: Pull Request. Reason: {reason}.")
                 target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else auto_branch_name("bug", issue=issue)

@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Self-test for llm_client's per-entry health tracking (Settings' "failing"
+badge on an LLM entry).
+
+Run:  python3 test_llm_client_entry_health.py
+
+llm_client.py can't be imported directly (same circular-import chain as
+log_scan.py — see test_log_scan_requirements.py's docstring), so this
+extracts the health-tracking functions via ast and execs them in a minimal
+namespace, the established convention in this repo.
+
+Regression context: lm#452/#469/#444 sat in an endless hourly review-retry
+loop because one configured reviewer entry (Copilot paired with a model its
+API rejects on every call) failed silently — nothing in Settings showed it
+was broken. _record_llm_success/_record_llm_failure/get_llm_entry_health are
+wired into _call_provider_timed (every LLM call in the app routes through
+it) so a hard-failing entry becomes visible without reading ab.log."""
+import ast
+import threading
+from datetime import datetime
+
+
+def _load_ns():
+    src = open("llm_client.py").read()
+    tree = ast.parse(src)
+    names = {"_model_key", "_record_llm_success", "_record_llm_failure", "get_llm_entry_health"}
+    ns = {"threading": threading, "datetime": datetime}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in names:
+            exec(ast.get_source_segment(src, node), ns)
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id in ("_ENTRY_HEALTH_LOCK", "_ENTRY_HEALTH",
+                                                  "_ENTRY_UNHEALTHY_THRESHOLD")
+            for t in node.targets
+        ):
+            exec(ast.get_source_segment(src, node), ns)
+    missing = names - set(ns)
+    assert not missing, f"llm_client.py's shape changed — missing: {missing}"
+    return ns
+
+
+def _check(label, cond):
+    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+    return cond
+
+
+def main():
+    print("Running llm_client per-entry health self-test...")
+    ok = True
+    ns = _load_ns()
+    record_success = ns["_record_llm_success"]
+    record_failure = ns["_record_llm_failure"]
+    get_health = ns["get_llm_entry_health"]
+
+    # ── an entry with no calls yet reads as healthy, not unhealthy ──────────
+    h = get_health("copilot", "", "untouched-model")
+    ok &= _check("an entry with no recorded calls is healthy (silence != failure)",
+                h["unhealthy"] is False and h["consecutive_failures"] == 0)
+
+    # ── the actual regression: a model an API rejects on EVERY call ─────────
+    key = ("copilot", "", "grok-4.6")
+    ok &= _check("a single failure does not yet flag the entry (avoids one-off blips)",
+                not get_health(*key)["unhealthy"])
+    record_failure(key, Exception('400 unsupported_api_for_model: model "grok-4.6" is not '
+                                  "accessible via the /chat/completions endpoint"))
+    h1 = get_health(*key)
+    ok &= _check("after 1 failure: still not flagged (threshold is >1)",
+                not h1["unhealthy"] and h1["consecutive_failures"] == 1)
+    record_failure(key, Exception("400 unsupported_api_for_model (again)"))
+    h2 = get_health(*key)
+    ok &= _check("after 2 consecutive failures: flagged unhealthy",
+                h2["unhealthy"] and h2["consecutive_failures"] == 2)
+    ok &= _check("the last error message is captured for the badge tooltip",
+                "unsupported_api_for_model" in (h2["last_error"] or ""))
+    ok &= _check("last_error_at is stamped",
+                bool(h2["last_error_at"]))
+
+    # ── a success resets the streak — a since-fixed entry stops being flagged
+    record_success(key)
+    h3 = get_health(*key)
+    ok &= _check("a success after failures clears the unhealthy flag",
+                not h3["unhealthy"] and h3["consecutive_failures"] == 0)
+    ok &= _check("a success clears the stale last_error too",
+                h3["last_error"] is None)
+
+    # ── an unrelated entry is unaffected by another entry's failures ────────
+    other = get_health("ollama_cloud", "", "nemotron-3-ultra")
+    ok &= _check("a distinct (provider, base_url, model) key is tracked independently",
+                not other["unhealthy"] and other["consecutive_failures"] == 0)
+
+    print()
+    if ok:
+        print("ALL CASES PASSED")
+        return 0
+    print("ONE OR MORE CASES FAILED")
+    return 1
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
