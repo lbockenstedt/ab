@@ -875,7 +875,7 @@ def _extract_error_symbols(issue_body):
     return out
 
 
-def _extract_cited_paths(feedback, all_files):
+def _extract_cited_paths(feedback, all_files, avoid=None):
     """On a RETRY, pull the file paths a reviewer explicitly named out of the
     previous attempt's feedback and map them to REAL repo files.
 
@@ -887,6 +887,13 @@ def _extract_cited_paths(feedback, all_files):
     next attempt re-identifies the identical wrong file every time and burns every
     attempt on the same decoy (see AppBuilder's own lm#452 failure).
 
+    Reviewer text almost always names BOTH the rejected decoy and the correct
+    target ("edits install_all.sh but the real path is …/self_update.py"), and we
+    cannot reliably tell them apart by prose polarity. `avoid` is the set of files
+    the previous attempt ACTUALLY modified — i.e. the decoy(s) the reviewer just
+    rejected — and is excluded from the result, so a named-but-rejected file can
+    never lead the next attempt regardless of the phrasing order.
+
     Matches full repo-relative paths (…/foo/bar.py, with an optional ':<line>'
     suffix stripped) and, for a UNIQUE basename, bare filenames in prose/backticks
     ("target `self_update.py`"). Returns an ordered, de-duplicated list of real
@@ -896,13 +903,16 @@ def _extract_cited_paths(feedback, all_files):
         return []
     text = str(feedback)
     rel_set = set(all_files)
+    avoid_set = set(avoid or ())
     by_base = {}
     for f in all_files:
         by_base.setdefault(os.path.basename(f), []).append(f)
 
     ordered = []
     def _add(rel):
-        if rel and rel not in ordered:
+        # Never re-lead a file the previous attempt already modified: that is the
+        # decoy the reviewer rejected, and re-targeting it reintroduces the loop.
+        if rel and rel not in ordered and rel not in avoid_set:
             ordered.append(rel)
 
     # Full path-shaped tokens ('/'-containing, ending in a file extension); the
@@ -929,13 +939,22 @@ def _extract_cited_paths(feedback, all_files):
     return ordered
 
 
-def identify_files_to_fix(repo_path, issue_body, error_context=None):
-    """error_context: the previous attempt's failure feedback (e.g. a reviewer's
-    "you edited the wrong file — the real path is X"). On a retry this both
-    ANCHORS the candidate list on any real repo file the reviewer cited (put
-    first, so the builder re-targets instead of re-editing the rejected decoy)
-    and is handed to the LLM guesser so even an uncited retry re-locates with the
-    reviewer's reasoning rather than re-deriving the same wrong guess."""
+def identify_files_to_fix(repo_path, issue_body, error_context=None, retarget=False, avoid_paths=None):
+    """error_context: the previous attempt's failure feedback, handed to the LLM
+    guesser so a retry re-locates with the reviewer's reasoning rather than
+    re-deriving the same wrong guess.
+
+    retarget: an EXPLICIT wrong-file signal — True only when the previous attempt
+    was rejected by REVIEW (the sole failure state whose feedback can name a
+    different correct location). Every other retry kind (invalid/truncated JSON,
+    missed edit anchors, no edits, failed tests, low confidence) failed while the
+    TARGET file was correct, so re-targeting would steer AWAY from it. When
+    retarget is False we neither anchor on cited paths nor tell the guesser to
+    relocate — the file the last attempt aimed at is kept.
+
+    avoid_paths: files the previous attempt ACTUALLY modified (the rejected
+    decoys). Excluded from the reviewer-cited anchor so a named-but-rejected file
+    can never lead the retry."""
     logger.info("Identifying relevant files for fix...")
     all_files = []
     for root, _, files in os.walk(repo_path):
@@ -946,11 +965,14 @@ def identify_files_to_fix(repo_path, issue_body, error_context=None):
                 continue
             all_files.append(rel_path)
 
-    # Reviewer-cited files lead on a retry (see _extract_cited_paths). Merged in
-    # front of every return path below via _lead(), de-duped, order preserved.
-    cited = _extract_cited_paths(error_context, all_files)
+    # Reviewer-cited files lead ONLY on an explicit wrong-file signal (retarget) —
+    # a review rejection. For all other failure kinds the last target was correct,
+    # so cited stays empty and the existing candidate ordering is preserved. Any
+    # file the previous attempt modified (avoid_paths) is excluded so a rejected
+    # decoy can never lead. Merged in front of every return path below via _lead().
+    cited = _extract_cited_paths(error_context, all_files, avoid=avoid_paths) if retarget else []
     if cited:
-        logger.info("File identification: previous-attempt feedback cited existing file(s) "
+        logger.info("File identification: review rejection cited existing file(s) "
                     "→ re-targeting the fix, prioritising %s", ", ".join(cited[:5]))
 
     def _lead(*groups):
@@ -989,16 +1011,27 @@ def identify_files_to_fix(repo_path, issue_body, error_context=None):
 
     file_list_str = "\n".join(all_files)
     retry_hint = ""
-    if error_context:
-        # An uncited retry still benefits from the reviewer's reasoning: tell the
-        # guesser the last attempt was rejected and to locate the CORRECT file.
-        # Cap it — this is the SMALL file-id prompt, and a multi-reviewer critique
-        # can run to thousands of chars; the precise signal is already captured by
-        # _extract_cited_paths above, so a bounded excerpt is enough here.
+    if error_context and retarget:
+        # Wrong-file signal (review rejection): the reviewer MAY name a different
+        # correct location. Ask the guesser to prefer a cited file if present, but
+        # do NOT assert the last file was wrong — a rejection is often about the
+        # edit's content, not its location — so it can legitimately keep the same
+        # target. Cap it: this is the SMALL file-id prompt and the precise signal
+        # is already captured by _extract_cited_paths above.
         retry_hint = (
-            "\nA previous fix attempt was REJECTED. Reviewer feedback follows — use it to "
-            "locate the CORRECT file to change; the last attempt very likely edited the "
-            f"WRONG file:\n{str(error_context)[:2000]}\n"
+            "\nA previous fix attempt was REJECTED BY REVIEW. Reviewer feedback follows. If it "
+            "names a specific file as the correct location, target THAT file; otherwise keep the "
+            "same target file and address the critique — do NOT relocate to an unrelated file:\n"
+            f"{str(error_context)[:2000]}\n"
+        )
+    elif error_context:
+        # Non-review failure (bad/truncated JSON, missed anchors, no edits, failed
+        # tests, low confidence): the target file was NOT wrong. Keep the same
+        # file(s); the fault was in the edit, not its location.
+        retry_hint = (
+            "\nA previous fix attempt for the SAME file(s) failed for the reason below. The target "
+            "file was NOT wrong — do not switch files; produce a corrected fix for the same "
+            f"location:\n{str(error_context)[:2000]}\n"
         )
     prompt = (
         f"Issue Description: {issue_body}\n\n"
@@ -2008,7 +2041,7 @@ def _targeted_file_context(content, identifiers, max_chars, window=60, max_hits_
     return "\n".join(parts) if parts else None
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None):
+def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None):
     """files_override: skip the identify_files_to_fix guess and target exactly
     these repo-relative paths instead — for callers (pr_review's fix_one_pr)
     that already know precisely which files are at issue (a PR's own changed-
@@ -2026,7 +2059,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
     max_files = int(config.get("FIX_MAX_FILES", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"])
     max_file_chars = int(config.get("FIX_MAX_FILE_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"])
     max_ctx_chars = int(config.get("FIX_MAX_CONTEXT_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"])
-    relevant_files = list(files_override) if files_override else identify_files_to_fix(repo_path, issue_body, error_context)
+    relevant_files = list(files_override) if files_override else identify_files_to_fix(repo_path, issue_body, error_context, retarget=retarget, avoid_paths=avoid_paths)
     if not relevant_files:
         logger.warning(f"No specific files identified for issue. Attempting general fix.")
     # Bound the prompt: cap file count, per-file chars, and total chars so the
@@ -2790,6 +2823,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             built_key = None
             success = False
             error_context = None
+            # Files the previous attempt actually modified — the decoys a review
+            # rejection may re-name. Passed as avoid_paths so a rejected file can
+            # never lead the re-targeted retry.
+            modified_paths = set()
             # WHY the last attempt failed, structured. error_context is written for
             # the NEXT builder prompt, so it is phrased as instructions to a model
             # and gets buried behind boilerplate by the time it reaches the UI.
@@ -2866,7 +2903,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             processed[issue_id]["status"] = "processing"
                             save_processed(processed)
                     elif not pending_fix:
-                        fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out)
+                        fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out,
+                                                retarget=(last_failure.get("kind") == "review_rejected"),
+                                                avoid_paths=sorted(modified_paths))
                         success_applied, fixes, confidence = parse_and_apply(fix_code, path)
                     built_key = used_model_out.get("key")
 
@@ -2957,6 +2996,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             if review_verdict == "Reject":
                                 logger.warning(f"Reviewer REJECTED fix for {issue_id}: {critique}")
                                 error_context = f"Reviewer rejected the fix: {critique}"
+                                # Record the files this rejected attempt modified so
+                                # the re-targeted retry excludes them (never re-lead
+                                # a decoy the reviewer just rejected).
+                                try:
+                                    if isinstance(fixes, dict):
+                                        modified_paths.update(fixes.keys())
+                                except Exception:  # noqa: BLE001
+                                    pass
                                 last_failure = {
                                     "kind": "review_rejected",
                                     "detail": str(critique or "").strip(),
