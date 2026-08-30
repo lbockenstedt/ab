@@ -2091,6 +2091,36 @@ _ENTRY_UNHEALTHY_THRESHOLD = 2
 # (wrong model name) needs an operator anyway, and a real outage is rare
 # enough that checking hourly costs nothing.
 _ENTRY_UNHEALTHY_RETRY_SECONDS = 3600
+# A 400 that names the MODEL as the problem ("model X is not accessible via
+# the /chat/completions endpoint", code unsupported_api_for_model) is not a
+# transient failure and not a guess: the provider has told us this exact
+# (provider, base_url, model) pairing can never serve this request. Retrying
+# it hourly cannot succeed, and each retry costs a failed panel plus an ERROR
+# that the self-log scan files as a NEW issue — which is how one mis-set
+# reviewer model produced ab#119, #121, #125 and #135, all the same fact.
+# Excluded on the FIRST such failure (no threshold: one is conclusive) and for
+# far longer, since only an operator changing the entry can fix it.
+#
+# Safe against permanently stranding an entry, because health is keyed by
+# _model_key(provider, base_url, model): correcting the model in Settings
+# produces a DIFFERENT key that carries none of this state. The cooldown is
+# long rather than infinite only so a provider that later starts serving the
+# model recovers on its own.
+_ENTRY_UNSUPPORTED_RETRY_SECONDS = 86400
+#: Substrings that mark a 4xx as "this endpoint will never serve this model".
+#: Deliberately narrow — a rejection we cannot attribute to the model itself
+#: must keep the ordinary transient-failure path, not get locked out for a day.
+_UNSUPPORTED_MODEL_MARKERS = (
+    "unsupported_api_for_model",
+    "is not accessible via the",
+    "model_not_supported",
+)
+
+
+def _is_unsupported_model_error(err_str):
+    """True when the provider blamed the model itself, not the request."""
+    low = (err_str or "").lower()
+    return any(m in low for m in _UNSUPPORTED_MODEL_MARKERS)
 
 
 def _record_llm_success(key):
@@ -2106,7 +2136,22 @@ def _record_llm_failure(key, exc):
         entry["consecutive_failures"] = entry.get("consecutive_failures", 0) + 1
         entry["last_error"] = str(exc)[:300]
         entry["last_error_at"] = datetime.now().isoformat()
-        if entry["consecutive_failures"] >= _ENTRY_UNHEALTHY_THRESHOLD:
+        if _is_unsupported_model_error(str(exc)):
+            # Conclusive on the first occurrence — see
+            # _ENTRY_UNSUPPORTED_RETRY_SECONDS. Force the count to the
+            # threshold so _entry_is_unhealthy (shared with the Settings
+            # badge) agrees immediately instead of waiting for a second
+            # failure that can only repeat the same rejection.
+            was_excluded = entry.get("unsupported_model")
+            entry["retry_after"] = time.time() + _ENTRY_UNSUPPORTED_RETRY_SECONDS
+            entry["unsupported_model"] = True
+            if not was_excluded:
+                logger.error(
+                    "LLM entry %s rejected its own model (%s). Excluding it from routing for %dh — "
+                    "no retry can fix this. Change the model for this entry in "
+                    "Settings -> Model Registry.",
+                    key, entry["last_error"], _ENTRY_UNSUPPORTED_RETRY_SECONDS // 3600)
+        elif entry["consecutive_failures"] >= _ENTRY_UNHEALTHY_THRESHOLD:
             entry["retry_after"] = time.time() + _ENTRY_UNHEALTHY_RETRY_SECONDS
         _ENTRY_HEALTH[key] = entry
 
@@ -2130,7 +2175,14 @@ def _entry_is_unhealthy(key):
     through; if it fails again, _record_llm_failure extends the cooldown."""
     with _ENTRY_HEALTH_LOCK:
         entry = _ENTRY_HEALTH.get(key)
-    if not entry or entry.get("consecutive_failures", 0) < _ENTRY_UNHEALTHY_THRESHOLD:
+    if not entry:
+        return False
+    # A model the endpoint refuses to serve needs no blip tolerance: one
+    # rejection is the provider stating a fact, so this bypasses the
+    # consecutive-failure threshold (the count stays truthful for the badge).
+    if entry.get("unsupported_model"):
+        return time.time() < entry.get("retry_after", 0.0)
+    if entry.get("consecutive_failures", 0) < _ENTRY_UNHEALTHY_THRESHOLD:
         return False
     return time.time() < entry.get("retry_after", 0.0)
 

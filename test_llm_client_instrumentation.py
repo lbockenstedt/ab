@@ -88,16 +88,18 @@ def _load_timed_ns(perf_path):
     names = {"_LLM_PERF_STORE", "_LLM_PERF_LOCK", "_llm_perf_last_save", "_LLM_PERF_SAVE_INTERVAL",
               # per-entry health globals (_call_provider_timed records against these
               # on every call — see llm_client.get_llm_entry_health's docstring)
-              "_ENTRY_HEALTH_LOCK", "_ENTRY_HEALTH", "_ENTRY_UNHEALTHY_THRESHOLD"}
+              "_ENTRY_HEALTH_LOCK", "_ENTRY_HEALTH", "_ENTRY_UNHEALTHY_THRESHOLD",
+              "_ENTRY_UNSUPPORTED_RETRY_SECONDS", "_UNSUPPORTED_MODEL_MARKERS"}
     fn_names = {"_get_llm_perf_store", "get_llm_perf_snapshot", "_model_key", "_call_provider_timed",
-                "_call_provider_wrapper", "_record_llm_success", "_record_llm_failure"}
+                "_call_provider_wrapper", "_record_llm_success", "_record_llm_failure",
+                "_is_unsupported_model_error"}
     segs = []
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(getattr(t, "id", "") in names for t in node.targets):
             segs.append(ast.get_source_segment(src, node))
         elif isinstance(node, ast.FunctionDef) and node.name in fn_names:
             segs.append(ast.get_source_segment(src, node))
-    assert len(segs) == 7 + 7, f"expected 7 globals + 7 functions, found {len(segs)} segments"
+    assert len(segs) == 9 + 8, f"expected 9 globals + 8 functions, found {len(segs)} segments"
 
     calls = {"provider_calls": []}
 

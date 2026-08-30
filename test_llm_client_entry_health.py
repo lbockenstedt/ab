@@ -16,6 +16,7 @@ was broken. _record_llm_success/_record_llm_failure/get_llm_entry_health are
 wired into _call_provider_timed (every LLM call in the app routes through
 it) so a hard-failing entry becomes visible without reading ab.log."""
 import ast
+import logging
 import threading
 import time
 from datetime import datetime
@@ -25,15 +26,19 @@ def _load_ns():
     src = open("llm_client.py").read()
     tree = ast.parse(src)
     names = {"_model_key", "_record_llm_success", "_record_llm_failure",
-              "get_llm_entry_health", "_entry_is_unhealthy"}
-    ns = {"threading": threading, "datetime": datetime, "time": time}
+              "get_llm_entry_health", "_entry_is_unhealthy",
+              "_is_unsupported_model_error"}
+    ns = {"threading": threading, "datetime": datetime, "time": time,
+          "logger": logging.getLogger("entry-health-selftest")}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:
             exec(ast.get_source_segment(src, node), ns)
         elif isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id in ("_ENTRY_HEALTH_LOCK", "_ENTRY_HEALTH",
                                                   "_ENTRY_UNHEALTHY_THRESHOLD",
-                                                  "_ENTRY_UNHEALTHY_RETRY_SECONDS")
+                                                  "_ENTRY_UNHEALTHY_RETRY_SECONDS",
+                                                  "_ENTRY_UNSUPPORTED_RETRY_SECONDS",
+                                                  "_UNSUPPORTED_MODEL_MARKERS")
             for t in node.targets
         ):
             exec(ast.get_source_segment(src, node), ns)
@@ -60,23 +65,57 @@ def main():
     ok &= _check("an entry with no recorded calls is healthy (silence != failure)",
                 h["unhealthy"] is False and h["consecutive_failures"] == 0)
 
-    # ── the actual regression: a model an API rejects on EVERY call ─────────
+    # ── the actual regression: an entry failing on EVERY call ───────────────
+    # Uses a GENERIC error on purpose: this block guards the blip-tolerance
+    # threshold, which must stay >1 for failures we cannot attribute to a
+    # permanent cause. The model-rejection fast path is asserted separately
+    # below (it deliberately does NOT wait for a second failure).
     key = ("copilot", "", "grok-4.6")
     ok &= _check("a single failure does not yet flag the entry (avoids one-off blips)",
                 not get_health(*key)["unhealthy"])
-    record_failure(key, Exception('400 unsupported_api_for_model: model "grok-4.6" is not '
-                                  "accessible via the /chat/completions endpoint"))
+    record_failure(key, Exception("500 Internal Server Error from the provider"))
     h1 = get_health(*key)
     ok &= _check("after 1 failure: still not flagged (threshold is >1)",
                 not h1["unhealthy"] and h1["consecutive_failures"] == 1)
-    record_failure(key, Exception("400 unsupported_api_for_model (again)"))
+    record_failure(key, Exception("500 Internal Server Error (again)"))
     h2 = get_health(*key)
     ok &= _check("after 2 consecutive failures: flagged unhealthy",
                 h2["unhealthy"] and h2["consecutive_failures"] == 2)
     ok &= _check("the last error message is captured for the badge tooltip",
-                "unsupported_api_for_model" in (h2["last_error"] or ""))
+                "Internal Server Error" in (h2["last_error"] or ""))
     ok &= _check("last_error_at is stamped",
                 bool(h2["last_error_at"]))
+
+    # ── a model the endpoint REFUSES to serve is conclusive on the first
+    # failure. Waiting for a second (and then retrying hourly forever) is what
+    # let one mis-set reviewer model keep being re-picked, failing the panel
+    # and filing a duplicate log-alert issue every hour — ab#119/#121/#125/#135
+    # are all the same fact. No retry can change the provider's answer. ──────
+    unsup = ("copilot", "", "grok-4.5")
+    record_failure(unsup, Exception('400 unsupported_api_for_model: model "grok-4.5" is not '
+                                    "accessible via the /chat/completions endpoint"))
+    hu = get_health(*unsup)
+    ok &= _check("model rejection flags the entry on the FIRST failure",
+                hu["unhealthy"] and hu["consecutive_failures"] == 1)
+    with ns["_ENTRY_HEALTH_LOCK"]:
+        _entry = ns["_ENTRY_HEALTH"][unsup]
+    ok &= _check("marked as a model-rejection, not a generic failure",
+                _entry.get("unsupported_model") is True)
+    ok &= _check("excluded far longer than the ordinary hourly retry",
+                _entry["retry_after"] - time.time()
+                > ns["_ENTRY_UNHEALTHY_RETRY_SECONDS"])
+    ok &= _check("cooldown matches the unsupported-model constant",
+                abs((_entry["retry_after"] - time.time())
+                    - ns["_ENTRY_UNSUPPORTED_RETRY_SECONDS"]) < 5)
+    # An operator correcting the model yields a DIFFERENT key, which carries
+    # none of this state — that is what stops the block being a dead end.
+    fixed = get_health("copilot", "", "gpt-5.5-corrected")
+    ok &= _check("correcting the model produces a clean, routable entry",
+                not fixed["unhealthy"] and fixed["consecutive_failures"] == 0)
+    # ...and a genuine success still clears it outright.
+    record_success(unsup)
+    ok &= _check("a later success clears the model-rejection block",
+                not get_health(*unsup)["unhealthy"])
 
     # ── a success resets the streak — a since-fixed entry stops being flagged
     record_success(key)
