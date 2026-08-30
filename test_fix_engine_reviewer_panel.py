@@ -59,7 +59,7 @@ def _load_ns(want_funcs, extra_ns=None):
     want_assigns = {
         "_REVIEW_TOOLS", "_REVIEW_TOOL_MAX_ITER", "_REVIEW_TOOL_MAX_FILES",
         "_REVIEW_FILE_MAX_CHARS", "_REVIEWER_JSON_SCHEMA", "_DIFF_FILE_HEADER_RE",
-        "_REVIEW_PANEL_MAX",
+        "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN",
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want_funcs:
@@ -148,6 +148,67 @@ def main():
     )
     ok &= _check("_select_review_panel: nothing configured -> []",
                 ns_panel_empty["_select_review_panel"]({}, builder_n=1) == [])
+
+    # ---- 1b. multiple opinions whenever possible (backfill at relaxed floor) ----
+    # Only ONE strong (large) non-builder model exists, but weaker distinct models
+    # are configured. The panel must still reach _REVIEW_PANEL_MIN by backfilling
+    # the weaker distinct models, so a lone reviewer never gates a fix unchecked.
+    def _cap_of(provider, model, max_complexity):
+        c = _candidate(provider, model)
+        c["caps"]["max_complexity"] = max_complexity
+        c["caps"]["cost_tier"] = "cheap"
+        return c
+
+    mixed = [
+        _cap_of("groq", "llama-70b", "large"),     # builder (slot 1) — excluded
+        _cap_of("anthropic", "claude-sonnet", "large"),  # the ONE strong reviewer
+        _cap_of("ollama", "qwen-7b", "medium"),    # weaker distinct model
+        _cap_of("local", "phi", "small"),          # weaker distinct model
+    ]
+
+    class _MixedLlmClient:
+        def _enumerate_candidates(self, config):
+            return list(mixed)
+        def get_llm_perf_snapshot(self):
+            return {}
+        def _model_key(self, provider, base_url, model):
+            return (provider, base_url, model)
+
+    ns_mixed = _load_ns(
+        {"_select_review_panel"},
+        {"llm_client": _MixedLlmClient(), "_get_provider_config": _get_provider_config,
+         "load_config": lambda: {}},
+    )
+    mixed_panel = ns_mixed["_select_review_panel"]({}, builder_n=1)
+    ok &= _check("_select_review_panel: backfills to >= _REVIEW_PANEL_MIN when only one strong model exists",
+                len(mixed_panel) >= ns_mixed["_REVIEW_PANEL_MIN"] >= 2)
+    ok &= _check("_select_review_panel: strong model is still chosen first",
+                bool(mixed_panel) and mixed_panel[0]["provider"] == "anthropic")
+    ok &= _check("_select_review_panel: backfill uses a distinct weaker model (not the builder, not a repeat)",
+                all(c["provider"] != "groq" for c in mixed_panel)
+                and len({c["provider"] for c in mixed_panel}) == len(mixed_panel))
+
+    # Genuinely only one non-builder model configured -> panel of 1 (backfill must
+    # NOT fabricate a second reviewer that doesn't exist).
+    solo = [_cap_of("groq", "llama-70b", "large"), _cap_of("anthropic", "claude-sonnet", "large")]
+
+    class _SoloLlmClient:
+        def _enumerate_candidates(self, config):
+            return list(solo)
+        def get_llm_perf_snapshot(self):
+            return {}
+        def _model_key(self, provider, base_url, model):
+            return (provider, base_url, model)
+
+    ns_solo = _load_ns(
+        {"_select_review_panel"},
+        {"llm_client": _SoloLlmClient(), "_get_provider_config": _get_provider_config,
+         "load_config": lambda: {}},
+    )
+    solo_panel = ns_solo["_select_review_panel"]({}, builder_n=1)
+    ok &= _check("_select_review_panel: only one non-builder model -> panel of 1 (no fabricated reviewer)",
+                len(solo_panel) == 1 and solo_panel[0]["provider"] == "anthropic")
+
 
     # ---- 2-6. _run_reviewer_turn ----
     def _make_turn_ns(try_candidate_stub, call_llm_stub):
