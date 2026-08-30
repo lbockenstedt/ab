@@ -136,9 +136,17 @@ _JSON_NEXT_MEMBER_RE = re.compile(r'\s*,\s*"[^"\\]{0,80}"\s*:')
 # Only these values are repaired leniently; every other byte of the response is
 # copied verbatim, so already-valid JSON is passed through untouched.
 _FIX_CODE_KEY_RE = re.compile(r'"(?:search|replace|code)"\s*:\s*"')
+# The reviewer schema's one free-text value. A critique quotes the code it is
+# reviewing (settings["KEY"], logger.error("…")), so it breaks in exactly the
+# same way a fix's code value does — see _review_one's use below.
+_REVIEW_TEXT_KEY_RE = re.compile(r'"critique"\s*:\s*"')
+# Reviewer objects only ever have these three members, so the "next member"
+# anchor can be exact rather than the fix path's generic <=80-char key match.
+_REVIEW_NEXT_MEMBER_RE = re.compile(r'\s*,\s*"(?:confidence|verdict|critique)"\s*:')
 
 
-def _relax_json_fix_strings(raw):
+def _relax_json_fix_strings(raw, key_re=None, next_member_re=None,
+                            bracket_closes=True):
     """Repair the single most destructive way an LLM's fix JSON breaks: a
     "search"/"replace"/"code" value holds a real code snippet whose OWN string
     literals contain unescaped double-quotes (e.g. logger.error("…")) — and
@@ -155,12 +163,23 @@ def _relax_json_fix_strings(raw):
     byte-for-byte, so this is a no-op on already-valid input and never corrupts
     unrelated fields (other keys, arrays of short strings, etc.). The result is
     only ever used if json.loads accepts it, so a mis-guessed boundary degrades
-    to the existing fallbacks rather than to a bad parse."""
+    to the existing fallbacks rather than to a bad parse.
+
+    key_re/next_member_re/bracket_closes parameterise the schema so the SAME
+    repair serves the reviewer's "critique" value (see _review_one), which
+    breaks identically because a critique quotes the code it reviews. Defaults
+    reproduce the fix-path behaviour exactly. bracket_closes=False is required
+    for prose values: a critique legitimately contains `settings["KEY"]`, and
+    the `"` before `]` there is an INNER quote, not a structural close — the
+    fix path's `]` anchor would mis-cut the value mid-sentence."""
+    key_re = key_re or _FIX_CODE_KEY_RE
+    next_member_re = next_member_re or _JSON_NEXT_MEMBER_RE
+    closers = ('}', ']', '') if bracket_closes else ('}', '')
     out = []
     pos = 0
     n = len(raw)
     while True:
-        m = _FIX_CODE_KEY_RE.search(raw, pos)
+        m = key_re.search(raw, pos)
         if not m:
             out.append(raw[pos:])
             break
@@ -182,13 +201,43 @@ def _relax_json_fix_strings(raw):
             if ch == '"':
                 rest = raw[j + 1:]
                 nxt = rest.lstrip()[:1]
-                if nxt in ('}', ']', '') or _JSON_NEXT_MEMBER_RE.match(rest):
+                if nxt in closers or next_member_re.match(rest):
                     break                      # structural close of the value
                 out.append('\\"'); j += 1; continue   # inner code quote
             out.append(ch); j += 1
         out.append('"')                        # emit the closing quote
         pos = j + 1
     return ''.join(out)
+
+
+def _parse_reviewer_json(raw):
+    """Parse a reviewer's {confidence, verdict, critique} object, applying the
+    same escalating repairs parse_and_apply already uses for fix JSON.
+
+    A reviewer's critique quotes the code under review, so it hits the exact
+    same failure the fix path was hardened against years ago — but the reviewer
+    path only ever called _robust_json_loads, so a single unescaped quote threw
+    the WHOLE review away (the reviewer was counted as failed, burning a panel
+    slot). Confirmed in production: a copilot review of settings["GITHUB_TOKEN_
+    configured"] died with "Expecting ',' delimiter: line 1 column 248" despite
+    a complete, well-formed answer (confidence 0.93, verdict Approve).
+
+    Raises the ORIGINAL JSONDecodeError if every repair fails, so the caller's
+    existing diagnostic logging is unchanged."""
+    try:
+        return _robust_json_loads(raw)
+    except json.JSONDecodeError as first:
+        for candidate in (
+            _sanitize_json_string_newlines(raw),
+            _relax_json_fix_strings(raw, key_re=_REVIEW_TEXT_KEY_RE,
+                                    next_member_re=_REVIEW_NEXT_MEMBER_RE,
+                                    bracket_closes=False),
+        ):
+            try:
+                return _robust_json_loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        raise first
 
 
 def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=None):
@@ -1267,7 +1316,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             )
             match = re.search(r'\{.*\}', res, re.DOTALL)
             if match:
-                _v = _robust_json_loads(match.group())
+                _v = _parse_reviewer_json(match.group())
                 _v["confidence"] = _norm_confidence(_v.get("confidence"))
                 return ({**_v, "reviewer": r["name"]}, None)
             # Parseable-JSON-less but non-erroring response: neither a vote nor a
