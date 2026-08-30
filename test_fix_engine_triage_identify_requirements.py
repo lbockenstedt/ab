@@ -121,13 +121,17 @@ def main():
         return '["src/a.py", "src/b.py"]'
 
     ns2 = _load_fix_engine_ns(
-        {"identify_files_to_fix"},
+        # The real array extractor is pulled in rather than stubbed: it is the
+        # thing that replaced the old greedy `\[.*\]` match, so stubbing it here
+        # would hide a regression in exactly the code this test exercises.
+        {"identify_files_to_fix", "_first_json_array_of_strings", "_json_string_spans"},
         {
             "call_llm": _capturing_call_llm2,
             "_robust_json_loads": json.loads,
             "_extract_issue_identifiers": lambda body: [],
             "_grep_files_for_identifiers": lambda repo_path, all_files, identifiers: [],
             "_extract_error_symbols": lambda body: [],
+            "is_llm_cooldown_error": lambda e: False,
         },
     )
     import tempfile
