@@ -963,6 +963,11 @@
                                             <p class="text-xs text-slate-500">Comma-separated prefixes. Leave blank to use the defaults.</p>
                                         </div>
                                     </div>
+                                    <div class="space-y-1">
+                                        <label class="text-sm font-medium text-slate-600">Release lock (hold auto-merge)</label>
+                                        <input type="text" name="release_locked_branches" title="Branches AppBuilder must not auto-merge into until you remove them here — PRs are still reviewed but held" value="{{ (settings.release_locked_branches or []) | join(', ') }}" placeholder="dev, qa" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <p class="text-xs text-slate-500">Comma-separated. While a branch is listed here, AppBuilder keeps reviewing PRs but will <span class="font-medium">not auto-merge</span> into it — changes stack up as open PRs for testing/validation and are processed once you remove it. Humans can still merge manually.</p>
+                                    </div>
                                 </div>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">

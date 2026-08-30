@@ -725,10 +725,38 @@ async def promote_branch(request: Request):
         targets = [repo_name]
 
     def _do_dispatch(repo_name):
-        # Shared with the scheduled-promotion path (promote_ops) so the manual
-        # and scheduled dispatches are one implementation, not two that drift.
-        from promote_ops import dispatch_promote_workflow
-        return dispatch_promote_workflow(token, repo_name, source, target, is_override)
+        repo = Github(token).get_repo(repo_name)
+        wf = repo.get_workflow("promote.yml")
+        # workflow_dispatch always runs the workflow file as it exists on the
+        # ref it is dispatched from; the promotion logic lives on the default
+        # branch, which is also what promote.yml's concurrency note assumes.
+        ref = repo.default_branch
+        # Send `target` ONLY for the override. promote.yml in the sibling repos
+        # still has just the `source` input, and GitHub rejects a dispatch that
+        # carries an input the workflow does not declare -- so always sending
+        # `target` would break the ordinary dev->qa / qa->main buttons on every
+        # repo except this one. Omitting it reproduces the historical call
+        # exactly, and those repos keep working; dev->main is the only route
+        # that genuinely requires the newer workflow.
+        #
+        # NOTE: promote_ops.dispatch_promote_workflow is the byte-for-byte twin
+        # of this block for the scheduled-promotion path (it cannot reuse this
+        # nested closure). Keep the two in lockstep -- both are covered by tests
+        # (test_promote_routes.py here, test_promote_ops.py there).
+        inputs = {"source": source}
+        if is_override:
+            inputs["target"] = target
+        ok = wf.create_dispatch(ref, inputs)
+        # PyGithub returns False rather than raising when GitHub rejects the
+        # dispatch. Treat that as a failure instead of reporting a false
+        # success -- for the override the likeliest cause is a promote.yml on
+        # that repo that predates the `target` input.
+        if ok is False:
+            extra = (" This repo's promote.yml may predate the 'target' input "
+                     "that the dev -> main override requires.") if is_override else ""
+            raise RuntimeError(
+                f"GitHub rejected the workflow dispatch for {repo_name} (ref '{ref}').{extra}")
+        return f"https://github.com/{repo_name}/actions/workflows/promote.yml"
 
     async def _dispatch(name):
         # PyGithub is synchronous — see pr_review_approve's note; offload so a
@@ -2593,6 +2621,10 @@ async def save_settings(request: Request):
         # them directly; the form supplies a comma-separated string.
         "protected_branches": parse_branch_names,
         "auto_branch_prefixes": parse_branch_names,
+        # Release lock: branches AppBuilder must NOT auto-merge into until
+        # unlocked (review still runs; PRs stack up). Stored as a list so
+        # branch_policy.is_release_locked can consume it directly.
+        "release_locked_branches": parse_branch_names,
         # GITHUB_TOKEN is handled after this loop: the form no longer renders
         # the saved PAT, so an empty field means "unchanged", not "clear it".
         # Leaving it here would let a plain Save wipe the token.

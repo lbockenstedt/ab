@@ -40,8 +40,10 @@ def _load_ns():
             seg = ast.get_source_segment(src, node)
             break
     assert seg, "_automerge_decision not found in pr_review.py"
+    import branch_policy
     ns = {"feature_boundary": real_feature_boundary,
-          "feature_allowlist": real_feature_allowlist}
+          "feature_allowlist": real_feature_allowlist,
+          "is_release_locked": branch_policy.is_release_locked}
     exec(seg, ns)
     return ns
 
@@ -101,6 +103,18 @@ def main():
     # explicitly rather than just asserting it as a side effect. ─────────────
     should, reason = decide(_clean_rec(), ["some/file.py"], _clean_config(), _clean_pr_meta())
     ok &= _check("human PR, all conditions cleared -> auto-merge approved", should is True)
+
+    # ── release lock: a fully-cleared PR is HELD (not merged) while its target
+    # branch is locked, and flows again once the lock is lifted. Review still
+    # runs; only the unattended merge waits. ─────────────────────────────────
+    should, reason = decide(_clean_rec(), ["some/file.py"],
+                            _clean_config(release_locked_branches=["dev"]), _clean_pr_meta())
+    ok &= _check("target branch under release lock -> held (not merged)", should is False)
+    ok &= _check("release-lock reason names the lock",
+                 should is False and "release lock" in (reason or "").lower())
+    should, reason = decide(_clean_rec(), ["some/file.py"],
+                            _clean_config(release_locked_branches=["qa"]), _clean_pr_meta())
+    ok &= _check("a DIFFERENT branch locked -> this dev PR still flows", should is True)
 
     # ── two independent kill switches ────────────────────────────────────────
     should, reason = decide(_clean_rec(), [], _clean_config(feature_drive_enabled=False), _clean_pr_meta())
