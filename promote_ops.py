@@ -73,8 +73,14 @@ def dispatch_promote_workflow(token, repo_name, source, target, is_override):
     """Dispatch promote.yml in ``repo_name`` for the ``source -> target`` hop.
 
     Returns the workflow URL on success and raises on failure. This ONLY opens a
-    PR -- it never merges. Shared with routes.promote_branch so the manual and
-    scheduled paths behave identically.
+    PR -- it never merges.
+
+    PARITY: this is the byte-for-byte twin of routes.promote_branch's nested
+    ``_do_dispatch`` (that one cannot be shared because it is a closure over the
+    request handler). Any change to the dispatch contract -- the `target`-only-
+    on-override rule, the default-branch ref, or the create_dispatch==False
+    handling -- must be made in BOTH. test_promote_ops.py covers this copy;
+    test_promote_routes.py covers the routes copy.
     """
     from github import Github
     repo = Github(token).get_repo(repo_name)
