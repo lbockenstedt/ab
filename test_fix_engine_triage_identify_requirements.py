@@ -159,9 +159,13 @@ def main():
                  files == ["src/a.py", "src/b.py"])
 
     # ---- 3. identify_files_to_fix RETRY re-targeting (site #2, error_context) ----
-    # On a retry, a reviewer's "wrong file — the real path is core/.../self_update.py"
-    # feedback must LEAD the candidate list so the next attempt re-targets instead of
-    # re-editing the rejected decoy. Reproduces the AppBuilder lm#452 failure mode.
+    # On a REVIEW-REJECTION retry (retarget=True), a reviewer's "wrong file — the
+    # real path is core/.../self_update.py" feedback must LEAD the candidate list
+    # so the next attempt re-targets instead of re-editing the rejected decoy.
+    # Reproduces the AppBuilder lm#452 failure mode. Non-review failures must NOT
+    # re-target (the target file was correct), and a decoy the previous attempt
+    # actually modified (avoid_paths) must never lead even when the reviewer names
+    # it — this is the state-conflation fix from PR #152's review.
     ns3 = _load_fix_engine_ns(
         {"identify_files_to_fix", "_first_json_array_of_strings", "_json_string_spans",
          "_extract_cited_paths"},
@@ -184,13 +188,34 @@ def main():
             f.write("echo hi\n")
         critique = ("Reviewer rejected the fix: the patch edits install_all.sh but the real "
                     "path is core/src/messaging/self_update.py:733 — target self_update.py.")
+        # (a) review rejection → re-target: cited correct file leads.
         retry_files = ns3["identify_files_to_fix"](
-            tmp, "self-update git lock error", error_context=critique)
+            tmp, "self-update git lock error", error_context=critique, retarget=True)
+        # (b) non-review failure (retarget=False, the default) → do NOT re-target:
+        # the target file was correct, so cited is suppressed and the LLM's same
+        # guess is kept (no relocation to the reviewer-named file).
+        nonreview = ns3["identify_files_to_fix"](
+            tmp, "self-update git lock error",
+            error_context="AI generated invalid JSON format")
+        # (c) bare-name phrasing names the decoy FIRST; excluding the file the
+        # previous attempt modified (avoid_paths) still makes the correct file lead.
+        bare = ("Reviewer rejected the fix: install_all.sh is not where the bug is; "
+                "edit self_update.py instead.")
+        retarget_avoided = ns3["identify_files_to_fix"](
+            tmp, "self-update git lock error", error_context=bare,
+            retarget=True, avoid_paths=["install_all.sh"])
 
-    ok &= _check("identify_files_to_fix: reviewer-cited file LEADS on a retry (re-targeting)",
+    ok &= _check("identify_files_to_fix: reviewer-cited file LEADS on a review-rejection retry",
                  bool(retry_files) and retry_files[0] == real)
+    ok &= _check("identify_files_to_fix: non-review failure does NOT re-target (keeps target file)",
+                 bool(nonreview) and nonreview[0] == "install_all.sh" and real not in nonreview[:1])
+    ok &= _check("identify_files_to_fix: avoid_paths keeps a rejected decoy from leading",
+                 bool(retarget_avoided) and retarget_avoided[0] == real)
     ok &= _check("identify_files_to_fix: no error_context anchors nothing (unchanged behavior)",
                  ns3["_extract_cited_paths"](None, [real]) == [])
+    ok &= _check("_extract_cited_paths: avoid= excludes a previously-modified decoy",
+                 "install_all.sh" not in ns3["_extract_cited_paths"](
+                     critique, [real, "install_all.sh"], avoid=["install_all.sh"]))
 
     print()
     if ok:
