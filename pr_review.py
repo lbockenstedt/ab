@@ -1389,7 +1389,20 @@ def fix_one_pr(repo_full_name, number, config=None):
 
         rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}
         panel_critique = (rec.get("panel_critique") or "").strip()
-        if not findings and not panel_critique:
+
+        # Self-improvement: also read the pre-review AB actually POSTED on this PR
+        # and fold every below-target panel's dissent into the fix prompt. This
+        # survives a restart (where in-memory `state` lost panel_critique) and
+        # targets exactly the panels that lowered the score. See pr_review_score.
+        score_feedback = ""
+        try:
+            import pr_review_score
+            _report, _body = pr_review_score.read_pr_review(pr)
+            score_feedback = pr_review_score.dissent_feedback(_report, _body).strip()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("fix_one_pr: pre-review score read skipped: %s", e)
+
+        if not findings and not panel_critique and not score_feedback:
             return False, "No findings to fix — this PR has a clean pre-review."
 
         lines = ["PR #%s: %s" % (pr.number, pr.title or "")]
@@ -1402,6 +1415,8 @@ def fix_one_pr(repo_full_name, number, config=None):
                     (f.get("level") or "advisory").upper(), f.get("title") or "", f.get("detail") or ""))
         if panel_critique:
             lines.append("\nSkeptical reviewer critique (from the last panel pass):\n" + panel_critique)
+        if score_feedback:
+            lines.append("\n" + score_feedback)
         fix_body = "\n".join(lines)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
