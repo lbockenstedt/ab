@@ -1587,8 +1587,35 @@ def poller_worker():
         time.sleep(interval)
 
 
+def promote_scheduler_worker():
+    """Open promotion PRs on a fixed cadence (dev->qa and, if enabled, qa->main).
 
-
+    Off by default. When ``promote_schedule_enabled`` is set, this wakes every
+    ``promote_schedule_check_interval_min`` minutes and asks promote_ops which
+    routes are due (per their configured interval-in-hours); each due route is
+    dispatched exactly like the WebUI promotion buttons — it OPENS a PR into the
+    next branch and never merges. AppBuilder's own pre-review then runs on that
+    PR, which is the "run the changes through AB" step. See promote_ops for the
+    decision logic and the shared dispatch."""
+    from datetime import datetime, timezone
+    while True:
+        try:
+            cfg = load_config()
+        except Exception as e:  # noqa: BLE001 — a bad config read must not kill the loop
+            logger.error("promote scheduler: could not load config: %s", e)
+            time.sleep(1800)
+            continue
+        interval_min = max(1, int(cfg.get("promote_schedule_check_interval_min", 30) or 30))
+        if cfg.get("promote_schedule_enabled"):
+            try:
+                from promote_ops import run_scheduled_promotions
+                summary = run_scheduled_promotions(cfg, now=datetime.now(timezone.utc))
+                if summary.get("dispatched"):
+                    logger.warning("promote scheduler: opened %d promotion PR dispatch(es) this cycle",
+                                   summary["dispatched"])
+            except Exception as e:  # noqa: BLE001 — never let a cycle crash the worker
+                logger.error("promote scheduler: cycle failed: %s", e)
+        time.sleep(interval_min * 60)
 
 
 def _model_fetch_reason(e):

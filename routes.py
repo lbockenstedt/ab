@@ -725,33 +725,10 @@ async def promote_branch(request: Request):
         targets = [repo_name]
 
     def _do_dispatch(repo_name):
-        repo = Github(token).get_repo(repo_name)
-        wf = repo.get_workflow("promote.yml")
-        # workflow_dispatch always runs the workflow file as it exists on the
-        # ref it is dispatched from; the promotion logic lives on the default
-        # branch, which is also what promote.yml's concurrency note assumes.
-        ref = repo.default_branch
-        # Send `target` ONLY for the override. promote.yml in the sibling repos
-        # still has just the `source` input, and GitHub rejects a dispatch that
-        # carries an input the workflow does not declare -- so always sending
-        # `target` would break the ordinary dev->qa / qa->main buttons on every
-        # repo except this one. Omitting it reproduces the historical call
-        # exactly, and those repos keep working; dev->main is the only route
-        # that genuinely requires the newer workflow.
-        inputs = {"source": source}
-        if is_override:
-            inputs["target"] = target
-        ok = wf.create_dispatch(ref, inputs)
-        # PyGithub returns False rather than raising when GitHub rejects the
-        # dispatch. Treat that as a failure instead of reporting a false
-        # success -- for the override the likeliest cause is a promote.yml on
-        # that repo that predates the `target` input.
-        if ok is False:
-            extra = (" This repo's promote.yml may predate the 'target' input "
-                     "that the dev -> main override requires.") if is_override else ""
-            raise RuntimeError(
-                f"GitHub rejected the workflow dispatch for {repo_name} (ref '{ref}').{extra}")
-        return f"https://github.com/{repo_name}/actions/workflows/promote.yml"
+        # Shared with the scheduled-promotion path (promote_ops) so the manual
+        # and scheduled dispatches are one implementation, not two that drift.
+        from promote_ops import dispatch_promote_workflow
+        return dispatch_promote_workflow(token, repo_name, source, target, is_override)
 
     async def _dispatch(name):
         # PyGithub is synchronous — see pr_review_approve's note; offload so a
@@ -2684,6 +2661,14 @@ async def save_settings(request: Request):
         "HUB_WS_URL": lambda v: v.strip() if v else "",
         "HUB_AGENT_ID": lambda v: v.strip() if v else "ab",
         "POST_UPDATE_COOLDOWN_MINUTES": lambda v: max(0, int(v)) if str(v).isdigit() else 10,
+        # Scheduled promotion cadence (promote_ops / promote_scheduler_worker).
+        # Hours between auto-opening a promotion PR for each hop; 0 = that hop is
+        # off. qa->main defaults to 0 so production is never promoted on a timer
+        # unless explicitly turned on.
+        "promote_schedule_dev_to_qa_hours": lambda v: max(0, int(v)) if str(v).strip().lstrip("-").isdigit() else 24,
+        "promote_schedule_qa_to_main_hours": lambda v: max(0, int(v)) if str(v).strip().lstrip("-").isdigit() else 0,
+        "promote_schedule_check_interval_min": lambda v: max(1, int(v)) if str(v).strip().isdigit() else 30,
+        "promote_schedule_repo": lambda v: (v.strip() if v and v.strip() else "__all__"),
     }
 
 
@@ -2708,6 +2693,11 @@ async def save_settings(request: Request):
             config_data["GITHUB_TOKEN"] = _submitted_token
 
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
+    # Scheduled-promotion master switch (default OFF). When on, the
+    # promote_scheduler_worker opens dev->qa (and, if its cadence > 0, qa->main)
+    # promotion PRs on the configured interval. It only OPENS PRs — merging still
+    # goes through every existing gate.
+    config_data["promote_schedule_enabled"] = data.get("promote_schedule_enabled") == "on"
     # Unchecked checkboxes are simply absent from the form, so an explicit
     # comparison is what distinguishes "off" from "not submitted".
     config_data["delete_merged_branches"] = data.get("delete_merged_branches") == "on"
