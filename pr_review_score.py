@@ -125,17 +125,29 @@ def parse_review(body):
             })
         panels.append({
             "panel": title,
+            # "available" is the distinct state a missing Recommendation line
+            # signals: pr_review renders panels with NO recommendation/confidence
+            # for the "Panel unavailable this pass" / all-reviewers-failed case.
+            # That is NOT the same as "scored 0" nor "approved" — every consumer
+            # below keys off this flag so the two never conflate (a panel that did
+            # not run is neither a passing panel nor a hard-zero failure).
+            "available": bool(reco),
             "verdict": (reco.group("verdict") if reco else None),
             "confidence": (int(reco.group("pct")) if reco else None),
             "reviewers": reviewers,
             "dissenting": [r for r in reviewers if r["verdict"] != "Approve"],
         })
 
-    scored = [p["confidence"] for p in panels if p["confidence"] is not None]
+    scored = [p["confidence"] for p in panels if p["available"]]
     return {
         "head": head,
         "panels": panels,
+        # composite is over panels that actually ran; a panel that did not run
+        # neither lowers nor inflates it. `complete` is the separate signal that
+        # every panel ran, so a consumer can distinguish "all clear" from "we do
+        # not have the full skeptical picture this pass".
         "composite": (min(scored) if scored else None),
+        "complete": bool(panels) and all(p["available"] for p in panels),
         "any_dissent": any(p["dissenting"] for p in panels),
     }
 
@@ -167,13 +179,14 @@ def read_pr_review(pr):
 
     Returns (report, body) where report is the parse_review() dict and body is
     the raw comment markdown (needed by dissent_feedback for the critique text),
-    or (None, None) when AB has not posted a pre-review on this PR yet.
+    or (None, None) ONLY when AB has genuinely not posted a pre-review yet.
+
+    A failure to LIST comments (network/API) is a different state from "no review
+    exists" and must not be collapsed with it — it propagates as an exception so
+    the caller can tell "nothing to act on" apart from "could not read". The sole
+    internal caller (pr_review.fix_one_pr) already wraps this in try/except.
     """
-    try:
-        comments = list(pr.get_issue_comments())
-    except Exception as e:  # noqa: BLE001
-        logger.debug("read_pr_review: could not list comments: %s", e)
-        return None, None
+    comments = list(pr.get_issue_comments())
     body = _latest_review_comment(comments)
     if not body:
         return None, None
@@ -183,16 +196,21 @@ def read_pr_review(pr):
 def dissent_feedback(report, body, min_pct=90):
     """Turn a parsed review into actionable retry guidance for the fix engine.
 
-    Emits one bullet per panel that fell below `min_pct` OR carried a dissenting
-    reviewer, quoting that reviewer's concern. This is what closes AppBuilder's
-    self-improvement loop: fed back into the next fix attempt's prompt (see
-    pr_review.fix_one_pr), it points the builder at exactly what lowered the
+    Emits one bullet per AVAILABLE panel that fell below `min_pct` OR carried a
+    dissenting reviewer, quoting that reviewer's concern. A panel that did not run
+    (available False) is skipped — it is not a code defect the builder can fix, so
+    it never becomes retry guidance (consistent with main()'s gate, which treats
+    the same unavailable panel as "incomplete", not "failed"). This is what closes
+    AppBuilder's self-improvement loop: fed back into the next fix attempt's prompt
+    (see pr_review.fix_one_pr), it points the builder at exactly what lowered the
     score. Returns "" when every panel is at/above target with no dissent.
     """
     if not report:
         return ""
     lines = []
     for p in report.get("panels", []):
+        if not p.get("available"):
+            continue
         conf = p.get("confidence")
         below = conf is not None and conf < min_pct
         if not below and not p.get("dissenting"):
@@ -221,7 +239,9 @@ def render_human(report, body, min_pct):
     for p in report["panels"]:
         conf = f"{p['confidence']}%" if p["confidence"] is not None else "n/a"
         flag = ""
-        if p["confidence"] is not None and p["confidence"] < min_pct:
+        if not p.get("available"):
+            flag = "  ⚑ panel did not run this pass"
+        elif p["confidence"] is not None and p["confidence"] < min_pct:
             flag = "  ⬇ below threshold"
         elif p["dissenting"]:
             flag = "  ⚠ dissent"
@@ -290,13 +310,22 @@ def main(argv=None):
                           "current_head": head_oid, "stale": stale, "min": args.min}, indent=2))
     else:
         print(render_human(report, body, args.min))
+        if not report.get("complete"):
+            print("\n⚑ score INCOMPLETE — one or more panels did not run this pass; "
+                  "the full skeptical picture is unavailable (re-run to get all panels).")
         if stale:
             print(f"\n⚠ review is for {report['head'][:12]}, PR head is now "
                   f"{(head_oid or '')[:12]} — push landed, re-review pending.")
 
+    # Pass requires every panel that RAN to be at/above target with no dissent —
+    # AND every panel to have run (complete). A panel that did not run is neither
+    # a pass nor a hard-zero fail: it is "incomplete", which is not a green gate,
+    # so it also returns non-zero, but distinctly (the message above says why).
     comp = report["composite"]
-    passed = (comp is not None and comp >= args.min
-              and all((p["confidence"] or 0) >= args.min for p in report["panels"])
+    scored_panels = [p for p in report["panels"] if p.get("available")]
+    passed = (report.get("complete")
+              and comp is not None and comp >= args.min
+              and all((p["confidence"] or 0) >= args.min for p in scored_panels)
               and not report["any_dissent"])
     return 0 if passed else 1
 

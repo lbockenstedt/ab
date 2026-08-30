@@ -106,6 +106,34 @@ def main():
     ok &= _check("dissent_feedback: empty when every panel is at/above target",
                  prs.dissent_feedback(clean_report, clean, min_pct=90) == "")
 
+    # A panel that DID NOT RUN this pass (no Recommendation line — pr_review's
+    # "Panel unavailable this pass" state) is a DISTINCT state: neither a passing
+    # panel nor a hard-zero fail. Both consumers must agree on it.
+    unavailable = """<!-- ab-pr-review -->
+<!-- head: abc1234 -->
+### 🧠 Skeptical review (panel)
+
+🟢 **Recommendation: APPROVE** · panel confidence **96%**
+
+**Reviewer (copilot)** — 🟢 Approve · confidence 96%
+
+Looks good.
+
+### 🔀 State-logic / control-flow review (panel)
+
+_Panel unavailable this pass (all reviewers failed)._
+"""
+    ur = prs.parse_review(unavailable)
+    ok &= _check("parse: unavailable panel flagged available=False, confidence None",
+                 ur["panels"][1]["available"] is False and ur["panels"][1]["confidence"] is None)
+    ok &= _check("parse: available panel flagged available=True",
+                 ur["panels"][0]["available"] is True)
+    ok &= _check("parse: complete=False when any panel did not run", ur["complete"] is False)
+    ok &= _check("parse: composite ignores the unavailable panel (=96, not 0/None)",
+                 ur["composite"] == 96)
+    ok &= _check("dissent_feedback: an unavailable panel is NOT treated as a below-target concern",
+                 prs.dissent_feedback(ur, unavailable, min_pct=90) == "")
+
     # Programmatic reader over a PyGithub-shaped PR (latest marker comment wins).
     pr = _FakePR([_FakeComment("unrelated"), _FakeComment(SAMPLE)])
     r2, b2 = prs.read_pr_review(pr)
@@ -114,6 +142,19 @@ def main():
     none_pr = _FakePR([_FakeComment("no review here")])
     ok &= _check("read_pr_review: (None, None) when AB has not posted a review",
                  prs.read_pr_review(none_pr) == (None, None))
+
+    # "could not read comments" must NOT collapse into "no review exists": a
+    # listing failure propagates, distinct from the (None, None) not-posted state.
+    class _BoomPR:
+        def get_issue_comments(self):
+            raise RuntimeError("API down")
+    raised = False
+    try:
+        prs.read_pr_review(_BoomPR())
+    except RuntimeError:
+        raised = True
+    ok &= _check("read_pr_review: a listing error propagates (not collapsed with not-posted)",
+                 raised)
 
     print()
     if ok:
