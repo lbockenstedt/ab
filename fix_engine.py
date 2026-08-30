@@ -875,7 +875,67 @@ def _extract_error_symbols(issue_body):
     return out
 
 
-def identify_files_to_fix(repo_path, issue_body):
+def _extract_cited_paths(feedback, all_files):
+    """On a RETRY, pull the file paths a reviewer explicitly named out of the
+    previous attempt's feedback and map them to REAL repo files.
+
+    A skeptical reviewer that rejects a fix as "wrong file" almost always names
+    the correct location (e.g. "the real path is core/src/messaging/self_update.py:733"
+    or "target `self_update.py`"). That is the single strongest signal available on
+    a retry — stronger than re-deriving from the (unchanged) issue body, which is
+    exactly what produced the rejected guess in the first place. Without this the
+    next attempt re-identifies the identical wrong file every time and burns every
+    attempt on the same decoy (see AppBuilder's own lm#452 failure).
+
+    Matches full repo-relative paths (…/foo/bar.py, with an optional ':<line>'
+    suffix stripped) and, for a UNIQUE basename, bare filenames in prose/backticks
+    ("target `self_update.py`"). Returns an ordered, de-duplicated list of real
+    repo-relative paths; [] when nothing matches or feedback is empty."""
+    import re
+    if not feedback:
+        return []
+    text = str(feedback)
+    rel_set = set(all_files)
+    by_base = {}
+    for f in all_files:
+        by_base.setdefault(os.path.basename(f), []).append(f)
+
+    ordered = []
+    def _add(rel):
+        if rel and rel not in ordered:
+            ordered.append(rel)
+
+    # Full path-shaped tokens ('/'-containing, ending in a file extension); the
+    # ':<line>[:<col>]' a reviewer appends ("self_update.py:733") is not part of
+    # the regex-captured extension, so it is naturally excluded.
+    for m in re.finditer(r"([A-Za-z0-9_][\w./-]*/[\w./-]+\.[A-Za-z0-9]+)", text):
+        cand = m.group(1)
+        if cand in rel_set:
+            _add(cand)
+        else:
+            # Path cited relative to a subdir (or with an extra prefix) still
+            # resolves via a UNIQUE basename, so a full "core/src/messaging/
+            # self_update.py" maps to wherever the repo actually stores it.
+            hits = by_base.get(os.path.basename(cand), [])
+            if len(hits) == 1:
+                _add(hits[0])
+
+    # Bare filenames in prose or backticks — only when the basename is UNIQUE in
+    # the repo, so we never guess between two same-named files.
+    for m in re.finditer(r"[`'\"]?([A-Za-z0-9_][\w.-]*\.[A-Za-z0-9]+)[`'\"]?", text):
+        hits = by_base.get(os.path.basename(m.group(1)), [])
+        if len(hits) == 1:
+            _add(hits[0])
+    return ordered
+
+
+def identify_files_to_fix(repo_path, issue_body, error_context=None):
+    """error_context: the previous attempt's failure feedback (e.g. a reviewer's
+    "you edited the wrong file — the real path is X"). On a retry this both
+    ANCHORS the candidate list on any real repo file the reviewer cited (put
+    first, so the builder re-targets instead of re-editing the rejected decoy)
+    and is handed to the LLM guesser so even an uncited retry re-locates with the
+    reviewer's reasoning rather than re-deriving the same wrong guess."""
     logger.info("Identifying relevant files for fix...")
     all_files = []
     for root, _, files in os.walk(repo_path):
@@ -885,6 +945,21 @@ def identify_files_to_fix(repo_path, issue_body):
             if any(x in rel_path for x in [".git", "node_modules", "__pycache__", "venv", ".env"]):
                 continue
             all_files.append(rel_path)
+
+    # Reviewer-cited files lead on a retry (see _extract_cited_paths). Merged in
+    # front of every return path below via _lead(), de-duped, order preserved.
+    cited = _extract_cited_paths(error_context, all_files)
+    if cited:
+        logger.info("File identification: previous-attempt feedback cited existing file(s) "
+                    "→ re-targeting the fix, prioritising %s", ", ".join(cited[:5]))
+
+    def _lead(*groups):
+        out = []
+        for g in groups:
+            for f in (g or []):
+                if isinstance(f, str) and f not in out:
+                    out.append(f)
+        return out
 
     # Deterministic anchor: grep the repo for the exact symbols named in the issue
     # (e.g. "Can't find variable: ensureLDAPTennants") and rank those files FIRST —
@@ -908,12 +983,27 @@ def identify_files_to_fix(repo_path, issue_body):
         focused = symbol_hits[:3]
         logger.info("File identification: error symbol(s) %s → focusing the fix on %s",
                     error_symbols[:3], ", ".join(focused))
-        return focused
+        # cited leads even here: on a retry the error-symbol focus is the SAME
+        # guess the reviewer just rejected, so the reviewer-named file must win.
+        return _lead(cited, focused)
 
     file_list_str = "\n".join(all_files)
+    retry_hint = ""
+    if error_context:
+        # An uncited retry still benefits from the reviewer's reasoning: tell the
+        # guesser the last attempt was rejected and to locate the CORRECT file.
+        # Cap it — this is the SMALL file-id prompt, and a multi-reviewer critique
+        # can run to thousands of chars; the precise signal is already captured by
+        # _extract_cited_paths above, so a bounded excerpt is enough here.
+        retry_hint = (
+            "\nA previous fix attempt was REJECTED. Reviewer feedback follows — use it to "
+            "locate the CORRECT file to change; the last attempt very likely edited the "
+            f"WRONG file:\n{str(error_context)[:2000]}\n"
+        )
     prompt = (
         f"Issue Description: {issue_body}\n\n"
-        f"Repository File List:\n{file_list_str}\n\n"
+        f"Repository File List:\n{file_list_str}\n"
+        f"{retry_hint}\n"
         "Identify which files are most likely relevant to fixing this issue. "
         "Return ONLY a JSON array of file paths: [\"path/to/file1\", \"path/to/file2\"]"
     )
@@ -931,11 +1021,12 @@ def identify_files_to_fix(repo_path, issue_body):
         else:
             logger.error(f"Error identifying files: {e}")
         # A grep hit alone is still a usable answer even if the LLM leg failed.
-        return grep_hits
+        return _lead(cited, grep_hits)
 
-    # Merge: grep hits first (literal symbol location beats a guess), then any
-    # LLM-suggested files not already covered. De-duped, order preserved.
-    merged = list(grep_hits)
+    # Merge: reviewer-cited files first (retry re-targeting), then grep hits
+    # (literal symbol location beats a guess), then any LLM-suggested files not
+    # already covered. De-duped, order preserved.
+    merged = _lead(cited, grep_hits)
     for f in (llm_files or []):
         if isinstance(f, str) and f not in merged:
             merged.append(f)
@@ -1371,6 +1462,7 @@ def _ensure_review_checkout(repo_path, repo, head_sha, config):
 
 
 _REVIEW_PANEL_MAX = 4  # bounded like the largest configured pool this replaces (4 code slots)
+_REVIEW_PANEL_MIN = 2  # a lone reviewer is a single opinion; get a second whenever one exists
 
 
 def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers=_REVIEW_PANEL_MAX):
@@ -1381,6 +1473,13 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     excludes every prior pick (an accumulating exclude_models set), so the
     panel is naturally made of distinct models rather than requiring an
     operator to have configured a dedicated review pool.
+
+    Strong models (large-capability floor) are chosen first. If fewer than
+    _REVIEW_PANEL_MIN of them exist, the remaining slots are backfilled with
+    distinct models at a relaxed floor (medium, then any) so the panel still
+    delivers MULTIPLE opinions whenever more than one model is configured —
+    a lone reviewer's verdict would otherwise gate the fix unchecked. The
+    builder and already-picked models are never re-added.
 
     builder_key: the builder's already-resolved ModelKey (e.g. from
     apply_ai_fix's used_model_out=), excluded up front so the builder never
@@ -1430,6 +1529,31 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
             break
         panel.append(matched)
         excluded.add(sel.key)
+
+    # Multiple opinions whenever possible: a single reviewer is one opinion, and
+    # the whole point of the panel is cross-checking — a lone strong model gives
+    # no second opinion and its verdict alone gates the fix. When fewer than
+    # _REVIEW_PANEL_MIN strong models exist but OTHER distinct (non-builder,
+    # not-yet-picked) models are configured, backfill the remaining slots at a
+    # relaxed capability floor (medium, then any) so at least a second reviewer
+    # weighs in. Strong models are always chosen FIRST above; this only ADDS
+    # weaker distinct reviewers to reach a second opinion, never displaces a
+    # strong one, and never re-adds the builder or a model already on the panel.
+    for fallback_complexity in ("medium", "small"):
+        while len(panel) < _REVIEW_PANEL_MIN:
+            reqs = LlmRequirements(complexity=fallback_complexity, needs_structured_output=True,
+                                   exclude_models=tuple(excluded))
+            sel = select_model(reqs, candidates, perf)
+            if sel is None:
+                break
+            matched = next((c for c in candidates if c["key"] == sel.key), None)
+            if matched is None:
+                break
+            logger.info("review panel: backfilling a second opinion at relaxed floor "
+                        "'%s' with %s (only %d strong reviewer(s) available)",
+                        fallback_complexity, sel.key, len(panel))
+            panel.append(matched)
+            excluded.add(sel.key)
     return panel
 
 
@@ -1902,7 +2026,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
     max_files = int(config.get("FIX_MAX_FILES", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILES"])
     max_file_chars = int(config.get("FIX_MAX_FILE_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_FILE_CHARS"])
     max_ctx_chars = int(config.get("FIX_MAX_CONTEXT_CHARS", CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"]) or CHAT_CONFIG_DEFAULTS["FIX_MAX_CONTEXT_CHARS"])
-    relevant_files = list(files_override) if files_override else identify_files_to_fix(repo_path, issue_body)
+    relevant_files = list(files_override) if files_override else identify_files_to_fix(repo_path, issue_body, error_context)
     if not relevant_files:
         logger.warning(f"No specific files identified for issue. Attempting general fix.")
     # Bound the prompt: cap file count, per-file chars, and total chars so the

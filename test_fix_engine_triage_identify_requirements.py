@@ -124,7 +124,9 @@ def main():
         # The real array extractor is pulled in rather than stubbed: it is the
         # thing that replaced the old greedy `\[.*\]` match, so stubbing it here
         # would hide a regression in exactly the code this test exercises.
-        {"identify_files_to_fix", "_first_json_array_of_strings", "_json_string_spans"},
+        # _extract_cited_paths is the retry re-targeting helper (case 3 below).
+        {"identify_files_to_fix", "_first_json_array_of_strings", "_json_string_spans",
+         "_extract_cited_paths"},
         {
             "call_llm": _capturing_call_llm2,
             "_robust_json_loads": json.loads,
@@ -155,6 +157,40 @@ def main():
                  reqs2 is not None and reqs2.min_context_tokens == len(captured3["prompt"]) // 4 > 0)
     ok &= _check("identify_files_to_fix: existing JSON-array parsing still returns the LLM's file list",
                  files == ["src/a.py", "src/b.py"])
+
+    # ---- 3. identify_files_to_fix RETRY re-targeting (site #2, error_context) ----
+    # On a retry, a reviewer's "wrong file — the real path is core/.../self_update.py"
+    # feedback must LEAD the candidate list so the next attempt re-targets instead of
+    # re-editing the rejected decoy. Reproduces the AppBuilder lm#452 failure mode.
+    ns3 = _load_fix_engine_ns(
+        {"identify_files_to_fix", "_first_json_array_of_strings", "_json_string_spans",
+         "_extract_cited_paths"},
+        {
+            # LLM still "guesses" the decoy the previous attempt already edited.
+            "call_llm": lambda *a, **k: '["install_all.sh"]',
+            "_robust_json_loads": json.loads,
+            "_extract_issue_identifiers": lambda body: [],
+            "_grep_files_for_identifiers": lambda repo_path, all_files, identifiers: [],
+            "_extract_error_symbols": lambda body: [],
+            "is_llm_cooldown_error": lambda e: False,
+        },
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "core", "src", "messaging"), exist_ok=True)
+        real = os.path.join("core", "src", "messaging", "self_update.py")
+        with open(os.path.join(tmp, real), "w") as f:
+            f.write("pass\n")
+        with open(os.path.join(tmp, "install_all.sh"), "w") as f:
+            f.write("echo hi\n")
+        critique = ("Reviewer rejected the fix: the patch edits install_all.sh but the real "
+                    "path is core/src/messaging/self_update.py:733 — target self_update.py.")
+        retry_files = ns3["identify_files_to_fix"](
+            tmp, "self-update git lock error", error_context=critique)
+
+    ok &= _check("identify_files_to_fix: reviewer-cited file LEADS on a retry (re-targeting)",
+                 bool(retry_files) and retry_files[0] == real)
+    ok &= _check("identify_files_to_fix: no error_context anchors nothing (unchanged behavior)",
+                 ns3["_extract_cited_paths"](None, [real]) == [])
 
     print()
     if ok:
