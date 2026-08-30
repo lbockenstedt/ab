@@ -1242,6 +1242,10 @@ def module_repo_map_suggest():
     except Exception as e:  # noqa: BLE001
         return {"error": f"module type map unavailable: {e}", "suggested": {}}
     cfg = load_config()
+    # Imported here rather than at module scope to match _promotable_repos, the
+    # only other caller. Without it this name resolves to a module global that
+    # does not exist, so every request to this endpoint raised NameError.
+    from github_ops import get_monitored_repos
     monitored = [clean_repo_name(r) for r in (get_monitored_repos(cfg) or []) if r]
     by_base = {}
     for r in monitored:
@@ -2291,7 +2295,23 @@ async def settings_page(request: Request):
     log_module_options = sorted(_mrm.keys()) if isinstance(_mrm, dict) else []
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
-    settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN") or settings.get("GITHUB_TOKEN", "")
+    # NEVER put the PAT itself in the render context. type="password" only masks
+    # the field on screen — the value still ships in the HTML, so it was
+    # readable via View Source, the DOM inspector, and anything that caches the
+    # page. Blanking it HERE is only the first layer and is not sufficient on
+    # its own: the context below merges **config AFTER **settings, so
+    # config["GITHUB_TOKEN"] would reinstate the raw value. The authoritative
+    # blanking lives in that merged dict, next to llm_proxy_api_key.
+    settings["GITHUB_TOKEN"] = ""
+    # Three distinct states, not two: stored in config.json, supplied only via
+    # the environment, or absent. Every consumer resolves config-or-env
+    # (pr_actions, fix_engine, llm_proxy, ...), so an env-only install has a
+    # working token with nothing in config — the form must not claim it is
+    # "stored", and must not imply a Clear here would revoke it.
+    settings["GITHUB_TOKEN_configured"] = bool(
+        config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", ""))
+    settings["GITHUB_TOKEN_from_env"] = bool(
+        not config.get("GITHUB_TOKEN") and os.getenv("GITHUB_TOKEN", ""))
     settings["LLM_TIMEOUT"] = config.get("LLM_TIMEOUT") or settings.get("LLM_TIMEOUT", "900")
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
@@ -2453,7 +2473,15 @@ async def settings_page(request: Request):
                      # proxy key must never be embedded in the served HTML, so
                      # the field renders from a presence flag only.
                      "llm_proxy_api_key": "",
-                     "llm_proxy_api_key_configured": bool(config.get("llm_proxy_api_key"))},
+                     "llm_proxy_api_key_configured": bool(config.get("llm_proxy_api_key")),
+                     # SECURITY: **config is merged AFTER **settings above, so
+                     # config["GITHUB_TOKEN"] silently reinstates the raw PAT
+                     # that settings_page blanked. This merged dict is what the
+                     # template actually sees, so it is the only place the
+                     # blanking is authoritative.
+                     "GITHUB_TOKEN": "",
+                     "GITHUB_TOKEN_configured": settings["GITHUB_TOKEN_configured"],
+                     "GITHUB_TOKEN_from_env": settings["GITHUB_TOKEN_from_env"]},
         "registry_rules_json": _registry_rules_json,
         "registry_preview": _registry_preview,
         "registry_unclassified": _registry_unclassified,
@@ -2588,7 +2616,9 @@ async def save_settings(request: Request):
         # them directly; the form supplies a comma-separated string.
         "protected_branches": parse_branch_names,
         "auto_branch_prefixes": parse_branch_names,
-        "GITHUB_TOKEN": lambda v: v,
+        # GITHUB_TOKEN is handled after this loop: the form no longer renders
+        # the saved PAT, so an empty field means "unchanged", not "clear it".
+        # Leaving it here would let a plain Save wipe the token.
         "LLM_PROVIDER_1": lambda v: v,
         "LLM_API_KEY_1": lambda v: v,
         "LLM_MODEL_1": lambda v: v,
@@ -2664,6 +2694,18 @@ async def save_settings(request: Request):
                 config_data[key] = []
             else:
                 config_data[key] = transform(val)
+
+    # Secret field, write-only in the UI. A blank submit means "the operator did
+    # not retype it" and must KEEP the stored PAT — otherwise saving any
+    # unrelated setting would silently break every GitHub call. Revoking is
+    # explicit, via the same __CLEAR__ sentinel llm_proxy_api_key and the OIDC
+    # client secret use, so "unchanged" and "clear" remain distinct states.
+    if "GITHUB_TOKEN" in data:
+        _submitted_token = str(data.get("GITHUB_TOKEN") or "").strip()
+        if _submitted_token == "__CLEAR__":
+            config_data["GITHUB_TOKEN"] = ""
+        elif _submitted_token:
+            config_data["GITHUB_TOKEN"] = _submitted_token
 
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     # Unchecked checkboxes are simply absent from the form, so an explicit
