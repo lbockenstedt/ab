@@ -70,7 +70,7 @@ from github_ops import get_monitored_repos
 from app_state import update_task_state, record_pr_review, update_pr_review, mark_pr_approved, state
 import feature_boundary
 import feature_allowlist
-from branch_policy import AUTO_BRANCH_PREFIXES_BY_KIND
+from branch_policy import AUTO_BRANCH_PREFIXES_BY_KIND, is_release_locked
 from pr_actions import approve_pr, merge_pr
 from secrets_scan import check_secrets
 from check_tooltips import find_missing_tooltips_in_files
@@ -1055,6 +1055,17 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         return False, (f"target branch {_base_ref!r} is a release branch — never eligible for "
                        "auto-merge at any confidence, even if listed in "
                        "feature_automerge_target_branches (merges into it are owner-only)")
+
+    # Manual release lock (Settings → "Release lock"). While a branch is locked,
+    # AppBuilder keeps REVIEWING PRs but must not auto-merge into it: changes
+    # stack up as open PRs so a human can finish testing/validation, and they
+    # are processed on the next scan once the lock is released. Checked before
+    # the target-branch allowlist so a locked branch holds even when it is
+    # otherwise an eligible auto-merge target. Only auto-merge is held; humans
+    # can still merge manually.
+    if is_release_locked(_base_ref, config):
+        return False, (f"target branch {_base_ref!r} is under a release lock — holding "
+                       "(reviewed but not merged) until the lock is released")
 
     if _base_ref not in (config.get("feature_automerge_target_branches") or []):
         return False, ("target branch %r is not in feature_automerge_target_branches "

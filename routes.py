@@ -738,6 +738,11 @@ async def promote_branch(request: Request):
         # repo except this one. Omitting it reproduces the historical call
         # exactly, and those repos keep working; dev->main is the only route
         # that genuinely requires the newer workflow.
+        #
+        # NOTE: promote_ops.dispatch_promote_workflow is the byte-for-byte twin
+        # of this block for the scheduled-promotion path (it cannot reuse this
+        # nested closure). Keep the two in lockstep -- both are covered by tests
+        # (test_promote_routes.py here, test_promote_ops.py there).
         inputs = {"source": source}
         if is_override:
             inputs["target"] = target
@@ -2616,6 +2621,10 @@ async def save_settings(request: Request):
         # them directly; the form supplies a comma-separated string.
         "protected_branches": parse_branch_names,
         "auto_branch_prefixes": parse_branch_names,
+        # Release lock: branches AppBuilder must NOT auto-merge into until
+        # unlocked (review still runs; PRs stack up). Stored as a list so
+        # branch_policy.is_release_locked can consume it directly.
+        "release_locked_branches": parse_branch_names,
         # GITHUB_TOKEN is handled after this loop: the form no longer renders
         # the saved PAT, so an empty field means "unchanged", not "clear it".
         # Leaving it here would let a plain Save wipe the token.
@@ -2684,6 +2693,14 @@ async def save_settings(request: Request):
         "HUB_WS_URL": lambda v: v.strip() if v else "",
         "HUB_AGENT_ID": lambda v: v.strip() if v else "ab",
         "POST_UPDATE_COOLDOWN_MINUTES": lambda v: max(0, int(v)) if str(v).isdigit() else 10,
+        # Scheduled promotion cadence (promote_ops / promote_scheduler_worker).
+        # Hours between auto-opening a promotion PR for each hop; 0 = that hop is
+        # off. qa->main defaults to 0 so production is never promoted on a timer
+        # unless explicitly turned on.
+        "promote_schedule_dev_to_qa_hours": lambda v: max(0, int(v)) if str(v).strip().lstrip("-").isdigit() else 24,
+        "promote_schedule_qa_to_main_hours": lambda v: max(0, int(v)) if str(v).strip().lstrip("-").isdigit() else 0,
+        "promote_schedule_check_interval_min": lambda v: max(1, int(v)) if str(v).strip().isdigit() else 30,
+        "promote_schedule_repo": lambda v: (v.strip() if v and v.strip() else "__all__"),
     }
 
 
@@ -2708,6 +2725,11 @@ async def save_settings(request: Request):
             config_data["GITHUB_TOKEN"] = _submitted_token
 
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
+    # Scheduled-promotion master switch (default OFF). When on, the
+    # promote_scheduler_worker opens dev->qa (and, if its cadence > 0, qa->main)
+    # promotion PRs on the configured interval. It only OPENS PRs — merging still
+    # goes through every existing gate.
+    config_data["promote_schedule_enabled"] = data.get("promote_schedule_enabled") == "on"
     # Unchecked checkboxes are simply absent from the form, so an explicit
     # comparison is what distinguishes "off" from "not submitted".
     config_data["delete_merged_branches"] = data.get("delete_merged_branches") == "on"

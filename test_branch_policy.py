@@ -16,9 +16,11 @@ from branch_policy import (
     auto_branch_prefixes,
     is_auto_created,
     is_protected,
+    is_release_locked,
     may_delete,
     may_force_push,
     protected_branches,
+    release_locked_branches,
 )
 
 
@@ -239,3 +241,41 @@ def test_auto_branch_name_prefixes_match_the_recognition_table():
         name = auto_branch_name(kind, description="x")
         assert name.startswith(prefix)
         assert is_auto_created(name)
+
+
+# ── release lock: hold auto-merge into a branch without blocking review ──────
+
+def test_no_release_lock_by_default():
+    assert release_locked_branches({}) == set()
+    assert release_locked_branches(None) == set()
+    assert not is_release_locked("dev", {})
+    assert not is_release_locked("qa", {})
+
+
+@pytest.mark.parametrize("ref", ["dev", "qa"])
+def test_locked_branches_report_locked(ref):
+    cfg = {"release_locked_branches": ["dev", "qa"]}
+    assert is_release_locked(ref, cfg)
+    assert release_locked_branches(cfg) == {"dev", "qa"}
+
+
+def test_release_lock_is_case_insensitive_and_string_parsed():
+    # Settings supplies a comma-separated string; matching ignores case/space.
+    cfg = {"release_locked_branches": "Dev, QA"}
+    assert is_release_locked("dev", cfg)
+    assert is_release_locked("qa", cfg)
+    assert not is_release_locked("main", cfg)
+
+
+def test_unlisted_branch_is_not_locked():
+    cfg = {"release_locked_branches": ["dev"]}
+    assert is_release_locked("dev", cfg)
+    assert not is_release_locked("qa", cfg)
+
+
+def test_release_lock_does_not_affect_delete_or_protection():
+    # The lock gates auto-merge only — it must not change cleanup/force-push
+    # policy. A locked non-auto branch is still just "not AppBuilder's".
+    cfg = {"release_locked_branches": ["feature/x"]}
+    ok, _ = may_delete("feature/x", cfg)
+    assert not ok  # unchanged: not an auto-created branch, still undeletable

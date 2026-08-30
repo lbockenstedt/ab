@@ -539,20 +539,20 @@
             <table class="w-full text-left text-sm table-fixed">
                 <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
                     <tr class="border-b border-slate-200">
-                        <th class="px-3 py-3 font-medium w-[20%]">Issue ID</th>
-                        <th class="px-3 py-3 font-medium text-right w-[30%]">Status</th>
-                        <th class="px-3 py-3 font-medium text-right w-[50%]">Actions</th>
+                        <th class="px-4 py-3 font-medium w-[30%]">Issue ID</th>
+                        <th class="px-4 py-3 font-medium w-[16%]">Status</th>
+                        <th class="px-4 py-3 font-medium w-[54%]">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-200">
                     {% for issue_id, info in state.processed.items() %}
                     <tr class="hover:bg-slate-50 transition-colors" data-status="{{ info.status }}">
-                        <td class="px-6 py-3 font-mono text-[#01A982] align-middle">{{ issue_id }}</td>
-                        <td class="px-6 py-3 text-right align-middle">
+                        <td class="px-4 py-3 font-mono text-[#01A982] align-middle truncate" title="{{ issue_id }}">{{ issue_id }}</td>
+                        <td class="px-4 py-3 align-middle">
                             <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% elif info.status == 'feature_flagged' %}text-purple-700 bg-purple-100{% elif info.status == 'feature_needs_info' %}text-sky-700 bg-sky-100{% elif info.status == 'feature_built' %}text-teal-700 bg-teal-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
-                        <td class="px-6 py-3 align-middle">
-                            <div class="flex flex-wrap gap-1.5 justify-end items-center">
+                        <td class="px-4 py-3 align-middle">
+                            <div class="flex flex-wrap gap-1.5 justify-start items-center">
                                 {% if info.status in ('feature_flagged', 'feature_needs_info') %}
                                 <!-- No Retry/Claude/Reopen here — those trigger a code fix attempt,
                                      but a boundary-flag or a clarify request has no code to fix; the
@@ -962,6 +962,11 @@
                                             <input type="text" name="auto_branch_prefixes" value="{{ (settings.auto_branch_prefixes or []) | join(', ') }}" placeholder="bug/, ai-feature/" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
                                             <p class="text-xs text-slate-500">Comma-separated prefixes. Leave blank to use the defaults.</p>
                                         </div>
+                                    </div>
+                                    <div class="space-y-1">
+                                        <label class="text-sm font-medium text-slate-600">Release lock (hold auto-merge)</label>
+                                        <input type="text" name="release_locked_branches" title="Branches AppBuilder must not auto-merge into until you remove them here — PRs are still reviewed but held" value="{{ (settings.release_locked_branches or []) | join(', ') }}" placeholder="dev, qa" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <p class="text-xs text-slate-500">Comma-separated. While a branch is listed here, AppBuilder keeps reviewing PRs but will <span class="font-medium">not auto-merge</span> into it — changes stack up as open PRs for testing/validation and are processed once you remove it. Humans can still merge manually.</p>
                                     </div>
                                 </div>
                             </div>
@@ -2285,6 +2290,39 @@
                             {% if settings.get('feature_automerge_enabled') and not (settings.get('pr_review_llm_enabled') and settings.get('pr_review_state_logic_enabled')) %}
                             <p class="text-xs text-amber-600 font-medium mt-2">⚠️ Auto-merge is on, but one or both review panels (LLM tab → Pre-review) are off — auto-merge can never clear without them, so nothing will happen until you enable both.</p>
                             {% endif %}
+                        </div>
+
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Scheduled Promotion <span class="text-slate-400 font-normal">(opens dev→qa / qa→main PRs on a cadence — never merges)</span></label>
+                            <div class="flex items-center gap-3">
+                                <input type="checkbox" name="promote_schedule_enabled" id="promote_schedule_enabled" {{ 'checked' if settings.get('promote_schedule_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="promote_schedule_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, AppBuilder opens a promotion PR (via .github/workflows/promote.yml) for each hop below on the configured interval. It only OPENS the PR; your existing review/auto-merge gates still decide whether it merges.">
+                                    Enable scheduled promotion
+                                </label>
+                            </div>
+                            <p class="text-xs text-slate-500">Each hop opens a batch PR into the next branch, which AppBuilder's pre-review then scores. Set a hop's interval to <strong>0</strong> to turn that hop off. Nothing here merges — merging still goes through the Auto-Merge gates above (and main stays owner-only).</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">dev → qa cadence (hours)</label>
+                                    <input type="number" name="promote_schedule_dev_to_qa_hours" min="0" value="{{ settings.get('promote_schedule_dev_to_qa_hours', 24) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <span class="text-xs text-slate-500">Default 24h. How often to batch dev into a qa promotion PR. 0 = off.</span>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">qa → main cadence (hours)</label>
+                                    <input type="number" name="promote_schedule_qa_to_main_hours" min="0" value="{{ settings.get('promote_schedule_qa_to_main_hours', 0) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <span class="text-xs text-slate-500">Default <strong>0 (off)</strong> — opening production PRs on a timer is opt-in. Still only opens a PR; it does not merge.</span>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Check interval (minutes)</label>
+                                    <input type="number" name="promote_schedule_check_interval_min" min="1" value="{{ settings.get('promote_schedule_check_interval_min', 30) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <span class="text-xs text-slate-500">How often the scheduler wakes to check whether a hop is due (default 30m).</span>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Repository scope</label>
+                                    <input type="text" name="promote_schedule_repo" value="{{ settings.get('promote_schedule_repo', '__all__') }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <span class="text-xs text-slate-500"><code>__all__</code> (default) = every promotable repo, exactly like the footer "All" button. Or a single <code>owner/name</code>.</span>
+                                </div>
+                            </div>
                         </div>
 
                         <div class="flex justify-end pt-6 mt-2">

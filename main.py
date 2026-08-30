@@ -644,6 +644,7 @@ if _acquire_worker_singleton():
     threading.Thread(target=restart_worker, daemon=True).start()
     threading.Thread(target=log_health_worker, daemon=True).start()
     threading.Thread(target=model_preload_worker, daemon=True).start()
+    threading.Thread(target=promote_scheduler_worker, daemon=True).start()
     # Batch worker (async cloud batch processing). Gated by batch_enabled (default
     # off). Defensive import/start so a batch issue can never crash AppBuilder startup.
     try:
