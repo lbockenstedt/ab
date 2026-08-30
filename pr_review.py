@@ -1513,10 +1513,59 @@ def scan_open_prs(gh, config):
                                        getattr(pr, "number", "?"), repo_name, e)
             except Exception as e:  # noqa: BLE001
                 logger.warning("pr_review: repo %s failed: %s", repo_name, e)
-        # Self-heal listed PRs that are no longer open (merged elsewhere or closed).
+        # Backfill the target-branch badge on older records (see below), then
+        # self-heal listed PRs that are no longer open (merged elsewhere or closed).
+        _backfill_pr_review_refs(gh)
         _reconcile_closed_prs(gh, seen_open)
     finally:
         update_task_state("PRReview", action="end")
+
+
+# Records written before base_ref/head_ref existed have neither, so the PR list
+# renders no target-branch badge for them — in a dev -> qa -> main workflow that
+# is the single most useful fact about a PR, and it was missing from the large
+# majority of rows (67 of 72 on the production host). New reviews store the refs;
+# this fills in the history so the column is uniformly populated.
+#
+# Deliberately bounded per scan cycle: a full backfill is one GET per affected
+# record, and the scan cycle also has real review work to do. The work is
+# idempotent and self-terminating — each cycle re-computes what is still missing
+# and stops costing anything once nothing is (an in-memory dict scan).
+_REFS_BACKFILL_PER_CYCLE = 25
+
+
+def _backfill_pr_review_refs(gh, limit=_REFS_BACKFILL_PER_CYCLE):
+    """Fill in base_ref/head_ref on reviewed-PR records that predate those
+    fields. Never raises out — a backfill is cosmetic and must not break a scan.
+
+    Returns the number of records updated (for tests/logging)."""
+    try:
+        reviews = dict(state.get("pr_reviews") or {})
+    except Exception:  # noqa: BLE001
+        return 0
+    pending = [(k, r) for k, r in reviews.items()
+               if r and not r.get("base_ref") and r.get("repo") and r.get("number")]
+    if not pending:
+        return 0
+    filled = 0
+    for _key, rec in pending[:max(0, int(limit or 0))]:
+        repo_name, number = rec.get("repo"), rec.get("number")
+        try:
+            pr = gh.get_repo(repo_name).get_pull(int(number))
+            base_ref = getattr(getattr(pr, "base", None), "ref", "") or ""
+            head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
+        except Exception as e:  # noqa: BLE001
+            logger.debug("pr_review backfill: %s#%s fetch failed: %s", repo_name, number, e)
+            continue
+        if not base_ref:
+            continue
+        if update_pr_review(repo_name, number,
+                            base_ref=str(base_ref)[:120], head_ref=str(head_ref)[:120]):
+            filled += 1
+    if filled:
+        logger.info("pr_review: backfilled target branch on %d record(s); %d still missing",
+                    filled, max(0, len(pending) - filled))
+    return filled
 
 
 def _reconcile_closed_prs(gh, seen_open):
