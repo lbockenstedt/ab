@@ -210,6 +210,216 @@ def _relax_json_fix_strings(raw, key_re=None, next_member_re=None,
     return ''.join(out)
 
 
+# The members of a single edit object. Used by the omitted-key repair below to
+# work out WHICH key a stray bare string was supposed to be labelled with.
+_EDIT_OBJECT_KEYS = ("file", "search", "replace")
+
+
+def _json_string_spans(text):
+    """(start, end) index of every JSON string literal in *text*, where `end`
+    is the index of the closing quote. Backslash escapes are honoured, so a
+    `\\"` inside a value does not terminate the span.
+
+    If the text ends INSIDE a string (a truncated response), the final span's
+    `end` is len(text) — i.e. past the last valid index. `_looks_truncated_json`
+    keys off exactly that, so don't ""tidy"" it to len(text) - 1."""
+    spans = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == '"':
+            start = i
+            i += 1
+            while i < n:
+                if text[i] == '\\':
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    break
+                i += 1
+            spans.append((start, i))
+            i += 1
+        else:
+            i += 1
+    return spans
+
+
+def _looks_truncated_json(text):
+    """True when *text* was cut off mid-object rather than being malformed.
+
+    Two signatures, both meaning "the model stopped early", neither meaning
+    "the model wrote bad JSON": the text ends inside an unterminated string, or
+    it ends with containers still open. Telling these apart matters because the
+    retry feedback is completely different — a truncated response needs FEWER
+    and SMALLER edits, whereas "your JSON was invalid" tells the model to
+    re-check syntax that was actually fine as far as it got, which is what made
+    lm#452 burn an attempt re-emitting the same oversized edit."""
+    if not text:
+        return False
+    spans = _json_string_spans(text)
+    if spans and spans[-1][1] >= len(text):
+        return True
+    ends = {s: e for s, e in spans}
+    depth = 0
+    i, n = 0, len(text)
+    while i < n:
+        if i in ends:
+            i = ends[i] + 1
+            continue
+        if text[i] in '{[':
+            depth += 1
+        elif text[i] in '}]':
+            depth -= 1
+        i += 1
+    return depth > 0
+
+
+def _enclosing_flat_object(text, spans, idx):
+    """(open, close) of the innermost {...} containing *idx*, but ONLY if that
+    object is flat — no nested object/array among its members. Returns None
+    otherwise. Flatness is required because the omitted-key repair reasons about
+    "which of file/search/replace is absent", which is only meaningful for a
+    single edit object, never for the envelope that holds the edits array."""
+    ends = {s: e for s, e in spans}
+    stack, best = [], None
+    i, n = 0, len(text)
+    while i < n:
+        if i in ends:
+            i = ends[i] + 1
+            continue
+        if text[i] == '{':
+            stack.append(i)
+        elif text[i] == '}':
+            if stack:
+                start = stack.pop()
+                if start < idx <= i and (best is None or start > best[0]):
+                    best = (start, i)
+        i += 1
+    if best is None:
+        return None
+    inner = best[0] + 1
+    while inner < best[1]:
+        if inner in ends:
+            inner = ends[inner] + 1
+            continue
+        if text[inner] in '{[':
+            return None
+        inner += 1
+    return best
+
+
+def _flat_object_keys(text, spans, open_idx, close_idx):
+    """The key names of a flat object — every string inside it that is followed
+    by a `:`."""
+    keys = set()
+    for start, end in spans:
+        if not (open_idx < start and end < close_idx):
+            continue
+        j = end + 1
+        while j < close_idx and text[j] in ' \t\r\n':
+            j += 1
+        if j < close_idx and text[j] == ':':
+            keys.add(text[start + 1:end])
+    return keys
+
+
+def _repair_missing_object_keys(raw, schema_keys=_EDIT_OBJECT_KEYS, max_repairs=8):
+    """Re-attach a schema key the model forgot to emit.
+
+    Confirmed live on lm#487, where an otherwise perfect response omitted the
+    `"search"` LABEL while still emitting its value:
+
+        {"file": "WebUI/index.html", "class=\\"relative z-[60] …\\">", "replace": …}
+
+    json.loads reports `Expecting ':' delimiter` because it read that bare
+    string as a key; the whole (correct) fix was then thrown away. Nothing else
+    in the ladder helps — the quotes are already escaped properly and the
+    newlines are fine, so this is a purely STRUCTURAL omission.
+
+    The repair is driven by json's own error position and refuses to guess:
+
+      * only on `Expecting ':'`, and only when the char json tripped on is a
+        `,` or `}` — proving the string was a VALUE, not a key that merely lost
+        its colon;
+      * only inside a flat object (a single edit), never the envelope;
+      * only when EXACTLY ONE schema key is absent, so the label to insert is
+        unambiguous. Two missing keys could be inserted in either order, so we
+        decline rather than risk swapping a search with a replace — which would
+        silently apply the fix BACKWARDS.
+
+    Bounded to *max_repairs* insertions so a pathological payload can't spin.
+    Returns *raw* unchanged whenever it doesn't apply; the caller only uses the
+    result if json.loads then succeeds."""
+    text = raw
+    for _ in range(max_repairs):
+        try:
+            json.loads(text)
+            return text
+        except json.JSONDecodeError as e:
+            if "':'" not in str(e):
+                return text
+            pos = e.pos
+            if pos >= len(text) or text[pos] not in (',', '}'):
+                return text
+            spans = _json_string_spans(text)
+            stray = None
+            for start, end in spans:
+                if end < pos:
+                    stray = (start, end)
+                else:
+                    break
+            if stray is None or text[stray[1] + 1:pos].strip():
+                return text
+            obj = _enclosing_flat_object(text, spans, stray[0])
+            if obj is None:
+                return text
+            present = _flat_object_keys(text, spans, obj[0], obj[1])
+            missing = [k for k in schema_keys if k not in present]
+            if len(missing) != 1:
+                return text
+            text = text[:stray[0]] + '"' + missing[0] + '": ' + text[stray[0]:]
+    return text
+
+
+def _first_json_array_of_strings(text):
+    """The first balanced `[...]` in *text* that parses AND is a list of
+    strings, or None.
+
+    Replaces a greedy `\\[.*\\]` DOTALL match, which spanned from the first `[`
+    anywhere in the response to the LAST `]` anywhere in it — so one mention of
+    a Tailwind class like `z-[60]` in the model's preamble swallowed the entire
+    reply and produced `Expecting value: line 1 column 2`. Requiring the
+    elements to be strings is what stops `z-[60]` itself from being accepted as
+    the answer (`[60]` is perfectly valid JSON, just not a file list)."""
+    spans = _json_string_spans(text)
+    ends = {s: e for s, e in spans}
+    i, n = 0, len(text)
+    while i < n:
+        if i in ends:
+            i = ends[i] + 1
+            continue
+        if text[i] == '[':
+            depth, j = 0, i
+            while j < n:
+                if j in ends:
+                    j = ends[j] + 1
+                    continue
+                if text[j] in '[{':
+                    depth += 1
+                elif text[j] in ']}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            val = json.loads(text[i:j + 1])
+                        except Exception:  # noqa: BLE001
+                            val = None
+                        if isinstance(val, list) and val and all(isinstance(x, str) for x in val):
+                            return val
+                        break
+                j += 1
+        i += 1
+    return None
+
+
 def _parse_reviewer_json(raw):
     """Parse a reviewer's {confidence, verdict, critique} object, applying the
     same escalating repairs parse_and_apply already uses for fix JSON.
@@ -292,6 +502,65 @@ def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=N
         f"Diff of those files since the fix:\n{diff or '(no line changes captured)'}\n"
         "Trace the regression to the change above and fix from there — do not re-solve "
         "the original error from scratch."
+    )
+
+
+# Terminal failure kinds worth replaying to the builder. "review_rejected" and
+# "no_edits" both mean the previous RUN produced something concrete that was
+# judged wrong — that judgement is the single most useful input a retry can have.
+_REPLAYABLE_FAILURE_KINDS = ("review_rejected", "no_edits", "qa_failed", "error")
+
+
+def _prior_failure_context(issue_info):
+    """For an issue being re-run after a terminal failure: tell the builder WHY
+    the last run failed, so a retry does not repeat it.
+
+    error_context (the attempt-to-attempt feedback loop) is reset to None at the
+    start of every run, and the stored failure_detail was written to the record
+    for the UI but never read back. So a retry began completely blind: the model
+    re-derived the same wrong fix and the reviewers re-rejected it for the same
+    reason, burning all attempts again.
+
+    Observed on lbockenstedt/lm#452 and #487 — both rejected 3/3 because the fix
+    edited the wrong file/function, with the reviewer stating exactly where the
+    bug actually lived. That critique is sitting in the record; this feeds it
+    back.
+
+    Returns "" for anything not worth replaying (no prior failure, no detail, or
+    a failure kind that says nothing about the code), so the prompt is unchanged
+    on a first run."""
+    if not isinstance(issue_info, dict):
+        return ""
+    if (issue_info.get("status") or "") != "failed":
+        return ""
+    detail = str(issue_info.get("failure_detail") or "").strip()
+    kind = str(issue_info.get("failure_kind") or "").strip()
+    if not detail or kind not in _REPLAYABLE_FAILURE_KINDS:
+        return ""
+    attempts = issue_info.get("attempts")
+    try:
+        attempts = int(attempts)
+    except (TypeError, ValueError):
+        attempts = 0
+    conf = issue_info.get("failure_confidence")
+    try:
+        conf_txt = " (reviewer confidence %.0f%%)" % (float(conf) * 100)
+    except (TypeError, ValueError):
+        conf_txt = ""
+    lead = {
+        "review_rejected": "the skeptical reviewer panel REJECTED the fix",
+        "no_edits": "the builder returned JSON containing no applicable edits",
+        "qa_failed": "the fix failed QA verification",
+        "error": "the run errored out",
+    }.get(kind, "the run failed")
+    return (
+        "\n\n--- WHY THE PREVIOUS RUN FAILED (read this before proposing a fix) ---\n"
+        f"A previous AppBuilder run on this issue used {attempts or 'several'} attempt(s) "
+        f"and ended because {lead}{conf_txt}:\n"
+        f"{detail[:1000]}\n\n"
+        "Treat the above as a verified finding about the CODE, not as style feedback. "
+        "If it says the wrong file or function was changed, locate the one it names "
+        "before editing anything. Do not re-propose the same change."
     )
 
 
@@ -655,10 +924,7 @@ def identify_files_to_fix(repo_path, issue_body):
                                min_context_tokens=len(prompt) // 4)
         res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.",
                        requirements=reqs)
-        import re
-        match = re.search(r'\[.*\]', res, re.DOTALL)
-        if match:
-            llm_files = _robust_json_loads(match.group())
+        llm_files = _first_json_array_of_strings(res or "") or []
     except Exception as e:
         if is_llm_cooldown_error(e):
             logger.warning(f"File identification deferred — LLM providers cooling down: {e}")
@@ -1885,6 +2151,15 @@ def parse_and_apply(content, repo_path):
                 except json.JSONDecodeError:
                     data = None
                 if data is None:
+                    # Fallback 1c: the model emitted a value but forgot its KEY
+                    # (`{"file": …, "<search text>", "replace": …}`). Purely
+                    # structural, so none of the quote/newline repairs above can
+                    # touch it — see _repair_missing_object_keys.
+                    try:
+                        data = _robust_json_loads(_repair_missing_object_keys(raw))
+                    except json.JSONDecodeError:
+                        data = None
+                if data is None:
                     # Fallback 2: some LLMs (Gemini Flash) return Python-style
                     # dicts with single quotes instead of JSON double quotes.
                     # ast.literal_eval is safe (only evaluates literals).
@@ -1908,11 +2183,17 @@ def parse_and_apply(content, repo_path):
                             # dump here is invisible to it — this exact gap is why this
                             # failure kept recurring as a "non-actionable, please provide
                             # the full log snippet" issue instead of ever being fixed.
+                            # A response that simply STOPPED early is reported as its own
+                            # reason, so the retry asks for smaller edits instead of
+                            # telling the model to fix syntax that was never wrong.
+                            truncated = _looks_truncated_json(content)
                             logger.error(
-                                f"Error parsing or applying JSON fix: {ast_err} — "
+                                f"Error parsing or applying JSON fix: "
+                                f"{'response truncated mid-object' if truncated else ast_err} — "
                                 f"raw content ({len(content)} chars): {content[:1500]!r}"
                             )
-                            parse_and_apply.last_reason = "invalid_json"
+                            parse_and_apply.last_reason = (
+                                "truncated_json" if truncated else "invalid_json")
                             return False, {}, 0.0
 
         fixes = data.get("fixes", {}) or {}
@@ -2432,6 +2713,17 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 except Exception as _re:  # noqa: BLE001
                     logger.debug(f"regression triage context skipped for {issue_id}: {_re}")
 
+            # Re-run after a terminal failure → replay the reason so the builder
+            # does not blindly re-derive the fix that was already rejected.
+            try:
+                _pf = _prior_failure_context(issue_info)
+                if _pf:
+                    fix_body += _pf
+                    logger.info("Added prior-failure context (%s) for retried %s.",
+                                issue_info.get("failure_kind"), issue_id)
+            except Exception as _pe:  # noqa: BLE001
+                logger.debug(f"prior failure context skipped for {issue_id}: {_pe}")
+
             for attempt in range(1, max_attempts + 1):
                 try:
                     update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
@@ -2485,6 +2777,15 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 "whole file, and never use placeholders like \"rest of file "
                                 "unchanged\".")
                             _kind = "unsafe_rewrite"
+                        elif _reason == "truncated_json":
+                            failure_msg = (
+                                "Your previous response was cut off mid-object, so it could "
+                                "not be parsed. The JSON itself was well-formed as far as it "
+                                "got — do NOT change your syntax. Instead return FEWER and "
+                                "SMALLER edits: use the shortest unique \"search\" anchor that "
+                                "identifies the spot (a few lines, not the whole function), "
+                                "and split unrelated changes across separate edits.")
+                            _kind = "truncated_json"
                         else:
                             failure_msg = "AI generated invalid JSON format"
                             _kind = "invalid_json"
