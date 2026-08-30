@@ -2621,6 +2621,10 @@ async def save_settings(request: Request):
         # them directly; the form supplies a comma-separated string.
         "protected_branches": parse_branch_names,
         "auto_branch_prefixes": parse_branch_names,
+        # Release lock: branches AppBuilder must NOT auto-merge into until
+        # unlocked (review still runs; PRs stack up). Stored as a list so
+        # branch_policy.is_release_locked can consume it directly.
+        "release_locked_branches": parse_branch_names,
         # GITHUB_TOKEN is handled after this loop: the form no longer renders
         # the saved PAT, so an empty field means "unchanged", not "clear it".
         # Leaving it here would let a plain Save wipe the token.

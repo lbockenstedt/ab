@@ -130,6 +130,27 @@ def auto_branch_prefixes(config=None):
     return tuple(configured) if configured else DEFAULT_AUTO_PREFIXES
 
 
+def release_locked_branches(config=None):
+    """Branches under a manual release lock.
+
+    While a branch is locked, AppBuilder keeps reviewing PRs but must NOT
+    auto-merge into it: changes stack up as open PRs so a human can finish
+    testing/validation, and they are processed once the lock is released. This
+    is orthogonal to protection/cleanup — it gates the unattended MERGE only,
+    not deletion, force-push, or review. Empty by default (no locks).
+
+    Config key: ``release_locked_branches`` (list, or comma/space/newline
+    string from the Settings form).
+    """
+    cfg = config or {}
+    return {n.lower() for n in parse_names(cfg.get("release_locked_branches")) if n}
+
+
+def is_release_locked(ref, config=None):
+    """True if ``ref`` is under a manual release lock (see release_locked_branches)."""
+    return str(ref or "").strip().lower() in release_locked_branches(config)
+
+
 def is_protected(ref, config=None, repo_default_branch=None):
     return str(ref or "").strip().lower() in protected_branches(config, repo_default_branch)
 
