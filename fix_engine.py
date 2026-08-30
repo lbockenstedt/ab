@@ -295,6 +295,65 @@ def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=N
     )
 
 
+# Terminal failure kinds worth replaying to the builder. "review_rejected" and
+# "no_edits" both mean the previous RUN produced something concrete that was
+# judged wrong — that judgement is the single most useful input a retry can have.
+_REPLAYABLE_FAILURE_KINDS = ("review_rejected", "no_edits", "qa_failed", "error")
+
+
+def _prior_failure_context(issue_info):
+    """For an issue being re-run after a terminal failure: tell the builder WHY
+    the last run failed, so a retry does not repeat it.
+
+    error_context (the attempt-to-attempt feedback loop) is reset to None at the
+    start of every run, and the stored failure_detail was written to the record
+    for the UI but never read back. So a retry began completely blind: the model
+    re-derived the same wrong fix and the reviewers re-rejected it for the same
+    reason, burning all attempts again.
+
+    Observed on lbockenstedt/lm#452 and #487 — both rejected 3/3 because the fix
+    edited the wrong file/function, with the reviewer stating exactly where the
+    bug actually lived. That critique is sitting in the record; this feeds it
+    back.
+
+    Returns "" for anything not worth replaying (no prior failure, no detail, or
+    a failure kind that says nothing about the code), so the prompt is unchanged
+    on a first run."""
+    if not isinstance(issue_info, dict):
+        return ""
+    if (issue_info.get("status") or "") != "failed":
+        return ""
+    detail = str(issue_info.get("failure_detail") or "").strip()
+    kind = str(issue_info.get("failure_kind") or "").strip()
+    if not detail or kind not in _REPLAYABLE_FAILURE_KINDS:
+        return ""
+    attempts = issue_info.get("attempts")
+    try:
+        attempts = int(attempts)
+    except (TypeError, ValueError):
+        attempts = 0
+    conf = issue_info.get("failure_confidence")
+    try:
+        conf_txt = " (reviewer confidence %.0f%%)" % (float(conf) * 100)
+    except (TypeError, ValueError):
+        conf_txt = ""
+    lead = {
+        "review_rejected": "the skeptical reviewer panel REJECTED the fix",
+        "no_edits": "the builder returned JSON containing no applicable edits",
+        "qa_failed": "the fix failed QA verification",
+        "error": "the run errored out",
+    }.get(kind, "the run failed")
+    return (
+        "\n\n--- WHY THE PREVIOUS RUN FAILED (read this before proposing a fix) ---\n"
+        f"A previous AppBuilder run on this issue used {attempts or 'several'} attempt(s) "
+        f"and ended because {lead}{conf_txt}:\n"
+        f"{detail[:1000]}\n\n"
+        "Treat the above as a verified finding about the CODE, not as style feedback. "
+        "If it says the wrong file or function was changed, locate the one it names "
+        "before editing anything. Do not re-propose the same change."
+    )
+
+
 def _notify_bug_fixed(issue):
     """If a GitHub issue came from an LM 'File a Bug' report (hidden bug-report-id
     marker in the body), tell the hub the issue is fixed so the LM bug-reports UI
@@ -2431,6 +2490,17 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         logger.info(f"Added regression-triage context for reopened {issue_id}.")
                 except Exception as _re:  # noqa: BLE001
                     logger.debug(f"regression triage context skipped for {issue_id}: {_re}")
+
+            # Re-run after a terminal failure → replay the reason so the builder
+            # does not blindly re-derive the fix that was already rejected.
+            try:
+                _pf = _prior_failure_context(issue_info)
+                if _pf:
+                    fix_body += _pf
+                    logger.info("Added prior-failure context (%s) for retried %s.",
+                                issue_info.get("failure_kind"), issue_id)
+            except Exception as _pe:  # noqa: BLE001
+                logger.debug(f"prior failure context skipped for {issue_id}: {_pe}")
 
             for attempt in range(1, max_attempts + 1):
                 try:
