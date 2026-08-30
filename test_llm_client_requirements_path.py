@@ -35,9 +35,11 @@ def _load_ns():
         # EXCLUDED from the picker's pool, not just visible in Settings —
         # see _entry_is_unhealthy's docstring in llm_client.py)
         "_record_llm_failure", "_record_llm_success", "_entry_is_unhealthy",
+        "_is_unsupported_model_error",
     }
     want_assign = {
         "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_TOOL_400_MARKERS",
+        "_UNSUPPORTED_MODEL_MARKERS", "_ENTRY_UNSUPPORTED_RETRY_SECONDS",
         "_ENDPOINT_CB_LOCK", "_ENDPOINT_CREDIT_CB", "_MODEL_RATE_CB",
         "_MODEL_LOCKS_LOCK", "_MODEL_LOCKS",
         "_LLM_PERF_STORE", "_LLM_PERF_LOCK",
@@ -175,11 +177,14 @@ def main():
     ok &= _check("before any failure, the entry is a normal available candidate",
                 len(hard_candidates_before) == 1 and hard_candidates_before[0]["available"] is True)
 
-    ns["_record_llm_failure"](hard_key, Exception('400 unsupported_api_for_model'))
+    # Generic error on purpose: blip tolerance applies to failures we cannot
+    # attribute to a permanent cause. A model the endpoint REFUSES to serve is
+    # asserted separately below and excludes on the first failure.
+    ns["_record_llm_failure"](hard_key, Exception('503 Service Unavailable'))
     ok &= _check("one failure alone does not exclude the candidate (avoids a one-off blip)",
                 ns["_enumerate_candidates"](hard_cfg)[0]["available"] is True)
 
-    ns["_record_llm_failure"](hard_key, Exception('400 unsupported_api_for_model (again)'))
+    ns["_record_llm_failure"](hard_key, Exception('503 Service Unavailable (again)'))
     hard_candidates_after = ns["_enumerate_candidates"](hard_cfg)
     ok &= _check("after 2 consecutive failures, the SAME entry that keeps 400ing is excluded "
                 "from the pool — the actual fix for lm#452/#469/#444 (a broken reviewer no "
@@ -191,6 +196,20 @@ def main():
     ok &= _check("a success (e.g. after an operator fixes the model name) clears the exclusion "
                 "immediately — no need to wait out the hourly retry window",
                 ns["_enumerate_candidates"](hard_cfg)[0]["available"] is True)
+
+    # --- a model the endpoint refuses to serve: excluded on the FIRST failure
+    # Retrying it hourly cannot succeed and re-breaks the reviewer panel every
+    # cycle (ab#119/#121/#125/#135 are the same fact, filed four times).
+    unsup_cfg = {"llm_entries": [_entry("e2", "copilot", "grok-4.5", base_url="")]}
+    unsup_key = ns["_model_key"]("copilot", "", "grok-4.5")
+    ns["_record_llm_failure"](unsup_key, Exception(
+        '400 unsupported_api_for_model: model "grok-4.5" is not accessible '
+        'via the /chat/completions endpoint'))
+    unsup_after = ns["_enumerate_candidates"](unsup_cfg)
+    ok &= _check("a model-rejection 400 excludes the candidate immediately, with no "
+                "second failure and no hourly re-pick",
+                len(unsup_after) == 1 and unsup_after[0]["available"] is False
+                and unsup_after[0]["unavailable_reason"] == "hard_failing")
 
     # Timed recovery: re-trip it, then simulate the retry window elapsing —
     # this is what lets the picker try it again on its own even if nobody
