@@ -926,8 +926,12 @@
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">GitHub Personal Access Token</label>
-                                <input type="password" name="GITHUB_TOKEN" value="" autocomplete="new-password" placeholder="{% if settings.GITHUB_TOKEN_SET %}Saved — leave blank to keep it{% else %}Not configured{% endif %}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
-                                <p class="text-xs text-slate-500">{% if settings.GITHUB_TOKEN_SET %}A token is stored. Type a new one only to replace it.{% else %}No token stored yet.{% endif %}</p>
+                                <input type="password" id="github-token" name="GITHUB_TOKEN" value="" autocomplete="new-password" title="GitHub Personal Access Token used for all repo, issue and PR operations. Write-only: leave blank to keep the stored token." placeholder="{% if settings.GITHUB_TOKEN_configured %}Leave blank to keep the current token{% else %}Not configured{% endif %}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <p class="text-xs text-slate-500">
+                                    {% if settings.GITHUB_TOKEN_from_env %}Supplied by the <code>GITHUB_TOKEN</code> environment variable — nothing is stored in the config, so clearing here will not revoke it.
+                                    {% elif settings.GITHUB_TOKEN_configured %}A token is stored. Type a new one only to replace it, or <a href="#" onclick="abGithubTokenClear(); return false;" class="text-[#01A982] underline">clear it</a>.
+                                    {% else %}No token stored yet.{% endif %}
+                                </p>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Default Branch</label>
@@ -3010,6 +3014,14 @@
                     status.className = 'text-xs mb-4 text-red-500';
                 }
             }
+        };
+
+        window.abGithubTokenClear = function () {
+            const el = document.getElementById('github-token');
+            if (!el) return;
+            if (!confirm('Clear the stored GitHub token? Every repo, issue and PR operation will fail until a new one is saved.')) return;
+            el.value = '__CLEAR__';
+            showToast('Token will be cleared when you save.', 'info');
         };
 
         window.abOidcSecretClear = function () {

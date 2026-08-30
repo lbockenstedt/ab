@@ -109,7 +109,7 @@ def case_template_hides_token():
     )
 
     # Render the real field fragment both ways and assert the secret is absent.
-    match = re.search(r'<input type="password" name="GITHUB_TOKEN"[^>]*>', src)
+    match = re.search(r'<input[^>]*name="GITHUB_TOKEN"[^>]*>', src)
     ok &= _check("token input found", match is not None)
     if not match:
         return False
@@ -122,14 +122,32 @@ def case_template_hides_token():
     env = jinja2.Environment(autoescape=True)
     tmpl = env.from_string(fragment)
 
-    secret = "ghp_SUPERSECRETVALUE1234567890"
-    with_token = tmpl.render(settings={"GITHUB_TOKEN": secret, "GITHUB_TOKEN_SET": True})
-    without = tmpl.render(settings={"GITHUB_TOKEN": "", "GITHUB_TOKEN_SET": False})
+    # Assembled at runtime so secret scanners (AppBuilder's own Tier-1
+    # check included) do not flag this fixture as a real credential.
+    secret = "ghp_" + "N" * 26
+    stored = tmpl.render(settings={"GITHUB_TOKEN": secret,
+                                   "GITHUB_TOKEN_configured": True,
+                                   "GITHUB_TOKEN_from_env": False})
+    env_only = tmpl.render(settings={"GITHUB_TOKEN": secret,
+                                     "GITHUB_TOKEN_configured": True,
+                                     "GITHUB_TOKEN_from_env": True})
+    without = tmpl.render(settings={"GITHUB_TOKEN": "",
+                                    "GITHUB_TOKEN_configured": False,
+                                    "GITHUB_TOKEN_from_env": False})
 
-    ok &= _check("secret absent from rendered HTML", secret not in with_token)
-    ok &= _check("renders empty value", 'value=""' in with_token)
+    for label, html in (("stored", stored), ("env-only", env_only), ("absent", without)):
+        ok &= _check(f"secret absent from rendered HTML ({label})", secret not in html)
+    ok &= _check("renders empty value", 'value=""' in stored)
+    ok &= _check("has a title= tooltip", "title=" in stored)
+    ok &= _check("signals a token is stored", "stored" in stored)
+    ok &= _check("offers an explicit clear when stored", "abGithubTokenClear" in stored)
     ok &= _check(
-        "signals a token is stored", "Saved" in with_token or "stored" in with_token
+        "env-only says so and does not claim it is stored",
+        "environment variable" in env_only,
+    )
+    ok &= _check(
+        "env-only offers no misleading clear link",
+        "abGithubTokenClear" not in env_only,
     )
     ok &= _check(
         "signals when no token is stored",
@@ -152,7 +170,7 @@ def case_blank_token_preserved():
 
     block = _extract_block(
         src,
-        "    _submitted_token = str(data.get(",
+        '    if "GITHUB_TOKEN" in data:',
         '    config_data["direct_push_enabled"]',
     )
     ok &= _check("token save block located exactly once", block is not None)
@@ -180,6 +198,16 @@ def case_blank_token_preserved():
         run({"GITHUB_TOKEN": "  ghp_new_token  "}, stored) == "ghp_new_token",
     )
     ok &= _check("works with no prior token", run({"GITHUB_TOKEN": "ghp_a"}, "") == "ghp_a")
+    # "unchanged" and "revoke" must stay distinct states, same as the sibling
+    # llm_proxy_api_key / OIDC client-secret fields.
+    ok &= _check(
+        "__CLEAR__ sentinel revokes the token",
+        run({"GITHUB_TOKEN": "__CLEAR__"}, stored) == "",
+    )
+    ok &= _check(
+        "__CLEAR__ is whitespace tolerant",
+        run({"GITHUB_TOKEN": "  __CLEAR__  "}, stored) == "",
+    )
     return ok
 
 
@@ -187,16 +215,109 @@ def case_blank_token_preserved():
 # 2c. Render context must not carry the secret
 # --------------------------------------------------------------------------- #
 def case_render_context_excludes_token():
-    print("CASE: settings_page puts no PAT in the render context")
+    print("CASE: the merged render context carries no PAT")
     src = _read(ROUTES)
+
     ok = _check(
         "old leaking assignment gone",
         'settings["GITHUB_TOKEN"] = config.get("GITHUB_TOKEN")' not in src,
     )
-    ok &= _check('blanked in context', 'settings["GITHUB_TOKEN"] = ""' in src)
+
+    # Grepping the source is NOT sufficient here: settings_page blanks
+    # settings["GITHUB_TOKEN"], but the template context is built as
+    # {**settings, **config, ...} and config is merged AFTERWARDS, so
+    # config["GITHUB_TOKEN"] silently reinstates the raw PAT. Extract the real
+    # dict expression and evaluate it to prove what the template actually sees.
+    anchor = '"settings": {**settings, **config,'
+    ok &= _check("context dict located exactly once", src.count(anchor) == 1)
+    if src.count(anchor) != 1:
+        return False
+
+    start = src.index("{", src.index(anchor) + len('"settings": ') - 1)
+    depth, end = 0, None
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    ok &= _check("context dict brace-matched", end is not None)
+    if end is None:
+        return False
+
+    # Assembled at runtime so secret scanners (AppBuilder's own Tier-1
+    # check included) do not flag this fixture as a real credential.
+    secret = "ghp_" + "N" * 26
+    scope = {
+        "settings": {
+            "GITHUB_TOKEN": "",
+            "monitored_labels_str": "",
+            "GITHUB_TOKEN_configured": True,
+            "GITHUB_TOKEN_from_env": False,
+        },
+        # A real config always carries the token; that is the whole point.
+        "config": {"GITHUB_TOKEN": secret, "llm_proxy_api_key": "sk-secret"},
+        "repo_tests_str": "",
+        "_safe_llm_credentials": [],
+        "_safe_llm_entries": [],
+    }
+    ctx = eval(src[start:end], scope, scope)  # noqa: S307 - repo's own source
+
+    ok &= _check("merged context blanks GITHUB_TOKEN", ctx.get("GITHUB_TOKEN") == "")
     ok &= _check(
-        "boolean flag exposed instead", 'settings["GITHUB_TOKEN_SET"]' in src
+        "secret appears nowhere in the merged context",
+        secret not in repr(ctx),
     )
+    ok &= _check(
+        "presence flag survives the merge", ctx.get("GITHUB_TOKEN_configured") is True
+    )
+    ok &= _check(
+        "sibling secret still blanked (regression guard)",
+        ctx.get("llm_proxy_api_key") == "",
+    )
+    return ok
+
+
+def case_token_state_flags():
+    print("CASE: config-set / env-only / absent are distinct states")
+    src = _read(ROUTES)
+    ok = _check("configured flag present", 'settings["GITHUB_TOKEN_configured"]' in src)
+    ok &= _check("env-only flag present", 'settings["GITHUB_TOKEN_from_env"]' in src)
+
+    block = _extract_block(
+        src,
+        '    settings["GITHUB_TOKEN_configured"]',
+        "\n    settings[\"LLM_TIMEOUT\"]",
+    )
+    ok &= _check("flag block located exactly once", block is not None)
+    if block is None:
+        return False
+
+    def run(cfg_token, env_token):
+        scope = {"settings": {}, "config": {"GITHUB_TOKEN": cfg_token},
+                 "os": __import__("os")}
+        env = scope["os"].environ
+        prior = env.get("GITHUB_TOKEN")
+        if env_token:
+            env["GITHUB_TOKEN"] = env_token
+        else:
+            env.pop("GITHUB_TOKEN", None)
+        try:
+            exec(compile(block, "<flags>", "exec"), scope, scope)
+        finally:
+            if prior is None:
+                env.pop("GITHUB_TOKEN", None)
+            else:
+                env["GITHUB_TOKEN"] = prior
+        s = scope["settings"]
+        return s["GITHUB_TOKEN_configured"], s["GITHUB_TOKEN_from_env"]
+
+    ok &= _check("stored in config -> configured, not env", run("ghp_cfg", "") == (True, False))
+    ok &= _check("env only -> configured AND env", run("", "ghp_env") == (True, True))
+    ok &= _check("neither -> not configured", run("", "") == (False, False))
+    ok &= _check("config wins over env", run("ghp_cfg", "ghp_env") == (True, False))
     return ok
 
 
@@ -207,6 +328,7 @@ def main():
         case_template_hides_token,
         case_blank_token_preserved,
         case_render_context_excludes_token,
+        case_token_state_flags,
     ):
         ok &= case()
         print()
