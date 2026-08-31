@@ -569,7 +569,9 @@
                                 {% else %}
                                 <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap">Retry</button>
                                 <button onclick="reopenIssue('{{ issue_id }}')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when AppBuilder marked it fixed but the fix didn't actually land">Reopen</button>
+                                {% if claude_enabled %}
                                 <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
+                                {% endif %}
                                 <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                                 <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                                 {% endif %}
