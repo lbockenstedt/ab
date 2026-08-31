@@ -1915,6 +1915,114 @@ def _norm_confidence(value):
     return max(0.0, min(1.0, c))
 
 
+#: Failure kinds where NO accepted change was produced because the model either
+#: found nothing to change (``no_edits``) or produced something the reviewers did
+#: not accept (``review_rejected`` / ``low_confidence``). These are the only states
+#: where "the code is already correct" is a plausible explanation, so they are the
+#: only ones worth an already-resolved check. Mechanical output failures (bad or
+#: truncated JSON, missed edit anchors, unsafe rewrite) and ``qa_failed`` (a change
+#: WAS made and broke tests) are never evidence of an already-fixed tree.
+_RESOLVED_CHECK_KINDS = frozenset({"no_edits", "review_rejected", "low_confidence"})
+
+
+def _should_check_already_resolved(last_failure, config):
+    """Pure gate (no LLM/network): run the already-resolved verification only for
+    failure kinds that mean 'the model engaged but produced no accepted change',
+    and only when the feature is enabled (config ``verify_already_resolved``,
+    default on)."""
+    if not (config or {}).get("verify_already_resolved", True):
+        return False
+    kind = (last_failure or {}).get("kind") or "unknown"
+    return kind in _RESOLVED_CHECK_KINDS
+
+
+def _resolved_gate(result, config):
+    """Pure decision: given the verifier's parsed result, decide whether to mark
+    the issue resolved. Deliberately strict — requires an explicit ``resolved`` is
+    true, non-empty ``evidence``, and a ``confidence`` at/above the configured
+    threshold (config ``resolved_confidence_threshold``, default 0.85) — so an
+    unsure or hallucinated verdict falls through to the normal failure path."""
+    if not isinstance(result, dict) or not result.get("resolved"):
+        return False
+    if not str(result.get("evidence") or "").strip():
+        return False
+    try:
+        conf = float(result.get("confidence"))
+    except (TypeError, ValueError):
+        return False
+    try:
+        threshold = float((config or {}).get("resolved_confidence_threshold", 0.85))
+    except (TypeError, ValueError):
+        threshold = 0.85
+    return conf >= threshold
+
+
+def verify_already_resolved(repo_path, issue_body, config, task_id=None):
+    """Ask a model whether the reported problem is ALREADY absent from the current
+    code — i.e. the run produced no accepted fix because there is nothing left to
+    fix (a re-filed/duplicate report, or a fix already merged), not because the fix
+    could not be found. Returns the parsed dict
+    ``{"resolved": bool, "confidence": float, "evidence": str}`` or ``{}`` on any
+    failure.
+
+    Best-effort and side-effect-free: a provider/cooldown/parse error yields ``{}``
+    so the caller falls through to the normal failure path and never emits a false
+    'resolved'. Judges ONLY from the current file contents on disk (the tree is
+    pristine at HEAD by the time a run is declared failed)."""
+    try:
+        files = identify_files_to_fix(repo_path, issue_body) or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"already-resolved check: file identification failed: {e}")
+        return {}
+    blobs, budget = [], 24000
+    for rel in files[:6]:
+        full = _safe_repo_target(repo_path, rel, what="already-resolved read")
+        if not full:
+            continue
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        take = text[:budget]
+        blobs.append(f"=== {rel} ===\n{take}")
+        budget -= len(take)
+        if budget <= 0:
+            break
+    if not blobs:
+        return {}
+    prompt = (
+        f"Reported problem:\n{issue_body}\n\n"
+        "Current code (the files most relevant to this problem):\n\n"
+        + "\n\n".join(blobs)
+        + "\n\nQuestion: Is the reported problem ALREADY resolved in the current code shown "
+          "above — i.e. is there NO code change left to make because the code already behaves "
+          "correctly? Judge ONLY from the code shown. If the fix is clearly already present, "
+          "quote the specific current-code lines that prove it. If you are unsure, or the "
+          "problem still appears present, answer resolved=false.\n"
+          "Return ONLY a JSON object: {\"resolved\": boolean, \"confidence\": number between 0 "
+          "and 1, \"evidence\": \"the specific current-code lines proving it, or empty\"}"
+    )
+    try:
+        from model_selection import LlmRequirements
+        reqs = LlmRequirements(complexity="small", needs_structured_output=True,
+                               min_context_tokens=len(prompt) // 4)
+        res = call_llm(prompt, system_prompt="You are a strict verification bot. Only return a JSON object.",
+                       requirements=reqs, task_id=task_id)
+        import re
+        match = re.search(r'\{.*\}', res or "", re.DOTALL)
+        if not match:
+            return {}
+        data = _robust_json_loads(match.group())
+        return data if isinstance(data, dict) else {}
+    except Exception as e:  # noqa: BLE001
+        if is_llm_cooldown_error(e):
+            logger.warning(f"already-resolved check deferred — LLM providers cooling down: {e}")
+        else:
+            logger.warning(f"already-resolved check failed: {e}")
+        return {}
+
+
 def _safe_repo_target(repo_root, filepath, what="apply fix"):
     """Resolve *filepath* under *repo_root*, rejecting absolute paths, ``..``
     traversal, and symlinks that escape the repo. Returns the absolute path or
@@ -3122,6 +3230,60 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     continue
 
             if not success:
+                # "Failure" must mean "I could not fix it" — NOT "there was nothing
+                # to fix". Before recording a failure, for the kinds where no accepted
+                # change was produced, verify whether the reported problem is ALREADY
+                # resolved in the current tree (a re-filed/duplicate report, or a fix
+                # already merged). If so, mark the issue resolved instead of failed.
+                if _should_check_already_resolved(last_failure, config):
+                    try:
+                        _verdict = verify_already_resolved(
+                            repo_git.working_dir, issue.body or "", config, task_id=issue_id)
+                    except Exception as _ve:  # noqa: BLE001
+                        logger.warning(f"already-resolved check errored for {issue_id}: {_ve}")
+                        _verdict = {}
+                    if _resolved_gate(_verdict, config):
+                        _evidence = str(_verdict.get("evidence") or "").strip()
+                        _conf = _norm_confidence(_verdict.get("confidence"))
+                        logger.info(f"{issue_id}: no fix was needed — already resolved in tree "
+                                    f"(confidence {_conf:.0%}); marking resolved, not failed.")
+                        try:
+                            issue.create_comment(
+                                "✅ **AppBuilder — already resolved**\n\n"
+                                "I found no code change to make because the reported problem does "
+                                "not appear to be present in the current code — it looks like this "
+                                f"was already fixed (verification confidence {_conf:.0%}).\n\n"
+                                f"**Evidence:**\n{_evidence[:1500]}\n\n"
+                                "Marking this as resolved. Reopen if it recurs.")
+                        except Exception as ce:  # noqa: BLE001
+                            logger.warning(f"could not post already-resolved comment to {issue_id}: {ce}")
+                        try:
+                            issue.add_to_labels("ab-already-resolved")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            issue.edit(state="closed")
+                        except Exception as ce:  # noqa: BLE001
+                            logger.warning(f"could not close already-resolved issue {issue_id}: {ce}")
+                        processed = load_processed()
+                        processed[f"{repo_name}:{issue_num}"] = {
+                            "status": "resolved",
+                            "timestamp": datetime.now().isoformat(),
+                            "resolution": "already_fixed",
+                            "evidence": _evidence[:1000],
+                            "confidence": _conf,
+                            "attempts": max_attempts,
+                            "original_body": issue.body,
+                        }
+                        save_processed(processed)
+                        state["processed"] = processed
+                        try:
+                            recompute_issue_counters(processed)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        update_task_state(task_id=issue_id, action="end")
+                        return True, "Already resolved (no code change needed)"
+
                 state["failure_count"] += 1
                 # Lead with the CAUSE. This string is shown truncated in the
                 # status table, and the old form spent its first 72 characters on
