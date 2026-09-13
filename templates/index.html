@@ -1765,6 +1765,12 @@
                                     Heartbeat Triage (file issues for missing heartbeats)
                                 </label>
                             </div>
+                            <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                                <input type="checkbox" name="verify_already_resolved" id="verify_already_resolved" {{ 'checked' if settings.verify_already_resolved else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]" title="On by default. When a fix run produces no accepted change (the model found nothing to change, or its change was rejected as unnecessary), AppBuilder verifies whether the reported problem is ALREADY fixed in the current code. If a model confirms it with evidence at/above the confidence threshold, the issue is marked RESOLVED and closed (with an evidence comment) instead of posting an 'AppBuilder Failure'. Failure is reserved for 'I could not fix it', not 'there was nothing to fix'. Reversible: reopen if it recurs.">
+                                <label for="verify_already_resolved" class="text-xs font-medium text-slate-700" title="On by default. When a fix run produces no accepted change (the model found nothing to change, or its change was rejected as unnecessary), AppBuilder verifies whether the reported problem is ALREADY fixed in the current code. If a model confirms it with evidence at/above the confidence threshold, the issue is marked RESOLVED and closed (with an evidence comment) instead of posting an 'AppBuilder Failure'. Failure is reserved for 'I could not fix it', not 'there was nothing to fix'. Reversible: reopen if it recurs.">
+                                    Mark already-fixed issues resolved (not failed)
+                                </label>
+                            </div>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6">
                             <div class="space-y-2">
