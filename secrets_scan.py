@@ -32,6 +32,13 @@ _SIGNATURE_PATTERNS = [
         r"(?i)\b(postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s/'\"]+:[^@\s/'\"]+@"), None),
     ("Slack Webhook URL", re.compile(
         r"https://hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+"), None),
+    # An at-rest encryption key (Fernet keys are exactly 43 urlsafe-base64 chars
+    # + '='). Named explicitly so the finding says what was leaked: exposing one
+    # means every encrypted state file must be re-encrypted, not just the key
+    # replaced. Quotes optional -- these almost always appear in a .env line.
+    ("Encryption key (Fernet-shaped)", re.compile(
+        r"(?i)\b[a-z0-9_-]*(?:fernet|encryption)[a-z0-9_-]*key\b\s*[:=]\s*"
+        r"['\"]?[A-Za-z0-9_-]{43}=['\"]?"), None),
 ]
 
 # Generic "assignment of a secret-shaped value to a secret-shaped name" — needs
@@ -40,6 +47,25 @@ _GENERIC_ASSIGN = re.compile(
     r"(?i)\b(api[_-]?key|secret([_-]?key)?|access[_-]?token|auth[_-]?token|"
     r"password|passwd|pwd|client[_-]?secret|private[_-]?key)\b\s*[:=]\s*"
     r"['\"]([^'\"\s]{8,})['\"]"
+)
+
+# Unquoted ``NAME=value`` — the dotenv/shell/systemd/YAML shape.
+# ``_GENERIC_ASSIGN`` above misses this class entirely for two independent
+# reasons, and that is exactly how an at-rest encryption key can reach a diff
+# unnoticed:
+#   1. it REQUIRES quotes, but a .env line never has them; and
+#   2. it anchors each credential word with ``\b``, which cannot match after an
+#      underscore — so a vendor/product prefix hides the name completely
+#      (``LM_FERNET_KEY``, ``LM_HUB_SECRET`` and ``DB_PASSWORD`` all slip past).
+# So match the credential word as a SUFFIX of the identifier, and make the
+# quotes optional. The value charset deliberately excludes ``:``, ``/``, ``(``,
+# ``$``, ``{`` and whitespace, so a URL, a filesystem path, a function call and
+# a ``${VAR}`` expansion are all structurally unable to match; together with the
+# placeholder + lookup-context exclusions that keeps ordinary config lines quiet.
+_ENV_ASSIGN = re.compile(
+    r"(?i)(?:^|[\s;,{])([A-Za-z][A-Za-z0-9_-]*"
+    r"(?:key|secret|token|password|passwd|pwd))\s*[:=]\s*"
+    r"['\"]?([A-Za-z0-9+/=_.~-]{12,})['\"]?\s*(?:[#;].*)?$"
 )
 
 _PLACEHOLDER_RE = re.compile(
@@ -82,6 +108,16 @@ def _scan_line(text):
         value = m.group(3)
         if not _PLACEHOLDER_RE.match(value.strip()) and not _LOOKUP_CONTEXT_RE.search(text):
             hits.append(("Hardcoded credential-shaped assignment", m.group(0)))
+    elif not any(n.startswith("Encryption key") for n, _ in hits):
+        # Only when the quoted rule and the Fernet signature both stayed silent,
+        # so one .env line never yields three findings for the same secret.
+        m = _ENV_ASSIGN.search(text)
+        if m:
+            value = m.group(2)
+            if (not _PLACEHOLDER_RE.match(value.strip())
+                    and not _LOOKUP_CONTEXT_RE.search(text)):
+                hits.append(("Hardcoded credential in an unquoted assignment",
+                             m.group(0).strip()))
     return hits
 
 
