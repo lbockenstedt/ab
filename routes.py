@@ -910,10 +910,20 @@ async def dashboard(request: Request):
 
     pr_items.sort(key=get_priority)
 
+    # Whether a local Claude CLI provider slot is configured — the per-issue
+    # "Claude" fix button is hidden when it isn't, since triggerFix(..., 'claude')
+    # would otherwise fail with "no claude_cli provider is configured".
+    try:
+        from llm_client import _find_claude_cli_slot
+        claude_enabled = _find_claude_cli_slot(load_config()) is not None
+    except Exception:
+        claude_enabled = False
+
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "status",
         "state": {**state, "processed": recent_processed},
-        "sorted_pr_reviews": pr_items
+        "sorted_pr_reviews": pr_items,
+        "claude_enabled": claude_enabled
     })
 
 
