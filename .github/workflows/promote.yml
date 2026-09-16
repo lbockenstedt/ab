@@ -17,17 +17,26 @@ name: promote
 # Any OTHER conflict is left unresolved on purpose: the job fails loudly so a
 # human resolves it, rather than a bot guessing at real code.
 #
-# PROMOTION IS DELIBERATE, NOT AUTOMATIC. This previously ran `on: push` to dev
+# PROMOTION IS BATCHED, NOT PER-COMMIT. This previously ran `on: push` to dev
 # and qa, so every single commit to dev immediately raised (or force-pushed) a
 # PR into qa, and merging that PR was itself a push to qa, which immediately
 # raised the next PR into main. Unfinished work was therefore permanently in
-# flight toward production and neither gate ever batched anything. Promotion is
-# now started by hand: run this workflow with `source: dev` when dev is actually
-# ready, then again with `source: qa` to move qa into main. Each hop becomes one
-# intentional PR covering everything that has accumulated since the last one.
+# flight toward production and neither gate ever batched anything.
+#
+# Promotion is now driven two ways, and BOTH only ever OPEN a PR:
+#   * On a SCHEDULE (see `on.schedule`): once per weekday this prepares/refreshes
+#     one dev -> qa PR and one qa -> main PR, each batching everything that has
+#     accumulated on the source since the last promotion. This is a cadence, not
+#     a per-commit trigger, so it does not reintroduce the churn/cascade above --
+#     and because nothing here merges, unfinished work never advances on its own;
+#     a human still reviews and merges (or closes) each PR.
+#   * BY HAND (see `on.workflow_dispatch`): run with `source: dev` (dev -> qa) or
+#     `source: qa` (qa -> main) to prepare that hop immediately, e.g. between
+#     scheduled runs. Identical output to the scheduled path.
+# When there is nothing new to promote, promote.sh no-ops and no PR is opened.
 #
 # CI is unaffected -- ci.yml still runs on every dev push and on every PR, so
-# day-to-day feedback stays automatic. Only the decision to promote is manual.
+# day-to-day feedback stays automatic. Only the decision to MERGE is manual.
 #
 # THIS WORKFLOW NEVER MERGES. Every route it supports ends at an OPEN PR that a
 # human merges. That includes the dev -> main override below.
@@ -46,6 +55,13 @@ name: promote
 # requires a typed confirmation.
 
 on:
+  schedule:
+    # Weekdays at 13:00 UTC. A scheduled run has no inputs and always fires from
+    # the default branch, so it cannot express a single source/target the way a
+    # manual run does -- instead the `plan` job below fans it out to BOTH normal
+    # hops (dev -> qa and qa -> main). Cadence, not per-commit: it refreshes the
+    # accumulated promotion PRs once a day and never merges them.
+    - cron: '0 13 * * 1-5'
   workflow_dispatch:
     inputs:
       source:
@@ -71,20 +87,79 @@ permissions:
   pull-requests: write
   actions: write   # to release the promotion PR's own CI run (see last step)
 
-concurrency:
-  # Keyed off the branch being promoted AND the target, not the ref the run was
-  # dispatched from -- a manual run is always dispatched from the default
-  # branch, so github.ref_name would collapse dev->qa and qa->main into one
-  # queue. The target is part of the key because dev now has two possible
-  # destinations (qa, and main via the override): without it, a dev->main run
-  # would queue behind an unrelated dev->qa run building a different branch.
-  group: promote-${{ github.event.inputs.source || github.ref_name }}-to-${{ github.event.inputs.target || 'auto' }}
-  cancel-in-progress: false
-
 jobs:
+  # Fan the trigger out to the concrete promotion routes to run. A manual
+  # dispatch yields exactly one route (honouring source/target, including the
+  # dev -> main override). A scheduled run yields both normal hops so the daily
+  # cadence prepares/refreshes the dev -> qa AND qa -> main PRs in one go.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      routes: ${{ steps.plan.outputs.routes }}
+    steps:
+      - name: Resolve routes
+        id: plan
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Both normal forward hops. dev -> main is intentionally NOT part of
+            # the automatic cadence: it is the manual-only urgent override.
+            routes='[{"src":"dev","tgt":"qa"},{"src":"qa","tgt":"main"}]'
+            echo "Scheduled run: promoting dev -> qa and qa -> main"
+          else
+            src="${{ github.event.inputs.source || 'dev' }}"
+            tgt_in="${{ github.event.inputs.target || 'auto' }}"
+
+            # The normal next hop, used when target is 'auto'/absent.
+            case "$src" in
+              dev) auto_tgt=qa ;;
+              qa)  auto_tgt=main ;;
+              *)   echo "::error::$src is not a promotable branch"; exit 1 ;;
+            esac
+
+            if [ -z "$tgt_in" ] || [ "$tgt_in" = "auto" ]; then
+              tgt="$auto_tgt"
+            else
+              tgt="$tgt_in"
+            fi
+
+            # Allowlist the routes that may exist, rather than trusting the two
+            # inputs independently. dev->main is deliberately present: it is the
+            # documented override for an urgent fix that cannot wait for a qa
+            # cycle. It still only opens a PR into main -- nothing here merges.
+            # NB the ':' separator: a case pattern like `dev->qa` is a bash
+            # SYNTAX error, because '>' is parsed as a redirection.
+            case "$src:$tgt" in
+              dev:qa|qa:main) ;;
+              dev:main)
+                echo "::warning title=Skipping qa::Promoting dev straight to main (override path). This opens a PR; it does not merge." ;;
+              *)
+                echo "::error::'$src -> $tgt' is not a permitted promotion route (allowed: dev->qa, qa->main, dev->main)"
+                exit 1 ;;
+            esac
+
+            routes="[{\"src\":\"$src\",\"tgt\":\"$tgt\"}]"
+            echo "Manual run: promoting $src -> $tgt"
+          fi
+          echo "routes=$routes" >> "$GITHUB_OUTPUT"
+
   promote:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      # Independent hops: don't cancel qa->main just because dev->qa failed.
+      fail-fast: false
+      matrix:
+        route: ${{ fromJSON(needs.plan.outputs.routes) }}
+    concurrency:
+      # Keyed off the branch being promoted AND the target so the two scheduled
+      # hops (and any manual run) never collapse into one queue. The target is
+      # part of the key because dev has two possible destinations (qa, and main
+      # via the override): without it, a dev->main run would queue behind an
+      # unrelated dev->qa run building a different branch.
+      group: promote-${{ matrix.route.src }}-to-${{ matrix.route.tgt }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,37 +168,8 @@ jobs:
       - name: Resolve source and target
         id: route
         run: |
-          src="${{ github.event.inputs.source || github.ref_name }}"
-          tgt_in="${{ github.event.inputs.target || 'auto' }}"
-
-          # The normal next hop, used when target is 'auto'/absent.
-          case "$src" in
-            dev) auto_tgt=qa ;;
-            qa)  auto_tgt=main ;;
-            *)   echo "::error::$src is not a promotable branch"; exit 1 ;;
-          esac
-
-          if [ -z "$tgt_in" ] || [ "$tgt_in" = "auto" ]; then
-            tgt="$auto_tgt"
-          else
-            tgt="$tgt_in"
-          fi
-
-          # Allowlist the routes that may exist, rather than trusting the two
-          # inputs independently. dev->main is deliberately present: it is the
-          # documented override for an urgent fix that cannot wait for a qa
-          # cycle. It still only opens a PR into main -- nothing here merges.
-          # NB the ':' separator: a case pattern like `dev->qa` is a bash
-          # SYNTAX error, because '>' is parsed as a redirection.
-          case "$src:$tgt" in
-            dev:qa|qa:main) ;;
-            dev:main)
-              echo "::warning title=Skipping qa::Promoting dev straight to main (override path). This opens a PR; it does not merge." ;;
-            *)
-              echo "::error::'$src -> $tgt' is not a permitted promotion route (allowed: dev->qa, qa->main, dev->main)"
-              exit 1 ;;
-          esac
-
+          src="${{ matrix.route.src }}"
+          tgt="${{ matrix.route.tgt }}"
           echo "src=$src" >> "$GITHUB_OUTPUT"
           echo "tgt=$tgt" >> "$GITHUB_OUTPUT"
           echo "branch=promote/$src-to-$tgt" >> "$GITHUB_OUTPUT"
