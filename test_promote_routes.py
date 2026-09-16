@@ -382,12 +382,29 @@ def test_promote_yml_declares_the_target_input_the_override_needs():
     assert "auto" in inputs["target"]["options"]
 
 
+def _route_allowlist_step():
+    """The step whose bash `case` allowlists the promotion routes.
+
+    This lived in the promote job's `route` step until promotion was fanned out
+    to a matrix; the allowlist now sits in the `plan` job's `plan` step (the
+    per-matrix `route` step only echoes the already-vetted src/tgt). Prefer the
+    plan step, but fall back so the assertion tracks the allowlist wherever it
+    is, rather than silently passing against a step that no longer gates.
+    """
+    doc = _promote_yml()
+    for job, sid in (("plan", "plan"), ("promote", "route")):
+        steps = doc["jobs"].get(job, {}).get("steps", [])
+        for s in steps:
+            if s.get("id") == sid and "case" in s.get("run", ""):
+                return s
+    raise AssertionError("no route-allowlist step found in promote.yml")
+
+
 def test_promote_yml_route_allowlist_matches_the_endpoint():
     """The endpoint, promote.yml and branch-flow.yml are three independent
     gates on the same decision; if they drift, one of them is not enforcing
     what it appears to."""
-    step = [s for s in _promote_yml()["jobs"]["promote"]["steps"] if s.get("id") == "route"][0]
-    run = step["run"]
+    run = _route_allowlist_step()["run"]
     _, _, _, ns = _load()
     for source, target in ns["PROMOTE_ROUTES"]:
         assert f"{source}:{target}" in run, (
@@ -398,7 +415,7 @@ def test_promote_yml_case_pattern_has_no_shell_redirection():
     """A case pattern like `dev->qa` is a bash SYNTAX error ('>' is parsed as a
     redirection), which YAML validation cannot catch and which would break
     every promotion at runtime."""
-    step = [s for s in _promote_yml()["jobs"]["promote"]["steps"] if s.get("id") == "route"][0]
+    step = _route_allowlist_step()
     for line in step["run"].splitlines():
         stripped = line.strip()
         if stripped.endswith(")") and "|" in stripped and not stripped.startswith("#"):
