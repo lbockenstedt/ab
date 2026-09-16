@@ -242,6 +242,31 @@
     </style>
 </head>
 <body class="flex flex-col h-screen w-screen overflow-hidden">
+    <!-- In-page confirmation modal. Used instead of native confirm()/prompt(),
+         which some browsers/embedded shells suppress silently — leaving a
+         destructive action (promote / override) firing with no visible prompt. -->
+    <div id="bf-confirm-overlay" class="hidden fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm px-4">
+        <div class="w-full max-w-md rounded-xl bg-white shadow-2xl border border-slate-200 overflow-hidden">
+            <div id="bf-confirm-head" class="px-5 py-3 border-b border-slate-200 flex items-center gap-2">
+                <i id="bf-confirm-icon" class="fas fa-circle-question text-slate-500"></i>
+                <h3 id="bf-confirm-title" class="font-semibold text-slate-800 text-sm">Please confirm</h3>
+            </div>
+            <div class="px-5 py-4">
+                <p id="bf-confirm-msg" class="text-sm text-slate-600 whitespace-pre-line"></p>
+                <div id="bf-confirm-type-wrap" class="hidden mt-3">
+                    <label id="bf-confirm-type-label" class="block text-xs font-medium text-slate-500 mb-1"></label>
+                    <input id="bf-confirm-type-input" type="text" autocomplete="off"
+                        class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-400" />
+                </div>
+            </div>
+            <div class="px-5 py-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
+                <button id="bf-confirm-cancel" type="button"
+                    class="px-4 py-2 rounded-lg text-xs uppercase tracking-widest font-semibold border border-slate-300 text-slate-600 hover:bg-slate-100 transition-all">Cancel</button>
+                <button id="bf-confirm-ok" type="button"
+                    class="px-4 py-2 rounded-lg text-xs uppercase tracking-widest font-semibold transition-all"></button>
+            </div>
+        </div>
+    </div>
     <!-- Topbar — spans full page width (LM-HUB shell) -->
     <header class="hpe-topbar h-16 flex-none flex items-center justify-between px-6">
         <!-- Left: AppBuilder icon | AppBuilder | <current module> — mirrors LM's
@@ -2811,6 +2836,79 @@
         // Lightweight toast notifier — replaces alert() for completion/error
         // messages so an action doesn't pop a blocking modal. Types: success |
         // error | info | warn. Auto-dismisses after 4s (errors 6s).
+        // In-page confirmation dialog returning a Promise<boolean>. Replaces
+        // native confirm()/prompt(), which can be suppressed by the browser
+        // (e.g. "prevent this page from creating additional dialogs") — which is
+        // why clicking Promote/Override could fire with no visible prompt.
+        // opts: { title, message, okText, danger, requireType }. When
+        // requireType is set the OK button stays disabled until the typed input
+        // matches it exactly.
+        function bfConfirm(opts = {}) {
+            const overlay = document.getElementById('bf-confirm-overlay');
+            const titleEl = document.getElementById('bf-confirm-title');
+            const iconEl = document.getElementById('bf-confirm-icon');
+            const msgEl = document.getElementById('bf-confirm-msg');
+            const okBtn = document.getElementById('bf-confirm-ok');
+            const cancelBtn = document.getElementById('bf-confirm-cancel');
+            const typeWrap = document.getElementById('bf-confirm-type-wrap');
+            const typeLabel = document.getElementById('bf-confirm-type-label');
+            const typeInput = document.getElementById('bf-confirm-type-input');
+            const danger = !!opts.danger;
+
+            titleEl.textContent = opts.title || 'Please confirm';
+            iconEl.className = danger
+                ? 'fas fa-triangle-exclamation text-red-500'
+                : 'fas fa-circle-question text-slate-500';
+            msgEl.textContent = opts.message || '';
+            okBtn.textContent = opts.okText || 'Confirm';
+            okBtn.className = 'px-4 py-2 rounded-lg text-xs uppercase tracking-widest font-semibold transition-all '
+                + (danger
+                    ? 'bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed'
+                    : 'bg-[#01A982] text-white hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed');
+
+            const requireType = opts.requireType || '';
+            if (requireType) {
+                typeWrap.classList.remove('hidden');
+                typeLabel.textContent = `Type ${requireType} to confirm:`;
+                typeInput.value = '';
+                okBtn.disabled = true;
+            } else {
+                typeWrap.classList.add('hidden');
+                okBtn.disabled = false;
+            }
+
+            overlay.classList.remove('hidden');
+            if (requireType) setTimeout(() => typeInput.focus(), 30);
+            else setTimeout(() => okBtn.focus(), 30);
+
+            return new Promise(resolve => {
+                function cleanup(result) {
+                    overlay.classList.add('hidden');
+                    okBtn.onclick = null;
+                    cancelBtn.onclick = null;
+                    typeInput.oninput = null;
+                    typeInput.onkeydown = null;
+                    overlay.onclick = null;
+                    document.removeEventListener('keydown', onKey);
+                    resolve(result);
+                }
+                function onKey(e) { if (e.key === 'Escape') cleanup(false); }
+                okBtn.onclick = () => {
+                    if (requireType && typeInput.value !== requireType) return;
+                    cleanup(true);
+                };
+                cancelBtn.onclick = () => cleanup(false);
+                overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+                document.addEventListener('keydown', onKey);
+                if (requireType) {
+                    typeInput.oninput = () => { okBtn.disabled = typeInput.value !== requireType; };
+                    typeInput.onkeydown = (e) => {
+                        if (e.key === 'Enter' && typeInput.value === requireType) cleanup(true);
+                    };
+                }
+            });
+        }
+
         function showToast(message, type = 'info') {
             let stack = document.getElementById('bf-toast-stack');
             if (!stack) {
@@ -3527,15 +3625,24 @@
 
             const isOverride = (source === 'dev' && target === 'main');
             if (isOverride) {
-                // Typed confirmation, not a plain confirm() — this route skips
-                // qa entirely, so it must not be reachable by a stray click.
-                const typed = window.prompt(
-                    `OVERRIDE — skip QA.\n\nThis opens a pull request from dev straight into main for ${label}, ` +
-                    `bypassing the qa gate. It opens a PR; it does NOT merge.\n\n` +
-                    `Type PROMOTE to confirm:`);
-                if (typed !== 'PROMOTE') { showToast('Override cancelled — nothing was promoted.', 'info'); return; }
-            } else if (!window.confirm(`Open a promotion pull request ${source} → ${target} for ${label}?\n\nThis does not merge.`)) {
-                return;
+                // Typed confirmation — this route skips qa entirely, so it must
+                // not be reachable by a stray click.
+                const ok = await bfConfirm({
+                    title: 'Override — skip QA',
+                    danger: true,
+                    okText: 'Promote to main',
+                    requireType: 'PROMOTE',
+                    message: `This opens a pull request from dev straight into main for ${label}, `
+                        + `bypassing the qa gate.\n\nIt opens a PR; it does NOT merge.`,
+                });
+                if (!ok) { showToast('Override cancelled — nothing was promoted.', 'info'); return; }
+            } else {
+                const ok = await bfConfirm({
+                    title: `Promote ${source} → ${target}`,
+                    okText: 'Open PR',
+                    message: `Open a promotion pull request ${source} → ${target} for ${label}?\n\nThis does not merge.`,
+                });
+                if (!ok) return;
             }
 
             const btn = document.getElementById(PROMOTE_BTN_IDS[source + '>' + target]);
