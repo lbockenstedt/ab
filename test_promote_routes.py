@@ -382,12 +382,29 @@ def test_promote_yml_declares_the_target_input_the_override_needs():
     assert "auto" in inputs["target"]["options"]
 
 
+def _route_allowlist_step():
+    """The step whose bash `case` allowlists the promotion routes.
+
+    This lived in the promote job's `route` step until promotion was fanned out
+    to a matrix; the allowlist now sits in the `plan` job's `plan` step (the
+    per-matrix `route` step only echoes the already-vetted src/tgt). Prefer the
+    plan step, but fall back so the assertion tracks the allowlist wherever it
+    is, rather than silently passing against a step that no longer gates.
+    """
+    doc = _promote_yml()
+    for job, sid in (("plan", "plan"), ("promote", "route")):
+        steps = doc["jobs"].get(job, {}).get("steps", [])
+        for s in steps:
+            if s.get("id") == sid and "case" in s.get("run", ""):
+                return s
+    raise AssertionError("no route-allowlist step found in promote.yml")
+
+
 def test_promote_yml_route_allowlist_matches_the_endpoint():
     """The endpoint, promote.yml and branch-flow.yml are three independent
     gates on the same decision; if they drift, one of them is not enforcing
     what it appears to."""
-    step = [s for s in _promote_yml()["jobs"]["promote"]["steps"] if s.get("id") == "route"][0]
-    run = step["run"]
+    run = _route_allowlist_step()["run"]
     _, _, _, ns = _load()
     for source, target in ns["PROMOTE_ROUTES"]:
         assert f"{source}:{target}" in run, (
@@ -398,7 +415,7 @@ def test_promote_yml_case_pattern_has_no_shell_redirection():
     """A case pattern like `dev->qa` is a bash SYNTAX error ('>' is parsed as a
     redirection), which YAML validation cannot catch and which would break
     every promotion at runtime."""
-    step = [s for s in _promote_yml()["jobs"]["promote"]["steps"] if s.get("id") == "route"][0]
+    step = _route_allowlist_step()
     for line in step["run"].splitlines():
         stripped = line.strip()
         if stripped.endswith(")") and "|" in stripped and not stripped.startswith("#"):
@@ -440,6 +457,32 @@ def test_repo_selector_lives_in_the_release_view():
     one on this view stayed empty."""
     assert 'id="promote-repo"' in _release_view_block(_index_html())
     assert _index_html().count('id="promote-repo"') == 1
+
+
+# --------------------------------------------------------------------------
+# Confirmation: Promote/Override must raise an in-page modal, not native
+# confirm()/prompt() (which some browsers/embedded shells suppress silently,
+# firing a destructive promotion with no visible prompt).
+# --------------------------------------------------------------------------
+def test_confirmation_uses_the_in_page_modal_not_native_dialogs():
+    text = _index_html()
+    assert 'id="bf-confirm-overlay"' in text, "the in-page confirm modal is missing"
+    assert "function bfConfirm(" in text
+    promote = text[text.index("async function promoteBranch("):]
+    promote = promote[:promote.index("\n        document.addEventListener('DOMContentLoaded', loadPromoteRepos);")]
+    assert "await bfConfirm(" in promote, "promoteBranch must await the in-page modal"
+    assert "window.confirm" not in promote and "window.prompt" not in promote, (
+        "promoteBranch must not fall back to native confirm()/prompt() -- they "
+        "can be suppressed, leaving the action to fire with no prompt")
+
+
+def test_override_confirmation_still_requires_typing_promote():
+    """The dev->main override must stay behind a typed confirmation."""
+    text = _index_html()
+    promote = text[text.index("async function promoteBranch("):]
+    assert "requireType: 'PROMOTE'" in promote, (
+        "the override path must keep its typed 'PROMOTE' confirmation")
+
 
 
 def test_footer_no_longer_carries_the_promotion_controls():
