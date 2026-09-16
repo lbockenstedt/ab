@@ -442,6 +442,32 @@ def test_repo_selector_lives_in_the_release_view():
     assert _index_html().count('id="promote-repo"') == 1
 
 
+# --------------------------------------------------------------------------
+# Confirmation: Promote/Override must raise an in-page modal, not native
+# confirm()/prompt() (which some browsers/embedded shells suppress silently,
+# firing a destructive promotion with no visible prompt).
+# --------------------------------------------------------------------------
+def test_confirmation_uses_the_in_page_modal_not_native_dialogs():
+    text = _index_html()
+    assert 'id="bf-confirm-overlay"' in text, "the in-page confirm modal is missing"
+    assert "function bfConfirm(" in text
+    promote = text[text.index("async function promoteBranch("):]
+    promote = promote[:promote.index("\n        document.addEventListener('DOMContentLoaded', loadPromoteRepos);")]
+    assert "await bfConfirm(" in promote, "promoteBranch must await the in-page modal"
+    assert "window.confirm" not in promote and "window.prompt" not in promote, (
+        "promoteBranch must not fall back to native confirm()/prompt() -- they "
+        "can be suppressed, leaving the action to fire with no prompt")
+
+
+def test_override_confirmation_still_requires_typing_promote():
+    """The dev->main override must stay behind a typed confirmation."""
+    text = _index_html()
+    promote = text[text.index("async function promoteBranch("):]
+    assert "requireType: 'PROMOTE'" in promote, (
+        "the override path must keep its typed 'PROMOTE' confirmation")
+
+
+
 def test_footer_no_longer_carries_the_promotion_controls():
     text = _index_html()
     footer = text[text.index("<footer"):text.index("</footer>")]
