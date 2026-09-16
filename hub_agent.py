@@ -800,6 +800,45 @@ class HubAgentClient:
             except Exception:  # noqa: BLE001
                 pass
 
+    async def _handle_get_mtls_status(self, msg):
+        """Report our mTLS material presence for the hub's readiness card
+        (System → Hub Status). Mirrors the shape every real spoke returns from
+        the shared control_plane's SPOKE_GET_MTLS_STATUS handler
+        (``{"status":"SUCCESS","mtls":{...}}``) so the card can render a
+        per-spoke green/amber dot for AppBuilder instead of a false "offline"
+        (ab is self-contained and otherwise never answers this probe, so the
+        hub's request times out and marks us offline even though our WS link is
+        up and we DO hold the hub-CA mTLS client cert). Read-only; no side
+        effects. The top-level correlation_id echoes the inbound message_id so
+        the hub's request_response path matches the reply."""
+        if self._ws is None or self.signer is None:
+            return
+        cc = self._client_cert_file
+        ck = self._client_key_file
+        ca = self._tls_ca_cert
+        mtls = {
+            "enabled": bool(self._hub_mtls and self._present_cert),
+            "ca_present": bool(ca and os.path.exists(ca)),
+            "client_cert_present": bool(cc and os.path.exists(cc)),
+            "client_key_present": bool(ck and os.path.exists(ck)),
+            "server_cert_present": False,
+            "ca_path": ca,
+            "client_cert_path": cc,
+            "client_key_path": ck,
+            "server_cert_path": "",
+        }
+        reply = {
+            "correlation_id": msg.get("header", {}).get("message_id"),
+            "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
+                       "sender_id": self.spoke_id, "destination_id": "hub"},
+            "payload": {"type": "COMMAND_RESULT",
+                        "data": {"status": "SUCCESS", "mtls": mtls}},
+        }
+        try:
+            await self._ws.send(encode_frame(self.signer, reply))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to send SPOKE_GET_MTLS_STATUS reply: %s", e)
+
     async def _handle_set_mtls_client_cert(self, msg, data):
         """Install the Hub-Local-CA clientAuth cert the hub minted for our mTLS
         CLIENT identity (public CAs no longer issue clientAuth). Written to the mTLS
@@ -1168,6 +1207,10 @@ class HubAgentClient:
 
         if cmd_type == "SPOKE_CLEAR_MTLS_CLIENT_CERT":
             await self._handle_clear_mtls_client_cert(msg)
+            return
+
+        if cmd_type == "SPOKE_GET_MTLS_STATUS":
+            await self._handle_get_mtls_status(msg)
             return
 
         if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
