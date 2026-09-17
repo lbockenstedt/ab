@@ -2242,16 +2242,11 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
             f"{fix_format}"
         )
     try:
-        # repo_checkout_path/enable_native_tools/json_schema are claude_cli-only
-        # (see _request_claude_cli) — every other provider ignores them and
-        # behaves exactly as before. Lets claude_cli verify/explore beyond the
-        # pre-selected relevant_files (e.g. a symbol's real definition) instead
-        # of guessing from context_code alone; the returned edits are still
-        # matched via exact-substring search against the real file content in
-        # parse_and_apply, so nothing here bypasses that safety net. Gated on
-        # repo_path actually being a real directory — enabling native tools
-        # with no valid --add-dir would fall back to the subprocess's own cwd
-        # (ab's own source tree), not the target repo.
+        # Let tool-capable providers explore the real checkout before returning
+        # exact-substring edits: claude_cli uses its native Read/Grep/Glob path;
+        # API providers use AppBuilder's local read-only repo-tool loop. The
+        # returned edits are still matched by parse_and_apply against the real
+        # file content, so exploration never bypasses that safety net.
         _native = bool(repo_path and os.path.isdir(repo_path))
         import dataclasses
         from model_selection import LlmRequirements
