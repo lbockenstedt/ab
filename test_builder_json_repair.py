@@ -31,6 +31,7 @@ import json
 import re
 
 _WANT_FUNCS = {"_json_string_spans", "_looks_truncated_json",
+               "_close_truncated_json",
                "_enclosing_flat_object", "_flat_object_keys",
                "_repair_missing_object_keys", "_first_json_array_of_strings"}
 _WANT_ASSIGNS = {"_EDIT_OBJECT_KEYS"}
@@ -203,8 +204,65 @@ def main():
     ok &= _check("fenced array is found",
                  first_array('```json\n["a.py"]\n```') == ["a.py"])
 
+    # ── _close_truncated_json ───────────────────────────────────────────────
+    # Detecting truncation was only ever used to pick a better ERROR MESSAGE --
+    # the response was still discarded, and the retry advice ("return FEWER and
+    # SMALLER edits") is unactionable for a payload that is one brace short.
+    # lm#440 died that way 659 chars into an 8192-token budget. Everything
+    # before the cut is valid JSON, so the complete edits are recoverable.
+    close = ns["_close_truncated_json"]
+
+    def _closed(raw):
+        out = close(raw)
+        return json.loads(out) if out is not None else None
+
+    d = _closed('{"confidence": 0.35, "edits": [{"file": "WebUI/main.js", '
+                '"search": "a", "replace": "b"}]')
+    ok &= _check("the lm#440 payload (one missing brace) is recovered intact",
+                 d is not None and d["confidence"] == 0.35 and len(d["edits"]) == 1)
+
+    d = _closed('{"confidence": 0.4, "edits": [{"file": "x.js", "search": "abc", '
+                '"replace": "def')
+    ok &= _check("a cut INSIDE a string closes the string then the containers",
+                 d is not None and d["edits"][0]["replace"] == "def")
+
+    d = _closed('{"confidence": 0.5, "edits": [{"file": "a.js", "search": "s1", '
+                '"replace": "r1"}, {"file": "b.js", "search": "s2"')
+    ok &= _check("a half-written trailing edit is dropped, earlier ones survive",
+                 d is not None and len(d["edits"]) == 1
+                 and d["edits"][0]["file"] == "a.js")
+
+    d = _closed('{"confidence": 0.6, "edits": [{"file": "a.js", '
+                '"search": "if (x) { y(); }", "replace": "if (x) { z(); }"}]')
+    ok &= _check("braces inside an edit's own text are not read as structure",
+                 d is not None and len(d["edits"]) == 1
+                 and d["edits"][0]["replace"] == "if (x) { z(); }")
+
+    # The repair must stay OUT of the way of the rest of the ladder: anything it
+    # cannot prove salvageable has to fall through to the existing handling.
+    ok &= _check("complete JSON is left alone (a different repair applies)",
+                 close('{"confidence": 0.9, "edits": [{"file": "a.js", '
+                       '"search": "s", "replace": "r"}]}') is None)
+    ok &= _check("prose that is not JSON at all is declined",
+                 close("I was unable to determine a fix.") is None)
+    ok &= _check("truncated before ANY edit completed is declined",
+                 close('{"confidence": 0.3, "edits": [{"file": "a.js", "sea') is None)
+    ok &= _check("an edit closed into shape but missing 'replace' is not applied",
+                 close('{"confidence": 0.5, "edits": [{"file": "a.js", '
+                       '"search": "s1"') is None)
+    ok &= _check("empty text is declined", close("") is None)
+
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
+
+
+def test_builder_json_repair():
+    """Collectable entrypoint.
+
+    CI runs `pytest -q .`; without this the whole module was imported and then
+    silently contributed ZERO tests, so none of these regressions were actually
+    guarded on a pull request."""
+    assert main() == 0
 
 
 if __name__ == "__main__":
