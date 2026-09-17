@@ -484,6 +484,18 @@ def test_override_confirmation_still_requires_typing_promote():
         "the override path must keep its typed 'PROMOTE' confirmation")
 
 
+def test_normal_hops_promote_without_a_confirmation():
+    """dev->qa and qa->main are reversible (they only OPEN a PR), so they fire
+    straight from the click -- no dialog, just the toast. Only the dev->main
+    override may still confirm, so exactly one bfConfirm() remains."""
+    text = _index_html()
+    promote = text[text.index("async function promoteBranch("):]
+    promote = promote[:promote.index("\n        document.addEventListener('DOMContentLoaded', loadPromoteRepos);")]
+    assert promote.count("bfConfirm(") == 1, (
+        "only the dev->main override may confirm; dev->qa and qa->main must "
+        "promote without a confirmation dialog")
+
+
 
 def test_footer_no_longer_carries_the_promotion_controls():
     text = _index_html()

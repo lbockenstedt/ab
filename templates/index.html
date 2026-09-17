@@ -3636,14 +3636,10 @@
                         + `bypassing the qa gate.\n\nIt opens a PR; it does NOT merge.`,
                 });
                 if (!ok) { showToast('Override cancelled — nothing was promoted.', 'info'); return; }
-            } else {
-                const ok = await bfConfirm({
-                    title: `Promote ${source} → ${target}`,
-                    okText: 'Open PR',
-                    message: `Open a promotion pull request ${source} → ${target} for ${label}?\n\nThis does not merge.`,
-                });
-                if (!ok) return;
             }
+            // dev → qa and qa → main are the normal, reversible hops — they only
+            // OPEN a PR, never merge — so they fire straight from the click with
+            // no confirmation dialog; the toast below is the only acknowledgement.
 
             const btn = document.getElementById(PROMOTE_BTN_IDS[source + '>' + target]);
             if (btn) btn.disabled = true;
