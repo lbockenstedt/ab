@@ -256,7 +256,8 @@ class HubAgentClient:
         # the self-signed hub cert (matches BaseControlPlane._client_ssl_ctx); set
         # LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify against a shipped CA.
         self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0") == "1"
-        self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "") or "").strip()
+        self._tls_ca_cert = ((os.environ.get("LM_HUB_CA_CERT", "") or "").strip()
+                             or "/etc/ab/hub-ca.pem")
         # mTLS CLIENT identity for the wss connection: a Hub-Local-CA clientAuth
         # cert delivered by SPOKE_SET_MTLS_CLIENT_CERT (NOT the LE WebUI cert —
         # public CAs can't issue a cert that chains to the hub's client CA, so an
@@ -310,6 +311,7 @@ class HubAgentClient:
 
         # Console spokes registry for credential distribution (lm console module).
         self._console_spokes: set = set()
+        self._bootstrap_hub_ca_from_webui_cert()
 
     # -------------------------------------------------------------- log relay
 
@@ -756,8 +758,10 @@ class HubAgentClient:
         Without this, ``websockets.connect`` builds a verifying context for a
         wss:// URI and the self-signed hub cert fails CERTIFICATE_VERIFY_FAILED."""
         try:
-            if self._tls_verify and self._tls_ca_cert:
+            if self._tls_verify and self._tls_ca_cert and os.path.exists(self._tls_ca_cert):
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
+            elif self._tls_verify:
+                ctx = ssl.create_default_context()
             else:
                 ctx = ssl._create_unverified_context()
             # Present the installed mTLS client cert (needed for HUB_REQUEST) —
@@ -777,6 +781,100 @@ class HubAgentClient:
         except Exception as e:  # noqa: BLE001
             logger.error("Could not build wss SSL context: %s", e)
             return None
+
+    def _atomic_write_file(self, path: str, content: str, mode: int = 0o644) -> bool:
+        """Write a material file by same-directory replace; return True if changed."""
+        content = content if content.endswith("\n") else content + "\n"
+        try:
+            with open(path, "r") as f:
+                if f.read() == content:
+                    try:
+                        os.chmod(path, mode)
+                    except OSError:
+                        pass
+                    return False
+        except OSError:
+            pass
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = f"{path}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+        with open(tmp, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+        return True
+
+    def _persist_env_key(self, key: str, value: str) -> None:
+        """Persist a single environment key in /etc/ab/.env atomically."""
+        env_file = os.path.join(os.environ.get("AB_CONFIG_DIR", "/etc/ab"), ".env")
+        os.makedirs(os.path.dirname(env_file) or ".", exist_ok=True)
+        lines = []
+        try:
+            with open(env_file, "r") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            pass
+        rendered = f"{key}={value}"
+        replaced = False
+        out = []
+        for line in lines:
+            if line.startswith(f"{key}="):
+                if not replaced:
+                    out.append(rendered)
+                    replaced = True
+                continue
+            out.append(line)
+        if not replaced:
+            out.append(rendered)
+        tmp = f"{env_file}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+        with open(tmp, "w") as f:
+            f.write("\n".join(out) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, env_file)
+        os.environ[key] = value
+
+    @staticmethod
+    def _ca_bundle_from_fullchain(fullchain: str) -> str:
+        blocks = []
+        start = "-----BEGIN CERTIFICATE-----"
+        end = "-----END CERTIFICATE-----"
+        for part in fullchain.split(start):
+            if end not in part:
+                continue
+            body = part.split(end, 1)[0]
+            blocks.append(f"{start}{body}{end}\n")
+        return "".join(blocks[1:]).strip()
+
+    def _persist_hub_ca_bundle(self, ca_bundle: str) -> bool:
+        ca_bundle = (ca_bundle or "").strip()
+        if not ca_bundle:
+            return False
+        ca_path = self._tls_ca_cert or "/etc/ab/hub-ca.pem"
+        changed = self._atomic_write_file(ca_path, ca_bundle, 0o644)
+        self._tls_ca_cert = ca_path
+        try:
+            self._persist_env_key("LM_HUB_CA_CERT", ca_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not persist LM_HUB_CA_CERT=%s: %s", ca_path, e)
+        return changed
+
+    def _bootstrap_hub_ca_from_webui_cert(self) -> None:
+        """Recover the CA bundle from AB's installed fullchain after upgrade."""
+        ca_path = self._tls_ca_cert or "/etc/ab/hub-ca.pem"
+        if os.path.exists(ca_path):
+            return
+        webui_cert = os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem")
+        try:
+            with open(webui_cert, "r") as f:
+                ca_bundle = self._ca_bundle_from_fullchain(f.read())
+            if ca_bundle:
+                self._persist_hub_ca_bundle(ca_bundle)
+                logger.info("Recovered hub CA bundle from WebUI fullchain into %s", ca_path)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not recover hub CA bundle from %s: %s", webui_cert, e)
 
     async def _handle_clear_mtls_client_cert(self, msg):
         """Revocation: delete our mTLS client cert + stop presenting it (reconnect
@@ -928,6 +1026,9 @@ class HubAgentClient:
                     os.chmod(webui_key, 0o600)
                 except OSError:
                     pass
+                ca_bundle = chain.strip() or self._ca_bundle_from_fullchain(fc)
+                if ca_bundle:
+                    self._persist_hub_ca_bundle(ca_bundle)
                 message = (f"WebUI cert installed for {data.get('domain') or '?'}"
                            " — restarting to load it")
                 logger.info("INSTALL_CERT: %s", message)
@@ -1214,16 +1315,26 @@ class HubAgentClient:
             return
 
         if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
-            # The hub's wildcard mTLS-materials fan-out. ab keeps its OWN
-            # dedicated cert (ab.<domain>) as its mTLS client identity — it
-            # must NOT adopt the fanned-out wildcard client cert, which would
-            # replace its SAN-pinned identity and break HUB_REQUEST authorization.
-            # So ignore the payload and just ACK, so the hub's durable mailbox
-            # clears it instead of retrying to exhaustion ("failed after max
-            # retries"). The hub also skips us once our cert is a claimed target.
-            await self._ack(msg, "SUCCESS",
-                            "ignored — ab uses its own dedicated cert, not the wildcard")
-            logger.info("SPOKE_SET_MTLS_MATERIALS ignored (ab keeps its own cert) — acked")
+            # AB keeps its own SAN-pinned client cert, so never adopt the
+            # wildcard client cert/key. The CA bundle is still required for hub
+            # verification and for the mTLS readiness card, so persist that.
+            ca_bundle = (data.get("ca_bundle") or data.get("ca") or "").strip()
+            if not ca_bundle:
+                await self._ack(msg, "ERROR", "missing ca_bundle")
+                return
+            try:
+                changed = self._persist_hub_ca_bundle(ca_bundle)
+                await self._ack(
+                    msg, "SUCCESS",
+                    "hub CA bundle installed"
+                    if changed else "hub CA bundle already current")
+                logger.info("SPOKE_SET_MTLS_MATERIALS: hub CA bundle %s at %s; "
+                            "kept AppBuilder dedicated client cert",
+                            "installed" if changed else "already current",
+                            self._tls_ca_cert)
+            except Exception as e:  # noqa: BLE001
+                await self._ack(msg, "ERROR", f"CA bundle install failed: {e}")
+                logger.warning("SPOKE_SET_MTLS_MATERIALS CA install failed: %s", e)
             return
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
