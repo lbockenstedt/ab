@@ -35,6 +35,7 @@ import config_store
 import llm_perf
 import model_registry
 import model_selection
+import repo_tools
 
 # Timeout support: Python 3.9 uses threading, Python 3.11+ uses contextlib.timeout
 try:
@@ -2648,12 +2649,57 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
     kwargs = dict(repo_checkout_path=repo_checkout_path, json_schema=json_schema,
                   enable_native_tools=enable_native_tools, search_model=search_model,
                   profile=profile, extra_add_dirs=extra_add_dirs)
+    agentic_repo_requested = bool(enable_native_tools and repo_checkout_path and not tools)
+    agentic_repo_available = any(
+        ((c.get("provider") or "").lower().strip() == "claude_cli")
+        or bool((c.get("caps") or {}).get("supports_tools"))
+        for c in chain
+    ) if agentic_repo_requested else False
+    try:
+        agentic_repo_max_iter = int(config.get("FIX_AGENTIC_MAX_ITERATIONS", 8) or 8)
+    except Exception:
+        agentic_repo_max_iter = 8
+    try:
+        agentic_repo_max_chars = int(config.get("FIX_AGENTIC_TOOL_MAX_CHARS", 12000) or 12000)
+    except Exception:
+        agentic_repo_max_chars = 12000
 
     sem = _get_category_semaphore("PICKER")
     sem.acquire()
     try:
         last_err = None
         for candidate in chain:
+            provider = (candidate.get("provider") or "").lower().strip()
+            if (agentic_repo_requested and agentic_repo_available
+                    and provider != "claude_cli"
+                    and not (candidate.get("caps") or {}).get("supports_tools")):
+                last_err = "agentic repo tools requested but candidate has no tool support"
+                continue
+
+            if (agentic_repo_requested and provider != "claude_cli"
+                    and (candidate.get("caps") or {}).get("supports_tools")):
+                def _agent_call(agent_messages, agent_tools):
+                    result, err = _try_candidate(candidate, agent_messages, agent_tools, False,
+                                                 task_id, config, **kwargs)
+                    if err is not None:
+                        raise Exception(err)
+                    return result
+
+                try:
+                    result = repo_tools.run_agentic_fix(
+                        _agent_call, messages, repo_checkout_path,
+                        max_iterations=agentic_repo_max_iter,
+                        max_result_chars=agentic_repo_max_chars,
+                        logger=logger,
+                    )
+                    if used_model_out is not None:
+                        used_model_out.update({"key": candidate["key"], "provider": candidate["provider"],
+                                               "model": candidate["model"], "base_url": candidate["base_url"]})
+                    return result
+                except Exception as e:  # noqa: BLE001 - try the next routed candidate
+                    last_err = e
+                    continue
+
             result, err = _try_candidate(candidate, messages, tools, effective_stream, task_id, config, **kwargs)
             if err is None:
                 if used_model_out is not None:
@@ -2688,11 +2734,12 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=No
       used_model_out=                — when given a dict, is populated in place
                                         with the winning candidate's identity.
 
-    ``repo_checkout_path``/``json_schema``/``enable_native_tools``/``search_model``
-    are claude_cli-specific (see _request_claude_cli's docstring) — every other
-    provider silently ignores them. Distinct from the generic ``tools=`` param
-    (an OpenAI-style function-schema every OTHER provider consumes; claude_cli
-    has no such API param).
+    ``repo_checkout_path`` + ``enable_native_tools`` enables either claude_cli's
+    native Read/Grep/Glob path or, for tool-capable API providers, AppBuilder's
+    local read-only repo-tool loop. ``json_schema``/``search_model`` remain
+    claude_cli-specific. Distinct from the generic ``tools=`` param (an
+    OpenAI-style function-schema every OTHER provider consumes; claude_cli has
+    no such API param).
 
     Endpoints in a 1-hour credit-exhaustion cooldown are skipped automatically.
     Concurrency: LLM_MAX_CONCURRENT gates per selection category; a per-model
