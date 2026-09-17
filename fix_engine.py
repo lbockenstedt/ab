@@ -273,6 +273,119 @@ def _looks_truncated_json(text):
     return depth > 0
 
 
+def _close_truncated_json(text):
+    """Complete a response that was cut off mid-object so the COMPLETE edits it
+    already contains can still be applied.
+
+    A response that simply stopped early is not malformed -- everything before
+    the cut is valid JSON. Discarding it threw away fully-formed edits and then
+    told the model to "return FEWER and SMALLER edits", which for a response
+    that was only ever one closing brace short is advice it cannot act on: the
+    retry re-emitted a similar payload and burned all three attempts (lm#440,
+    #453, #486 and #487 all died this way -- one of them 659 chars into an
+    8192-token budget, so this is NOT the output cap, it is the model simply
+    stopping).
+
+    Two passes, cheapest first:
+
+    1. Close whatever is still open (an unterminated string, then every open
+       container, innermost first). Rescues the common "missing the final }".
+    2. If that will not parse, the tail is a half-written element: rewind to the
+       end of the last COMPLETE element of the edits array and close there.
+
+    Either way the salvaged edits are then VALIDATED -- pass 1 happily closes a
+    trailing ``{"file": .., "search": ..`` into a well-formed object that is
+    missing its ``replace``, which would apply as a deletion. Any edit lacking
+    file/search/replace is dropped, and the result is rejected outright if
+    nothing complete survives.
+
+    Returns repaired JSON text, or None when nothing is salvageable. Never
+    raises -- a repair failure must degrade to the existing error path."""
+    if not text:
+        return None
+
+    def _scan(body):
+        """(ends_by_start, open_container_stack, ends_inside_string)."""
+        spans = _json_string_spans(body)
+        ends = {s: e for s, e in spans}
+        stack = []
+        i, n = 0, len(body)
+        while i < n:
+            if i in ends:
+                i = ends[i] + 1
+                continue
+            ch = body[i]
+            if ch in '{[':
+                stack.append(ch)
+            elif ch in '}]':
+                if stack:
+                    stack.pop()
+            i += 1
+        return ends, stack, bool(spans) and spans[-1][1] >= len(body)
+
+    def _closed(body, stack, close_string):
+        out = body + ('"' if close_string else '')
+        for ch in reversed(stack):
+            out += '}' if ch == '{' else ']'
+        return out
+
+    def _validated(candidate):
+        """Parsed + pruned candidate as JSON text, or None if nothing usable.
+
+        An edit is only usable with all three of file/search/replace present --
+        a truncated one closed into shape would otherwise replace its search
+        anchor with nothing."""
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        kept = [e for e in (parsed.get("edits") or [])
+                if isinstance(e, dict)
+                and e.get("file") and e.get("search") is not None
+                and e.get("replace") is not None]
+        if not kept and not (parsed.get("fixes") or {}):
+            return None
+        parsed["edits"] = kept
+        return json.dumps(parsed)
+
+    try:
+        _ends, stack, in_string = _scan(text)
+        if not in_string and not stack:
+            return None          # not truncated -- a different repair applies
+
+        # Pass 1 -- close what is open.
+        out = _validated(_closed(text, stack, in_string))
+        if out is not None:
+            return out
+
+        # Pass 2 -- rewind to the end of the last COMPLETE element. Track depth
+        # so a nested "}" inside an edit's own text is not mistaken for the end
+        # of the edit object (depth 2 == an element of the root's edits array).
+        ends, _stack, _ins = _scan(text)
+        depth, cut, i, n = 0, None, 0, len(text)
+        while i < n:
+            if i in ends:
+                i = ends[i] + 1
+                continue
+            ch = text[i]
+            if ch in '{[':
+                depth += 1
+            elif ch in '}]':
+                depth -= 1
+                if depth == 2:
+                    cut = i + 1
+            i += 1
+        if cut is None:
+            return None
+        head = text[:cut]
+        _e2, stack2, _i2 = _scan(head)
+        return _validated(_closed(head, stack2, False))
+    except Exception:            # noqa: BLE001 -- repair must never raise
+        return None
+
+
 def _enclosing_flat_object(text, spans, idx):
     """(open, close) of the innermost {...} containing *idx*, but ONLY if that
     object is flat — no nested object/array among its members. Returns None
@@ -2437,24 +2550,45 @@ def parse_and_apply(content, repo_path):
                                 raise ValueError(f"Expected dict, got {type(parsed).__name__}")
                             data = parsed
                         except Exception as ast_err:
-                            # Content embedded IN the ERROR line (not a separate DEBUG
-                            # line): the self-log scanner captures single ERROR/CRITICAL
-                            # lines verbatim with no surrounding context, so a DEBUG-only
-                            # dump here is invisible to it — this exact gap is why this
-                            # failure kept recurring as a "non-actionable, please provide
-                            # the full log snippet" issue instead of ever being fixed.
-                            # A response that simply STOPPED early is reported as its own
-                            # reason, so the retry asks for smaller edits instead of
-                            # telling the model to fix syntax that was never wrong.
-                            truncated = _looks_truncated_json(content)
-                            logger.error(
-                                f"Error parsing or applying JSON fix: "
-                                f"{'response truncated mid-object' if truncated else ast_err} — "
-                                f"raw content ({len(content)} chars): {content[:1500]!r}"
-                            )
-                            parse_and_apply.last_reason = (
-                                "truncated_json" if truncated else "invalid_json")
-                            return False, {}, 0.0
+                            # Fallback 4: the response simply STOPPED early, so
+                            # everything before the cut is valid JSON. Close the
+                            # open containers (and rewind past a half-written
+                            # trailing edit) and keep the complete edits rather
+                            # than discarding an otherwise-good fix over a
+                            # missing brace — the failure mode that burned all
+                            # three attempts on lm#440/#453/#486/#487.
+                            data = None
+                            repaired = _close_truncated_json(content)
+                            if repaired is not None:
+                                try:
+                                    data = _robust_json_loads(repaired)
+                                except json.JSONDecodeError:
+                                    data = None
+                            if data is not None:
+                                logger.warning(
+                                    "Recovered a truncated fix response by closing "
+                                    "%d unterminated char(s) — %d edit(s) salvaged.",
+                                    len(repaired) - len(content),
+                                    len(data.get("edits") or []))
+                            else:
+                                # Content embedded IN the ERROR line (not a separate DEBUG
+                                # line): the self-log scanner captures single ERROR/CRITICAL
+                                # lines verbatim with no surrounding context, so a DEBUG-only
+                                # dump here is invisible to it — this exact gap is why this
+                                # failure kept recurring as a "non-actionable, please provide
+                                # the full log snippet" issue instead of ever being fixed.
+                                # A response that simply STOPPED early is reported as its own
+                                # reason, so the retry asks for smaller edits instead of
+                                # telling the model to fix syntax that was never wrong.
+                                truncated = _looks_truncated_json(content)
+                                logger.error(
+                                    f"Error parsing or applying JSON fix: "
+                                    f"{'response truncated mid-object' if truncated else ast_err} — "
+                                    f"raw content ({len(content)} chars): {content[:1500]!r}"
+                                )
+                                parse_and_apply.last_reason = (
+                                    "truncated_json" if truncated else "invalid_json")
+                                return False, {}, 0.0
 
         fixes = data.get("fixes", {}) or {}
         edits = data.get("edits", []) or []
