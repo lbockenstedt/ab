@@ -2243,6 +2243,7 @@ async def settings_page(request: Request):
     # issue RESOLVED (not "failed") if so. Default ON. Threshold is the minimum
     # verifier confidence required before auto-resolving/closing.
     config.setdefault("verify_already_resolved", True)
+    config.setdefault("precheck_landed_fix", True)
     config.setdefault("resolved_confidence_threshold", 0.85)
     # Source knobs (default ON keeps the LM bug-fix pipeline working; the per-
     # module log grid + fix-log-detected are opt-in, default OFF, so the operator
@@ -2788,6 +2789,7 @@ async def save_settings(request: Request):
     # Mark already-fixed issues RESOLVED instead of "failed" when a run produces no
     # accepted change and the problem is verified already-present in the tree.
     config_data["verify_already_resolved"] = data.get("verify_already_resolved") == "on"
+    config_data["precheck_landed_fix"] = data.get("precheck_landed_fix") == "on"
     # File-a-Bug toggle (defaults on so the footer button works out of the box).
     config_data["bug_report_enabled"] = data.get("bug_report_enabled") != "off"
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"

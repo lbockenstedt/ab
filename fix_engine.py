@@ -273,6 +273,119 @@ def _looks_truncated_json(text):
     return depth > 0
 
 
+def _close_truncated_json(text):
+    """Complete a response that was cut off mid-object so the COMPLETE edits it
+    already contains can still be applied.
+
+    A response that simply stopped early is not malformed -- everything before
+    the cut is valid JSON. Discarding it threw away fully-formed edits and then
+    told the model to "return FEWER and SMALLER edits", which for a response
+    that was only ever one closing brace short is advice it cannot act on: the
+    retry re-emitted a similar payload and burned all three attempts (lm#440,
+    #453, #486 and #487 all died this way -- one of them 659 chars into an
+    8192-token budget, so this is NOT the output cap, it is the model simply
+    stopping).
+
+    Two passes, cheapest first:
+
+    1. Close whatever is still open (an unterminated string, then every open
+       container, innermost first). Rescues the common "missing the final }".
+    2. If that will not parse, the tail is a half-written element: rewind to the
+       end of the last COMPLETE element of the edits array and close there.
+
+    Either way the salvaged edits are then VALIDATED -- pass 1 happily closes a
+    trailing ``{"file": .., "search": ..`` into a well-formed object that is
+    missing its ``replace``, which would apply as a deletion. Any edit lacking
+    file/search/replace is dropped, and the result is rejected outright if
+    nothing complete survives.
+
+    Returns repaired JSON text, or None when nothing is salvageable. Never
+    raises -- a repair failure must degrade to the existing error path."""
+    if not text:
+        return None
+
+    def _scan(body):
+        """(ends_by_start, open_container_stack, ends_inside_string)."""
+        spans = _json_string_spans(body)
+        ends = {s: e for s, e in spans}
+        stack = []
+        i, n = 0, len(body)
+        while i < n:
+            if i in ends:
+                i = ends[i] + 1
+                continue
+            ch = body[i]
+            if ch in '{[':
+                stack.append(ch)
+            elif ch in '}]':
+                if stack:
+                    stack.pop()
+            i += 1
+        return ends, stack, bool(spans) and spans[-1][1] >= len(body)
+
+    def _closed(body, stack, close_string):
+        out = body + ('"' if close_string else '')
+        for ch in reversed(stack):
+            out += '}' if ch == '{' else ']'
+        return out
+
+    def _validated(candidate):
+        """Parsed + pruned candidate as JSON text, or None if nothing usable.
+
+        An edit is only usable with all three of file/search/replace present --
+        a truncated one closed into shape would otherwise replace its search
+        anchor with nothing."""
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        kept = [e for e in (parsed.get("edits") or [])
+                if isinstance(e, dict)
+                and e.get("file") and e.get("search") is not None
+                and e.get("replace") is not None]
+        if not kept and not (parsed.get("fixes") or {}):
+            return None
+        parsed["edits"] = kept
+        return json.dumps(parsed)
+
+    try:
+        _ends, stack, in_string = _scan(text)
+        if not in_string and not stack:
+            return None          # not truncated -- a different repair applies
+
+        # Pass 1 -- close what is open.
+        out = _validated(_closed(text, stack, in_string))
+        if out is not None:
+            return out
+
+        # Pass 2 -- rewind to the end of the last COMPLETE element. Track depth
+        # so a nested "}" inside an edit's own text is not mistaken for the end
+        # of the edit object (depth 2 == an element of the root's edits array).
+        ends, _stack, _ins = _scan(text)
+        depth, cut, i, n = 0, None, 0, len(text)
+        while i < n:
+            if i in ends:
+                i = ends[i] + 1
+                continue
+            ch = text[i]
+            if ch in '{[':
+                depth += 1
+            elif ch in '}]':
+                depth -= 1
+                if depth == 2:
+                    cut = i + 1
+            i += 1
+        if cut is None:
+            return None
+        head = text[:cut]
+        _e2, stack2, _i2 = _scan(head)
+        return _validated(_closed(head, stack2, False))
+    except Exception:            # noqa: BLE001 -- repair must never raise
+        return None
+
+
 def _enclosing_flat_object(text, spans, idx):
     """(open, close) of the innermost {...} containing *idx*, but ONLY if that
     object is flat — no nested object/array among its members. Returns None
@@ -1957,7 +2070,202 @@ def _resolved_gate(result, config):
     return conf >= threshold
 
 
-def verify_already_resolved(repo_path, issue_body, config, task_id=None):
+#: Landed-fix pre-check tuning. Few commits and a bounded diff: this runs before
+#: any attempt, so it must stay cheap.
+_LANDED_FIX_MAX_COMMITS = 5
+_LANDED_FIX_DIFF_BUDGET = 20000
+
+
+def _should_precheck_landed_fix(config):
+    """Gate for the landed-fix pre-check (config ``precheck_landed_fix``).
+
+    Shares ``verify_already_resolved``'s off switch: the pre-check only ever
+    ENDS in that verification, so disabling the verification must disable this
+    too, otherwise the gate would be advertised and not honoured."""
+    cfg = config or {}
+    if not cfg.get("verify_already_resolved", True):
+        return False
+    return bool(cfg.get("precheck_landed_fix", True))
+
+
+def _landed_fix_commits(repo_git, issue_num, limit=_LANDED_FIX_MAX_COMMITS):
+    """Commits already on this branch whose message references *issue_num*.
+
+    "Was this already fixed?" is a question git answers with certainty in
+    milliseconds and zero tokens. verify_already_resolved instead infers it from
+    file contents -- and for a 2 MB WebUI/main.js its 24 000-char budget shows
+    the model the first ~1% of the file, which is almost never where the fix is,
+    so the check could not succeed even when the fix was plainly there.
+
+    Anchored on non-digit boundaries so #44 does not match #440 or #4400.
+    """
+    try:
+        out = repo_git.git.log(
+            "--extended-regexp",
+            "--grep=(^|[^0-9])#%d([^0-9]|$)" % int(issue_num),
+            "--max-count=%d" % int(limit),
+            "--pretty=format:%H%x1f%s",
+        )
+    except Exception as e:  # noqa: BLE001 - a scan failure must never block a fix
+        logger.debug("landed-fix scan failed: %s", e)
+        return []
+    commits = []
+    for line in (out or "").splitlines():
+        if "\x1f" not in line:
+            continue
+        sha, subject = line.split("\x1f", 1)
+        if sha.strip():
+            commits.append({"sha": sha.strip(), "subject": subject.strip()})
+    return commits
+
+
+def _added_lines(diff_text, limit=40):
+    """Substantive added lines of a unified diff (no +++ header, no blank/brace
+    noise that would match anywhere in any file)."""
+    out = []
+    for line in (diff_text or "").splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        body = line[1:].strip()
+        if len(body) < 12:
+            continue
+        out.append(body)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _landed_fix_still_applied(repo_git, commits, min_ratio=0.6):
+    """True when the landed commits' added lines are STILL in the working tree.
+
+    Guards the regression case: a commit referencing the issue exists in history,
+    but the change was later reverted or overwritten, so the bug is genuinely
+    back and a fix really is needed. Deterministic -- no model involved.
+    """
+    try:
+        diff = repo_git.git.show(commits[0]["sha"], "--unified=0", "--format=")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("landed-fix diff read failed: %s", e)
+        return False, 0.0
+    added = _added_lines(diff)
+    if not added:
+        return False, 0.0
+    root = repo_git.working_dir
+    present = 0
+    cache = {}
+    for rel in _diff_files(diff):
+        full = _safe_repo_target(root, rel, what="landed-fix read")
+        if not full:
+            continue
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                cache[rel] = fh.read()
+        except OSError:
+            continue
+    haystack = "\n".join(cache.values())
+    if not haystack:
+        return False, 0.0
+    for line in added:
+        if line in haystack:
+            present += 1
+    ratio = present / float(len(added))
+    return ratio >= min_ratio, ratio
+
+
+def _diff_files(diff_text):
+    """Paths touched by a unified diff."""
+    return [m.group(1) for m in re.finditer(r"^\+\+\+ b/(.+)$", diff_text or "",
+                                            re.MULTILINE)]
+
+
+def _landed_fix_context(repo_git, commits):
+    """Evidence blob for the verifier: what landed, and the diff that landed."""
+    lines = ["A commit referencing this issue is ALREADY on this branch:"]
+    for c in commits:
+        lines.append("  %s  %s" % (c["sha"][:8], c["subject"]))
+    try:
+        diff = repo_git.git.show(commits[0]["sha"], "--format=")
+    except Exception:  # noqa: BLE001
+        diff = ""
+    if diff:
+        lines.append("\nThe diff that landed (truncated):\n"
+                     + diff[:_LANDED_FIX_DIFF_BUDGET])
+    return "\n".join(lines)
+
+
+def _already_resolved_verdict(repo_git, issue_body, config, issue_id,
+                              landed_context=""):
+    """Run the verifier and ALWAYS log what came back.
+
+    A declined verdict previously logged nothing at all, so "did the check run,
+    and what did it say?" was unanswerable from the log -- which is why five
+    issues that were already fixed looked like the feature had never fired."""
+    try:
+        verdict = verify_already_resolved(
+            repo_git.working_dir, issue_body, config, task_id=issue_id,
+            landed_context=landed_context)
+    except Exception as e:  # noqa: BLE001 - never block the normal path
+        logger.warning(f"already-resolved check errored for {issue_id}: {e}")
+        return {}
+    if not verdict:
+        logger.info("%s: already-resolved check returned no verdict.", issue_id)
+        return {}
+    if not _resolved_gate(verdict, config):
+        logger.info("%s: already-resolved check DECLINED (resolved=%s, "
+                    "confidence=%s, evidence=%s) — continuing with the normal path.",
+                    issue_id, verdict.get("resolved"), verdict.get("confidence"),
+                    "yes" if str(verdict.get("evidence") or "").strip() else "no")
+    return verdict
+
+
+def _resolve_as_already_fixed(issue, issue_id, repo_name, issue_num, verdict,
+                              attempts, state, how=""):
+    """Close *issue* as already fixed and record it as RESOLVED, not failed."""
+    evidence = str(verdict.get("evidence") or "").strip()
+    conf = _norm_confidence(verdict.get("confidence"))
+    logger.info("%s: no fix was needed — already resolved in tree "
+                "(confidence %.0f%%%s); marking resolved, not failed.",
+                issue_id, conf * 100, (", " + how) if how else "")
+    try:
+        issue.create_comment(
+            "✅ **AppBuilder — already resolved**\n\n"
+            "I found no code change to make because the reported problem does "
+            "not appear to be present in the current code — it looks like this "
+            f"was already fixed (verification confidence {conf:.0%}).\n\n"
+            f"**Evidence:**\n{evidence[:1500]}\n\n"
+            "Marking this as resolved. Reopen if it recurs.")
+    except Exception as ce:  # noqa: BLE001
+        logger.warning(f"could not post already-resolved comment to {issue_id}: {ce}")
+    try:
+        issue.add_to_labels("ab-already-resolved")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        issue.edit(state="closed")
+    except Exception as ce:  # noqa: BLE001
+        logger.warning(f"could not close already-resolved issue {issue_id}: {ce}")
+    processed = load_processed()
+    processed[f"{repo_name}:{issue_num}"] = {
+        "status": "resolved",
+        "timestamp": datetime.now().isoformat(),
+        "resolution": "already_fixed",
+        "evidence": evidence[:1000],
+        "confidence": conf,
+        "attempts": attempts,
+        "original_body": issue.body,
+    }
+    save_processed(processed)
+    state["processed"] = processed
+    try:
+        recompute_issue_counters(processed)
+    except Exception:  # noqa: BLE001
+        pass
+    update_task_state(task_id=issue_id, action="end")
+    return True, "Already resolved (no code change needed)"
+
+
+def verify_already_resolved(repo_path, issue_body, config, task_id=None,
+                            landed_context=""):
     """Ask a model whether the reported problem is ALREADY absent from the current
     code — i.e. the run produced no accepted fix because there is nothing left to
     fix (a re-filed/duplicate report, or a fix already merged), not because the fix
@@ -1989,11 +2297,15 @@ def verify_already_resolved(repo_path, issue_body, config, task_id=None):
         budget -= len(take)
         if budget <= 0:
             break
-    if not blobs:
+    # With landed evidence the DIFF is the proof, so an empty file read is not
+    # fatal -- it is the normal case for a multi-megabyte file whose relevant
+    # region lies far past the read budget.
+    if not blobs and not landed_context:
         return {}
     prompt = (
         f"Reported problem:\n{issue_body}\n\n"
-        "Current code (the files most relevant to this problem):\n\n"
+        + (landed_context + "\n\n" if landed_context else "")
+        + "Current code (the files most relevant to this problem):\n\n"
         + "\n\n".join(blobs)
         + "\n\nQuestion: Is the reported problem ALREADY resolved in the current code shown "
           "above — i.e. is there NO code change left to make because the code already behaves "
@@ -2437,24 +2749,45 @@ def parse_and_apply(content, repo_path):
                                 raise ValueError(f"Expected dict, got {type(parsed).__name__}")
                             data = parsed
                         except Exception as ast_err:
-                            # Content embedded IN the ERROR line (not a separate DEBUG
-                            # line): the self-log scanner captures single ERROR/CRITICAL
-                            # lines verbatim with no surrounding context, so a DEBUG-only
-                            # dump here is invisible to it — this exact gap is why this
-                            # failure kept recurring as a "non-actionable, please provide
-                            # the full log snippet" issue instead of ever being fixed.
-                            # A response that simply STOPPED early is reported as its own
-                            # reason, so the retry asks for smaller edits instead of
-                            # telling the model to fix syntax that was never wrong.
-                            truncated = _looks_truncated_json(content)
-                            logger.error(
-                                f"Error parsing or applying JSON fix: "
-                                f"{'response truncated mid-object' if truncated else ast_err} — "
-                                f"raw content ({len(content)} chars): {content[:1500]!r}"
-                            )
-                            parse_and_apply.last_reason = (
-                                "truncated_json" if truncated else "invalid_json")
-                            return False, {}, 0.0
+                            # Fallback 4: the response simply STOPPED early, so
+                            # everything before the cut is valid JSON. Close the
+                            # open containers (and rewind past a half-written
+                            # trailing edit) and keep the complete edits rather
+                            # than discarding an otherwise-good fix over a
+                            # missing brace — the failure mode that burned all
+                            # three attempts on lm#440/#453/#486/#487.
+                            data = None
+                            repaired = _close_truncated_json(content)
+                            if repaired is not None:
+                                try:
+                                    data = _robust_json_loads(repaired)
+                                except json.JSONDecodeError:
+                                    data = None
+                            if data is not None:
+                                logger.warning(
+                                    "Recovered a truncated fix response by closing "
+                                    "%d unterminated char(s) — %d edit(s) salvaged.",
+                                    len(repaired) - len(content),
+                                    len(data.get("edits") or []))
+                            else:
+                                # Content embedded IN the ERROR line (not a separate DEBUG
+                                # line): the self-log scanner captures single ERROR/CRITICAL
+                                # lines verbatim with no surrounding context, so a DEBUG-only
+                                # dump here is invisible to it — this exact gap is why this
+                                # failure kept recurring as a "non-actionable, please provide
+                                # the full log snippet" issue instead of ever being fixed.
+                                # A response that simply STOPPED early is reported as its own
+                                # reason, so the retry asks for smaller edits instead of
+                                # telling the model to fix syntax that was never wrong.
+                                truncated = _looks_truncated_json(content)
+                                logger.error(
+                                    f"Error parsing or applying JSON fix: "
+                                    f"{'response truncated mid-object' if truncated else ast_err} — "
+                                    f"raw content ({len(content)} chars): {content[:1500]!r}"
+                                )
+                                parse_and_apply.last_reason = (
+                                    "truncated_json" if truncated else "invalid_json")
+                                return False, {}, 0.0
 
         fixes = data.get("fixes", {}) or {}
         edits = data.get("edits", []) or []
@@ -2988,6 +3321,45 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             except Exception as _pe:  # noqa: BLE001
                 logger.debug(f"prior failure context skipped for {issue_id}: {_pe}")
 
+            # ── Landed-fix pre-check ───────────────────────────────────
+            # Ask git BEFORE spending an attempt: is a fix for this issue
+            # already on the branch? Five issues (lm#441/#453/#486/#487/#488)
+            # each burned all three attempts, escalated through three models and
+            # collected reviewer rejections for diffs that were correctly judged
+            # no-ops -- because the bug really was already fixed. The existing
+            # already-resolved check could only run AFTER that waste, and being
+            # file-content based it could not see a fix that lives deep inside a
+            # 2 MB file anyway.
+            #
+            # Trigger is deterministic (a commit whose message references this
+            # issue, whose added lines are STILL present so a later revert or
+            # regression does not read as "fixed"); the verdict is still the
+            # existing strict LLM gate, now shown the landed diff as evidence.
+            if _should_precheck_landed_fix(config):
+                try:
+                    _landed = _landed_fix_commits(repo_git, issue_num)
+                    if _landed:
+                        _applied, _ratio = _landed_fix_still_applied(repo_git, _landed)
+                        logger.info(
+                            "%s: found %d commit(s) referencing this issue "
+                            "(%s); added lines still present: %.0f%%.",
+                            issue_id, len(_landed), _landed[0]["sha"][:8], _ratio * 100)
+                        if _applied:
+                            _v = _already_resolved_verdict(
+                                repo_git, issue.body or "", config, issue_id,
+                                landed_context=_landed_fix_context(repo_git, _landed))
+                            if _resolved_gate(_v, config):
+                                return _resolve_as_already_fixed(
+                                    issue, issue_id, repo_name, issue_num, _v, 0,
+                                    state, how="before any attempt, from git history")
+                        else:
+                            logger.info(
+                                "%s: the referenced commit's changes are NO LONGER "
+                                "in the tree — treating this as a genuine regression "
+                                "and fixing it.", issue_id)
+                except Exception as _pe:  # noqa: BLE001 - never block a real fix
+                    logger.debug("landed-fix pre-check skipped for %s: %s", issue_id, _pe)
+
             for attempt in range(1, max_attempts + 1):
                 try:
                     update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
@@ -3231,53 +3603,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 # resolved in the current tree (a re-filed/duplicate report, or a fix
                 # already merged). If so, mark the issue resolved instead of failed.
                 if _should_check_already_resolved(last_failure, config):
-                    try:
-                        _verdict = verify_already_resolved(
-                            repo_git.working_dir, issue.body or "", config, task_id=issue_id)
-                    except Exception as _ve:  # noqa: BLE001
-                        logger.warning(f"already-resolved check errored for {issue_id}: {_ve}")
-                        _verdict = {}
+                    _verdict = _already_resolved_verdict(
+                        repo_git, issue.body or "", config, issue_id)
                     if _resolved_gate(_verdict, config):
-                        _evidence = str(_verdict.get("evidence") or "").strip()
-                        _conf = _norm_confidence(_verdict.get("confidence"))
-                        logger.info(f"{issue_id}: no fix was needed — already resolved in tree "
-                                    f"(confidence {_conf:.0%}); marking resolved, not failed.")
-                        try:
-                            issue.create_comment(
-                                "✅ **AppBuilder — already resolved**\n\n"
-                                "I found no code change to make because the reported problem does "
-                                "not appear to be present in the current code — it looks like this "
-                                f"was already fixed (verification confidence {_conf:.0%}).\n\n"
-                                f"**Evidence:**\n{_evidence[:1500]}\n\n"
-                                "Marking this as resolved. Reopen if it recurs.")
-                        except Exception as ce:  # noqa: BLE001
-                            logger.warning(f"could not post already-resolved comment to {issue_id}: {ce}")
-                        try:
-                            issue.add_to_labels("ab-already-resolved")
-                        except Exception:  # noqa: BLE001
-                            pass
-                        try:
-                            issue.edit(state="closed")
-                        except Exception as ce:  # noqa: BLE001
-                            logger.warning(f"could not close already-resolved issue {issue_id}: {ce}")
-                        processed = load_processed()
-                        processed[f"{repo_name}:{issue_num}"] = {
-                            "status": "resolved",
-                            "timestamp": datetime.now().isoformat(),
-                            "resolution": "already_fixed",
-                            "evidence": _evidence[:1000],
-                            "confidence": _conf,
-                            "attempts": max_attempts,
-                            "original_body": issue.body,
-                        }
-                        save_processed(processed)
-                        state["processed"] = processed
-                        try:
-                            recompute_issue_counters(processed)
-                        except Exception:  # noqa: BLE001
-                            pass
-                        update_task_state(task_id=issue_id, action="end")
-                        return True, "Already resolved (no code change needed)"
+                        return _resolve_as_already_fixed(
+                            issue, issue_id, repo_name, issue_num, _verdict,
+                            max_attempts, state, how="after %d attempt(s)" % max_attempts)
 
                 state["failure_count"] += 1
                 # Lead with the CAUSE. This string is shown truncated in the
