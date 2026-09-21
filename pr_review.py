@@ -445,14 +445,14 @@ def _pr_diff_text(files):
     """Assemble a unified-diff-ish text from a PR's changed files for the review
     panel — a `--- <filename>` header + patch per file, capped so a huge PR can't
     blow the provider limit (review_fix caps again at 20k internally)."""
+    from fix_engine import _truncate_diff   # lazy: fix_engine imports the app at load time
     parts = []
     for f in list(files)[:_PANEL_MAX_FILES]:
         fn = getattr(f, "filename", "?")
         patch = getattr(f, "patch", None) or ""
-        if len(patch) > _PANEL_PATCH_CHARS:
-            patch = patch[:_PANEL_PATCH_CHARS] + "\n… (patch truncated)"
+        patch = _truncate_diff(patch, _PANEL_PATCH_CHARS)
         parts.append("--- %s\n%s" % (fn, patch))
-    return "\n\n".join(parts)[:_PANEL_DIFF_CHARS]
+    return _truncate_diff("\n\n".join(parts), _PANEL_DIFF_CHARS)
 
 
 def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
@@ -484,7 +484,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
     try:
         from fix_engine import review_fix
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: panel skipped (fix_engine import failed: %s)", e)
+        logger.warning("pr_review: panel skipped (fix_engine import failed: %s)", e)
         return None
     # NOTE: the instruction block below contains literal Jinja examples (`{% for %}`,
     # `{{ }}`) whose `%` signs would be mis-parsed as %-format conversions. So only the
@@ -520,7 +520,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
         review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
                             repo=repo, head_sha=head_sha)
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: panel skipped (review_fix error: %s)", e)
+        logger.warning("pr_review: panel skipped (review_fix error: %s)", e, exc_info=True)
         return None
     return review if isinstance(review, dict) else None
 
@@ -552,7 +552,7 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     try:
         from fix_engine import review_fix
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: state-logic panel skipped (fix_engine import failed: %s)", e)
+        logger.warning("pr_review: state-logic panel skipped (fix_engine import failed: %s)", e)
         return None
     issue_body = (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
@@ -586,7 +586,7 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
         review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
                             repo=repo, head_sha=head_sha)
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: state-logic panel skipped (review_fix error: %s)", e)
+        logger.warning("pr_review: state-logic panel skipped (review_fix error: %s)", e, exc_info=True)
         return None
     return review if isinstance(review, dict) else None
 
@@ -722,6 +722,10 @@ def _render_review_body(review, header, blurb):
             conf_str),
         "",
     ]
+    if review.get("panel_size") == 1:
+        _models = review.get("panel_models") or []
+        out += ["_Single-reviewer panel: only 1 of 2 required frontier models was available (%s)._"
+                % (_models[0] if _models and _models[0] else "unknown model"), ""]
 
     # ── concerns, up front ────────────────────────────────────────────────
     if dissenting:
@@ -1073,6 +1077,8 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
                         "never eligible, regardless of author or confidence" % _base_ref)
 
     if rec.get("merged") or rec.get("auto_merged"):
+        # Keep the literal (must equal _IDEMPOTENT_MERGED_REASON): test_feature_automerge_gate
+        # execs this function standalone, so it cannot reference module constants.
         return False, "already merged (idempotent no-op)"
     if pr_meta.get("draft"):
         return False, "PR is a draft"
@@ -1135,6 +1141,41 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
 
 
+_AUTOMERGE_NOTE_MARKER = "<!-- ab-automerge -->"
+_IDEMPOTENT_MERGED_REASON = "already merged (idempotent no-op)"
+
+
+def _automerge_note(reason, cleared):
+    """The single markdown line telling a reader of the PR comment what the
+    auto-merge gate decided, prefixed by a hidden marker so a later decision can
+    find and replace it in place."""
+    reason = " ".join(str(reason or "").split())   # one line: the replace is line-based
+    head = "✅ **Auto-merge:**" if cleared else "\U0001F512 **Auto-merge held:**"   # ✅ / 🔒
+    return "%s %s %s" % (_AUTOMERGE_NOTE_MARKER, head, reason)
+
+
+def _update_automerge_comment(pr, key, note):
+    """Best-effort: put `note` in AppBuilder's pre-review comment — replacing the
+    existing auto-merge line, else appended at the END so the head marker and every
+    other line (which the already-current check and _extract_summary read) stay
+    byte-identical. No-op when there is no comment or it already says this."""
+    try:
+        comment = _find_marker_comment(pr)
+        if comment is None:
+            return
+        body = comment.body or ""
+        if note in body.splitlines():
+            return
+        if _AUTOMERGE_NOTE_MARKER in body:
+            new_body = re.sub(r"^" + re.escape(_AUTOMERGE_NOTE_MARKER) + r".*$",
+                              lambda _m: note, body, count=1, flags=re.M)
+        else:
+            new_body = body + "\n\n" + note
+        comment.edit(new_body)
+    except Exception as e:  # noqa: BLE001 - best-effort, like the rest of _maybe_auto_merge
+        logger.warning("pr_review: could not update auto-merge note on %s: %s", key, e)
+
+
 def _maybe_auto_merge(gh, repo, pr, config):
     """Called immediately after record_pr_review inside _review_one, so it
     always sees a fresh record. Evaluates _automerge_decision and, if it
@@ -1163,14 +1204,21 @@ def _maybe_auto_merge(gh, repo, pr, config):
         state_flags = {"paused": bool(state.get("paused")), "blackout": bool(state.get("blackout"))}
         should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags, changed_files)
         if not should_merge:
-            logger.debug("pr_review: auto-merge skipped for %s (%s)", key, reason)
+            # The scan runs every poll: record + log + edit the comment only when the
+            # refusal reason CHANGED, so an operator can see why a high-confidence PR
+            # wasn't merged without a write / log line / API call per poll.
+            if reason != _IDEMPOTENT_MERGED_REASON and reason != rec.get("auto_merge_blocked_reason"):
+                update_pr_review(repo.full_name, pr.number, auto_merge_blocked_reason=reason)
+                logger.info("pr_review: auto-merge held for %s: %s", key, reason)
+                _update_automerge_comment(pr, key, _automerge_note(reason, False))
             return
         logger.info("pr_review: auto-merging %s — %s", key, reason)
         approve_pr(gh, repo.full_name, pr.number, actor="ab-auto")
         mark_pr_approved(repo.full_name, pr.number, True)
         update_pr_review(repo.full_name, pr.number, auto_merge_score=min(
             rec.get("panel_confidence") or 0.0, rec.get("panel2_confidence") or 0.0),
-            auto_merge_reason=reason)
+            auto_merge_reason=reason, auto_merge_blocked_reason=None)
+        _update_automerge_comment(pr, key, _automerge_note(reason, True))
         status_code, result = merge_pr(gh, repo.full_name, pr.number)
         if status_code == 200 and result.get("status") == "success":
             update_pr_review(repo.full_name, pr.number, auto_merged=True)
