@@ -927,6 +927,24 @@ async def dashboard(request: Request):
     })
 
 
+def _duration_str(seconds):
+    seconds = max(0, int(seconds))
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m {seconds % 60}s"
+
+
+def _current_step(stream):
+    """Last non-blank line of a task's streamed reasoning, trimmed for display.
+    Lets the Active Tasks list show a one-line 'what is it doing right now'
+    without the caller having to poll/parse the full (often multi-KB) stream."""
+    if not stream:
+        return ""
+    for line in reversed(stream.strip().splitlines()):
+        line = line.strip()
+        if line:
+            return line[:160]
+    return ""
+
+
 @router.get("/api/task-details")
 async def get_task_details(task_id: str = None):
     if task_id:
@@ -935,19 +953,32 @@ async def get_task_details(task_id: str = None):
 
         task = state["active_tasks"][task_id]
         duration = datetime.now() - task["start_time"]
-        seconds = int(duration.total_seconds())
-        duration_str = f"{seconds // 3600}h {(seconds % 3600) // 60}m {seconds % 60}s"
 
         return {
             "status": state["status"],
             "task": task["name"],
-            "duration": duration_str,
+            "duration": _duration_str(duration.total_seconds()),
             "stream": task["stream"]
         }
 
+    # Summary list for the dashboard's live-refreshing "Active Tasks" card.
+    # Kept deliberately small per task (no full stream) so this can be polled
+    # every few seconds without the payload growing with reasoning length.
+    now = datetime.now()
+    tasks = {}
+    for tid, task in state["active_tasks"].items():
+        start_time = task.get("start_time") or now
+        tasks[tid] = {
+            "name": task.get("name", "Unknown Task"),
+            "kind": task.get("kind", "scan"),
+            "start_time": start_time.isoformat(),
+            "duration": _duration_str((now - start_time).total_seconds()),
+            "current_step": _current_step(task.get("stream")),
+        }
+
     return {
-        "active_tasks": state["active_tasks"],
-        "count": len(state["active_tasks"])
+        "active_tasks": tasks,
+        "count": len(tasks)
     }
 
 
