@@ -445,14 +445,14 @@ def _pr_diff_text(files):
     """Assemble a unified-diff-ish text from a PR's changed files for the review
     panel — a `--- <filename>` header + patch per file, capped so a huge PR can't
     blow the provider limit (review_fix caps again at 20k internally)."""
+    from fix_engine import _truncate_diff   # lazy: fix_engine imports the app at load time
     parts = []
     for f in list(files)[:_PANEL_MAX_FILES]:
         fn = getattr(f, "filename", "?")
         patch = getattr(f, "patch", None) or ""
-        if len(patch) > _PANEL_PATCH_CHARS:
-            patch = patch[:_PANEL_PATCH_CHARS] + "\n… (patch truncated)"
+        patch = _truncate_diff(patch, _PANEL_PATCH_CHARS)
         parts.append("--- %s\n%s" % (fn, patch))
-    return "\n\n".join(parts)[:_PANEL_DIFF_CHARS]
+    return _truncate_diff("\n\n".join(parts), _PANEL_DIFF_CHARS)
 
 
 def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
@@ -484,7 +484,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
     try:
         from fix_engine import review_fix
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: panel skipped (fix_engine import failed: %s)", e)
+        logger.warning("pr_review: panel skipped (fix_engine import failed: %s)", e)
         return None
     # NOTE: the instruction block below contains literal Jinja examples (`{% for %}`,
     # `{{ }}`) whose `%` signs would be mis-parsed as %-format conversions. So only the
@@ -520,7 +520,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
         review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
                             repo=repo, head_sha=head_sha)
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: panel skipped (review_fix error: %s)", e)
+        logger.warning("pr_review: panel skipped (review_fix error: %s)", e, exc_info=True)
         return None
     return review if isinstance(review, dict) else None
 
@@ -552,7 +552,7 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     try:
         from fix_engine import review_fix
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: state-logic panel skipped (fix_engine import failed: %s)", e)
+        logger.warning("pr_review: state-logic panel skipped (fix_engine import failed: %s)", e)
         return None
     issue_body = (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
@@ -586,7 +586,7 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
         review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
                             repo=repo, head_sha=head_sha)
     except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: state-logic panel skipped (review_fix error: %s)", e)
+        logger.warning("pr_review: state-logic panel skipped (review_fix error: %s)", e, exc_info=True)
         return None
     return review if isinstance(review, dict) else None
 
