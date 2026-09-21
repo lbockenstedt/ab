@@ -179,6 +179,12 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "auto_merged": bool(prev.get("auto_merged")),
                 "auto_merge_score": prev.get("auto_merge_score"),
                 "auto_merge_reason": prev.get("auto_merge_reason"),
+                # Why auto-merge was REFUSED (last decision) — survives re-scans so the
+                # poll-to-poll "did the reason change?" check has something to compare to.
+                # Reset when the head moved: the pre-review comment is re-rendered then
+                # (dropping the note), so the next decision must write it again.
+                "auto_merge_blocked_reason": (
+                    prev.get("auto_merge_blocked_reason") if prev.get("head") == head_sha else None),
                 # Denied does NOT persist here: record_pr_review only runs for OPEN
                 # PRs, and Deny CLOSES the PR — so a still-denied PR is never re-scanned
                 # (its badge persists via the stored record). Reaching this line means
