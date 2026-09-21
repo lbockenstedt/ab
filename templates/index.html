@@ -486,7 +486,7 @@
                     <div id="active-tasks-list" class="space-y-2 overflow-y-auto max-h-64">
                         {% if state.active_tasks %}
                             {% for tid, task in state.active_tasks.items() %}
-                                <div class="p-3 rounded-xl border {% if task.kind == 'pr' %}bg-indigo-50 border-indigo-300{% else %}bg-slate-100 border-slate-200{% endif %}">
+                                <div class="p-3 rounded-xl border {% if task.kind == 'pr' %}bg-indigo-50 border-indigo-300{% else %}bg-slate-100 border-slate-200{% endif %}" data-tid="{{ tid }}" data-start="{{ task.start_time.isoformat() }}">
                                     <div class="mb-1">
                                         {% if task.kind == 'pr' %}
                                             <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-300"><i class="fas fa-code-branch"></i> PR REVIEW</span>
@@ -504,6 +504,11 @@
                                     {% if tid and tid not in task.name %}
                                     <p class="text-slate-500 font-mono text-[10px] break-all mt-0.5">{{ tid }}</p>
                                     {% endif %}
+                                    <!-- Filled/kept live by startActiveTasksLiveRefresh() below so an
+                                         operator can see elapsed time and the current step without
+                                         waiting for the 30s full-page reload. -->
+                                    <p class="task-elapsed text-slate-400 font-mono text-[10px] mt-0.5"></p>
+                                    <p class="task-current-step text-slate-500 text-[11px] italic mt-1 truncate"></p>
                                 </div>
                             {% endfor %}
                         {% else %}
@@ -3306,6 +3311,52 @@
             if (window.BF_REFRESH && AUTO_VIEWS.indexOf(window.BF_REFRESH.view) !== -1 && !isPaused()) start();
             syncBtn(document.getElementById('refresh-pause-btn'));
         })();
+
+        // Keeps the "Active Tasks" card fresh without the 30s full-page reload:
+        // ticks each task's elapsed time locally every second, and separately
+        // polls /api/task-details (lightweight, no full stream) every 4s to
+        // update each task's one-line "current step" so an operator can see
+        // what's happening in near-real-time instead of only when a PR/fix
+        // suddenly appears after the next full reload.
+        function startActiveTasksLiveRefresh() {
+            function formatElapsed(startIso) {
+                const start = new Date(startIso).getTime();
+                if (isNaN(start)) return '';
+                const totalSeconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
+                const h = Math.floor(totalSeconds / 3600);
+                const m = Math.floor((totalSeconds % 3600) / 60);
+                const s = totalSeconds % 60;
+                return `${h}h ${m}m ${s}s`;
+            }
+
+            setInterval(function () {
+                try {
+                    document.querySelectorAll('#active-tasks-list [data-start]').forEach(function (el) {
+                        try {
+                            const elapsedEl = el.querySelector('.task-elapsed');
+                            if (elapsedEl) elapsedEl.textContent = formatElapsed(el.dataset.start);
+                        } catch (innerErr) { /* one bad element shouldn't stop the rest */ }
+                    });
+                } catch (e) { /* no-op — list may not be present on this view */ }
+            }, 1000);
+
+            setInterval(function () {
+                fetch('/api/task-details').then(function (resp) {
+                    return resp.json();
+                }).then(function (data) {
+                    const activeTasks = (data && data.active_tasks) || {};
+                    Object.keys(activeTasks).forEach(function (tid) {
+                        try {
+                            const el = document.querySelector('#active-tasks-list [data-tid="' + CSS.escape(tid) + '"]');
+                            if (!el) return;
+                            const stepEl = el.querySelector('.task-current-step');
+                            if (stepEl) stepEl.textContent = activeTasks[tid].current_step || '';
+                        } catch (innerErr) { /* skip this task, keep polling */ }
+                    });
+                }).catch(function (e) { /* transient network error — next tick will retry */ });
+            }, 4000);
+        }
+        if (document.getElementById('active-tasks-list')) startActiveTasksLiveRefresh();
 
         let currentTaskId = null;
         let detailsPollingInterval = null;
