@@ -722,6 +722,10 @@ def _render_review_body(review, header, blurb):
             conf_str),
         "",
     ]
+    if review.get("panel_size") == 1:
+        _models = review.get("panel_models") or []
+        out += ["_Single-reviewer panel: only 1 of 2 required frontier models was available (%s)._"
+                % (_models[0] if _models and _models[0] else "unknown model"), ""]
 
     # ── concerns, up front ────────────────────────────────────────────────
     if dissenting:

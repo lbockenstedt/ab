@@ -1,5 +1,5 @@
 """AI fix pipeline: issue analysis, sandboxed fix generation/application, verification, and per-issue orchestration (extracted from main.py)."""
-import base64, contextlib, git, json, os, re, requests, tempfile, threading, time, traceback
+import base64, contextlib, fnmatch, git, json, os, re, requests, tempfile, threading, time, traceback
 from datetime import datetime
 from github import Github, GithubException
 
@@ -1610,6 +1610,36 @@ def _ensure_review_checkout(repo_path, repo, head_sha, config):
 _REVIEW_PANEL_MAX = 4  # bounded like the largest configured pool this replaces (4 code slots)
 _REVIEW_PANEL_MIN = 2  # a lone reviewer is a single opinion; get a second whenever one exists
 
+#: Reviewer models allowed on the panels (fnmatch patterns, case-insensitive, matched against the
+#: model id with any "vendor/" prefix removed). Override with config `pr_review_panel_allowlist`
+#: (list or comma/space-separated string); an explicit empty list DISABLES the policy (legacy picker).
+DEFAULT_PANEL_ALLOWLIST = ("claude-opus-5*", "claude-opus-6*", "gpt-5.6-sol*")
+
+
+def _panel_allowlist(config):
+    """Active allowlist patterns as a tuple of lower-case strings; () means policy disabled."""
+    raw = (config or {}).get("pr_review_panel_allowlist")
+    if raw is None:
+        return DEFAULT_PANEL_ALLOWLIST
+    if isinstance(raw, str):
+        raw = re.split(r"[,\s]+", raw)
+    return tuple(p.strip().lower() for p in raw if p and str(p).strip())
+
+
+def _model_allowed(model, patterns):
+    """True when `model` matches any pattern in `patterns` (case-insensitive fnmatch on the id
+    with any leading "vendor/" removed)."""
+    m = (model or "").lower().split("/")[-1]
+    return any(fnmatch.fnmatchcase(m, p) for p in patterns or ())
+
+
+def _reviewer_name(candidate):
+    """Panel display name carrying the model, e.g. "Reviewer (copilot/claude-opus-5)". Kept under
+    60 chars so pr_review._REVIEWER_TAG_RE still round-trips it."""
+    label = ("%s/%s" % (candidate.get("provider"), candidate.get("model"))
+             if candidate.get("model") else str(candidate.get("provider")))[:48]
+    return f"Reviewer ({label})"
+
 
 def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers=_REVIEW_PANEL_MAX):
     """Picks up to max_reviewers DISTINCT models for the reviewer panel via
@@ -1626,6 +1656,12 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     delivers MULTIPLE opinions whenever more than one model is configured —
     a lone reviewer's verdict would otherwise gate the fix unchecked. The
     builder and already-picked models are never re-added.
+
+    Allowlist mode (default; see _panel_allowlist): only candidates matching the
+    allowlist (frontier models) are eligible, the capability floor is relaxed so
+    every allowlisted model can be seated, and there is NO weaker-model backfill —
+    a lone allowlisted model reviews alone and none yields []. An empty allowlist
+    restores the legacy strong-first + backfill behaviour described above.
 
     builder_key: the builder's already-resolved ModelKey (e.g. from
     apply_ai_fix's used_model_out=), excluded up front so the builder never
@@ -1645,6 +1681,9 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     from model_selection import LlmRequirements, select_model
 
     candidates = llm_client._enumerate_candidates(config)
+    patterns = _panel_allowlist(config)
+    if patterns:
+        candidates = [c for c in candidates if _model_allowed(c.get("model"), patterns)]
     perf = llm_client.get_llm_perf_snapshot()
 
     excluded = set()
@@ -1665,8 +1704,10 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
         # floor) so weak/small models can't review, but keep the default
         # cost-first ordering — the cheapest *capable* model wins and we only
         # ratchet up to a frontier model when nothing cheaper qualifies.
-        reqs = LlmRequirements(complexity="large", needs_structured_output=True,
-                               exclude_models=tuple(excluded))
+        # (Allowlist mode: the allowlist already guarantees capability, so the floor
+        # is relaxed to seat every allowlisted model the registry doesn't tag large.)
+        reqs = LlmRequirements(complexity="small" if patterns else "large",
+                               needs_structured_output=True, exclude_models=tuple(excluded))
         sel = select_model(reqs, candidates, perf)
         if sel is None:
             break
@@ -1675,6 +1716,15 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
             break
         panel.append(matched)
         excluded.add(sel.key)
+
+    if patterns:
+        # Never backfill a weaker model to reach the minimum.
+        _ids = [c.get("model") for c in panel]
+        logger.info("review panel (allowlist): seated %s", _ids)
+        if len(panel) < _REVIEW_PANEL_MIN:
+            logger.warning("review panel: only %d of %d allowlisted frontier reviewers available: %s",
+                           len(panel), _REVIEW_PANEL_MIN, _ids)
+        return panel
 
     # Multiple opinions whenever possible: a single reviewer is one opinion, and
     # the whole point of the panel is cross-checking — a lone strong model gives
@@ -1750,7 +1800,16 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
 
     reviewers = []
     for c in panel_candidates:
-        reviewers.append({"name": f"Reviewer ({c['provider']})", "candidate": c})
+        reviewers.append({"name": _reviewer_name(c), "candidate": c})
+
+    if not reviewers and _panel_allowlist(config):
+        # Frontier-only policy: never fall back to an arbitrary model.
+        patterns = _panel_allowlist(config)
+        logger.warning("review_fix: no allowlisted frontier reviewer available (need one of: %s)",
+                       ", ".join(patterns))
+        return {"status": "queue_for_retry",
+                "reason": "no_frontier_reviewer: no allowlisted model available (need one of: "
+                          + ", ".join(patterns) + ")"}
 
     if not reviewers:
         logger.warning("No reviewers configured. Falling back to default LLM review.")
@@ -1964,7 +2023,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     else:
         final_verdict = "Reject"
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques,
-            "reviews": reviews}
+            "reviews": reviews, "panel_size": len(reviewers),
+            "panel_models": [(r["candidate"] or {}).get("model") or "" for r in reviewers]}
 
 #: Failure kind -> operator-facing label. The pipeline knows precisely why it
 #: gave up; before this the UI showed a generic sentence and the reason lived
