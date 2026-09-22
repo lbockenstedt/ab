@@ -504,6 +504,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
         "2) Template/JS SYNTAX errors: unbalanced Jinja blocks, duplicate `const`/`let` "
         "in a <script>, leftover merge-conflict markers.\n"
         "3) Undefined names, obvious logic errors, security issues.\n"
+        "4) INTENT vs DIFF FIDELITY — Extract the PR's stated INTENT from the description and compare it against the actual DIFF: Does the diff faithfully and completely implement the stated intent? Does the diff introduce unstated side effects, scope creep, or contradict the stated intent? If the PR description lacks a clear intent statement, or if the code deviates from the stated intent, flag it and lower confidence.\n"
         "Reject (lower confidence) if any such defect is present.")
     try:
         attr_names = extract_getattr_names(files)
@@ -1230,6 +1231,14 @@ def _maybe_auto_merge(gh, repo, pr, config):
         logger.exception("pr_review: auto-merge attempt failed for %s#%s: %s", repo.full_name, pr.number, e)
 
 
+def _maybe_auto_remediate(gh, repo, pr, config):
+    try:
+        import pr_remediate
+        pr_remediate.maybe_auto_remediate(gh, repo, pr, config)
+    except Exception as e:
+        logger.exception("pr_review: auto-remediate failed for %s#%s: %s", repo.full_name, pr.number, e)
+
+
 def _review_one(gh, repo, pr, config, force=False):
     """force=True (the "Reprocess" button) bypasses the already-current cache
     check below and regenerates the comment + panel(s) even when the head SHA
@@ -1359,6 +1368,7 @@ def _review_one(gh, repo, pr, config, force=False):
     # docstring for the full gate list) — a no-op read+return for every PR
     # targeting main or any other non-allowlisted branch.
     _maybe_auto_merge(gh, repo, pr, config)
+    _maybe_auto_remediate(gh, repo, pr, config)
 
 
 def reprocess_one_pr(repo_full_name, number, config=None):
@@ -1386,7 +1396,7 @@ def reprocess_one_pr(repo_full_name, number, config=None):
     _review_one(gh, repo, pr, config, force=True)
 
 
-def fix_one_pr(repo_full_name, number, config=None):
+def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_model_out=None):
     """Entry point for the UI's per-PR "Fix" button (routes.py
     /api/pr-review/fix) — the ONLY way this ever runs; AppBuilder never applies a
     PR fix on its own. A human clicks Fix, and this:
@@ -1489,7 +1499,8 @@ def fix_one_pr(repo_full_name, number, config=None):
                 return False, "Could not check out PR branch %s: %s" % (branch, e)
 
             try:
-                fix_code = apply_ai_fix(path, fix_body, files_override=changed, task_id=lock_id)
+                fix_code = apply_ai_fix(path, fix_body, files_override=changed, task_id=lock_id,
+                                        requirements=requirements, used_model_out=used_model_out)
             except Exception as e:
                 return False, "Fix generation failed: %s" % e
             success_applied, fixes, confidence = parse_and_apply(fix_code, path)

@@ -2238,6 +2238,13 @@ def _fetch_github_repos_sync(token: str) -> list:
         return []
 
 
+def ensure_config_defaults(config):
+    """Ensure runtime defaults for config options including PR auto-remediation."""
+    config.setdefault("pr_auto_remediate_enabled", True)
+    config.setdefault("pr_auto_remediate_max_attempts", 3)
+    return config
+
+
 @router.get("/settings")
 async def settings_page(request: Request):
     load_dotenv(override=True)
@@ -2246,6 +2253,7 @@ async def settings_page(request: Request):
         val = os.getenv(k)
         if val: settings[k] = val
     config = load_config()
+    ensure_config_defaults(config)
     # Self-log scan defaults ON (self-diagnosis) until explicitly turned off
     # via the Settings toggle; display-only default so the checkbox renders
     # checked on a never-saved install.
@@ -2267,6 +2275,8 @@ async def settings_page(request: Request):
     # Narrow state-logic/control-flow panel on PR pre-review (advisory) — a SECOND,
     # independent opt-in sub-option (see pr_review._state_logic_review).
     config.setdefault("pr_review_state_logic_enabled", False)
+    config.setdefault("pr_auto_remediate_enabled", True)
+    config.setdefault("pr_auto_remediate_max_attempts", 3)
     config.setdefault("batch_enabled", False)
     config.setdefault("prompt_caching_enabled", True)
     # Already-resolved verification: when a fix run produces no accepted change,
