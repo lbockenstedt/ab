@@ -75,7 +75,6 @@ def _extract_added_lines(raw_patch: str) -> str:
     return raw_patch
 
 
-
 def _extract_removed_lines(raw_patch: str) -> str:
     """Extract removed lines from a unified diff patch."""
     if not raw_patch:
@@ -166,7 +165,6 @@ def _is_dom_mutation_or_deletion(raw_patch: str) -> bool:
         if anchor in clean_removed_text and anchor not in added_only:
             return True
 
-
     # 2. Overwrite / deletion calls in added lines
     for pat in mutation_patterns:
         for line in added_text.splitlines():
@@ -174,7 +172,6 @@ def _is_dom_mutation_or_deletion(raw_patch: str) -> bool:
                 continue
             if re.search(pat, line):
                 return True
-
 
     return False
 

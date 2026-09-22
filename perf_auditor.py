@@ -46,20 +46,18 @@ def audit_performance_hotpaths(files: List[Any]) -> List[Dict[str, Any]]:
             line = raw_line[1:] if (is_added or raw_line.startswith(" ")) else raw_line
 
             stripped = line.strip()
-            if not stripped:
+            if not stripped or stripped.startswith("#"):
                 continue
 
             current_indent = len(line) - len(line.lstrip())
-            while loop_indents and current_indent <= loop_indents[-1] and not stripped.startswith("#"):
+            while loop_indents and current_indent <= loop_indents[-1]:
                 loop_indents.pop()
-            while async_indents and current_indent <= async_indents[-1] and not stripped.startswith("#"):
+            while async_indents and current_indent <= async_indents[-1]:
                 async_indents.pop()
 
             # Track async function scope
             if stripped.startswith("async def "):
                 async_indents.append(current_indent)
-            elif stripped.startswith("def "):
-                async_indents = []
 
             # Track loop scope
             if re.search(r"^\s*(?:for\s+\w+|\s*while\b)", line):
@@ -69,7 +67,6 @@ def audit_performance_hotpaths(files: List[Any]) -> List[Dict[str, Any]]:
 
             in_loop = bool(loop_indents)
             in_async_def = bool(async_indents)
-
 
             # Track polling context
             if any(term in stripped.lower() for term in ("def poll", "poll_loop", "schedule_poll", "polling")):
