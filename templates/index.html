@@ -703,6 +703,8 @@
                             {% endif %}
                             {% if pr.auto_merged %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-teal-700 bg-teal-100" title="Auto-merged by feature auto-drive — both review panels cleared the configured confidence threshold, no human clicked Approve/Merge. {{ pr.auto_merge_reason or '' }}"><i class="fas fa-robot mr-1"></i>AUTO-MERGED{% if pr.auto_merge_score is not none %} · {{ (pr.auto_merge_score * 100)|round|int }}%{% endif %}</span>
+                            {% elif pr.auto_merge_blocked_reason and not pr.merged %}
+                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-amber-700 bg-amber-100" title="Auto-merge held: {{ pr.auto_merge_blocked_reason }}"><i class="fas fa-lock mr-1"></i>AUTO-MERGE HELD</span>
                             {% endif %}
                             </div>
                         </td>

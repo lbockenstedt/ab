@@ -1,5 +1,5 @@
 """AI fix pipeline: issue analysis, sandboxed fix generation/application, verification, and per-issue orchestration (extracted from main.py)."""
-import base64, contextlib, git, json, os, re, requests, tempfile, threading, time, traceback
+import base64, contextlib, fnmatch, git, json, os, re, requests, tempfile, threading, time, traceback
 from datetime import datetime
 from github import Github, GithubException
 
@@ -561,6 +561,74 @@ def _parse_reviewer_json(raw):
             except json.JSONDecodeError:
                 continue
         raise first
+
+
+def _has_verdict_key(obj):
+    return isinstance(obj, dict) and any(str(k).lower() == "verdict" for k in obj)
+
+
+def _canon_verdict_keys(obj):
+    # Downstream reads .get("verdict") / .get("confidence") / .get("critique").
+    return {(k.lower() if str(k).lower() in ("verdict", "confidence", "critique") else k): v
+            for k, v in obj.items()}
+
+
+def _balanced_brace_span(text, start):
+    """The `{...}` substring starting at text[start], ending at its matching `}`
+    (quoted strings and backslash escapes respected), or None if unbalanced."""
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def _extract_reviewer_verdict(text):
+    """Find the reviewer's verdict object anywhere in a reply, or None.
+
+    A greedy `\\{.*\\}` spans the FIRST `{` to the LAST `}`, so a prose reply
+    that mentions a `{...}` (or wraps the JSON in commentary) produced garbage
+    and discarded a correct verdict. Instead try a strict decode at every `{`
+    and take the first object carrying a "verdict" key; only if none decodes,
+    fall back to _parse_reviewer_json's repairs on each balanced-brace span.
+    Never raises."""
+    if not isinstance(text, str) or "{" not in text:
+        return None
+    text = re.sub(r"```(?:json)?", "", text)
+    starts = [m.start() for m in re.finditer(r"\{", text)]
+    decoder = json.JSONDecoder()
+    for i in starts:
+        try:
+            obj, _ = decoder.raw_decode(text[i:])
+        except ValueError:
+            continue
+        if _has_verdict_key(obj):
+            return _canon_verdict_keys(obj)
+    for i in starts:
+        span = _balanced_brace_span(text, i)
+        if span is None:
+            continue
+        try:
+            obj = _parse_reviewer_json(span)
+        except Exception:  # noqa: BLE001 — JSONDecodeError or a repair-helper edge case; try the next span
+            continue
+        if _has_verdict_key(obj):
+            return _canon_verdict_keys(obj)
+    return None
 
 
 def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=None):
@@ -1610,6 +1678,36 @@ def _ensure_review_checkout(repo_path, repo, head_sha, config):
 _REVIEW_PANEL_MAX = 4  # bounded like the largest configured pool this replaces (4 code slots)
 _REVIEW_PANEL_MIN = 2  # a lone reviewer is a single opinion; get a second whenever one exists
 
+#: Reviewer models allowed on the panels (fnmatch patterns, case-insensitive, matched against the
+#: model id with any "vendor/" prefix removed). Override with config `pr_review_panel_allowlist`
+#: (list or comma/space-separated string); an explicit empty list DISABLES the policy (legacy picker).
+DEFAULT_PANEL_ALLOWLIST = ("claude-opus-5*", "claude-opus-6*", "gpt-5.6-sol*")
+
+
+def _panel_allowlist(config):
+    """Active allowlist patterns as a tuple of lower-case strings; () means policy disabled."""
+    raw = (config or {}).get("pr_review_panel_allowlist")
+    if raw is None:
+        return DEFAULT_PANEL_ALLOWLIST
+    if isinstance(raw, str):
+        raw = re.split(r"[,\s]+", raw)
+    return tuple(p.strip().lower() for p in raw if p and str(p).strip())
+
+
+def _model_allowed(model, patterns):
+    """True when `model` matches any pattern in `patterns` (case-insensitive fnmatch on the id
+    with any leading "vendor/" removed)."""
+    m = (model or "").lower().split("/")[-1]
+    return any(fnmatch.fnmatchcase(m, p) for p in patterns or ())
+
+
+def _reviewer_name(candidate):
+    """Panel display name carrying the model, e.g. "Reviewer (copilot/claude-opus-5)". Kept under
+    60 chars so pr_review._REVIEWER_TAG_RE still round-trips it."""
+    label = ("%s/%s" % (candidate.get("provider"), candidate.get("model"))
+             if candidate.get("model") else str(candidate.get("provider")))[:48]
+    return f"Reviewer ({label})"
+
 
 def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers=_REVIEW_PANEL_MAX):
     """Picks up to max_reviewers DISTINCT models for the reviewer panel via
@@ -1626,6 +1724,12 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     delivers MULTIPLE opinions whenever more than one model is configured —
     a lone reviewer's verdict would otherwise gate the fix unchecked. The
     builder and already-picked models are never re-added.
+
+    Allowlist mode (default; see _panel_allowlist): only candidates matching the
+    allowlist (frontier models) are eligible, the capability floor is relaxed so
+    every allowlisted model can be seated, and there is NO weaker-model backfill —
+    a lone allowlisted model reviews alone and none yields []. An empty allowlist
+    restores the legacy strong-first + backfill behaviour described above.
 
     builder_key: the builder's already-resolved ModelKey (e.g. from
     apply_ai_fix's used_model_out=), excluded up front so the builder never
@@ -1645,6 +1749,9 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     from model_selection import LlmRequirements, select_model
 
     candidates = llm_client._enumerate_candidates(config)
+    patterns = _panel_allowlist(config)
+    if patterns:
+        candidates = [c for c in candidates if _model_allowed(c.get("model"), patterns)]
     perf = llm_client.get_llm_perf_snapshot()
 
     excluded = set()
@@ -1665,8 +1772,10 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
         # floor) so weak/small models can't review, but keep the default
         # cost-first ordering — the cheapest *capable* model wins and we only
         # ratchet up to a frontier model when nothing cheaper qualifies.
-        reqs = LlmRequirements(complexity="large", needs_structured_output=True,
-                               exclude_models=tuple(excluded))
+        # (Allowlist mode: the allowlist already guarantees capability, so the floor
+        # is relaxed to seat every allowlisted model the registry doesn't tag large.)
+        reqs = LlmRequirements(complexity="small" if patterns else "large",
+                               needs_structured_output=True, exclude_models=tuple(excluded))
         sel = select_model(reqs, candidates, perf)
         if sel is None:
             break
@@ -1675,6 +1784,15 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
             break
         panel.append(matched)
         excluded.add(sel.key)
+
+    if patterns:
+        # Never backfill a weaker model to reach the minimum.
+        _ids = [c.get("model") for c in panel]
+        logger.info("review panel (allowlist): seated %s", _ids)
+        if len(panel) < _REVIEW_PANEL_MIN:
+            logger.warning("review panel: only %d of %d allowlisted frontier reviewers available: %s",
+                           len(panel), _REVIEW_PANEL_MIN, _ids)
+        return panel
 
     # Multiple opinions whenever possible: a single reviewer is one opinion, and
     # the whole point of the panel is cross-checking — a lone strong model gives
@@ -1701,6 +1819,73 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
             panel.append(matched)
             excluded.add(sel.key)
     return panel
+
+
+def _truncate_diff(text, limit):
+    """Cap a diff at `limit` chars on a LINE boundary, with a marker that tells the
+    reviewer the cut is not a syntax error (a mid-hunk cut got reported as a phantom
+    "unterminated dict literal")."""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit + 1)
+    kept = text[:cut] if cut > 0 else text[:limit]
+    return kept + (
+        "\n… [DIFF TRUNCATED at %d chars: %d more chars omitted. The rest of the file "
+        "is NOT deleted and the cut point is NOT a syntax error - do not report it as "
+        "one; use fetch_repo_file to read the omitted code.]" % (len(kept), len(text) - len(kept)))
+
+
+_REVIEWER_RETRY_NOTE = (
+    "\n\nYour previous reply was not a JSON object. Reply with ONLY one JSON object and no "
+    "other text: {\"confidence\": <fraction 0.0-1.0>, \"verdict\": \"Approve\"|\"Reject\", "
+    "\"critique\": \"<explanation>\"}")
+
+
+def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha):
+    """Run ONE reviewer turn. Returns (vote_dict|None, failed_name|None).
+
+    Read-only: a reviewer only reads the diff and emits a JSON verdict, so
+    the panel is safe to run CONCURRENTLY — distinct models review in true
+    parallel; calls that land on the same model are serialised by
+    call_llm's per-model lock. No shared state is mutated here (results are
+    returned and collected by the caller in panel order).
+
+    A reply with no parseable verdict is retried once, then counted as a failure
+    (never silently dropped, which reported `all_reviewers_failed` with no cause)."""
+    res = None
+    try:
+        logger.info(f"{r['name']} analyzing fix...")
+        system = "You are a skeptical senior engineer. Be critical. Only return JSON."
+        res = _run_reviewer_turn(prompt, system, r.get("candidate"), task_id, repo, head_sha,
+                                 repo_checkout_path=checkout_path)
+        _v = _extract_reviewer_verdict(res)
+        if _v is None:
+            logger.info(f"{r['name']} reply had no parseable verdict — retrying once")
+            res = _run_reviewer_turn(prompt + _REVIEWER_RETRY_NOTE, system, r.get("candidate"),
+                                     task_id, repo, head_sha, repo_checkout_path=checkout_path)
+            _v = _extract_reviewer_verdict(res)
+        if _v is None:
+            logger.warning(f"{r['name']} returned no parseable verdict after retry - "
+                           f"raw response: {str(res)[:300]!r}")
+            return (None, r["name"])
+        _v["confidence"] = _norm_confidence(_v.get("confidence"))
+        return ({**_v, "reviewer": r["name"]}, None)
+    except Exception as e:
+        if is_llm_cooldown_error(e):
+            logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
+        elif isinstance(e, json.JSONDecodeError) and res is not None:
+            # _robust_json_loads only repairs one specific, confirmed-recurring
+            # pattern (a stray backslash) and re-raises anything else
+            # unchanged. A bare exception message ("Expecting value: line 1
+            # column 30") gives no way to root-cause or repair the NEXT
+            # occurrence of a different pattern — unlike parse_and_apply's
+            # last_failures for edit misses, there was nothing to go on here.
+            # Truncated: this is a raw LLM response, not something to log
+            # unbounded.
+            logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
+        else:
+            logger.error(f"{r['name']} failed: {e}")
+        return (None, r["name"])
 
 
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
@@ -1750,7 +1935,16 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
 
     reviewers = []
     for c in panel_candidates:
-        reviewers.append({"name": f"Reviewer ({c['provider']})", "candidate": c})
+        reviewers.append({"name": _reviewer_name(c), "candidate": c})
+
+    if not reviewers and _panel_allowlist(config):
+        # Frontier-only policy: never fall back to an arbitrary model.
+        patterns = _panel_allowlist(config)
+        logger.warning("review_fix: no allowlisted frontier reviewer available (need one of: %s)",
+                       ", ".join(patterns))
+        return {"status": "queue_for_retry",
+                "reason": "no_frontier_reviewer: no allowlisted model available (need one of: "
+                          + ", ".join(patterns) + ")"}
 
     if not reviewers:
         logger.warning("No reviewers configured. Falling back to default LLM review.")
@@ -1781,8 +1975,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         # in pr_review.py and d504df3's reasoning: local Ollama models default to
         # num_ctx=32768 tokens (~130K+ chars), so this is still comfortably inside
         # every configured provider's context window.
-        if len(diff_text) > 60000:
-            diff_text = diff_text[:60000] + "\n… [diff truncated for review] …"
+        diff_text = _truncate_diff(diff_text, 60000)
     if diff_text.strip():
         fix_details = f"\n--- DIFF (working tree vs HEAD) ---\n{diff_text}\n"
     else:
@@ -1834,46 +2027,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     failed_reviewers = []
 
     def _review_one(r):
-        """Run ONE reviewer turn. Returns (vote_dict|None, failed_name|None).
-
-        Read-only: a reviewer only reads the diff and emits a JSON verdict, so
-        the panel is safe to run CONCURRENTLY — distinct models review in true
-        parallel; calls that land on the same model are serialised by
-        call_llm's per-model lock. No shared state is mutated here (results are
-        returned and collected by the caller in panel order)."""
-        res = None
-        try:
-            logger.info(f"{r['name']} analyzing fix...")
-            res = _run_reviewer_turn(
-                prompt,
-                "You are a skeptical senior engineer. Be critical. Only return JSON.",
-                r.get("candidate"), task_id, repo, head_sha,
-                repo_checkout_path=checkout_path,
-            )
-            match = re.search(r'\{.*\}', res, re.DOTALL)
-            if match:
-                _v = _parse_reviewer_json(match.group())
-                _v["confidence"] = _norm_confidence(_v.get("confidence"))
-                return ({**_v, "reviewer": r["name"]}, None)
-            # Parseable-JSON-less but non-erroring response: neither a vote nor a
-            # counted failure, exactly as the prior sequential loop treated it.
-            return (None, None)
-        except Exception as e:
-            if is_llm_cooldown_error(e):
-                logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
-            elif isinstance(e, json.JSONDecodeError) and res is not None:
-                # _robust_json_loads only repairs one specific, confirmed-recurring
-                # pattern (a stray backslash) and re-raises anything else
-                # unchanged. A bare exception message ("Expecting value: line 1
-                # column 30") gives no way to root-cause or repair the NEXT
-                # occurrence of a different pattern — unlike parse_and_apply's
-                # last_failures for edit misses, there was nothing to go on here.
-                # Truncated: this is a raw LLM response, not something to log
-                # unbounded.
-                logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
-            else:
-                logger.error(f"{r['name']} failed: {e}")
-            return (None, r["name"])
+        return _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha)
 
     try:
         # Fan the panel out: reviewers are independent + read-only, so run them
@@ -1964,7 +2118,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     else:
         final_verdict = "Reject"
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques,
-            "reviews": reviews}
+            "reviews": reviews, "panel_size": len(reviewers),
+            "panel_models": [(r["candidate"] or {}).get("model") or "" for r in reviewers]}
 
 #: Failure kind -> operator-facing label. The pipeline knows precisely why it
 #: gave up; before this the UI showed a generic sentence and the reason lived
