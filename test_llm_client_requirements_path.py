@@ -36,11 +36,12 @@ def _load_ns():
         # see _entry_is_unhealthy's docstring in llm_client.py)
         "_record_llm_failure", "_record_llm_success", "_entry_is_unhealthy",
         "_is_unsupported_model_error", "_min_capability_rank", "_apply_capability_floor",
+        "_diag_reqs", "llm_diag",
     }
     want_assign = {
         "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_TOOL_400_MARKERS",
         "_UNSUPPORTED_MODEL_MARKERS", "_ENTRY_UNSUPPORTED_RETRY_SECONDS",
-        "_MIN_CAPABILITY_RANK_DEFAULT",
+        "_MIN_CAPABILITY_RANK_DEFAULT", "_DIAG_PRESETS",
         "_ENDPOINT_CB_LOCK", "_ENDPOINT_CREDIT_CB", "_MODEL_RATE_CB",
         "_MODEL_LOCKS_LOCK", "_MODEL_LOCKS",
         "_LLM_PERF_STORE", "_LLM_PERF_LOCK",
@@ -153,17 +154,19 @@ def main():
     floor_candidates = ns["_enumerate_candidates"](floor_cfg)
     ok &= _check("_enumerate_candidates itself is capability-agnostic — both entries present",
                 len(floor_candidates) == 2)
-    floored = ns["_apply_capability_floor"](floor_candidates, floor_cfg)
-    ok &= _check("default floor (85) admits an Opus-class model",
+    floored = ns["_apply_capability_floor"](floor_candidates, {"min_capability_rank": 85, **floor_cfg})
+    ok &= _check("an explicit floor of 85 admits an Opus-class model",
                 any(c["provider"] == "anthropic" for c in floored))
-    ok &= _check("default floor (85) excludes a weak/uncatalogued local model",
+    ok &= _check("an explicit floor of 85 excludes a weak/uncatalogued local model",
                 not any(c["provider"] == "ollama" for c in floored))
-    ok &= _check("_min_capability_rank defaults to 85 when unset",
-                ns["_min_capability_rank"]({}) == 85)
+    ok &= _check("_min_capability_rank defaults to 0 (floor disabled) when unset",
+                ns["_min_capability_rank"]({}) == 0)
     ok &= _check("min_capability_rank is operator-overridable via config",
-                ns["_min_capability_rank"]({"min_capability_rank": 0}) == 0)
+                ns["_min_capability_rank"]({"min_capability_rank": 85}) == 85)
+    ok &= _check("a malformed min_capability_rank falls back to the disabled default, not a raise",
+                ns["_min_capability_rank"]({"min_capability_rank": "eighty"}) == 0)
     lowered = ns["_apply_capability_floor"](floor_candidates, {"min_capability_rank": 0})
-    ok &= _check("a floor of 0 disables filtering entirely",
+    ok &= _check("a floor of 0 disables filtering entirely (also today's default)",
                 len(lowered) == 2)
 
     # --- legacy env-var slots (live-read) --------------------------------------
@@ -419,6 +422,21 @@ def main():
     ok &= _check("must_escalate_to_human=True with a satisfiable requirement resolves normally",
                 result == "ok from ollama/llama3.1:8b")
 
+    # A capability-floor exclusion is a POLICY decision, not "nothing can do
+    # this job" -- must_escalate_to_human must NOT fire when the unfloored
+    # pool would have resolved something; it should fall through to the
+    # safety floor instead (see the genuinely-unsatisfiable case above, which
+    # still raises since the default floor is 0 and removes nothing there).
+    ns["_test_calls"]["raise_exc"] = None
+    floor_policy_cfg = {"min_capability_rank": 85,
+                        "llm_entries": [_entry("e1", "ollama", "qwen2.5-coder:14b", api_key="")]}
+    policy_human_reqs = model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=True)
+    result = ns["_call_llm_with_requirements"](policy_human_reqs, "hi", "sys", None, None, None, None,
+                                               floor_policy_cfg)
+    ok &= _check("a capability-floor exclusion falls through to the safety floor even with "
+                "must_escalate_to_human=True, instead of raising LlmHumanEscalationNeeded",
+                result == "ok from ollama/qwen2.5-coder:14b")
+
     # --- used_model_out: populated with the winning candidate's identity -------
 
     ns["_test_calls"]["raise_exc"] = None
@@ -428,6 +446,29 @@ def main():
     ok &= _check("used_model_out is populated with the winning candidate's provider/model",
                 used.get("provider") == "ollama" and used.get("model") == "llama3.1:8b"
                 and used.get("key") is not None)
+
+    # --- llm_diag: surfaces what the capability floor excluded -----------------
+
+    diag_floor_cfg = {"min_capability_rank": 85,
+                      "llm_entries": [_entry("e1", "ollama", "qwen2.5-coder:14b", api_key=""),
+                                      _entry("e2", "anthropic", "claude-opus-5")]}
+    diag_report = ns["llm_diag"](config=diag_floor_cfg)
+    excluded_models = {
+        exc.get("model")
+        for entry in diag_report["presets"]
+        for exc in (entry.get("capability_floor") or {}).get("excluded", [])
+    }
+    ok &= _check("llm_diag reports the floor-excluded candidate on a floored config",
+                "qwen2.5-coder:14b" in excluded_models)
+    ok &= _check("llm_diag's floor entries carry the effective min_rank",
+                all(entry["capability_floor"]["min_rank"] == 85
+                    for entry in diag_report["presets"] if "capability_floor" in entry))
+
+    diag_no_floor_cfg = {"llm_entries": [_entry("e1", "ollama", "qwen2.5-coder:14b", api_key=""),
+                                         _entry("e2", "anthropic", "claude-opus-5")]}
+    diag_report_no_floor = ns["llm_diag"](config=diag_no_floor_cfg)
+    ok &= _check("llm_diag omits capability_floor entirely when the floor is disabled (default)",
+                not any("capability_floor" in entry for entry in diag_report_no_floor["presets"]))
 
     print()
     if ok:
