@@ -10,6 +10,7 @@ fix_engine imports the app (circular at import time), so -- like the other
 reviewer tests -- the pure helpers are extracted with ast and exec'd.
 """
 import ast
+import fnmatch
 import json
 import re
 import sys
@@ -21,11 +22,13 @@ _FE_FUNCS = {
     "_relax_json_fix_strings", "_parse_reviewer_json", "_robust_json_loads",
     "_sanitize_json_string_newlines", "_has_verdict_key", "_canon_verdict_keys",
     "_balanced_brace_span", "_extract_reviewer_verdict", "_norm_confidence",
-    "_truncate_diff", "_reviewer_vote",
+    "_truncate_diff", "_reviewer_vote", "_is_local_provider", "_cloud_frontier_fallback",
+    "_panel_allowlist", "_model_allowed", "_reviewer_name",
 }
 _FE_ASSIGNS = {
     "_JSON_NEXT_MEMBER_RE", "_FIX_CODE_KEY_RE", "_REVIEW_TEXT_KEY_RE",
     "_REVIEW_NEXT_MEMBER_RE", "_JSON_BAD_ESCAPE_RE", "_REVIEWER_RETRY_NOTE",
+    "_LOCAL_PROVIDERS", "DEFAULT_PANEL_ALLOWLIST",
 }
 
 
@@ -49,9 +52,20 @@ def _extract(path, funcs, assigns=()):
     return segs
 
 
+class _FakeLlmClient:
+    """Default llm_client stub: no candidates configured. Tests that need
+    _cloud_frontier_fallback to see specific candidates replace fe["llm_client"]."""
+    def __init__(self, candidates=()):
+        self._c = list(candidates)
+
+    def _enumerate_candidates(self, config):
+        return list(self._c)
+
+
 @pytest.fixture
 def fe():
-    ns = {"re": re, "json": json, "logger": _RecLog()}
+    ns = {"re": re, "json": json, "fnmatch": fnmatch, "logger": _RecLog(),
+          "llm_client": _FakeLlmClient()}
     exec("\n\n".join(_extract("llm_client.py", {"is_llm_cooldown_error"})), ns)
     exec("\n\n".join(_extract("fix_engine.py", _FE_FUNCS, _FE_ASSIGNS)), ns)
     missing = sorted((_FE_FUNCS | _FE_ASSIGNS) - set(ns))
@@ -126,36 +140,47 @@ def test_verdict_key_case_insensitive(fe):
 _R = {"name": "rev-1", "candidate": None}
 
 
-def _vote(fe, replies):
+def _local_cand(key="local-1", model="qwen-local"):
+    return {"key": key, "provider": "ollama", "model": model}
+
+
+def _cloud_cand(key="cloud-1", model="claude-opus-5"):
+    return {"key": key, "provider": "copilot", "model": model}
+
+
+def _vote(fe, replies, reviewer=None, config=None):
     """Run _reviewer_vote with _run_reviewer_turn replaying `replies` (an Exception
-    entry is raised). Returns (result, prompts seen)."""
+    entry is raised). Returns (result, prompts seen, candidates seen)."""
     prompts = []
+    candidates = []
     it = iter(replies)
 
     def fake_turn(prompt, system, cand, task_id, repo, head_sha, repo_checkout_path=None):
         prompts.append(prompt)
+        candidates.append(cand)
         r = next(it)
         if isinstance(r, Exception):
             raise r
         return r
 
     fe["_run_reviewer_turn"] = fake_turn
-    return fe["_reviewer_vote"](_R, "PROMPT", None, None, None, None), prompts
+    result = fe["_reviewer_vote"](reviewer or _R, "PROMPT", None, None, None, None, config or {})
+    return result, prompts, candidates
 
 
 def test_vote_first_try(fe):
-    (vote, failed), prompts = _vote(fe, [JSON])
+    (vote, failed), prompts, _c = _vote(fe, [JSON])
     assert failed is None and vote["reviewer"] == "rev-1" and vote["verdict"] == "Approve"
     assert len(prompts) == 1
 
 
 def test_vote_normalises_percentage_confidence(fe):
-    (vote, _), _p = _vote(fe, ['{"confidence": 95, "verdict": "Approve"}'])
+    (vote, _), _p, _c = _vote(fe, ['{"confidence": 95, "verdict": "Approve"}'])
     assert vote["confidence"] == 0.95
 
 
 def test_vote_retries_once_after_prose(fe):
-    (vote, failed), prompts = _vote(fe, ["Looks fine to me, the {...} is noise.", JSON])
+    (vote, failed), prompts, _c = _vote(fe, ["Looks fine to me, the {...} is noise.", JSON])
     assert failed is None and vote["verdict"] == "Approve"
     assert len(prompts) == 2
     assert prompts[0] == "PROMPT"
@@ -163,7 +188,7 @@ def test_vote_retries_once_after_prose(fe):
 
 
 def test_vote_prose_twice_is_counted_failure(fe):
-    (vote, failed), prompts = _vote(fe, ["no json here", "still none {...}"])
+    (vote, failed), prompts, _c = _vote(fe, ["no json here", "still none {...}"])
     assert vote is None and failed == "rev-1"
     assert len(prompts) == 2
     warns = [m for lvl, m in fe["logger"].records if lvl == "warning"]
@@ -171,9 +196,110 @@ def test_vote_prose_twice_is_counted_failure(fe):
 
 
 def test_vote_cooldown_error_not_retried(fe):
-    (vote, failed), prompts = _vote(fe, [RuntimeError("all providers cooling down: rate_limited")])
+    (vote, failed), prompts, _c = _vote(fe, [RuntimeError("all providers cooling down: rate_limited")])
     assert vote is None and failed == "rev-1"
     assert len(prompts) == 1
+
+
+# ── _reviewer_vote: hard-failure retry / cloud escalation ──────────────────
+
+def test_vote_local_hard_failure_escalates_to_cloud_and_succeeds(fe):
+    local = _local_cand()
+    cloud = _cloud_cand()
+    fe["llm_client"] = _FakeLlmClient([local, cloud])
+    reviewer = {"name": "rev-1", "candidate": local}
+    (vote, failed), prompts, cands = _vote(
+        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
+    assert failed is None
+    assert vote["reviewer"] == "rev-1"  # original seat's name, not the fallback's
+    assert vote["escalated_to"] == fe["_reviewer_name"](cloud)
+    assert len(cands) == 2
+    assert cands[0] is local
+    assert cands[1] is cloud  # escalated retry targets the cloud fallback
+
+
+def test_vote_local_hard_failure_escalation_also_fails(fe):
+    local = _local_cand()
+    cloud = _cloud_cand()
+    fe["llm_client"] = _FakeLlmClient([local, cloud])
+    reviewer = {"name": "rev-1", "candidate": local}
+    (vote, failed), prompts, cands = _vote(
+        fe, [ConnectionError("network blip"), ConnectionError("still down")],
+        reviewer=reviewer, config={})
+    assert vote is None and failed == "rev-1"
+    assert len(cands) == 2
+
+
+def test_vote_local_hard_failure_no_cloud_fallback_retries_same_candidate(fe):
+    local = _local_cand()
+    fe["llm_client"] = _FakeLlmClient([local])  # no allowlisted cloud candidate configured
+    reviewer = {"name": "rev-1", "candidate": local}
+    (vote, failed), prompts, cands = _vote(
+        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
+    assert failed is None and vote["reviewer"] == "rev-1"
+    assert "escalated_to" not in vote
+    assert len(cands) == 2
+    assert cands[0] is local and cands[1] is local
+
+
+def test_vote_non_local_hard_failure_retries_same_candidate(fe):
+    cloud = _cloud_cand()
+    fe["llm_client"] = _FakeLlmClient([cloud, _local_cand()])
+    reviewer = {"name": "rev-1", "candidate": cloud}
+    (vote, failed), prompts, cands = _vote(
+        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
+    assert failed is None and vote["reviewer"] == "rev-1"
+    assert "escalated_to" not in vote
+    assert len(cands) == 2
+    assert cands[0] is cloud and cands[1] is cloud  # no escalation needed/attempted
+
+
+def test_vote_cooldown_on_local_reviewer_still_not_retried(fe):
+    # Regression guard: a cooldown error must NOT trigger the new hard-failure
+    # retry/escalation path, even for a local-provider reviewer.
+    local = _local_cand()
+    fe["llm_client"] = _FakeLlmClient([local, _cloud_cand()])
+    reviewer = {"name": "rev-1", "candidate": local}
+    (vote, failed), prompts, cands = _vote(
+        fe, [RuntimeError("all providers cooling down: rate_limited")], reviewer=reviewer, config={})
+    assert vote is None and failed == "rev-1"
+    assert len(cands) == 1
+
+
+# ── _cloud_frontier_fallback & panel diversity ─────────────────────────────
+
+def test_cloud_frontier_fallback_excludes_seated_panel_keys(fe):
+    cloud1 = _cloud_cand("cloud-1", "claude-opus-5")
+    cloud2 = _cloud_cand("cloud-2", "gpt-5.6-sol")
+    fe["llm_client"] = _FakeLlmClient([cloud1, cloud2])
+    # When cloud-1 is in exclude_keys (seated on panel), fallback picks cloud-2
+    c = fe["_cloud_frontier_fallback"]({"cloud-1"}, {})
+    assert c is not None and c["key"] == "cloud-2"
+    # When both are in exclude_keys, fallback returns None
+    assert fe["_cloud_frontier_fallback"]({"cloud-1", "cloud-2"}, {}) is None
+
+
+def test_vote_local_hard_failure_excludes_seated_panel_keys_from_escalation(fe):
+    local = _local_cand("local-1", "qwen-local")
+    cloud_seated = _cloud_cand("cloud-1", "claude-opus-5")
+    cloud_other = _cloud_cand("cloud-2", "gpt-5.6-sol")
+    fe["llm_client"] = _FakeLlmClient([local, cloud_seated, cloud_other])
+    # cloud-1 is already seated on the panel
+    reviewer = {"name": "rev-1", "candidate": local, "seated_panel_keys": {"local-1", "cloud-1"}}
+    (vote, failed), _prompts, cands = _vote(
+        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
+    assert failed is None
+    assert vote["reviewer"] == "rev-1"
+    assert vote["escalated_to"] == fe["_reviewer_name"](cloud_other)
+    assert cands[1] is cloud_other  # did NOT pick seated cloud-1
+
+
+def test_vote_first_attempt_json_decode_error_logs_warning_with_raw_snippet(fe):
+    err = json.JSONDecodeError("Expecting value", '{"bad": json...', 0)
+    (vote, failed), _prompts, _cands = _vote(fe, [err, JSON])
+    assert failed is None and vote["verdict"] == "Approve"
+    warns = [m for lvl, m in fe["logger"].records if lvl == "warning"]
+    assert any("JSON parse failed" in m and "raw response" in m and "bad" in m for m in warns)
 
 
 # ── _truncate_diff ──────────────────────────────────────────────────────────
