@@ -131,6 +131,28 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
         except (TypeError, ValueError):
             panel2_confidence = None
 
+    # Composite consensus & average confidence computation
+    valid_confs = [c for c in (panel_confidence, panel2_confidence) if c is not None]
+    panel_avg_confidence = (sum(valid_confs) / len(valid_confs)) if valid_confs else None
+
+    p1_active = bool(panel_verdict and not panel_status)
+    p2_active = bool(panel2_verdict and not panel2_status)
+    if p1_active and p2_active:
+        v1_app = panel_verdict.strip().lower() == "approve"
+        v2_app = panel2_verdict.strip().lower() == "approve"
+        if v1_app and v2_app:
+            composite_verdict = "Approve"
+        elif v1_app or v2_app:
+            composite_verdict = "Split"
+        else:
+            composite_verdict = "Deny"
+    elif p1_active:
+        composite_verdict = panel_verdict
+    elif p2_active:
+        composite_verdict = panel2_verdict
+    else:
+        composite_verdict = ""
+
     key = "%s#%s" % (repo, number)
     try:
         with _task_state_lock:
@@ -167,6 +189,8 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "panel2_confidence": panel2_confidence,
                 "panel2_status": panel2_status,
                 "panel2_critique": panel2_critique,
+                "panel_avg_confidence": panel_avg_confidence,
+                "composite_verdict": composite_verdict,
                 # Preserve a human's Approve across re-scans; reset if the head moved.
                 "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
                 # Merged is terminal — keep it so the PR stays listed with its badge.

@@ -49,15 +49,29 @@ CORE_DOM_ANCHORS = (
 )
 
 
+def _is_unified_diff(lines: List[str]) -> bool:
+    """Return True if the lines constitute a unified diff (hunk or file headers)."""
+    has_hunk = any(l.startswith("@@") for l in lines)
+    has_file_headers = (
+        any(l.startswith("--- ") for l in lines)
+        and any(l.startswith("+++ ") for l in lines)
+    )
+    return has_hunk or has_file_headers
+
+
 def _extract_added_lines(raw_patch: str) -> str:
     """Extract added lines from a unified diff patch."""
     if not raw_patch:
         return ""
     lines = raw_patch.splitlines()
-    has_diff_markers = any(l.startswith("+") for l in lines if not l.startswith("+++"))
-    if has_diff_markers:
+    has_plus = any(l.startswith("+") for l in lines if not l.startswith("+++"))
+    if has_plus:
         added = [l[1:] for l in lines if l.startswith("+") and not l.startswith("+++")]
         return "\n".join(added)
+    if _is_unified_diff(lines):
+        # Confirmed unified diff with no additions (pure deletion or context-only hunk)
+        return ""
+    # Non-diff raw content fallback
     return raw_patch
 
 
@@ -128,12 +142,6 @@ def _is_dom_mutation_or_deletion(raw_patch: str) -> bool:
     removed_text = _extract_removed_lines(raw_patch)
     added_text = _extract_added_lines(raw_patch)
 
-    # 1. Removal of DOM anchors from existing code
-    for anchor in CORE_DOM_ANCHORS:
-        if anchor in removed_text and anchor not in added_text:
-            return True
-
-    # 2. Overwrite / deletion calls in added lines
     mutation_patterns = (
         r"(?:document\.(?:getElementById|querySelector)\s*\(\s*['\"]#?_lmToastRegion['\"]\s*\)|window\._lmToastRegion|_lmToastRegion)\s*\.(?:remove|empty)\s*\(",
         r"(?:document\.(?:getElementById|querySelector)\s*\(\s*['\"]#?_lmToastRegion['\"]\s*\)|window\._lmToastRegion|_lmToastRegion)\s*\.(?:innerHTML|textContent)\s*=\s*['\"]\s*['\"]",
@@ -141,9 +149,29 @@ def _is_dom_mutation_or_deletion(raw_patch: str) -> bool:
         r"delete\s+window\._lmToastRegion",
         r"(?:document\.(?:getElementById|querySelector)\s*\(\s*['\"]#app['\"]\s*\)|#app)\s*\.(?:remove|empty)\s*\(",
     )
-    for pat in mutation_patterns:
-        if re.search(pat, raw_patch):
+
+    # 1. Removal of DOM anchors from existing code (excluding lines deleting mutation calls)
+    clean_removed = [
+        line for line in removed_text.splitlines()
+        if not any(re.search(pat, line) for pat in mutation_patterns)
+    ]
+    clean_removed_text = "\n".join(clean_removed)
+
+    added_only = "\n".join(
+        l[1:] for l in raw_patch.splitlines()
+        if l.startswith("+") and not l.startswith("+++")
+    )
+    for anchor in CORE_DOM_ANCHORS:
+        if anchor in clean_removed_text and anchor not in added_only:
             return True
+
+    # 2. Overwrite / deletion calls in added lines
+    for pat in mutation_patterns:
+        for line in added_text.splitlines():
+            if line.startswith("-"):
+                continue
+            if re.search(pat, line):
+                return True
 
     return False
 
@@ -224,7 +252,7 @@ def check_fleet_invariants(
         if raw_patch:
             added_patch = _extract_added_lines(raw_patch)
             for cdn in BLOCKED_CDNS:
-                if cdn in added_patch or cdn in raw_patch:
+                if cdn in added_patch:
                     return False, CDN_EGRESS_VIOLATION
 
     # f) Twin-Parity Check for pxmx
