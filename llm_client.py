@@ -2416,6 +2416,52 @@ def _iter_configured_endpoints(config):
         yield f"legacy_{n}", provider, api_key, model, base_url, rpm
 
 
+#: Frontier-capability floor: the picker must only ever SELECT a model whose
+#: capability_rank (model_registry.capability_rank) is at least this strong —
+#: i.e. no worse than the GPT-5(.5)-class / Claude Opus-class rules in
+#: model_registry.DEFAULT_MODEL_RULES (both rank 85+ there). Applied by
+#: _apply_capability_floor right before a candidate pool is handed to
+#: model_selection.select_model / explain_selection — deliberately NOT baked
+#: into _enumerate_candidates itself, since that list is also the source for
+#: _configured_entries/safety_floor (the genuine last-resort path when NO
+#: candidate is selectable at all) and for entry-health/credit/rate-limit
+#: bookkeeping that must keep tracking every configured endpoint regardless
+#: of how capable it is. OFF by default (0 — no filtering): routing behaviour
+#: is unchanged unless an operator explicitly opts in via
+#: config["min_capability_rank"] (e.g. 85, to match the GPT-5(.5)/Opus-class
+#: rules above). capability_rank's own fallback table
+#: (model_registry._CAPABILITY_RANK_BY_COMPLEXITY) tops out at 70, so a
+#: nonzero floor here will exclude every rule that lacks an explicit
+#: capability_rank — set with that in mind.
+_MIN_CAPABILITY_RANK_DEFAULT = 0
+
+
+def _min_capability_rank(config):
+    if "min_capability_rank" not in config:
+        return _MIN_CAPABILITY_RANK_DEFAULT
+    raw = config["min_capability_rank"]
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("min_capability_rank=%r is not an integer; ignoring (floor disabled)", raw)
+        return _MIN_CAPABILITY_RANK_DEFAULT
+
+
+def _apply_capability_floor(candidates, config):
+    """Filters an _enumerate_candidates() list down to only those meeting the
+    frontier _min_capability_rank(config) floor, for the picker's OWN ranking
+    pass. Deliberately NOT a hard failure when this empties the pool: the
+    caller (_call_llm_with_requirements) already falls to
+    model_selection.safety_floor when select_model resolves nothing, which is
+    the existing, loudly-logged (logger.warning) last resort for "nothing
+    else works" — this floor only changes what NORMAL routing may pick."""
+    min_rank = _min_capability_rank(config)
+    if min_rank <= 0:
+        return candidates
+    return [c for c in candidates
+            if model_registry.capability_rank(c.get("caps") or {}) >= min_rank]
+
+
 def _enumerate_candidates(config):
     """Every USABLE endpoint as plain dicts for model_selection.select_model
     — the impure boundary the redesign plan calls for: config reads, live
@@ -2602,21 +2648,43 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
         tuning["slow_factor"] = config.get("model_slow_factor")
     if config.get("model_min_samples") is not None:
         tuning["min_samples"] = config.get("model_min_samples")
-    selection = model_selection.select_model(reqs, candidates, perf, tuning)
+    picker_candidates = _apply_capability_floor(candidates, config)
+    selection = model_selection.select_model(reqs, picker_candidates, perf, tuning)
 
     if selection is not None:
         winning = next((c for c in candidates if c["key"] == selection.key), None)
         chain = ([winning] if winning else []) + list(selection.alternatives or [])
     else:
+        # A floored-out pool can make select_model() come up empty even though
+        # the requirements themselves are satisfiable — that's a policy
+        # exclusion, not genuine unavailability. If the caller opted into
+        # must_escalate_to_human, we honor that fail-safe by escalating with
+        # a clear diagnostic message rather than silently dropping to a weak
+        # safety floor. If not escalating to human, we fall to the safety floor.
+        # Only worth the extra picker call when the floor actually removed something.
+        floor_excluded_a_selection = False
+        if len(picker_candidates) < len(candidates):
+            floor_excluded_a_selection = model_selection.select_model(reqs, candidates, perf, tuning) is not None
         if reqs.must_escalate_to_human:
+            if floor_excluded_a_selection:
+                raise LlmHumanEscalationNeeded(
+                    f"No candidate satisfies requirements with configured capability floor (min_capability_rank={_min_capability_rank(config)}, reqs={reqs!r}) — "
+                    "caller opted into must_escalate_to_human rather than falling to the safety floor.")
             raise LlmHumanEscalationNeeded(
                 f"No candidate satisfies requirements (reqs={reqs!r}) — the caller opted "
                 "into must_escalate_to_human instead of the rule-based safety floor.")
         floor_entry = model_selection.safety_floor(_configured_entries(config))
         if floor_entry is None:
             raise Exception("No LLM providers configured")
-        logger.warning("select_model resolved nothing for this call (reqs=%r) — falling to the safety "
-                       "floor: %s / %s", reqs, floor_entry["provider"], floor_entry["model"])
+        if floor_excluded_a_selection:
+            logger.warning(
+                "select_model: %d candidate(s) satisfied requirements but were excluded by the "
+                "capability floor (min_capability_rank=%d) — falling to the safety floor: %s / %s",
+                len(candidates) - len(picker_candidates), _min_capability_rank(config),
+                floor_entry["provider"], floor_entry["model"])
+        else:
+            logger.warning("select_model resolved nothing for this call (reqs=%r) — falling to the safety "
+                           "floor: %s / %s", reqs, floor_entry["provider"], floor_entry["model"])
         chain = [{
             "key": _model_key(floor_entry["provider"], floor_entry.get("base_url", ""), floor_entry["model"]),
             "provider": floor_entry["provider"], "model": floor_entry["model"],
@@ -2905,6 +2973,10 @@ def llm_diag(preset=None, overrides=None, config=None):
     """
     config = config or load_config()
     candidates = _enumerate_candidates(config)
+    picker_candidates = _apply_capability_floor(candidates, config)
+    picker_keys = {c["key"] for c in picker_candidates}
+    floor_excluded = [c for c in candidates if c["key"] not in picker_keys]
+    effective_min_rank = _min_capability_rank(config)
     perf = get_llm_perf_snapshot()
     wanted = [p for p in _DIAG_PRESETS if not preset or p[0] == preset]
     out = []
@@ -2912,12 +2984,22 @@ def llm_diag(preset=None, overrides=None, config=None):
         entry = {"label": label, "description": description}
         try:
             reqs = _diag_reqs(kwargs, overrides)
-            res = model_selection.explain_selection(reqs, candidates, perf)
+            res = model_selection.explain_selection(reqs, picker_candidates, perf)
             entry.update(res)
         except Exception as ex:  # noqa: BLE001 — one bad preset never sinks the report
             entry["error"] = str(ex)[:400]
             entry["selected"] = None
             entry["rows"] = []
+        finally:
+            if effective_min_rank > 0 and floor_excluded:
+                entry["capability_floor"] = {
+                    "min_rank": effective_min_rank,
+                    "excluded": [
+                        {"model": c.get("model"), "provider": c.get("provider"),
+                         "capability_rank": model_registry.capability_rank(c.get("caps") or {})}
+                        for c in floor_excluded
+                    ],
+                }
         out.append(entry)
     return {"candidate_count": len(candidates), "presets": out}
 
