@@ -27,13 +27,17 @@ def audit_performance_hotpaths(files: List[Any]) -> List[Dict[str, Any]]:
 
         # State tracking through diff lines
         in_async_def = False
+        async_indent = 0
         in_loop = False
+        loop_indent = 0
         in_poll_context = False
 
         for raw_line in lines:
             if raw_line.startswith("@@"):
                 in_async_def = False
+                async_indent = 0
                 in_loop = False
+                loop_indent = 0
                 in_poll_context = False
                 continue
 
@@ -43,19 +47,29 @@ def audit_performance_hotpaths(files: List[Any]) -> List[Dict[str, Any]]:
             if is_deleted:
                 continue
 
-            line = raw_line[1:] if is_added else raw_line
+            line = raw_line[1:] if (is_added or raw_line.startswith(" ")) else raw_line
 
             stripped = line.strip()
+            if not stripped:
+                continue
+
+            current_indent = len(line) - len(line.lstrip())
+            if in_loop and current_indent <= loop_indent and not stripped.startswith("#"):
+                in_loop = False
+            if in_async_def and current_indent <= async_indent and not stripped.startswith("#"):
+                in_async_def = False
 
             # Track async function scope
             if stripped.startswith("async def "):
                 in_async_def = True
+                async_indent = current_indent
             elif stripped.startswith("def "):
                 in_async_def = False
 
             # Track loop scope
             if re.search(r"^\s*(?:for\s+\w+|\s*while\b)", line):
                 in_loop = True
+                loop_indent = current_indent
             elif stripped.startswith("def ") or stripped.startswith("class "):
                 in_loop = False
 
