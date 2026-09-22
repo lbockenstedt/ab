@@ -35,11 +35,12 @@ def _load_ns():
         # EXCLUDED from the picker's pool, not just visible in Settings —
         # see _entry_is_unhealthy's docstring in llm_client.py)
         "_record_llm_failure", "_record_llm_success", "_entry_is_unhealthy",
-        "_is_unsupported_model_error",
+        "_is_unsupported_model_error", "_min_capability_rank", "_apply_capability_floor",
     }
     want_assign = {
         "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_TOOL_400_MARKERS",
         "_UNSUPPORTED_MODEL_MARKERS", "_ENTRY_UNSUPPORTED_RETRY_SECONDS",
+        "_MIN_CAPABILITY_RANK_DEFAULT",
         "_ENDPOINT_CB_LOCK", "_ENDPOINT_CREDIT_CB", "_MODEL_RATE_CB",
         "_MODEL_LOCKS_LOCK", "_MODEL_LOCKS",
         "_LLM_PERF_STORE", "_LLM_PERF_LOCK",
@@ -144,6 +145,26 @@ def main():
                                _entry("e2", "openai", "gpt-9", api_key="k2", base_url="https://x")]}
     ok &= _check("two entries resolving to the same ModelKey collapse into one candidate",
                 len(ns["_enumerate_candidates"](dup_cfg)) == 1)
+
+    # --- frontier capability floor (_min_capability_rank/_apply_capability_floor) ---
+
+    floor_cfg = {"llm_entries": [_entry("e1", "ollama", "qwen2.5-coder:14b", api_key=""),
+                                 _entry("e2", "anthropic", "claude-opus-5")]}
+    floor_candidates = ns["_enumerate_candidates"](floor_cfg)
+    ok &= _check("_enumerate_candidates itself is capability-agnostic — both entries present",
+                len(floor_candidates) == 2)
+    floored = ns["_apply_capability_floor"](floor_candidates, floor_cfg)
+    ok &= _check("default floor (85) admits an Opus-class model",
+                any(c["provider"] == "anthropic" for c in floored))
+    ok &= _check("default floor (85) excludes a weak/uncatalogued local model",
+                not any(c["provider"] == "ollama" for c in floored))
+    ok &= _check("_min_capability_rank defaults to 85 when unset",
+                ns["_min_capability_rank"]({}) == 85)
+    ok &= _check("min_capability_rank is operator-overridable via config",
+                ns["_min_capability_rank"]({"min_capability_rank": 0}) == 0)
+    lowered = ns["_apply_capability_floor"](floor_candidates, {"min_capability_rank": 0})
+    ok &= _check("a floor of 0 disables filtering entirely",
+                len(lowered) == 2)
 
     # --- legacy env-var slots (live-read) --------------------------------------
 
@@ -332,7 +353,8 @@ def main():
     ns["_test_calls"]["raise_exc"] = None
     ns["_test_calls"]["provider_calls"].clear()
     reqs = model_selection.LlmRequirements(complexity="trivial")
-    e2e_cfg = {"llm_entries": [_entry("e1", "ollama", "llama3.1:8b", api_key="")]}
+    e2e_cfg = {"min_capability_rank": 0,
+               "llm_entries": [_entry("e1", "ollama", "llama3.1:8b", api_key="")]}
     result = ns["_call_llm_with_requirements"](reqs, "hi", "sys", None, None, None, None, e2e_cfg)
     ok &= _check("end-to-end: a single configured candidate is selected and called",
                 result == "ok from ollama/llama3.1:8b")
@@ -347,7 +369,8 @@ def main():
         fail_first["n"] += 1
         return Exception("boom") if fail_first["n"] == 1 else None
     ns["_test_calls"]["raise_exc"] = _fail_first_provider
-    two_cfg = {"llm_entries": [_entry("e1", "ollama", "llama3.1:8b", api_key=""),
+    two_cfg = {"min_capability_rank": 0,
+               "llm_entries": [_entry("e1", "ollama", "llama3.1:8b", api_key=""),
                                _entry("e2", "lmstudio", "some-model", api_key="")]}
     result = ns["_call_llm_with_requirements"](reqs, "hi", "sys", None, None, None, None, two_cfg)
     ok &= _check("failover: the first candidate's failure doesn't sink the whole call "
