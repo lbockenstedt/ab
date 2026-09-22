@@ -256,6 +256,14 @@ class HubAgentClient:
         # the self-signed hub cert (matches BaseControlPlane._client_ssl_ctx); set
         # LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify against a shipped CA.
         self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0") == "1"
+        # Preserve whether the operator actually provided LM_HUB_CA_CERT
+        # BEFORE applying the /etc/ab/hub-ca.pem default below — once the
+        # default is substituted in, "unset" and "explicitly set to the
+        # default path" become indistinguishable from a bare truthiness check
+        # on self._tls_ca_cert (which is never empty afterward), so the
+        # not-set diagnostic in _client_ssl_ctx would be permanently
+        # unreachable without this flag (ab#204/#205 reviewer finding).
+        self._tls_ca_cert_explicit = bool((os.environ.get("LM_HUB_CA_CERT", "") or "").strip())
         self._tls_ca_cert = ((os.environ.get("LM_HUB_CA_CERT", "") or "").strip()
                              or "/etc/ab/hub-ca.pem")
         # mTLS CLIENT identity for the wss connection: a Hub-Local-CA clientAuth
@@ -761,6 +769,27 @@ class HubAgentClient:
             if self._tls_verify and self._tls_ca_cert and os.path.exists(self._tls_ca_cert):
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
             elif self._tls_verify:
+                # ab#204/#205: verification was explicitly requested
+                # (LM_HUB_TLS_VERIFY=1) but LM_HUB_CA_CERT is unset or points
+                # at a file that doesn't exist. Falling back to the system
+                # trust store here is the correct fail-closed behavior for a
+                # verify-on request — silently downgrading to unverified would
+                # defeat the operator's explicit choice — but it will reject
+                # the hub's self-signed cert with CERTIFICATE_VERIFY_FAILED,
+                # which without this log reads as an unexplained connection
+                # drop rather than a config problem the operator can fix.
+                if not self._tls_ca_cert_explicit:
+                    logger.warning(
+                        "wss: LM_HUB_TLS_VERIFY=1 but LM_HUB_CA_CERT is not set — "
+                        "falling back to the system trust store, which will reject "
+                        "the hub's self-signed certificate. Set LM_HUB_CA_CERT to "
+                        "the hub's CA file to connect with verification enabled.")
+                else:
+                    logger.warning(
+                        "wss: LM_HUB_TLS_VERIFY=1 but LM_HUB_CA_CERT=%s does not "
+                        "exist — falling back to the system trust store, which "
+                        "will reject the hub's self-signed certificate.",
+                        self._tls_ca_cert)
                 ctx = ssl.create_default_context()
             else:
                 ctx = ssl._create_unverified_context()
@@ -855,6 +884,7 @@ class HubAgentClient:
         ca_path = self._tls_ca_cert or "/etc/ab/hub-ca.pem"
         changed = self._atomic_write_file(ca_path, ca_bundle, 0o644)
         self._tls_ca_cert = ca_path
+        self._tls_ca_cert_explicit = True
         try:
             self._persist_env_key("LM_HUB_CA_CERT", ca_path)
         except Exception as e:  # noqa: BLE001
