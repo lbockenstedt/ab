@@ -9,8 +9,13 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+import contract_guard
 import feature_boundary
+import fleet_guardrails
+import perf_auditor
+import pr_concierge
 import secrets_scan
+import twin_sync
 
 try:
     from model_selection import LlmRequirements
@@ -96,6 +101,11 @@ def check_pr_guardrails(
     paths = list(changed_paths or [])
     if not paths and files:
         paths = [getattr(f, "filename", "") for f in files if getattr(f, "filename", "")]
+
+    # 0. Extended fleet invariants check
+    fleet_ok, fleet_violation = fleet_guardrails.check_fleet_invariants(pr, files, paths)
+    if not fleet_ok:
+        return False, fleet_violation
 
     # 1. Deterministic boundary checks against target DEFAULT_BOUNDARIES
     all_boundaries = (
@@ -291,11 +301,18 @@ def auto_remediate_pr(
     # Guardrails check
     passed, violation = check_pr_guardrails(pr, files, changed_paths, config)
     if not passed:
+        guidance = pr_concierge.generate_user_guidance(
+            repo_name=repo_full_name,
+            pr_number=pr.number,
+            violation=violation,
+            changed_files=changed_paths,
+        )
         banner = (
             "🚨 **AppBuilder — Security Guardrail Violation Detected**\n\n"
             "Automated remediation is strictly blocked because this PR touches security-sensitive invariants or contains potential security risks:\n\n"
             f"- **Violation**: {violation}\n\n"
-            "**Action**: This PR has been locked from automated fixes and requires mandatory human review."
+            "**Action**: This PR has been locked from automated fixes and requires mandatory human review.\n\n"
+            f"{guidance}"
         )
         try:
             pr.create_issue_comment(banner)
@@ -309,9 +326,18 @@ def auto_remediate_pr(
     attempts = rec.get("remediation_attempts", 0)
     max_attempts = int(config.get("pr_auto_remediate_max_attempts", 3))
     if attempts >= max_attempts:
+        guidance = pr_concierge.generate_user_guidance(
+            repo_name=repo_full_name,
+            pr_number=pr.number,
+            review_report=rec.get("panel_critique") or rec.get("dissent_feedback"),
+            attempts=attempts,
+            max_attempts=max_attempts,
+            changed_files=changed_paths,
+        )
         exhausted_comment = (
             "🤖 **AppBuilder — Automated Remediation Limit Reached**\n\n"
-            f"AppBuilder attempted to remediate review findings {attempts} times but was unable to resolve all critiques. Leaving for human review."
+            f"AppBuilder attempted to remediate review findings {attempts} times but was unable to resolve all critiques. Leaving for human review.\n\n"
+            f"{guidance}"
         )
         try:
             pr.create_issue_comment(exhausted_comment)
@@ -320,6 +346,29 @@ def auto_remediate_pr(
 
         update_pr_review(repo_full_name, pr.number, auto_remediate_status="exhausted_human_review")
         return False, "Remediation attempt limit reached"
+
+    # Twin-parity detection and auto-mirroring on pxmx
+    if "pxmx" in repo_full_name.lower():
+        drifts = twin_sync.detect_twin_drift(repo_full_name, files)
+        if drifts:
+            mirrored_list = []
+            for d in drifts:
+                src_path = d.get("source")
+                tgt_path = d.get("twin")
+                src_f = next((f for f in files if getattr(f, "filename", "") == src_path), None)
+                src_content = getattr(src_f, "patch", "") if src_f else ""
+                mirror_data = twin_sync.mirror_twin_content(src_path, tgt_path, src_content)
+                mirrored_list.append(mirror_data)
+            rec["mirrored_twins"] = mirrored_list
+
+    # Wire contract & Performance hotpath audits
+    contract_warnings = contract_guard.audit_wire_contract(files)
+    perf_warnings = perf_auditor.audit_performance_hotpaths(files)
+    if contract_warnings or perf_warnings:
+        if "findings" not in rec or rec["findings"] is None:
+            rec["findings"] = []
+        rec["findings"].extend(contract_warnings)
+        rec["findings"].extend(perf_warnings)
 
     # Assess complexity & requirements
     critique = rec.get("panel_critique") or ""
