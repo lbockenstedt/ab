@@ -106,16 +106,19 @@ def test_template_syntax_and_rendering():
 
     # Render a small slice with the same logic to verify output formatting
     template_str = """
-    {% set comp_verdict = pr.composite_verdict or pr.panel_verdict %}
-    {% set avg_conf = pr.panel_avg_confidence if pr.panel_avg_confidence is not none else pr.panel_confidence %}
+    {% set comp_verdict = pr.get('composite_verdict') or pr.get('panel_verdict') %}
+    {% set avg_conf = pr.get('panel_avg_confidence') if pr.get('panel_avg_confidence') is not none else pr.get('panel_confidence') %}
+    {% set p1_conf = pr.get('panel_confidence') %}
+    {% set p2_conf = pr.get('panel2_confidence') %}
+    {% set am_score = pr.get('auto_merge_score') %}
     {% if comp_verdict %}
     <span class="badge">ADVISORY {{ comp_verdict|upper }}{% if avg_conf is not none %} · {{ (avg_conf * 100)|round|int }}%{% endif %}</span>
     {% endif %}
-    {% if pr.panel_verdict and not pr.panel_status %}
-    <span>🧠 {{ pr.panel_verdict|upper }} · {{ (pr.panel_confidence * 100)|round|int }}%</span>
+    {% if pr.get('panel_verdict') and not pr.get('panel_status') %}
+    <span>🧠 {{ pr.panel_verdict|upper }}{% if p1_conf is not none %} · {{ (p1_conf * 100)|round|int }}%{% endif %}</span>
     {% endif %}
-    {% if pr.panel2_verdict and not pr.panel2_status %}
-    <span>🔀 {{ pr.panel2_verdict|upper }} · {{ (pr.panel2_confidence * 100)|round|int }}%</span>
+    {% if pr.get('panel2_verdict') and not pr.get('panel2_status') %}
+    <span>🔀 {{ pr.panel2_verdict|upper }}{% if p2_conf is not none %} · {{ (p2_conf * 100)|round|int }}%{% endif %}</span>
     {% endif %}
     """
     tmpl = env.from_string(template_str)
@@ -133,3 +136,15 @@ def test_template_syntax_and_rendering():
     assert "ADVISORY SPLIT · 65%" in out
     assert "🧠 APPROVE · 90%" in out
     assert "🔀 DENY · 40%" in out
+
+    # Test legacy PR records without panel_avg_confidence (e.g. pre-existing state entries)
+    legacy_out = tmpl.render(pr={
+        "panel_verdict": "Approve",
+        "panel_confidence": 0.90,
+    })
+    assert "ADVISORY APPROVE · 90%" in legacy_out
+    assert "🧠 APPROVE · 90%" in legacy_out
+
+    # Test completely empty PR record does not raise UndefinedError
+    empty_out = tmpl.render(pr={})
+    assert empty_out.strip() == ""
