@@ -761,6 +761,27 @@ class HubAgentClient:
             if self._tls_verify and self._tls_ca_cert and os.path.exists(self._tls_ca_cert):
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
             elif self._tls_verify:
+                # ab#204/#205: verification was explicitly requested
+                # (LM_HUB_TLS_VERIFY=1) but LM_HUB_CA_CERT is unset or points
+                # at a file that doesn't exist. Falling back to the system
+                # trust store here is the correct fail-closed behavior for a
+                # verify-on request — silently downgrading to unverified would
+                # defeat the operator's explicit choice — but it will reject
+                # the hub's self-signed cert with CERTIFICATE_VERIFY_FAILED,
+                # which without this log reads as an unexplained connection
+                # drop rather than a config problem the operator can fix.
+                if not self._tls_ca_cert:
+                    logger.warning(
+                        "wss: LM_HUB_TLS_VERIFY=1 but LM_HUB_CA_CERT is not set — "
+                        "falling back to the system trust store, which will reject "
+                        "the hub's self-signed certificate. Set LM_HUB_CA_CERT to "
+                        "the hub's CA file to connect with verification enabled.")
+                else:
+                    logger.warning(
+                        "wss: LM_HUB_TLS_VERIFY=1 but LM_HUB_CA_CERT=%s does not "
+                        "exist — falling back to the system trust store, which "
+                        "will reject the hub's self-signed certificate.",
+                        self._tls_ca_cert)
                 ctx = ssl.create_default_context()
             else:
                 ctx = ssl._create_unverified_context()
