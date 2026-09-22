@@ -32,13 +32,14 @@ def _load_funcs():
     want = {"_safe_repo_target", "_issue_identifiers", "_targeted_file_context",
             "parse_and_apply", "_claim_issue", "_release_issue",
             "_robust_json_loads", "_sanitize_json_string_newlines",
-            "_relax_json_fix_strings",
+            "_relax_json_fix_strings", "_repair_missing_object_keys",
+            "_json_string_spans", "_looks_truncated_json", "_close_truncated_json",
             "_fetch_repo_file_for_review", "_repo_file_text",
             "_snippet_language_mismatch_hint",
             "_relaxed_edit_span"}
     want_assign = {"_ISSUE_STOP_TOKENS", "_inflight_lock", "_inflight_issues",
                     "_JSON_BAD_ESCAPE_RE", "_JS_ONLY_TOKENS_RE", "_PY_ONLY_TOKENS_RE",
-                    "_JS_EXTS", "_PY_EXTS",
+                    "_JS_EXTS", "_PY_EXTS", "_EDIT_OBJECT_KEYS",
                     "_FIX_JSON_KEYS", "_JSON_NEXT_MEMBER_RE", "_FIX_CODE_KEY_RE"}
     segs = []
     for node in tree.body:
@@ -117,6 +118,22 @@ def main():
         {"file": "WebUI/main.js", "search": "nonexistent snippet zzz", "replace": "x"}]})
     bad_ok, bad_applied, _ = ns["parse_and_apply"](bad, d)
     ok &= _check("non-matching edit does NOT report success", bad_ok is False and not bad_applied)
+
+    # ab#206: a response that stops so early it never emits a closing '}'
+    # anywhere used to be reported as "no_json" (the LLM-said-nothing case) —
+    # the top-level `{.*}` locator required a closing brace to even try, so
+    # the truncation-repair fallback (_close_truncated_json) was unreachable
+    # for the exact case it exists to rescue. It must now be recognized as
+    # truncated_json and its complete edit salvaged.
+    ns["parse_and_apply"]("ignored", d)  # reset .last_reason from the prior call
+    trunc = ('{"confidence": 0.9, "edits": [{"file": "WebUI/main.js", '
+             '"search": "    await ensureLDAPTenants();", '
+             '"replace": "    await ensureLDAPTenants(); // patched"')
+    trunc_ok, trunc_applied, _ = ns["parse_and_apply"](trunc, d)
+    ok &= _check("a response with no closing brace at all is still salvaged",
+                 trunc_ok and "WebUI/main.js" in trunc_applied)
+    ok &= _check("... and is reported as truncated_json, not no_json",
+                 ns["parse_and_apply"].last_reason != "no_json")
 
     # Regression guard for GitHub issue #755 ("Edit search snippet not found in
     # '...'; skipping this edit" — non-actionable, no context): the failing

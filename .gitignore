@@ -25,3 +25,4 @@ certs/
 keys.json
 hub_secret.json
 secrets.json
+.test_agentic_repo_tools/
