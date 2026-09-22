@@ -2416,6 +2416,45 @@ def _iter_configured_endpoints(config):
         yield f"legacy_{n}", provider, api_key, model, base_url, rpm
 
 
+#: Frontier-capability floor: the picker must only ever SELECT a model whose
+#: capability_rank (model_registry.capability_rank) is at least this strong —
+#: i.e. no worse than the GPT-5(.5)-class / Claude Opus-class rules in
+#: model_registry.DEFAULT_MODEL_RULES (both rank 85+ there). Applied by
+#: _apply_capability_floor right before a candidate pool is handed to
+#: model_selection.select_model / explain_selection — deliberately NOT baked
+#: into _enumerate_candidates itself, since that list is also the source for
+#: _configured_entries/safety_floor (the genuine last-resort path when NO
+#: candidate is selectable at all) and for entry-health/credit/rate-limit
+#: bookkeeping that must keep tracking every configured endpoint regardless
+#: of how capable it is. Operator-overridable via
+#: config["min_capability_rank"] (e.g. to temporarily re-admit weaker models
+#: for cost reasons); set it to 0 (or negative) to disable the floor.
+_MIN_CAPABILITY_RANK_DEFAULT = 85
+
+
+def _min_capability_rank(config):
+    raw = config.get("min_capability_rank", _MIN_CAPABILITY_RANK_DEFAULT)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return _MIN_CAPABILITY_RANK_DEFAULT
+
+
+def _apply_capability_floor(candidates, config):
+    """Filters an _enumerate_candidates() list down to only those meeting the
+    frontier _min_capability_rank(config) floor, for the picker's OWN ranking
+    pass. Deliberately NOT a hard failure when this empties the pool: the
+    caller (_call_llm_with_requirements) already falls to
+    model_selection.safety_floor when select_model resolves nothing, which is
+    the existing, loudly-logged (logger.warning) last resort for "nothing
+    else works" — this floor only changes what NORMAL routing may pick."""
+    min_rank = _min_capability_rank(config)
+    if min_rank <= 0:
+        return candidates
+    return [c for c in candidates
+            if model_registry.capability_rank(c.get("caps") or {}) >= min_rank]
+
+
 def _enumerate_candidates(config):
     """Every USABLE endpoint as plain dicts for model_selection.select_model
     — the impure boundary the redesign plan calls for: config reads, live
@@ -2602,7 +2641,8 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
         tuning["slow_factor"] = config.get("model_slow_factor")
     if config.get("model_min_samples") is not None:
         tuning["min_samples"] = config.get("model_min_samples")
-    selection = model_selection.select_model(reqs, candidates, perf, tuning)
+    picker_candidates = _apply_capability_floor(candidates, config)
+    selection = model_selection.select_model(reqs, picker_candidates, perf, tuning)
 
     if selection is not None:
         winning = next((c for c in candidates if c["key"] == selection.key), None)
@@ -2905,6 +2945,7 @@ def llm_diag(preset=None, overrides=None, config=None):
     """
     config = config or load_config()
     candidates = _enumerate_candidates(config)
+    picker_candidates = _apply_capability_floor(candidates, config)
     perf = get_llm_perf_snapshot()
     wanted = [p for p in _DIAG_PRESETS if not preset or p[0] == preset]
     out = []
@@ -2912,7 +2953,7 @@ def llm_diag(preset=None, overrides=None, config=None):
         entry = {"label": label, "description": description}
         try:
             reqs = _diag_reqs(kwargs, overrides)
-            res = model_selection.explain_selection(reqs, candidates, perf)
+            res = model_selection.explain_selection(reqs, picker_candidates, perf)
             entry.update(res)
         except Exception as ex:  # noqa: BLE001 — one bad preset never sinks the report
             entry["error"] = str(ex)[:400]
