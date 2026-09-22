@@ -29,5 +29,7 @@ def is_queued_for_retry_stale(prior_review, head_sha):
     already a fresh review via the normal (not-already_current) path, so this
     returns False rather than double-triggering."""
     prior = prior_review or {}
-    return bool(prior.get("panel_status") == "queue_for_retry"
-                and prior.get("head") == head_sha)
+    return bool(
+        (prior.get("panel_status") == "queue_for_retry" or prior.get("panel2_status") == "queue_for_retry")
+        and prior.get("head") == head_sha
+    )

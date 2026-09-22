@@ -72,6 +72,7 @@ def _load_llm_client_ns(enqueue_fn, batch_enabled=True):
             {"key": ("anthropic", "", "claude-x"), "provider": "anthropic",
              "model": "claude-x", "api_key": "k", "base_url": "", "rpm": 0},
         ],
+        "_apply_capability_floor": lambda candidates, config: candidates,
         "get_llm_perf_snapshot": lambda: {},
         "_configured_entries": lambda config: [],
         "_model_key": lambda p, b, m: (p, b, m),
