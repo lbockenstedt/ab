@@ -2454,35 +2454,48 @@ def _landed_fix_still_applied(repo_git, commits, min_ratio=0.6):
     Guards the regression case: a commit referencing the issue exists in history,
     but the change was later reverted or overwritten, so the bug is genuinely
     back and a fix really is needed. Deterministic -- no model involved.
+
+    Checks EVERY commit that references the issue, not just the newest
+    (``commits[0]``): a newer, unrelated commit that happens to mention the
+    issue (e.g. "reopening #488", "revert fix for #488") would otherwise be
+    the only evidence consulted, and its added lines being trivially present
+    (or its diff having few/no additions) says nothing about whether the
+    ACTUAL fix commit further back is still applied. The strongest ratio
+    across all referencing commits is used, so a genuine still-applied fix is
+    found even when it isn't the most recent issue-referencing commit.
     """
-    try:
-        diff = repo_git.git.show(commits[0]["sha"], "--unified=0", "--format=")
-    except Exception as e:  # noqa: BLE001
-        logger.debug("landed-fix diff read failed: %s", e)
-        return False, 0.0
-    added = _added_lines(diff)
-    if not added:
-        return False, 0.0
     root = repo_git.working_dir
-    present = 0
-    cache = {}
-    for rel in _diff_files(diff):
-        full = _safe_repo_target(root, rel, what="landed-fix read")
-        if not full:
-            continue
+    best_ratio = 0.0
+    for commit in commits or []:
         try:
-            with open(full, "r", encoding="utf-8", errors="replace") as fh:
-                cache[rel] = fh.read()
-        except OSError:
+            diff = repo_git.git.show(commit["sha"], "--unified=0", "--format=")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("landed-fix diff read failed for %s: %s",
+                         commit.get("sha"), e)
             continue
-    haystack = "\n".join(cache.values())
-    if not haystack:
-        return False, 0.0
-    for line in added:
-        if line in haystack:
-            present += 1
-    ratio = present / float(len(added))
-    return ratio >= min_ratio, ratio
+        added = _added_lines(diff)
+        if not added:
+            continue
+        cache = {}
+        for rel in _diff_files(diff):
+            full = _safe_repo_target(root, rel, what="landed-fix read")
+            if not full:
+                continue
+            try:
+                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                    cache[rel] = fh.read()
+            except OSError:
+                continue
+        haystack = "\n".join(cache.values())
+        if not haystack:
+            continue
+        present = sum(1 for line in added if line in haystack)
+        ratio = present / float(len(added))
+        if ratio > best_ratio:
+            best_ratio = ratio
+        if best_ratio >= min_ratio:
+            break
+    return best_ratio >= min_ratio, best_ratio
 
 
 def _diff_files(diff_text):
@@ -2557,18 +2570,26 @@ def _resolve_as_already_fixed(issue, issue_id, repo_name, issue_num, verdict,
         issue.edit(state="closed")
     except Exception as ce:  # noqa: BLE001
         logger.warning(f"could not close already-resolved issue {issue_id}: {ce}")
-    processed = load_processed()
-    processed[f"{repo_name}:{issue_num}"] = {
-        "status": "resolved",
-        "timestamp": datetime.now().isoformat(),
-        "resolution": "already_fixed",
-        "evidence": evidence[:1000],
-        "confidence": conf,
-        "attempts": attempts,
-        "original_body": issue.body,
-    }
-    save_processed(processed)
-    state["processed"] = processed
+    # The bookkeeping below must not be able to raise past this point: the
+    # issue may already be closed on GitHub by the call above, and a caller
+    # (the landed-fix pre-check) relies on this function returning normally
+    # so it can `return` instead of falling through into fix attempts on an
+    # issue it just closed.
+    try:
+        processed = load_processed()
+        processed[f"{repo_name}:{issue_num}"] = {
+            "status": "resolved",
+            "timestamp": datetime.now().isoformat(),
+            "resolution": "already_fixed",
+            "evidence": evidence[:1000],
+            "confidence": conf,
+            "attempts": attempts,
+            "original_body": issue.body,
+        }
+        save_processed(processed)
+        state["processed"] = processed
+    except Exception as ce:  # noqa: BLE001
+        logger.warning(f"could not persist already-resolved state for {issue_id}: {ce}")
     try:
         recompute_issue_counters(processed)
     except Exception:  # noqa: BLE001
@@ -3648,7 +3669,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # issue, whose added lines are STILL present so a later revert or
             # regression does not read as "fixed"); the verdict is still the
             # existing strict LLM gate, now shown the landed diff as evidence.
-            if _should_precheck_landed_fix(config):
+            if _should_precheck_landed_fix(config) and not was_reopened:
+                # Skipped for reopened issues: a reopened issue is, by
+                # construction, one whose "fix" commit is still on the branch
+                # and still didn't fix the bug -- exactly the input that makes
+                # this precheck fire and (wrongly) close a live regression
+                # before any attempt is made. See _regression_triage_context
+                # above, which already treats reopened issues as a distinct,
+                # more skeptical case.
                 try:
                     _landed = _landed_fix_commits(repo_git, issue_num)
                     if _landed:
