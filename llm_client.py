@@ -2657,14 +2657,19 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
     else:
         # A floored-out pool can make select_model() come up empty even though
         # the requirements themselves are satisfiable — that's a policy
-        # exclusion, not genuine unavailability, and must not read to the
-        # caller (or the operator, via must_escalate_to_human) as "nothing can
-        # do this job". Only worth the extra picker call when the floor
-        # actually removed something.
+        # exclusion, not genuine unavailability. If the caller opted into
+        # must_escalate_to_human, we honor that fail-safe by escalating with
+        # a clear diagnostic message rather than silently dropping to a weak
+        # safety floor. If not escalating to human, we fall to the safety floor.
+        # Only worth the extra picker call when the floor actually removed something.
         floor_excluded_a_selection = False
         if len(picker_candidates) < len(candidates):
             floor_excluded_a_selection = model_selection.select_model(reqs, candidates, perf, tuning) is not None
-        if reqs.must_escalate_to_human and not floor_excluded_a_selection:
+        if reqs.must_escalate_to_human:
+            if floor_excluded_a_selection:
+                raise LlmHumanEscalationNeeded(
+                    f"No candidate satisfies requirements with configured capability floor (min_capability_rank={_min_capability_rank(config)}, reqs={reqs!r}) — "
+                    "caller opted into must_escalate_to_human rather than falling to the safety floor.")
             raise LlmHumanEscalationNeeded(
                 f"No candidate satisfies requirements (reqs={reqs!r}) — the caller opted "
                 "into must_escalate_to_human instead of the rule-based safety floor.")
@@ -2981,6 +2986,11 @@ def llm_diag(preset=None, overrides=None, config=None):
             reqs = _diag_reqs(kwargs, overrides)
             res = model_selection.explain_selection(reqs, picker_candidates, perf)
             entry.update(res)
+        except Exception as ex:  # noqa: BLE001 — one bad preset never sinks the report
+            entry["error"] = str(ex)[:400]
+            entry["selected"] = None
+            entry["rows"] = []
+        finally:
             if effective_min_rank > 0 and floor_excluded:
                 entry["capability_floor"] = {
                     "min_rank": effective_min_rank,
@@ -2990,10 +3000,6 @@ def llm_diag(preset=None, overrides=None, config=None):
                         for c in floor_excluded
                     ],
                 }
-        except Exception as ex:  # noqa: BLE001 — one bad preset never sinks the report
-            entry["error"] = str(ex)[:400]
-            entry["selected"] = None
-            entry["rows"] = []
         out.append(entry)
     return {"candidate_count": len(candidates), "presets": out}
 

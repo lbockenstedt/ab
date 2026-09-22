@@ -422,20 +422,35 @@ def main():
     ok &= _check("must_escalate_to_human=True with a satisfiable requirement resolves normally",
                 result == "ok from ollama/llama3.1:8b")
 
-    # A capability-floor exclusion is a POLICY decision, not "nothing can do
-    # this job" -- must_escalate_to_human must NOT fire when the unfloored
-    # pool would have resolved something; it should fall through to the
-    # safety floor instead (see the genuinely-unsatisfiable case above, which
-    # still raises since the default floor is 0 and removes nothing there).
+    # When a capability floor excludes candidates that would otherwise satisfy
+    # requirements, an operator opting into must_escalate_to_human=True must be
+    # escalated to instead of silently dropping to the weak safety floor.
     ns["_test_calls"]["raise_exc"] = None
     floor_policy_cfg = {"min_capability_rank": 85,
                         "llm_entries": [_entry("e1", "ollama", "qwen2.5-coder:14b", api_key="")]}
     policy_human_reqs = model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=True)
-    result = ns["_call_llm_with_requirements"](policy_human_reqs, "hi", "sys", None, None, None, None,
-                                               floor_policy_cfg)
-    ok &= _check("a capability-floor exclusion falls through to the safety floor even with "
-                "must_escalate_to_human=True, instead of raising LlmHumanEscalationNeeded",
-                result == "ok from ollama/qwen2.5-coder:14b")
+    threw_floor_human = False
+    exc_floor_human_msg = ""
+    try:
+        ns["_call_llm_with_requirements"](policy_human_reqs, "hi", "sys", None, None, None, None,
+                                           floor_policy_cfg)
+    except ns["LlmHumanEscalationNeeded"] as ex:
+        threw_floor_human = True
+        exc_floor_human_msg = str(ex)
+    except Exception:
+        threw_floor_human = False
+    ok &= _check("a capability-floor exclusion honors must_escalate_to_human=True by raising "
+                "LlmHumanEscalationNeeded instead of falling to the safety floor",
+                threw_floor_human)
+    ok &= _check("the capability-floor escalation message explains the floor exclusion and rank",
+                "configured capability floor" in exc_floor_human_msg and "min_capability_rank=85" in exc_floor_human_msg)
+
+    # When must_escalate_to_human=False, a floor exclusion falls through to the safety floor as expected:
+    result_fallback = ns["_call_llm_with_requirements"](
+        model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=False),
+        "hi", "sys", None, None, None, None, floor_policy_cfg)
+    ok &= _check("when must_escalate_to_human=False, capability-floor exclusion falls to safety floor",
+                result_fallback == "ok from ollama/qwen2.5-coder:14b")
 
     # --- used_model_out: populated with the winning candidate's identity -------
 
@@ -463,6 +478,22 @@ def main():
     ok &= _check("llm_diag's floor entries carry the effective min_rank",
                 all(entry["capability_floor"]["min_rank"] == 85
                     for entry in diag_report["presets"] if "capability_floor" in entry))
+
+    # llm_diag: preserves capability_floor even if explain_selection raises an exception
+    orig_explain = model_selection.explain_selection
+    try:
+        def _failing_explain(*a, **kw):
+            raise RuntimeError("simulated explain_selection failure")
+        model_selection.explain_selection = _failing_explain
+        diag_err_report = ns["llm_diag"](config=diag_floor_cfg)
+        ok &= _check("llm_diag reports error when explain_selection fails",
+                    all(entry.get("error") and "simulated explain_selection failure" in entry["error"]
+                        for entry in diag_err_report["presets"]))
+        ok &= _check("llm_diag attaches capability_floor even when explain_selection raises an exception",
+                    all("capability_floor" in entry and entry["capability_floor"]["min_rank"] == 85
+                        for entry in diag_err_report["presets"]))
+    finally:
+        model_selection.explain_selection = orig_explain
 
     diag_no_floor_cfg = {"llm_entries": [_entry("e1", "ollama", "qwen2.5-coder:14b", api_key=""),
                                          _entry("e2", "anthropic", "claude-opus-5")]}
