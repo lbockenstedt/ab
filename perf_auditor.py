@@ -26,18 +26,14 @@ def audit_performance_hotpaths(files: List[Any]) -> List[Dict[str, Any]]:
         lines = raw_patch.splitlines()
 
         # State tracking through diff lines
-        in_async_def = False
-        async_indent = 0
-        in_loop = False
-        loop_indent = 0
+        async_indents: List[int] = []
+        loop_indents: List[int] = []
         in_poll_context = False
 
         for raw_line in lines:
             if raw_line.startswith("@@"):
-                in_async_def = False
-                async_indent = 0
-                in_loop = False
-                loop_indent = 0
+                async_indents = []
+                loop_indents = []
                 in_poll_context = False
                 continue
 
@@ -54,24 +50,26 @@ def audit_performance_hotpaths(files: List[Any]) -> List[Dict[str, Any]]:
                 continue
 
             current_indent = len(line) - len(line.lstrip())
-            if in_loop and current_indent <= loop_indent and not stripped.startswith("#"):
-                in_loop = False
-            if in_async_def and current_indent <= async_indent and not stripped.startswith("#"):
-                in_async_def = False
+            while loop_indents and current_indent <= loop_indents[-1] and not stripped.startswith("#"):
+                loop_indents.pop()
+            while async_indents and current_indent <= async_indents[-1] and not stripped.startswith("#"):
+                async_indents.pop()
 
             # Track async function scope
             if stripped.startswith("async def "):
-                in_async_def = True
-                async_indent = current_indent
+                async_indents.append(current_indent)
             elif stripped.startswith("def "):
-                in_async_def = False
+                async_indents = []
 
             # Track loop scope
             if re.search(r"^\s*(?:for\s+\w+|\s*while\b)", line):
-                in_loop = True
-                loop_indent = current_indent
+                loop_indents.append(current_indent)
             elif stripped.startswith("def ") or stripped.startswith("class "):
-                in_loop = False
+                loop_indents = []
+
+            in_loop = bool(loop_indents)
+            in_async_def = bool(async_indents)
+
 
             # Track polling context
             if any(term in stripped.lower() for term in ("def poll", "poll_loop", "schedule_poll", "polling")):

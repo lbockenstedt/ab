@@ -456,3 +456,19 @@ def test_contract_guard_unrelated_get_does_not_suppress_warning():
     unsafe_keys = [f for f in findings if f["type"] == "wire_contract_unsafe_key_access" and f.get("key") == "unprotected_key"]
     assert len(unsafe_keys) == 1
 
+
+def test_perf_auditor_nested_loop_preserves_outer_scope():
+    patch = (
+        "@@ -1,15 +1,15 @@\n"
+        "+ for batch in batches:\n"
+        "+     for item in batch:\n"
+        "+         process(item)\n"
+        "+     await flush()\n"
+        "+ await outside()\n"
+    )
+    files = [MockFile("src/worker.py", patch)]
+    findings = perf_auditor.audit_performance_hotpaths(files)
+    loop_awaits = [f for f in findings if f["type"] == "sequential_await_in_loop"]
+    assert len(loop_awaits) == 1
+
+
