@@ -1825,9 +1825,14 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
             # _ids may now include a local-Ollama backfill seat (still short of the
             # minimum) alongside any frontier seats - never call a seated local model
             # "frontier" here, that's exactly the state this warning exists to flag.
-            logger.warning("review panel: only %d of %d reviewer seat(s) filled (frontier "
-                           "allowlist + local Ollama backfill): %s",
-                           len(panel), _REVIEW_PANEL_MIN, _ids)
+            if len(panel) > _before:
+                logger.warning("review panel: only %d of %d reviewer seat(s) filled (frontier "
+                               "allowlist + local Ollama backfill): %s",
+                               len(panel), _REVIEW_PANEL_MIN, _ids)
+            else:
+                logger.warning("review panel: only %d of %d reviewer seat(s) filled (frontier "
+                               "allowlist): %s",
+                               len(panel), _REVIEW_PANEL_MIN, _ids)
         return panel
 
     # Multiple opinions whenever possible: a single reviewer is one opinion, and
@@ -1894,7 +1899,7 @@ def _cloud_frontier_fallback(exclude_keys, config):
     return None
 
 
-def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config):
+def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=None):
     """Run ONE reviewer turn. Returns (vote_dict|None, failed_name|None).
 
     Read-only: a reviewer only reads the diff and emits a JSON verdict, so
@@ -1912,8 +1917,13 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config):
     cloud frontier candidate when the failed reviewer was local (self-hosted
     Ollama), otherwise against the same candidate. Either way the vote/failure is
     reported under the ORIGINAL reviewer's name, so the panel seat's identity is
-    stable regardless of which model actually answered it."""
+    stable regardless of which model actually answered it. When escalated to cloud,
+    `escalated_to` records the fallback model's name in the vote dictionary."""
     res = None
+    if panel_keys is None:
+        panel_keys = r.get("seated_panel_keys") or set()
+    else:
+        panel_keys = set(panel_keys)
 
     def _attempt(reviewer):
         nonlocal res
@@ -1931,16 +1941,12 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config):
     def _log_hard_failure(e):
         if is_llm_cooldown_error(e):
             logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
-        elif isinstance(e, json.JSONDecodeError) and res is not None:
-            # _robust_json_loads only repairs one specific, confirmed-recurring
-            # pattern (a stray backslash) and re-raises anything else
-            # unchanged. A bare exception message ("Expecting value: line 1
-            # column 30") gives no way to root-cause or repair the NEXT
-            # occurrence of a different pattern — unlike parse_and_apply's
-            # last_failures for edit misses, there was nothing to go on here.
-            # Truncated: this is a raw LLM response, not something to log
-            # unbounded.
-            logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
+        elif isinstance(e, json.JSONDecodeError):
+            raw = res if res is not None else getattr(e, "doc", None)
+            if raw is not None:
+                logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {str(raw)[:300]!r}")
+            else:
+                logger.error(f"{r['name']} JSON parse failed ({e})")
         else:
             logger.error(f"{r['name']} failed: {e}")
 
@@ -1960,16 +1966,26 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config):
             # on every other candidate sharing the provider.
             logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
             return (None, r["name"])
+        elif isinstance(e, json.JSONDecodeError):
+            raw = res if res is not None else getattr(e, "doc", None)
+            if raw is not None:
+                logger.warning(f"{r['name']} JSON parse failed ({e}) — raw response: {str(raw)[:300]!r}")
+            else:
+                logger.warning(f"{r['name']} JSON parse failed ({e})")
 
         orig_candidate = r.get("candidate") or {}
-        fallback_candidate = (_cloud_frontier_fallback({orig_candidate.get("key")}, config)
+        orig_key = orig_candidate.get("key")
+        exclude_keys = panel_keys | ({orig_key} if orig_key else set())
+        fallback_candidate = (_cloud_frontier_fallback(exclude_keys, config)
                               if _is_local_provider(orig_candidate.get("provider")) else None)
         if fallback_candidate is not None:
             fallback_name = _reviewer_name(fallback_candidate)
-            retry_reviewer = {"name": fallback_name, "candidate": fallback_candidate}
+            retry_reviewer = {"name": fallback_name, "candidate": fallback_candidate,
+                              "seated_panel_keys": panel_keys}
             logger.info("%s failed (%s); retrying via cloud frontier escalation: %s",
                         r["name"], e, fallback_name)
         else:
+            fallback_name = None
             retry_reviewer = r
             logger.info("%s failed (%s); retrying", r["name"], e)
 
@@ -1984,7 +2000,10 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config):
                            f"raw response: {str(res)[:300]!r}")
             return (None, r["name"])
         _v["confidence"] = _norm_confidence(_v.get("confidence"))
-        return ({**_v, "reviewer": r["name"]}, None)
+        out = {**_v, "reviewer": r["name"]}
+        if fallback_name is not None:
+            out["escalated_to"] = fallback_name
+        return (out, None)
 
 
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
@@ -2035,6 +2054,9 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     reviewers = []
     for c in panel_candidates:
         reviewers.append({"name": _reviewer_name(c), "candidate": c})
+    panel_keys = {m.get("candidate", {}).get("key") for m in reviewers if m.get("candidate", {}).get("key")}
+    for r in reviewers:
+        r["seated_panel_keys"] = panel_keys
 
     if not reviewers and _panel_allowlist(config):
         # Frontier-only policy: never fall back to an arbitrary model.
@@ -2126,7 +2148,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     failed_reviewers = []
 
     def _review_one(r):
-        return _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config)
+        return _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=panel_keys)
 
     try:
         # Fan the panel out: reviewers are independent + read-only, so run them
@@ -2182,6 +2204,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             "verdict": v.get("verdict"),
             "confidence": v.get("confidence"),
             "critique": v.get("critique", ""),
+            **({"escalated_to": v["escalated_to"]} if "escalated_to" in v else {}),
         }
         for v in votes
     ]

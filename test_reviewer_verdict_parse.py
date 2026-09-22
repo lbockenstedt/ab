@@ -212,6 +212,7 @@ def test_vote_local_hard_failure_escalates_to_cloud_and_succeeds(fe):
         fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
     assert failed is None
     assert vote["reviewer"] == "rev-1"  # original seat's name, not the fallback's
+    assert vote["escalated_to"] == fe["_reviewer_name"](cloud)
     assert len(cands) == 2
     assert cands[0] is local
     assert cands[1] is cloud  # escalated retry targets the cloud fallback
@@ -236,6 +237,7 @@ def test_vote_local_hard_failure_no_cloud_fallback_retries_same_candidate(fe):
     (vote, failed), prompts, cands = _vote(
         fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
     assert failed is None and vote["reviewer"] == "rev-1"
+    assert "escalated_to" not in vote
     assert len(cands) == 2
     assert cands[0] is local and cands[1] is local
 
@@ -247,6 +249,7 @@ def test_vote_non_local_hard_failure_retries_same_candidate(fe):
     (vote, failed), prompts, cands = _vote(
         fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
     assert failed is None and vote["reviewer"] == "rev-1"
+    assert "escalated_to" not in vote
     assert len(cands) == 2
     assert cands[0] is cloud and cands[1] is cloud  # no escalation needed/attempted
 
@@ -261,6 +264,42 @@ def test_vote_cooldown_on_local_reviewer_still_not_retried(fe):
         fe, [RuntimeError("all providers cooling down: rate_limited")], reviewer=reviewer, config={})
     assert vote is None and failed == "rev-1"
     assert len(cands) == 1
+
+
+# ── _cloud_frontier_fallback & panel diversity ─────────────────────────────
+
+def test_cloud_frontier_fallback_excludes_seated_panel_keys(fe):
+    cloud1 = _cloud_cand("cloud-1", "claude-opus-5")
+    cloud2 = _cloud_cand("cloud-2", "gpt-5.6-sol")
+    fe["llm_client"] = _FakeLlmClient([cloud1, cloud2])
+    # When cloud-1 is in exclude_keys (seated on panel), fallback picks cloud-2
+    c = fe["_cloud_frontier_fallback"]({"cloud-1"}, {})
+    assert c is not None and c["key"] == "cloud-2"
+    # When both are in exclude_keys, fallback returns None
+    assert fe["_cloud_frontier_fallback"]({"cloud-1", "cloud-2"}, {}) is None
+
+
+def test_vote_local_hard_failure_excludes_seated_panel_keys_from_escalation(fe):
+    local = _local_cand("local-1", "qwen-local")
+    cloud_seated = _cloud_cand("cloud-1", "claude-opus-5")
+    cloud_other = _cloud_cand("cloud-2", "gpt-5.6-sol")
+    fe["llm_client"] = _FakeLlmClient([local, cloud_seated, cloud_other])
+    # cloud-1 is already seated on the panel
+    reviewer = {"name": "rev-1", "candidate": local, "seated_panel_keys": {"local-1", "cloud-1"}}
+    (vote, failed), _prompts, cands = _vote(
+        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
+    assert failed is None
+    assert vote["reviewer"] == "rev-1"
+    assert vote["escalated_to"] == fe["_reviewer_name"](cloud_other)
+    assert cands[1] is cloud_other  # did NOT pick seated cloud-1
+
+
+def test_vote_first_attempt_json_decode_error_logs_warning_with_raw_snippet(fe):
+    err = json.JSONDecodeError("Expecting value", '{"bad": json...', 0)
+    (vote, failed), _prompts, _cands = _vote(fe, [err, JSON])
+    assert failed is None and vote["verdict"] == "Approve"
+    warns = [m for lvl, m in fe["logger"].records if lvl == "warning"]
+    assert any("JSON parse failed" in m and "raw response" in m and "bad" in m for m in warns)
 
 
 # ── _truncate_diff ──────────────────────────────────────────────────────────

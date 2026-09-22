@@ -33,6 +33,17 @@ class _NoLog:
         return lambda *a, **k: None
 
 
+class _RecLog:
+    def __init__(self):
+        self.records = []
+
+    def __getattr__(self, level):
+        def _log(msg, *a, **k):
+            formatted = (str(msg) % a) if a else str(msg)
+            self.records.append((level, formatted))
+        return _log
+
+
 def _load_fix_engine(extra_ns=None):
     src = open("fix_engine.py").read()
     segs = []
@@ -191,9 +202,24 @@ def test_local_backfill_does_not_run_when_frontier_alone_reaches_minimum():
 
 
 def test_no_local_candidates_leaves_panel_short_no_crash():
-    ns = _engine(_production())  # single frontier candidate, no local providers configured
+    log = _RecLog()
+    ns = _engine(_production(), logger=log)  # single frontier candidate, no local providers configured
     panel = ns["_select_review_panel"]({}, builder_n=0)
     assert _models(panel) == ["claude-opus-5"]
+    warns = [m for lvl, m in log.records if lvl == "warning"]
+    assert any("only 1 of 2 reviewer seat(s) filled (frontier allowlist):" in m for m in warns)
+    assert not any("local Ollama backfill" in m for m in warns)
+
+
+def test_short_panel_with_local_backfill_logs_both_clauses():
+    # 0 frontier candidates, but 1 local candidate available: panel has 1 local reviewer (< 2 minimum)
+    cands = [_cand("ollama", "qwen-local")]
+    log = _RecLog()
+    ns = _engine(cands, logger=log)
+    panel = ns["_select_review_panel"]({}, builder_n=0)
+    assert _models(panel) == ["qwen-local"]
+    warns = [m for lvl, m in log.records if lvl == "warning"]
+    assert any("only 1 of 2 reviewer seat(s) filled (frontier allowlist + local Ollama backfill):" in m for m in warns)
 
 
 # ---- 3c. _cloud_frontier_fallback ----
