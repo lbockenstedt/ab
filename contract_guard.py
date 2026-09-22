@@ -74,8 +74,7 @@ def audit_wire_contract(files: List[Any]) -> List[Dict[str, Any]]:
         for line in added_lines:
             for match in PAYLOAD_INDEX_PATTERN.finditer(line):
                 var_name, key_name = match.group(1), match.group(2)
-                # Check if .get is also on this line or nearby
-                if f".get(" not in line:
+                if f"{var_name}.get(" not in line:
                     findings.append({
                         "type": "wire_contract_unsafe_key_access",
                         "file": filename,

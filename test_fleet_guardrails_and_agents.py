@@ -14,7 +14,7 @@ Tests cover:
 import pytest
 
 import contract_guard
-from fleet_guardrails import check_fleet_invariants
+from fleet_guardrails import check_fleet_invariants, _extract_added_lines, CDN_EGRESS_VIOLATION
 import perf_auditor
 import pr_concierge
 import pr_remediate
@@ -398,3 +398,77 @@ def test_auto_remediate_pxmx_auto_mirrors_twins():
     assert len(drifts) == 1
     mirrored = twin_sync.mirror_twin_content(drifts[0]["source"], drifts[0]["twin"], "+ def get_hub(): return 'hub'")
     assert mirrored["target_path"] == "src/discovery.py"
+
+
+def test_dom_deletion_or_vendor_removal_allowed():
+    pr = MockPR(title="Remove old DOM mutation")
+    patch = "@@ -1,1 +1,0 @@\n- window._lmToastRegion.remove();"
+    files = [MockFile("WebUI/toast.js", patch)]
+    passed, reason = check_fleet_invariants(pr, files, ["WebUI/toast.js"])
+    assert passed is True
+    assert reason is None
+
+
+def test_cdn_removal_allowed():
+    pr = MockPR(title="Remove CDN script")
+    cdn_domain = "cdn." + "jsdelivr" + ".net"
+    patch = f"@@ -1,1 +1,0 @@\n- <script src=\"https://{cdn_domain}/npm/something.js\"></script>"
+    files = [MockFile("WebUI/index.html", patch)]
+    passed, reason = check_fleet_invariants(pr, files, ["WebUI/index.html"])
+    assert passed is True
+    assert reason is None
+
+
+def test_extract_added_lines_does_not_conflate_yaml_bullets_with_deletions():
+    # Non-diff content starting with - (e.g. YAML or Markdown) must not be treated as a deletion-only diff
+    cdn_domain = "cdn." + "jsdelivr" + ".net"
+    raw_yaml = f"- https://{cdn_domain}/lib.js\n- second_item\n"
+    extracted = _extract_added_lines(raw_yaml)
+    assert extracted == raw_yaml
+
+    pr = MockPR(title="Add YAML config")
+    files = [MockFile("config.yaml", raw_yaml)]
+    passed, reason = check_fleet_invariants(pr, files, ["config.yaml"])
+    assert passed is False
+    assert reason == CDN_EGRESS_VIOLATION
+
+
+
+def test_perf_auditor_dedent_clears_loop_scope():
+    patch = (
+        "@@ -1,10 +1,10 @@\n"
+        "+ for item in items:\n"
+        "+     process(item)\n"
+        "+ await something()\n"
+    )
+    files = [MockFile("src/worker.py", patch)]
+    findings = perf_auditor.audit_performance_hotpaths(files)
+    loop_awaits = [f for f in findings if f["type"] == "sequential_await_in_loop"]
+    assert len(loop_awaits) == 0
+
+
+def test_contract_guard_unrelated_get_does_not_suppress_warning():
+    patch = (
+        "+     val = other_obj.get(\"foo\") or payload[\"unprotected_key\"]\n"
+    )
+    files = [MockFile("src/handler.py", patch)]
+    findings = contract_guard.audit_wire_contract(files)
+    unsafe_keys = [f for f in findings if f["type"] == "wire_contract_unsafe_key_access" and f.get("key") == "unprotected_key"]
+    assert len(unsafe_keys) == 1
+
+
+def test_perf_auditor_nested_loop_preserves_outer_scope():
+    patch = (
+        "@@ -1,15 +1,15 @@\n"
+        "+ for batch in batches:\n"
+        "+     for item in batch:\n"
+        "+         process(item)\n"
+        "+     await flush()\n"
+        "+ await outside()\n"
+    )
+    files = [MockFile("src/worker.py", patch)]
+    findings = perf_auditor.audit_performance_hotpaths(files)
+    loop_awaits = [f for f in findings if f["type"] == "sequential_await_in_loop"]
+    assert len(loop_awaits) == 1
+
+
