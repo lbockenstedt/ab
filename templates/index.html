@@ -695,24 +695,27 @@
                             {% endif %}
                             {# Advisory review panels verdict — surfaced here so it isn't github.com-only.
                                Advisory ONLY: a human is still the sole approver. #}
-                            {% set comp_verdict = pr.composite_verdict or pr.panel_verdict %}
-                            {% set avg_conf = pr.panel_avg_confidence if pr.panel_avg_confidence is not none else pr.panel_confidence %}
-                            {% if pr.panel_status and pr.panel2_status %}
+                            {% set comp_verdict = pr.get('composite_verdict') or pr.get('panel_verdict') %}
+                            {% set avg_conf = pr.get('panel_avg_confidence') if pr.get('panel_avg_confidence') is not none else pr.get('panel_confidence') %}
+                            {% set p1_conf = pr.get('panel_confidence') %}
+                            {% set p2_conf = pr.get('panel2_confidence') %}
+                            {% set am_score = pr.get('auto_merge_score') %}
+                            {% if pr.get('panel_status') and pr.get('panel2_status') %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panels could not run for this pass: {{ pr.panel_status }}">PANELS N/A</span>
                             {% elif pr.panel_status or pr.panel2_status %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panel could not run for this pass: {{ pr.panel_status or pr.panel2_status }}">PANEL N/A</span>
                             {% elif comp_verdict %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {% if comp_verdict == 'Approve' %}text-green-700 bg-green-100{% elif comp_verdict == 'Split' %}text-amber-800 bg-amber-100 border border-amber-300{% else %}text-red-700 bg-red-100{% endif %}" title="Composite advisory panel verdict (average confidence: {{ (avg_conf * 100)|round|int if avg_conf is not none else 'N/A' }}%) — a human is still the sole approver.">ADVISORY {{ comp_verdict|upper }}{% if avg_conf is not none %} · {{ (avg_conf * 100)|round|int }}%{% endif %}</span>
                             {% endif %}
-                            {% if pr.panel_verdict and not pr.panel_status %}
-                            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap {% if pr.panel_verdict == 'Approve' %}text-green-700 bg-green-50 border border-green-200{% else %}text-red-700 bg-red-50 border border-red-200{% endif %}" title="Panel 1 (Skeptical review): {{ pr.panel_verdict }}{% if pr.panel_confidence is not none %} ({{ (pr.panel_confidence * 100)|round|int }}%){% endif %}">🧠 {{ pr.panel_verdict|upper }}{% if pr.panel_confidence is not none %} · {{ (pr.panel_confidence * 100)|round|int }}%{% endif %}</span>
+                            {% if pr.get('panel_verdict') and not pr.get('panel_status') %}
+                            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap {% if pr.panel_verdict == 'Approve' %}text-green-700 bg-green-50 border border-green-200{% else %}text-red-700 bg-red-50 border border-red-200{% endif %}" title="Panel 1 (Skeptical review): {{ pr.panel_verdict }}{% if p1_conf is not none %} ({{ (p1_conf * 100)|round|int }}%){% endif %}">🧠 {{ pr.panel_verdict|upper }}{% if p1_conf is not none %} · {{ (p1_conf * 100)|round|int }}%{% endif %}</span>
                             {% endif %}
-                            {% if pr.panel2_verdict and not pr.panel2_status %}
-                            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap {% if pr.panel2_verdict == 'Approve' %}text-green-700 bg-green-50 border border-green-200{% else %}text-red-700 bg-red-50 border border-red-200{% endif %}" title="Panel 2 (State-logic review): {{ pr.panel2_verdict }}{% if pr.panel2_confidence is not none %} ({{ (pr.panel2_confidence * 100)|round|int }}%){% endif %}">🔀 {{ pr.panel2_verdict|upper }}{% if pr.panel2_confidence is not none %} · {{ (pr.panel2_confidence * 100)|round|int }}%{% endif %}</span>
+                            {% if pr.get('panel2_verdict') and not pr.get('panel2_status') %}
+                            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap {% if pr.panel2_verdict == 'Approve' %}text-green-700 bg-green-50 border border-green-200{% else %}text-red-700 bg-red-50 border border-red-200{% endif %}" title="Panel 2 (State-logic review): {{ pr.panel2_verdict }}{% if p2_conf is not none %} ({{ (p2_conf * 100)|round|int }}%){% endif %}">🔀 {{ pr.panel2_verdict|upper }}{% if p2_conf is not none %} · {{ (p2_conf * 100)|round|int }}%{% endif %}</span>
                             {% endif %}
-                            {% if pr.auto_merged %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-teal-700 bg-teal-100" title="Auto-merged by feature auto-drive — both review panels cleared the configured confidence threshold, no human clicked Approve/Merge. {{ pr.auto_merge_reason or '' }}"><i class="fas fa-robot mr-1"></i>AUTO-MERGED{% if pr.auto_merge_score is not none %} · {{ (pr.auto_merge_score * 100)|round|int }}%{% endif %}</span>
-                            {% elif pr.auto_merge_blocked_reason and not pr.merged %}
+                            {% if pr.get('auto_merged') %}
+                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-teal-700 bg-teal-100" title="Auto-merged by feature auto-drive — both review panels cleared the configured confidence threshold, no human clicked Approve/Merge. {{ pr.auto_merge_reason or '' }}"><i class="fas fa-robot mr-1"></i>AUTO-MERGED{% if am_score is not none %} · {{ (am_score * 100)|round|int }}%{% endif %}</span>
+                            {% elif pr.get('auto_merge_blocked_reason') and not pr.get('merged') %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-amber-700 bg-amber-100" title="Auto-merge held: {{ pr.auto_merge_blocked_reason }}"><i class="fas fa-lock mr-1"></i>AUTO-MERGE HELD</span>
                             {% endif %}
                             </div>
@@ -772,22 +775,22 @@
                                 {% endfor %}
                             </div>
                             {% endif %}
-                            {% if pr.panel_status %}
+                            {% if pr.get('panel_status') %}
                             <div class="text-[11px] text-slate-500 italic mb-1">🧠 Skeptical review unavailable this pass ({{ pr.panel_status }}).</div>
-                            {% elif pr.panel_critique %}
+                            {% elif pr.get('panel_critique') %}
                             <!-- The panel's reasoning, the same text the GitHub comment
                                  carries. Without it the row showed only a verdict badge,
                                  so reading the review meant leaving the app. -->
                             <div class="mb-1">
-                                <span class="font-semibold text-slate-600 text-xs">🧠 Skeptical review{% if pr.panel_verdict %} — {{ pr.panel_verdict }}{% if pr.panel_confidence is not none %} · {{ (pr.panel_confidence * 100)|round|int }}%{% endif %}{% endif %}:</span>
+                                <span class="font-semibold text-slate-600 text-xs">🧠 Skeptical review{% if pr.get('panel_verdict') %} — {{ pr.panel_verdict }}{% if p1_conf is not none %} · {{ (p1_conf * 100)|round|int }}%{% endif %}{% endif %}:</span>
                                 <div class="text-[11px] text-slate-600 whitespace-pre-line pl-2 mt-0.5">{{ pr.panel_critique }}</div>
                             </div>
                             {% endif %}
-                            {% if pr.panel2_status %}
+                            {% if pr.get('panel2_status') %}
                             <div class="text-[11px] text-slate-500 italic mb-1">🔀 State-logic review unavailable this pass ({{ pr.panel2_status }}).</div>
-                            {% elif pr.panel2_critique %}
+                            {% elif pr.get('panel2_critique') %}
                             <div class="mb-1">
-                                <span class="font-semibold text-slate-600 text-xs">🔀 State-logic review{% if pr.panel2_verdict %} — {{ pr.panel2_verdict }}{% if pr.panel2_confidence is not none %} · {{ (pr.panel2_confidence * 100)|round|int }}%{% endif %}{% endif %}:</span>
+                                <span class="font-semibold text-slate-600 text-xs">🔀 State-logic review{% if pr.get('panel2_verdict') %} — {{ pr.panel2_verdict }}{% if p2_conf is not none %} · {{ (p2_conf * 100)|round|int }}%{% endif %}{% endif %}:</span>
                                 <div class="text-[11px] text-slate-600 whitespace-pre-line pl-2 mt-0.5">{{ pr.panel2_critique }}</div>
                             </div>
                             {% endif %}
