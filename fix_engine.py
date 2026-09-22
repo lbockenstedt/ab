@@ -1701,6 +1701,15 @@ def _model_allowed(model, patterns):
     return any(fnmatch.fnmatchcase(m, p) for p in patterns or ())
 
 
+#: Self-hosted Ollama registry providers (model_registry.py's "ollama-local"/"ollama2-local"
+#: entries) -- NOT "ollama_cloud", which is a hosted service, not local.
+_LOCAL_PROVIDERS = frozenset({"ollama", "ollama2"})
+
+
+def _is_local_provider(provider):
+    return (provider or "").lower().strip() in _LOCAL_PROVIDERS
+
+
 def _reviewer_name(candidate):
     """Panel display name carrying the model, e.g. "Reviewer (copilot/claude-opus-5)". Kept under
     60 chars so pr_review._REVIEWER_TAG_RE still round-trips it."""
@@ -1786,11 +1795,38 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
         excluded.add(sel.key)
 
     if patterns:
-        # Never backfill a weaker model to reach the minimum.
+        # Never backfill a weaker (non-local, non-allowlisted) model to reach the minimum.
         _ids = [c.get("model") for c in panel]
         logger.info("review panel (allowlist): seated %s", _ids)
         if len(panel) < _REVIEW_PANEL_MIN:
-            logger.warning("review panel: only %d of %d allowlisted frontier reviewers available: %s",
+            # The frontier allowlist alone couldn't reach the minimum -- self-hosted
+            # Ollama (ollama/ollama2, NOT ollama_cloud) is trusted enough to fill the
+            # remaining slot(s) before the panel gives up on a second opinion.
+            local_candidates = [c for c in llm_client._enumerate_candidates(config)
+                                if _is_local_provider(c.get("provider")) and c.get("key") not in excluded]
+            _before = len(panel)
+            for fallback_complexity in ("medium", "small"):
+                while len(panel) < _REVIEW_PANEL_MIN:
+                    reqs = LlmRequirements(complexity=fallback_complexity, needs_structured_output=True,
+                                           exclude_models=tuple(excluded))
+                    sel = select_model(reqs, local_candidates, perf)
+                    if sel is None:
+                        break
+                    matched = next((c for c in local_candidates if c["key"] == sel.key), None)
+                    if matched is None:
+                        break
+                    panel.append(matched)
+                    excluded.add(sel.key)
+            if len(panel) > _before:
+                logger.info("review panel (allowlist): backfilled %d local Ollama reviewer(s): %s",
+                            len(panel) - _before, [c.get("model") for c in panel[_before:]])
+            _ids = [c.get("model") for c in panel]  # refresh so the warning below reflects the backfill
+        if len(panel) < _REVIEW_PANEL_MIN:
+            # _ids may now include a local-Ollama backfill seat (still short of the
+            # minimum) alongside any frontier seats - never call a seated local model
+            # "frontier" here, that's exactly the state this warning exists to flag.
+            logger.warning("review panel: only %d of %d reviewer seat(s) filled (frontier "
+                           "allowlist + local Ollama backfill): %s",
                            len(panel), _REVIEW_PANEL_MIN, _ids)
         return panel
 
@@ -1841,7 +1877,24 @@ _REVIEWER_RETRY_NOTE = (
     "\"critique\": \"<explanation>\"}")
 
 
-def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha):
+def _cloud_frontier_fallback(exclude_keys, config):
+    """One allowlisted (see _panel_allowlist) candidate on a NON-local provider, not in
+    exclude_keys, or None if none is available. Used only to escalate a failed local
+    reviewer call - never changes panel SELECTION, only a single retry's target."""
+    patterns = _panel_allowlist(config)
+    if not patterns:
+        return None
+    for c in llm_client._enumerate_candidates(config):
+        if c.get("key") in exclude_keys:
+            continue
+        if _is_local_provider(c.get("provider")):
+            continue
+        if _model_allowed(c.get("model"), patterns):
+            return c
+    return None
+
+
+def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config):
     """Run ONE reviewer turn. Returns (vote_dict|None, failed_name|None).
 
     Read-only: a reviewer only reads the diff and emits a JSON verdict, so
@@ -1850,27 +1903,32 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha):
     call_llm's per-model lock. No shared state is mutated here (results are
     returned and collected by the caller in panel order).
 
-    A reply with no parseable verdict is retried once, then counted as a failure
-    (never silently dropped, which reported `all_reviewers_failed` with no cause)."""
+    A reply with no parseable verdict is retried once against the SAME candidate,
+    then counted as a failure (never silently dropped, which reported
+    `all_reviewers_failed` with no cause) — independent of the retry below, which
+    is for a different failure mode (the call itself raised).
+
+    A call that raises (cooldown excepted) is retried once too — escalated to a
+    cloud frontier candidate when the failed reviewer was local (self-hosted
+    Ollama), otherwise against the same candidate. Either way the vote/failure is
+    reported under the ORIGINAL reviewer's name, so the panel seat's identity is
+    stable regardless of which model actually answered it."""
     res = None
-    try:
-        logger.info(f"{r['name']} analyzing fix...")
+
+    def _attempt(reviewer):
+        nonlocal res
         system = "You are a skeptical senior engineer. Be critical. Only return JSON."
-        res = _run_reviewer_turn(prompt, system, r.get("candidate"), task_id, repo, head_sha,
+        res = _run_reviewer_turn(prompt, system, reviewer.get("candidate"), task_id, repo, head_sha,
                                  repo_checkout_path=checkout_path)
         _v = _extract_reviewer_verdict(res)
         if _v is None:
-            logger.info(f"{r['name']} reply had no parseable verdict — retrying once")
-            res = _run_reviewer_turn(prompt + _REVIEWER_RETRY_NOTE, system, r.get("candidate"),
+            logger.info(f"{reviewer['name']} reply had no parseable verdict — retrying once")
+            res = _run_reviewer_turn(prompt + _REVIEWER_RETRY_NOTE, system, reviewer.get("candidate"),
                                      task_id, repo, head_sha, repo_checkout_path=checkout_path)
             _v = _extract_reviewer_verdict(res)
-        if _v is None:
-            logger.warning(f"{r['name']} returned no parseable verdict after retry - "
-                           f"raw response: {str(res)[:300]!r}")
-            return (None, r["name"])
-        _v["confidence"] = _norm_confidence(_v.get("confidence"))
-        return ({**_v, "reviewer": r["name"]}, None)
-    except Exception as e:
+        return _v
+
+    def _log_hard_failure(e):
         if is_llm_cooldown_error(e):
             logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
         elif isinstance(e, json.JSONDecodeError) and res is not None:
@@ -1885,7 +1943,48 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha):
             logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {res[:300]!r}")
         else:
             logger.error(f"{r['name']} failed: {e}")
-        return (None, r["name"])
+
+    try:
+        logger.info(f"{r['name']} analyzing fix...")
+        _v = _attempt(r)
+        if _v is None:
+            logger.warning(f"{r['name']} returned no parseable verdict after retry - "
+                           f"raw response: {str(res)[:300]!r}")
+            return (None, r["name"])
+        _v["confidence"] = _norm_confidence(_v.get("confidence"))
+        return ({**_v, "reviewer": r["name"]}, None)
+    except Exception as e:
+        if is_llm_cooldown_error(e):
+            # A cooldown is a known, already-classified condition — not worth
+            # retrying, and escalating past it would just hit the same cooldown
+            # on every other candidate sharing the provider.
+            logger.warning(f"{r['name']} deferred — LLM providers cooling down: {e}")
+            return (None, r["name"])
+
+        orig_candidate = r.get("candidate") or {}
+        fallback_candidate = (_cloud_frontier_fallback({orig_candidate.get("key")}, config)
+                              if _is_local_provider(orig_candidate.get("provider")) else None)
+        if fallback_candidate is not None:
+            fallback_name = _reviewer_name(fallback_candidate)
+            retry_reviewer = {"name": fallback_name, "candidate": fallback_candidate}
+            logger.info("%s failed (%s); retrying via cloud frontier escalation: %s",
+                        r["name"], e, fallback_name)
+        else:
+            retry_reviewer = r
+            logger.info("%s failed (%s); retrying", r["name"], e)
+
+        try:
+            _v = _attempt(retry_reviewer)
+        except Exception as e2:
+            _log_hard_failure(e2)
+            return (None, r["name"])
+
+        if _v is None:
+            logger.warning(f"{r['name']} returned no parseable verdict after retry - "
+                           f"raw response: {str(res)[:300]!r}")
+            return (None, r["name"])
+        _v["confidence"] = _norm_confidence(_v.get("confidence"))
+        return ({**_v, "reviewer": r["name"]}, None)
 
 
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
@@ -2027,7 +2126,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     failed_reviewers = []
 
     def _review_one(r):
-        return _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha)
+        return _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config)
 
     try:
         # Fan the panel out: reviewers are independent + read-only, so run them
