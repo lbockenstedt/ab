@@ -29,7 +29,7 @@ class MockFile:
 
 
 class MockPR:
-    def __init__(self, title="Test PR", body="", number=101, files=None, repo_name="lbockenstedt/nw"):
+    def __init__(self, title="Test PR", body="", number=101, files=None, repo_name="lbockenstedt/nw", head_ref="", user_login=""):
         self.title = title
         self.body = body
         self.number = number
@@ -39,6 +39,8 @@ class MockPR:
         self.merged = False
         self.draft = False
         self.repo_name = repo_name
+        self.head_ref = head_ref
+        self.user = type("MockUser", (), {"login": user_login})()
 
     def get_files(self):
         return self._files
@@ -70,6 +72,28 @@ def test_fleet_invariants_blocks_nested_version():
     passed, reason = check_fleet_invariants(pr, files, ["spoke/VERSION"])
     assert passed is False
     assert "VERSION" in reason
+
+
+def test_fleet_invariants_allows_promotion_pr_version_modification():
+    files = [MockFile("VERSION", "+ 1.43\n- 1.42")]
+
+    # 1. By head_ref (e.g. promote/dev-to-qa)
+    pr1 = MockPR(title="Regular title", head_ref="promote/dev-to-qa")
+    passed, reason = check_fleet_invariants(pr1, files, ["VERSION"])
+    assert passed is True
+    assert reason is None
+
+    # 2. By title (e.g. promote: dev -> qa)
+    pr2 = MockPR(title="promote: dev -> qa")
+    passed, reason = check_fleet_invariants(pr2, files, ["VERSION"])
+    assert passed is True
+    assert reason is None
+
+    # 3. By user (e.g. promote-bot[bot])
+    pr3 = MockPR(title="Automated bump", user_login="promote-bot[bot]")
+    passed, reason = check_fleet_invariants(pr3, files, ["VERSION"])
+    assert passed is True
+    assert reason is None
 
 
 def test_fleet_invariants_blocks_npm_and_lockfiles():
@@ -207,6 +231,20 @@ def test_pr_concierge_exhausted_attempts_warning():
     assert "Please fix my Pull Request" in guidance
 
 
+def test_pr_concierge_non_dom_error_with_appbuilder_not_misclassified():
+    guidance = pr_concierge.generate_user_guidance(
+        repo_name="lbockenstedt/ab",
+        pr_number=99,
+        violation="AppBuilder detected application logic failure in backend worker",
+        changed_files=["src/worker.py"],
+    )
+    # Must NOT be misclassified into global DOM container violation branch
+    assert "The Pull Request removed or mutated a core global DOM container" not in guidance
+    assert "Preserve `#_lmToastRegion` and `#app` intact" not in guidance
+    assert "AppBuilder detected application logic failure in backend worker" in guidance
+    assert "Address the flagged guardrail violation before resubmitting the Pull Request." in guidance
+
+
 # --------------------------------------------------------------------------
 # 3. Twin Sync Tests
 # --------------------------------------------------------------------------
@@ -282,6 +320,22 @@ def test_perf_auditor_detects_blocking_sleep_and_hotpaths():
     assert "blocking_sleep_in_async" in finding_types
     assert "sequential_await_in_loop" in finding_types
     assert "repeated_decryption_in_polling_loop" in finding_types
+
+
+def test_perf_auditor_resets_scope_on_hunk_headers():
+    # Hunk 1 has an async def. Hunk 2 has a regular function with time.sleep.
+    # Without resetting scope on '@@', in_async_def would leak from hunk 1 into hunk 2.
+    patch = (
+        "@@ -10,6 +10,6 @@\n"
+        "+ async def async_task():\n"
+        "+     await step()\n"
+        "@@ -50,6 +50,6 @@\n"
+        "+     time.sleep(1)\n"
+    )
+    files = [MockFile("src/sync_worker.py", patch)]
+    findings = perf_auditor.audit_performance_hotpaths(files)
+    finding_types = [f["type"] for f in findings]
+    assert "blocking_sleep_in_async" not in finding_types
 
 
 # --------------------------------------------------------------------------

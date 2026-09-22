@@ -175,11 +175,21 @@ def check_fleet_invariants(
     if not paths and files:
         paths = [getattr(f, "filename", "") for f in files if getattr(f, "filename", "")]
 
+    head_ref = getattr(pr, "head_ref", None) or getattr(getattr(pr, "head", None), "ref", "") or ""
+    pr_title = str(getattr(pr, "title", "") or "").lower()
+    pr_user = str(getattr(getattr(pr, "user", None), "login", "") or "").lower()
+    is_promotion = (
+        head_ref.startswith("promote/")
+        or pr_title.startswith("promote:")
+        or "promote-bot" in pr_user
+    )
+
     # a) VERSION protection
-    for p in paths:
-        bname = os.path.basename(p)
-        if bname == "VERSION" or p.endswith("/VERSION") or p == "VERSION":
-            return False, VERSION_VIOLATION
+    if not is_promotion:
+        for p in paths:
+            bname = os.path.basename(p)
+            if bname == "VERSION" or p.endswith("/VERSION") or p == "VERSION":
+                return False, VERSION_VIOLATION
 
     # b) Vanilla JS / No-NPM Purity
     for p in paths:

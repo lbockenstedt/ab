@@ -31,6 +31,12 @@ def audit_performance_hotpaths(files: List[Any]) -> List[Dict[str, Any]]:
         in_poll_context = False
 
         for raw_line in lines:
+            if raw_line.startswith("@@"):
+                in_async_def = False
+                in_loop = False
+                in_poll_context = False
+                continue
+
             # Strip diff prefix if present
             is_added = raw_line.startswith("+") and not raw_line.startswith("+++")
             is_deleted = raw_line.startswith("-") and not raw_line.startswith("---")

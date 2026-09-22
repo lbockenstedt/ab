@@ -37,6 +37,10 @@ def main():
         "queue_for_retry at the same head is stale (forces a retry)",
         is_queued_for_retry_stale(
             {"panel_status": "queue_for_retry", "head": "abc123"}, "abc123") is True)
+    ok &= _check(
+        "panel2_status queue_for_retry at the same head is stale (forces a retry)",
+        is_queued_for_retry_stale(
+            {"panel2_status": "queue_for_retry", "head": "abc123"}, "abc123") is True)
 
     # (2) A prior review that actually completed (real verdict, no
     # panel_status) is NOT stale — the normal cache behavior is preserved.
