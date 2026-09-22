@@ -398,3 +398,45 @@ def test_auto_remediate_pxmx_auto_mirrors_twins():
     assert len(drifts) == 1
     mirrored = twin_sync.mirror_twin_content(drifts[0]["source"], drifts[0]["twin"], "+ def get_hub(): return 'hub'")
     assert mirrored["target_path"] == "src/discovery.py"
+
+
+def test_dom_deletion_or_vendor_removal_allowed():
+    pr = MockPR(title="Remove old DOM mutation")
+    patch = "- window._lmToastRegion.remove();"
+    files = [MockFile("WebUI/toast.js", patch)]
+    passed, reason = check_fleet_invariants(pr, files, ["WebUI/toast.js"])
+    assert passed is True
+    assert reason is None
+
+
+def test_cdn_removal_allowed():
+    pr = MockPR(title="Remove CDN script")
+    patch = "- <script src=\"https://cdn.jsdelivr.net/npm/something.js\"></script>"
+    files = [MockFile("WebUI/index.html", patch)]
+    passed, reason = check_fleet_invariants(pr, files, ["WebUI/index.html"])
+    assert passed is True
+    assert reason is None
+
+
+def test_perf_auditor_dedent_clears_loop_scope():
+    patch = (
+        "@@ -1,10 +1,10 @@\n"
+        "+ for item in items:\n"
+        "+     process(item)\n"
+        "+ await something()\n"
+    )
+    files = [MockFile("src/worker.py", patch)]
+    findings = perf_auditor.audit_performance_hotpaths(files)
+    loop_awaits = [f for f in findings if f["type"] == "sequential_await_in_loop"]
+    assert len(loop_awaits) == 0
+
+
+def test_contract_guard_unrelated_get_does_not_suppress_warning():
+    patch = (
+        "+     val = other_obj.get(\"foo\") or payload[\"unprotected_key\"]\n"
+    )
+    files = [MockFile("src/handler.py", patch)]
+    findings = contract_guard.audit_wire_contract(files)
+    unsafe_keys = [f for f in findings if f["type"] == "wire_contract_unsafe_key_access" and f.get("key") == "unprotected_key"]
+    assert len(unsafe_keys) == 1
+
