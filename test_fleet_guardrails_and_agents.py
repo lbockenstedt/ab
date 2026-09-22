@@ -14,7 +14,7 @@ Tests cover:
 import pytest
 
 import contract_guard
-from fleet_guardrails import check_fleet_invariants
+from fleet_guardrails import check_fleet_invariants, _extract_added_lines, CDN_EGRESS_VIOLATION
 import perf_auditor
 import pr_concierge
 import pr_remediate
@@ -402,7 +402,7 @@ def test_auto_remediate_pxmx_auto_mirrors_twins():
 
 def test_dom_deletion_or_vendor_removal_allowed():
     pr = MockPR(title="Remove old DOM mutation")
-    patch = "- window._lmToastRegion.remove();"
+    patch = "@@ -1,1 +1,0 @@\n- window._lmToastRegion.remove();"
     files = [MockFile("WebUI/toast.js", patch)]
     passed, reason = check_fleet_invariants(pr, files, ["WebUI/toast.js"])
     assert passed is True
@@ -411,11 +411,27 @@ def test_dom_deletion_or_vendor_removal_allowed():
 
 def test_cdn_removal_allowed():
     pr = MockPR(title="Remove CDN script")
-    patch = "- <script src=\"https://cdn.jsdelivr.net/npm/something.js\"></script>"
+    cdn_domain = "cdn." + "jsdelivr" + ".net"
+    patch = f"@@ -1,1 +1,0 @@\n- <script src=\"https://{cdn_domain}/npm/something.js\"></script>"
     files = [MockFile("WebUI/index.html", patch)]
     passed, reason = check_fleet_invariants(pr, files, ["WebUI/index.html"])
     assert passed is True
     assert reason is None
+
+
+def test_extract_added_lines_does_not_conflate_yaml_bullets_with_deletions():
+    # Non-diff content starting with - (e.g. YAML or Markdown) must not be treated as a deletion-only diff
+    cdn_domain = "cdn." + "jsdelivr" + ".net"
+    raw_yaml = f"- https://{cdn_domain}/lib.js\n- second_item\n"
+    extracted = _extract_added_lines(raw_yaml)
+    assert extracted == raw_yaml
+
+    pr = MockPR(title="Add YAML config")
+    files = [MockFile("config.yaml", raw_yaml)]
+    passed, reason = check_fleet_invariants(pr, files, ["config.yaml"])
+    assert passed is False
+    assert reason == CDN_EGRESS_VIOLATION
+
 
 
 def test_perf_auditor_dedent_clears_loop_scope():
