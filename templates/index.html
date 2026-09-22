@@ -699,7 +699,7 @@
                             {% set avg_conf = pr.panel_avg_confidence if pr.panel_avg_confidence is not none else pr.panel_confidence %}
                             {% if pr.panel_status and pr.panel2_status %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panels could not run for this pass: {{ pr.panel_status }}">PANELS N/A</span>
-                            {% elif not comp_verdict and (pr.panel_status or pr.panel2_status) %}
+                            {% elif pr.panel_status or pr.panel2_status %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panel could not run for this pass: {{ pr.panel_status or pr.panel2_status }}">PANEL N/A</span>
                             {% elif comp_verdict %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {% if comp_verdict == 'Approve' %}text-green-700 bg-green-100{% elif comp_verdict == 'Split' %}text-amber-800 bg-amber-100 border border-amber-300{% else %}text-red-700 bg-red-100{% endif %}" title="Composite advisory panel verdict (average confidence: {{ (avg_conf * 100)|round|int if avg_conf is not none else 'N/A' }}%) — a human is still the sole approver.">ADVISORY {{ comp_verdict|upper }}{% if avg_conf is not none %} · {{ (avg_conf * 100)|round|int }}%{% endif %}</span>
