@@ -151,7 +151,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     elif p2_active:
         composite_verdict = panel2_verdict
     else:
-        composite_verdict = panel_verdict or panel2_verdict or ""
+        composite_verdict = ""
 
     key = "%s#%s" % (repo, number)
     try:
