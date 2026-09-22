@@ -62,8 +62,6 @@ def audit_performance_hotpaths(files: List[Any]) -> List[Dict[str, Any]]:
             # Track loop scope
             if re.search(r"^\s*(?:for\s+\w+|\s*while\b)", line):
                 loop_indents.append(current_indent)
-            elif stripped.startswith("def ") or stripped.startswith("class "):
-                loop_indents = []
 
             in_loop = bool(loop_indents)
             in_async_def = bool(async_indents)
