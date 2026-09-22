@@ -217,6 +217,36 @@ def main():
         ok &= _check("the same tree fails a stricter ratio (the knob works)",
                      applied_strict is False)
 
+    # ── git-backed: checks ALL referencing commits, not just the newest ─────
+    # A newer commit mentions the issue (e.g. a reopen/triage note) but does
+    # not carry the fix; the actual fix landed in an OLDER commit that is
+    # still fully applied. Only checking commits[0] would wrongly conclude
+    # "not applied" and skip the already-fixed short-circuit.
+    with tempfile.TemporaryDirectory() as tmp:
+        git = _mkrepo(tmp)
+        path = os.path.join(tmp, "app.js")
+        with open(path, "w") as fh:
+            fh.write("base\n")
+        git("add", "-A")
+        git("commit", "-qm", "initial import")
+        with open(path, "w") as fh:
+            fh.write("base\nconst OLDER_FIX_SENTINEL = computeTheCorrectThing();\n")
+        git("add", "-A")
+        git("commit", "-qm", "AI Fix #470: handle the stale lock")
+        other_path = os.path.join(tmp, "notes.md")
+        with open(other_path, "w") as fh:
+            fh.write("unrelated triage note about #470\n")
+        git("add", "-A")
+        git("commit", "-qm", "chore: triage notes for #470")
+        repo = _Repo(tmp)
+
+        found = ns["_landed_fix_commits"](repo, 470)
+        ok &= _check("both commits referencing #470 are found", len(found) == 2)
+        applied, ratio = ns["_landed_fix_still_applied"](repo, found)
+        ok &= _check("the older commit's still-applied fix is found even "
+                     "though it is not commits[0]",
+                     applied is True and ratio == 1.0)
+
     # ── robustness: the pre-check must never break a real fix run ───────────
     class _Broken:
         working_dir = "/nonexistent"
