@@ -1899,7 +1899,7 @@ def _cloud_frontier_fallback(exclude_keys, config):
     return None
 
 
-def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=None):
+def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=None, panel_candidates=None):
     """Run ONE reviewer turn. Returns (vote_dict|None, failed_name|None).
 
     Read-only: a reviewer only reads the diff and emits a JSON verdict, so
@@ -1924,6 +1924,8 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
         panel_keys = r.get("seated_panel_keys") or set()
     else:
         panel_keys = set(panel_keys)
+    if panel_candidates is None:
+        panel_candidates = r.get("panel_candidates")
 
     def _attempt(reviewer):
         nonlocal res
@@ -1976,18 +1978,52 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
         orig_candidate = r.get("candidate") or {}
         orig_key = orig_candidate.get("key")
         exclude_keys = panel_keys | ({orig_key} if orig_key else set())
-        fallback_candidate = (_cloud_frontier_fallback(exclude_keys, config)
-                              if _is_local_provider(orig_candidate.get("provider")) else None)
+
+        fallback_candidate = None
+        if _is_local_provider(orig_candidate.get("provider")):
+            fallback_candidate = _cloud_frontier_fallback(exclude_keys, config)
+        else:
+            if panel_candidates:
+                for c in panel_candidates:
+                    if c.get("key") not in exclude_keys:
+                        fallback_candidate = c
+                        break
+            if fallback_candidate is None:
+                fallback_candidate = _cloud_frontier_fallback(exclude_keys, config)
+            if fallback_candidate is None:
+                if not _panel_allowlist(config):
+                    for c in llm_client._enumerate_candidates(config):
+                        if c.get("key") not in exclude_keys and not _is_local_provider(c.get("provider")):
+                            fallback_candidate = c
+                            break
+            if fallback_candidate is None:
+                local_candidates = [
+                    c for c in llm_client._enumerate_candidates(config)
+                    if _is_local_provider(c.get("provider")) and c.get("key") not in exclude_keys
+                ]
+                if local_candidates:
+                    fallback_candidate = local_candidates[0]
+
         if fallback_candidate is not None:
             fallback_name = _reviewer_name(fallback_candidate)
             retry_reviewer = {"name": fallback_name, "candidate": fallback_candidate,
                               "seated_panel_keys": panel_keys}
-            logger.info("%s failed (%s); retrying via cloud frontier escalation: %s",
-                        r["name"], e, fallback_name)
+            if _is_local_provider(orig_candidate.get("provider")):
+                logger.info("%s failed (%s); retrying via cloud frontier escalation: %s",
+                            r["name"], e, fallback_name)
+            elif _is_local_provider(fallback_candidate.get("provider")):
+                logger.info("%s failed (%s); retrying via local Ollama backfill: %s",
+                            r["name"], e, fallback_name)
+            else:
+                logger.info("%s failed (%s); retrying via cloud fallback: %s",
+                            r["name"], e, fallback_name)
         else:
             fallback_name = None
             retry_reviewer = r
             logger.info("%s failed (%s); retrying", r["name"], e)
+
+        import time
+        time.sleep(2.0)
 
         try:
             _v = _attempt(retry_reviewer)
@@ -2053,7 +2089,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
 
     reviewers = []
     for c in panel_candidates:
-        reviewers.append({"name": _reviewer_name(c), "candidate": c})
+        reviewers.append({"name": _reviewer_name(c), "candidate": c, "panel_candidates": panel_candidates})
     panel_keys = {m.get("candidate", {}).get("key") for m in reviewers if m.get("candidate", {}).get("key")}
     for r in reviewers:
         r["seated_panel_keys"] = panel_keys
@@ -2148,7 +2184,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     failed_reviewers = []
 
     def _review_one(r):
-        return _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=panel_keys)
+        return _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=panel_keys, panel_candidates=panel_candidates)
 
     try:
         # Fan the panel out: reviewers are independent + read-only, so run them

@@ -57,7 +57,7 @@ def generate_user_guidance(
             "Implement UI components using native browser DOM APIs and vanilla ES6 modules."
         )
 
-    elif "dom container" in v_lower or "toast" in v_lower or "app" in v_lower:
+    elif "dom container" in v_lower or "toast" in v_lower or "#app" in v_lower or "_lmtoastregion" in v_lower:
         flagged_desc = (
             "The Pull Request removed or mutated a core global DOM container (`#_lmToastRegion`, `#app`, or `window._lmToastRegion`)."
         )

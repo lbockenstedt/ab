@@ -242,16 +242,42 @@ def test_vote_local_hard_failure_no_cloud_fallback_retries_same_candidate(fe):
     assert cands[0] is local and cands[1] is local
 
 
-def test_vote_non_local_hard_failure_retries_same_candidate(fe):
+def test_vote_non_local_hard_failure_no_fallback_retries_same_candidate(fe):
     cloud = _cloud_cand()
-    fe["llm_client"] = _FakeLlmClient([cloud, _local_cand()])
+    fe["llm_client"] = _FakeLlmClient([cloud])
     reviewer = {"name": "rev-1", "candidate": cloud}
     (vote, failed), prompts, cands = _vote(
         fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
     assert failed is None and vote["reviewer"] == "rev-1"
     assert "escalated_to" not in vote
     assert len(cands) == 2
-    assert cands[0] is cloud and cands[1] is cloud  # no escalation needed/attempted
+    assert cands[0] is cloud and cands[1] is cloud  # no fallback available, retries same candidate
+
+
+def test_vote_cloud_hard_failure_escalates_to_other_cloud_candidate(fe):
+    cloud1 = _cloud_cand("cloud-1", "claude-opus-5")
+    cloud2 = _cloud_cand("cloud-2", "gpt-5.6-sol")
+    fe["llm_client"] = _FakeLlmClient([cloud1, cloud2])
+    reviewer = {"name": "rev-1", "candidate": cloud1}
+    (vote, failed), prompts, cands = _vote(
+        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
+    assert failed is None and vote["reviewer"] == "rev-1"
+    assert vote["escalated_to"] == fe["_reviewer_name"](cloud2)
+    assert len(cands) == 2
+    assert cands[0] is cloud1 and cands[1] is cloud2
+
+
+def test_vote_cloud_hard_failure_falls_back_to_local_ollama_backfill(fe):
+    cloud = _cloud_cand()
+    local = _local_cand()
+    fe["llm_client"] = _FakeLlmClient([cloud, local])
+    reviewer = {"name": "rev-1", "candidate": cloud}
+    (vote, failed), prompts, cands = _vote(
+        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
+    assert failed is None and vote["reviewer"] == "rev-1"
+    assert vote["escalated_to"] == fe["_reviewer_name"](local)
+    assert len(cands) == 2
+    assert cands[0] is cloud and cands[1] is local
 
 
 def test_vote_cooldown_on_local_reviewer_still_not_retried(fe):
