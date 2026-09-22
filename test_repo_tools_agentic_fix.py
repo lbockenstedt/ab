@@ -77,11 +77,12 @@ def _load_llm_ns():
         "_provider_configured", "_provider_is_nokey", "_is_ollama", "_is_ollama_cloud", "_is_lmstudio",
         "_routed_model_dead", "_get_category_semaphore",
         "_record_llm_failure", "_record_llm_success", "_entry_is_unhealthy",
-        "_is_unsupported_model_error",
+        "_is_unsupported_model_error", "_min_capability_rank", "_apply_capability_floor",
     }
     want_assign = {
         "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_TOOL_400_MARKERS",
         "_UNSUPPORTED_MODEL_MARKERS", "_ENTRY_UNSUPPORTED_RETRY_SECONDS",
+        "_MIN_CAPABILITY_RANK_DEFAULT",
         "_ENDPOINT_CB_LOCK", "_ENDPOINT_CREDIT_CB", "_MODEL_RATE_CB",
         "_MODEL_LOCKS_LOCK", "_MODEL_LOCKS",
         "_LLM_PERF_STORE", "_LLM_PERF_LOCK",
@@ -150,7 +151,7 @@ def _entry(id_, provider, model, api_key="k", base_url="", rpm=0, enabled=True):
 
 def test_call_llm_requirements_path_does_not_send_tools_when_native_tools_disabled():
     ns = _load_llm_ns()
-    cfg = {"llm_entries": [_entry("e1", "copilot", "gpt-4o")]}
+    cfg = {"min_capability_rank": 0, "llm_entries": [_entry("e1", "copilot", "gpt-4o")]}
     reqs = model_selection.LlmRequirements(complexity="small")
 
     out = ns["_call_llm_with_requirements"](
@@ -165,7 +166,7 @@ def test_call_llm_requirements_path_does_not_send_tools_when_native_tools_disabl
 
 def test_call_llm_requirements_path_uses_repo_tools_when_native_tools_enabled():
     ns = _load_llm_ns()
-    cfg = {"llm_entries": [_entry("e1", "copilot", "gpt-4o")], "FIX_AGENTIC_MAX_ITERATIONS": 2}
+    cfg = {"min_capability_rank": 0, "llm_entries": [_entry("e1", "copilot", "gpt-4o")], "FIX_AGENTIC_MAX_ITERATIONS": 2}
     reqs = model_selection.LlmRequirements(complexity="small")
     root = _scratch("enabled")
     (root / "x.py").write_text("VALUE = 1\n", encoding="utf-8")

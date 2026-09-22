@@ -20,16 +20,28 @@ _PANEL_NAMES = {
     "_select_review_panel", "review_fix", "_panel_allowlist", "_model_allowed",
     "_reviewer_name", "_reviewer_vote", "_extract_reviewer_verdict",
     "_has_verdict_key", "_canon_verdict_keys", "_balanced_brace_span",
+    "_is_local_provider", "_cloud_frontier_fallback",
 }
 _PANEL_ASSIGNS = {
     "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN", "DEFAULT_PANEL_ALLOWLIST",
-    "_REVIEWER_RETRY_NOTE",
+    "_REVIEWER_RETRY_NOTE", "_LOCAL_PROVIDERS",
 }
 
 
 class _NoLog:
     def __getattr__(self, _):
         return lambda *a, **k: None
+
+
+class _RecLog:
+    def __init__(self):
+        self.records = []
+
+    def __getattr__(self, level):
+        def _log(msg, *a, **k):
+            formatted = (str(msg) % a) if a else str(msg)
+            self.records.append((level, formatted))
+        return _log
 
 
 def _load_fix_engine(extra_ns=None):
@@ -114,6 +126,17 @@ def test_model_allowed_empty_patterns_is_false():
     assert not _load_fix_engine()["_model_allowed"]("claude-opus-5", ())
 
 
+# ---- 1b. _is_local_provider ----
+@pytest.mark.parametrize("provider", ["ollama", "ollama2", "Ollama", " OLLAMA2 "])
+def test_is_local_provider_true(provider):
+    assert _load_fix_engine()["_is_local_provider"](provider)
+
+
+@pytest.mark.parametrize("provider", ["ollama_cloud", "copilot", "anthropic", "", None])
+def test_is_local_provider_false(provider):
+    assert not _load_fix_engine()["_is_local_provider"](provider)
+
+
 # ---- 2. _panel_allowlist ----
 def test_panel_allowlist_parsing():
     ns = _load_fix_engine()
@@ -149,6 +172,85 @@ def test_custom_allowlist_seats_only_that_model():
     ns = _engine(_production())
     panel = ns["_select_review_panel"]({"pr_review_panel_allowlist": ["gemini-3.7-flash"]}, builder_n=0)
     assert _models(panel) == ["gemini-3.7-flash"]
+
+
+# ---- 3b. _select_review_panel local Ollama backfill ----
+def test_local_backfill_reaches_minimum_and_stops_there():
+    cands = [
+        _cand("copilot", "claude-opus-5", tier="frontier"),
+        _cand("ollama", "qwen-something"),
+        _cand("ollama2", "llama-something"),
+        _cand("ollama", "third-local-model"),
+    ]
+    ns = _engine(cands)
+    panel = ns["_select_review_panel"]({}, builder_n=0)
+    assert _models(panel)[0] == "claude-opus-5"
+    assert len(panel) == 2  # _REVIEW_PANEL_MIN — the 3rd local candidate is not seated
+    assert panel[1]["provider"] in ("ollama", "ollama2")
+
+
+def test_local_backfill_does_not_run_when_frontier_alone_reaches_minimum():
+    cands = [
+        _cand("copilot", "claude-opus-5", tier="frontier"),
+        _cand("copilot", "claude-opus-6", tier="frontier"),
+        _cand("ollama", "qwen-something"),
+    ]
+    ns = _engine(cands)
+    panel = ns["_select_review_panel"]({}, builder_n=0)
+    assert set(_models(panel)) == {"claude-opus-5", "claude-opus-6"}
+    assert all(c["provider"] != "ollama" for c in panel)
+
+
+def test_no_local_candidates_leaves_panel_short_no_crash():
+    log = _RecLog()
+    ns = _engine(_production(), logger=log)  # single frontier candidate, no local providers configured
+    panel = ns["_select_review_panel"]({}, builder_n=0)
+    assert _models(panel) == ["claude-opus-5"]
+    warns = [m for lvl, m in log.records if lvl == "warning"]
+    assert any("only 1 of 2 reviewer seat(s) filled (frontier allowlist):" in m for m in warns)
+    assert not any("local Ollama backfill" in m for m in warns)
+
+
+def test_short_panel_with_local_backfill_logs_both_clauses():
+    # 0 frontier candidates, but 1 local candidate available: panel has 1 local reviewer (< 2 minimum)
+    cands = [_cand("ollama", "qwen-local")]
+    log = _RecLog()
+    ns = _engine(cands, logger=log)
+    panel = ns["_select_review_panel"]({}, builder_n=0)
+    assert _models(panel) == ["qwen-local"]
+    warns = [m for lvl, m in log.records if lvl == "warning"]
+    assert any("only 1 of 2 reviewer seat(s) filled (frontier allowlist + local Ollama backfill):" in m for m in warns)
+
+
+# ---- 3c. _cloud_frontier_fallback ----
+def _fallback_mix():
+    return [
+        _cand("ollama", "local-model"),
+        _cand("copilot", "claude-opus-5", tier="frontier"),
+        _cand("copilot", "claude-sonnet-5", tier="frontier"),
+    ]
+
+
+def test_cloud_frontier_fallback_returns_non_local_allowlisted_candidate():
+    ns = _engine(_fallback_mix())
+    c = ns["_cloud_frontier_fallback"](set(), {})
+    assert c is not None and c["model"] == "claude-opus-5" and c["provider"] != "ollama"
+
+
+def test_cloud_frontier_fallback_none_when_all_allowlisted_excluded():
+    ns = _engine(_fallback_mix())
+    excluded = {c["key"] for c in _fallback_mix() if c["model"] == "claude-opus-5"}
+    assert ns["_cloud_frontier_fallback"](excluded, {}) is None
+
+
+def test_cloud_frontier_fallback_none_when_no_allowlisted_candidate_exists():
+    ns = _engine([_cand("ollama", "local-model"), _cand("copilot", "gpt-4o-2024-08-06")])
+    assert ns["_cloud_frontier_fallback"](set(), {}) is None
+
+
+def test_cloud_frontier_fallback_none_when_allowlist_empty():
+    ns = _engine(_fallback_mix())
+    assert ns["_cloud_frontier_fallback"](set(), {"pr_review_panel_allowlist": []}) is None
 
 
 # ---- 4. review_fix ----
