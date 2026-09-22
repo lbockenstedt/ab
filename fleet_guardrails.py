@@ -56,7 +56,9 @@ def _is_unified_diff(lines: List[str]) -> bool:
         any(l.startswith("--- ") for l in lines)
         and any(l.startswith("+++ ") for l in lines)
     )
-    return has_hunk or has_file_headers
+    has_deletions = any(l.startswith("-") and not l.startswith("---") for l in lines)
+    pure_diff_lines = bool(lines) and all(l.startswith(("-", " ")) for l in lines if l.strip())
+    return has_hunk or has_file_headers or (has_deletions and pure_diff_lines)
 
 
 def _extract_added_lines(raw_patch: str) -> str:
