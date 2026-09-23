@@ -16,7 +16,11 @@ INVARIANTS (see memory pr-gate-ab-prereview):
     explicitly opted into ``feature_automerge_target_branches`` (defaults to
     empty — opt-in, not opt-out; e.g. ["dev", "qa"]). main/master (and the
     configured ``default_branch``) are refused structurally, so listing one
-    there does nothing — merges into the release branch stay owner-only.
+    there does nothing — merges into the release branch stay owner-only —
+    UNLESS ``feature_automerge_allow_release_branch`` is explicitly turned on
+    (default off), which lifts that refusal for rapid-development phases. Even
+    then the branch must still be listed, so the opt-out and the branch choice
+    remain two separate acts.
     Beyond that gate: both review
     panels Approve above a configurable confidence floor, the diff is a
     provably-additive shape (``feature_allowlist``), the diff touches no
@@ -1029,7 +1033,8 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     diff PROVEN documentation-only skips the two panels' verdict/confidence
     gates. Docs are still reviewed and the review is still posted; they are
     just not held on a subjective accuracy judgement, since a .md edit cannot
-    change runtime behaviour. Every containment gate — release branch, release
+    change runtime behaviour. Every containment gate — release branch (unless
+    feature_automerge_allow_release_branch is on), release
     lock, opt-in lists, mergeable/draft/state, Tier-1 clean (secrets), boundary
     deny-list, allowlist — is unchanged and still applies to docs PRs.
 
@@ -1060,17 +1065,28 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     if pr_meta.get("repo") not in (config.get("feature_automerge_repos") or []):
         return False, "repo is not in feature_automerge_repos (opt-in, defaults to none)"
     # Structural refusal of the release branch, checked BEFORE the operator's
-    # allowlist so configuration cannot override it. The allowlist is a free-text
-    # field in Settings; both it and this function's docstring say "NEVER main",
-    # but saying it is not enforcing it — typing "main" into that box was enough
-    # to make an unattended merge onto the release branch eligible. Only the repo
-    # owner merges into main, so that invariant lives in code, not in guidance.
+    # allowlist so a free-text field cannot override it. The allowlist is a
+    # free-text box in Settings; both it and this function's docstring say
+    # "NEVER main", but saying it is not enforcing it — typing "main" into that
+    # box was enough to make an unattended merge onto the release branch
+    # eligible.
+    #
+    # feature_automerge_allow_release_branch (default OFF) is the deliberate
+    # opt-out, for a rapid-development phase where dev→qa→main should flow
+    # without waiting on an owner click. It is a SEPARATE, explicit key on
+    # purpose: re-using the free-text branch list would recreate exactly the
+    # accident this guard was added to stop. Turning it on is not sufficient by
+    # itself — the release branch must ALSO be listed in
+    # feature_automerge_target_branches below, so unlocking the invariant and
+    # choosing the branch remain two distinct, conscious acts.
     _base_ref = pr_meta.get("base_ref")
     _release_branches = {"main", "master", (config.get("default_branch") or "main")}
-    if _base_ref in _release_branches:
+    _allow_release = bool(config.get("feature_automerge_allow_release_branch", False))
+    if _base_ref in _release_branches and not _allow_release:
         return False, (f"target branch {_base_ref!r} is a release branch — never eligible for "
                        "auto-merge at any confidence, even if listed in "
-                       "feature_automerge_target_branches (merges into it are owner-only)")
+                       "feature_automerge_target_branches (merges into it are owner-only). "
+                       "Set feature_automerge_allow_release_branch=true to opt out.")
 
     # Manual release lock (Settings → "Release lock"). While a branch is locked,
     # AppBuilder keeps REVIEWING PRs but must not auto-merge into it: changes
