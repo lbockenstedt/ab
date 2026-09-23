@@ -204,6 +204,24 @@ def get_hub_state():
 #     — ensure the file is valid JSON" (e.g. ab#806); a code edit cannot
 #     fix a corrupt file on disk.
 #
+#  3. Reviewer-panel verdict-parsing chatter. A reviewer reply that isn't
+#     parseable JSON is logged at ERROR/WARNING and then RECOVERED from in the
+#     same call: _review_one retries once against the same candidate with an
+#     explicit re-prompt, and a raised parse error escalates the seat to a
+#     cloud frontier fallback (or the next panel candidate). The panel's
+#     verdict is unaffected. Models answering a "return JSON" prompt in prose
+#     is routine, so each occurrence filed a near-identical issue — ab#191,
+#     #202, #213, #214, #215 and #216 are all the same non-fact.
+#
+#  4. Terminal fix-pipeline OUTCOMES, logged at ERROR by the manual-retry
+#     route. "Reviewers rejected the fix after 3 attempt(s)", "Held for human
+#     review (no model meets this fix's requirements)" and "AI returned no
+#     edits after 3 attempt(s)" are _FAILURE_LABELS values — the pipeline
+#     deciding, correctly and by design, not to ship a fix. The decision is
+#     already recorded on the issue and shown in the status table; filing a
+#     NEW issue about it (ab#198, #199, #203, #210) asks the fixer to fix the
+#     fact that it declined to fix something.
+#
 # The lines are still logged (humans and the Diagnostics view see them); they
 # just no longer seed an auto-fix issue.
 _SELF_SCAN_NOISE = re.compile(
@@ -215,9 +233,81 @@ _SELF_SCAN_NOISE = re.compile(
     r'|No verified fix found after'
     r'|Error reading persistent config'
     r'|Could not save to persistent storage'
-    r'|Critical failure saving config',
+    r'|Critical failure saving config'
+    # (3) reviewer-panel chatter — retried and/or escalated in the same call.
+    r'|Reviewer \([^)]*\) JSON parse failed'
+    r'|returned no parseable verdict'
+    r'|reply had no parseable verdict'
+    r'|deferred — LLM providers cooling down'
+    # (4) terminal pipeline outcomes — already surfaced on the issue and in the
+    # status table. Anchored to AppBuilder's own "<repo>:<issue-number>:"
+    # manual-retry format and to the exact _FAILURE_LABELS wording, NOT to the
+    # bare phrase: a spoke legitimately logs things like "Manual retry failed
+    # for the SNMP walk on 10.0.0.5: timeout", and swallowing that would hide a
+    # real product error. test_self_scan_noise.py pins exactly that case.
+    r'|Manual retry failed for \S+:\d+:'
+    r'|Reviewers rejected the fix'
+    r'|Held for human review'
+    r'|AI returned no edits after'
+    # (5) provider rate-limiting that the LLM client already fully absorbs.
+    # On the final 429 the client honours Retry-After (_parse_retry_after),
+    # trips the global breaker (_llm_cb_trip, _RATELIMIT_COOLDOWN_SECONDS),
+    # marks the entry unhealthy with a retry_after so _entry_is_unhealthy
+    # excludes it, and fails over to the next candidate. The ERROR line is
+    # operator visibility for an EXTERNAL condition, not a defect -- ten
+    # duplicate issues were filed off it. Anchored to the client's own
+    # "at <endpoint> after N attempts" wording so an unrelated message that
+    # merely contains "429" is still reported.
+    r'|LLM 429 at \S+ after \d+ attempts'
+    r'|LLM HTTPError 429 at \S+',
     re.IGNORECASE,
 )
+
+
+_LOG_LEVEL_NAMES = ("CRITICAL", "FATAL", "ERROR", "WARNING", "WARN",
+                    "NOTICE", "INFO", "DEBUG", "TRACE")
+#: Bracketed (``[ERROR]``) or python-logging dash style (``- AppBuilder - ERROR -``).
+#: The alternation is built from the level names ONLY, so a logger/module name
+#: such as ``AppBuilder`` can never be read as a level -- it is the first
+#: ``- WORD -`` group on a standard line, and a bare ``- ([A-Z]+) -`` pattern
+#: reports it as the severity.
+_LOG_LEVEL_RE = re.compile(
+    r"\[(" + "|".join(_LOG_LEVEL_NAMES) + r")\]"
+    r"|(?:^|\s)-\s(" + "|".join(_LOG_LEVEL_NAMES) + r")\s-",
+    re.IGNORECASE,
+)
+#: Only the line PREFIX is inspected. This is the crux: the level tag always
+#: appears early, and scanning the whole line is exactly what lets prose such as
+#: "...the reported error originates from..." masquerade as a severity.
+_LOG_LEVEL_PREFIX_CHARS = 120
+
+
+def _explicit_log_level(text):
+    """Return the severity a log line explicitly declares, or None if it declares none.
+
+    filter_error_logs documents that "WARNINGs are excluded: the LLM task is to
+    find actionable *errors*, not routine warnings" -- but nothing implemented
+    that. Its inclusion regex searched the ENTIRE line for ``Error[: ]``/
+    ``Failed``/``Exception``, so a WARNING or even INFO line whose message text
+    happened to contain the word "error" was scooped up as an error. Reviewer
+    rejections are the worst case, because the reviewer's explanation is prose
+    that routinely says things like "the reported error originates from...":
+    ab#137, #138, #173 and #174 are all WARNING lines filed as faults.
+
+    Normalizes WARN -> WARNING and FATAL -> CRITICAL. Returns the FIRST level tag
+    found in the prefix, so the line's own level wins over any later mention.
+    """
+    if not text:
+        return None
+    m = _LOG_LEVEL_RE.search(text[:_LOG_LEVEL_PREFIX_CHARS])
+    if not m:
+        return None
+    level = (m.group(1) or m.group(2) or "").upper()
+    if level == "WARN":
+        return "WARNING"
+    if level == "FATAL":
+        return "CRITICAL"
+    return level or None
 
 
 def filter_error_logs(logs):
@@ -266,7 +356,17 @@ def filter_error_logs(logs):
             module = ''
             text = str(entry)
 
-        if not error_pattern.search(text):
+        # Honour an explicitly-declared level before falling back to signature
+        # matching. Without this the signature scan reads the whole line --
+        # including a reviewer's prose explanation -- so a WARNING saying "the
+        # reported error originates from ..." was filed as a fault (ab#137,
+        # #138, #173, #174). Lines with NO level tag still fall through to the
+        # signature test, so a bare traceback is unaffected.
+        level = _explicit_log_level(text)
+        if level is not None:
+            if level not in ("ERROR", "CRITICAL"):
+                continue
+        elif not error_pattern.search(text):
             continue
 
         # Skip AppBuilder's own operational chatter (fix-engine mechanics + config
@@ -293,6 +393,64 @@ def filter_error_logs(logs):
             break
 
     return kept
+
+
+def _json_string_spans(text):
+    """(start, end) index pairs of every JSON string literal in *text*."""
+    spans, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == '\\':
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    break
+                j += 1
+            spans.append((i, j))
+            i = j + 1
+            continue
+        i += 1
+    return spans
+
+def _first_json_array_of_objects(text):
+    """Find the first JSON array in *text* where all elements are dicts.
+    
+    Replaces a greedy `\[.*\]` DOTALL match which spanned from the first `[`
+    anywhere in the reply to the LAST `]` anywhere in it, producing "Expecting
+    value: line 1 column 2 (char 1)" and "Extra data: line 23 column 1".
+    
+    Returns the list if found, or None if no valid candidate is found.
+    """
+    spans = _json_string_spans(text)
+    ends = {s: e for s, e in spans}
+    i, n = 0, len(text)
+    while i < n:
+        if i in ends:
+            i = ends[i] + 1
+            continue
+        if text[i] == '[':
+            depth, j = 0, i
+            while j < n:
+                if j in ends:
+                    j = ends[j] + 1
+                    continue
+                if text[j] in '[{':
+                    depth += 1
+                elif text[j] in ']}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            val = json.loads(text[i:j + 1])
+                        except Exception:
+                            val = None
+                        if isinstance(val, list) and all(isinstance(x, dict) for x in val):
+                            return val
+                        break
+                j += 1
+        i += 1
+    return None
 
 
 def analyze_logs_for_errors(logs):
@@ -341,50 +499,48 @@ def analyze_logs_for_errors(logs):
                                min_context_tokens=len(prompt) // 4)
         res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.",
                        requirements=reqs)
-        import re
-        match = re.search(r'\[.*\]', res, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group())
-            # Defensive: the LLM might return a single object instead of an array.
-            if isinstance(parsed, dict):
-                logger.warning(f"LLM returned a single JSON object instead of an array for log analysis. Wrapping in list.")
-                parsed = [parsed]
-            if not isinstance(parsed, list):
-                logger.warning(f"LLM returned non-array JSON for log analysis: {type(parsed).__name__}. Discarding.")
-                return []
-            cleaned = []
-            for entry in parsed:
-                if not isinstance(entry, dict):
-                    logger.debug(f"Dropping malformed log-analysis entry (not a dict): {entry}")
-                    continue
-                module_val = entry.get('module')
-                title_val = entry.get('title')
-                body_val = entry.get('body')
-                if not module_val or not str(module_val).strip():
-                    logger.warning(f"Hub log analysis found an actionable error but it's missing a module identifier. Log snippet: {body_val[:200]!r}")
-                    continue
-                if not title_val or not str(title_val).strip():
-                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty title): {entry}")
-                    continue
-                if not body_val or not str(body_val).strip():
-                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty body): {entry}")
-                    continue
+        parsed = _first_json_array_of_objects(res or "")
+        if parsed is None:
+            logger.warning(
+                "Log analysis produced no parseable JSON array of objects; discarding this "
+                f"sweep. Response head: {str(res)[:300]!r}"
+            )
+            return []
+        # _first_json_array_of_objects already guarantees a list whose entries are
+        # all dicts, so the old isinstance(parsed, dict) / non-list guards here are
+        # gone: they existed only because the greedy regex could hand back anything.
+        cleaned = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                logger.debug(f"Dropping malformed log-analysis entry (not a dict): {entry}")
+                continue
+            module_val = entry.get('module')
+            title_val = entry.get('title')
+            body_val = entry.get('body')
+            if not module_val or not str(module_val).strip():
+                logger.warning(f"Hub log analysis found an actionable error but it's missing a module identifier. Log snippet: {body_val[:200]!r}")
+                continue
+            if not title_val or not str(title_val).strip():
+                logger.debug(f"Dropping malformed log-analysis entry (missing/empty title): {entry}")
+                continue
+            if not body_val or not str(body_val).strip():
+                logger.debug(f"Dropping malformed log-analysis entry (missing/empty body): {entry}")
+                continue
 
-                # Try to find the original source entry to preserve full context (host, path, etc.)
-                source_entry = next((log for log in logs if isinstance(log, dict)
-                                   and str(log.get('module')) == str(module_val)
-                                   and str(body_val) in str(log.get('log', ''))), {})
+            # Try to find the original source entry to preserve full context (host, path, etc.)
+            source_entry = next((log for log in logs if isinstance(log, dict)
+                               and str(log.get('module')) == str(module_val)
+                               and str(body_val) in str(log.get('log', ''))), {})
 
-                # Normalise all fields to strings so downstream code never receives None.
-                cleaned.append({
-                    'module': str(module_val),
-                    'title': str(title_val),
-                    'body': str(body_val),
-                    'repo': str(entry.get('repo')) if entry.get('repo') and str(entry.get('repo')).strip() else '',
-                    'source_data': source_entry
-                })
-            return cleaned
-        return []
+            # Normalise all fields to strings so downstream code never receives None.
+            cleaned.append({
+                'module': str(module_val),
+                'title': str(title_val),
+                'body': str(body_val),
+                'repo': str(entry.get('repo')) if entry.get('repo') and str(entry.get('repo')).strip() else '',
+                'source_data': source_entry
+            })
+        return cleaned
     except Exception as e:
         if is_llm_cooldown_error(e):
             logger.warning(f"Log analysis deferred — LLM providers cooling down: {e}")

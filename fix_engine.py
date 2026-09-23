@@ -22,6 +22,7 @@ from main import (
     call_llm,
     find_existing_pull_request,
     is_llm_cooldown_error,
+    is_llm_auth_error,
     load_config,
     load_processed,
     recompute_issue_counters,
@@ -1965,6 +1966,14 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
                 logger.error(f"{r['name']} JSON parse failed ({e}) — raw response: {str(raw)[:300]!r}")
             else:
                 logger.error(f"{r['name']} JSON parse failed ({e})")
+        elif is_llm_auth_error(e):
+            # A credential / permission state on that provider, not a fault in
+            # AppBuilder. The panel degrades gracefully -- the remaining
+            # reviewers carry the verdict -- so this is a WARNING telling an
+            # operator what to configure. At ERROR it was harvested by the log
+            # scanner and filed against AppBuilder (ab#17, ab#190).
+            logger.warning(f"{r['name']} unavailable — provider credentials or permissions "
+                           f"need attention (Settings → LLM Vault): {e}")
         else:
             logger.error(f"{r['name']} failed: {e}")
 

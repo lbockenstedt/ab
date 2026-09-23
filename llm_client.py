@@ -24,6 +24,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 from datetime import datetime
 
 import requests
@@ -1354,6 +1355,45 @@ _UNSUPPORTED_SCHEMA_HINTS = (
 )
 
 
+#: Bodies that are just a restatement of the HTTP status — they name no
+#: parameter, no model and no code, so nothing can be attributed to them.
+#: Compared after lower-casing and stripping surrounding whitespace/punctuation.
+_OPAQUE_4XX_BODIES = frozenset((
+    "", "bad request", "400 bad request", "400", "client error",
+    "invalid request", "error", "unprocessable entity", "not found",
+))
+
+
+def _is_uninformative_4xx_body(body):
+    """True when a 4xx body tells us nothing we can attribute the failure to.
+
+    Copilot's /chat/completions answers some rejections with the bare string
+    "Bad Request\\n" — no code, no message, no mention of response_format and
+    no mention of the model. That matches none of the hints above, so the
+    schema-free retry below never fired and a call that would have succeeded
+    without response_format failed outright (ab#263).
+
+    Deliberately an exact match against a closed set of status restatements
+    rather than a length heuristic: a short body can still be perfectly
+    informative ("maximum context length exceeded" is 31 characters), and
+    retrying that one would fail identically at double the cost.
+    """
+    low = (body or "").strip().strip(".!").lower()
+    if low in _OPAQUE_4XX_BODIES:
+        return True
+    # A JSON error object always carries a reason, however terse.
+    try:
+        parsed = json.loads(body)
+    except Exception:  # noqa: BLE001 — a non-JSON body is judged above
+        return False
+    if isinstance(parsed, dict):
+        err = parsed.get("error")
+        if isinstance(err, dict):
+            return not (err.get("code") or err.get("message"))
+        return not (err or parsed.get("message") or parsed.get("detail"))
+    return False
+
+
 def _post_maybe_structured(endpoint, payload, headers, config, stream, provider, json_schema):
     """POST via _llm_retry_post, asking for schema-constrained output when a
     json_schema is supplied.
@@ -1364,6 +1404,9 @@ def _post_maybe_structured(endpoint, payload, headers, config, stream, provider,
     silently broke), this degrades: on a 4xx that looks like an
     unsupported-parameter complaint, it retries ONCE without response_format,
     which is precisely the old behaviour. Any other error propagates unchanged.
+
+    Handles opaque 4xx bodies (e.g. "Bad Request\n") by retrying without schema
+    enforcement if the body gives no attributable reason.
     """
     rf = _response_format_from_schema(json_schema)
     if not rf or payload.get("tools"):
@@ -1377,15 +1420,32 @@ def _post_maybe_structured(endpoint, payload, headers, config, stream, provider,
     except requests.exceptions.HTTPError as e:
         resp = getattr(e, "response", None)
         status = getattr(resp, "status_code", None)
+        # "" means two very different things and they must not be conflated:
+        # the server genuinely returned an empty body (opaque — a retry is the
+        # whole point), or we could not READ the body (decode error, connection
+        # reset mid-read). In the second case we know nothing about the
+        # rejection, so treating it as opaque fires the schema-free retry that
+        # this function's docstring specifically warns costs double and fails
+        # identically. Only a successful read may be judged opaque.
         body = ""
+        body_readable = False
         try:
             body = (resp.text or "")[:600].lower() if resp is not None else ""
+            body_readable = resp is not None
         except Exception:  # noqa: BLE001
             body = ""
+            body_readable = False
         detail = (body or str(e).lower())
-        if status in (400, 404, 422) and any(h in detail for h in _UNSUPPORTED_SCHEMA_HINTS):
-            logger.info("llm: %s/%s rejected response_format — retrying without schema enforcement.",
-                        provider, payload.get("model"))
+        uninformative = body_readable and _is_uninformative_4xx_body(body)
+        if status in (400, 404, 422) and (
+            any(h in detail for h in _UNSUPPORTED_SCHEMA_HINTS) or uninformative
+        ):
+            if uninformative:
+                logger.info("llm: %s/%s had uninformative 4xx body — retrying without schema enforcement.",
+                            provider, payload.get("model"))
+            else:
+                logger.info("llm: %s/%s rejected response_format — retrying without schema enforcement.",
+                            provider, payload.get("model"))
             return _llm_retry_post(endpoint, payload, headers, config, stream=stream, provider=provider)
         raise
 
@@ -1925,8 +1985,10 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
         stderr = proc.stderr.strip()
 
         # Parse JSON response if possible.
+        envelope_parsed = False
         try:
             data = json.loads(output)
+            envelope_parsed = True
             # A schema-validated call returns structured_output pre-parsed —
             # re-serialize IT (guaranteed clean JSON) rather than trusting
             # the freeform `result` text, which is where "Extra data" parse
@@ -1959,20 +2021,41 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
                 resets_match = _re.search(r"resets (.+?)[\s·]", combined_text, _re.IGNORECASE)
                 resets_at = resets_match.group(1).strip() if resets_match else "soon"
                 raise Exception(f"claude_cli_rate_limit:Session limit reached (resets {resets_at})")
-            # Detect auth failure from the JSON payload.
-            if data.get("is_error") or ("Not logged in" in (text or "") or "/login" in (text or "")):
-                raise Exception(
-                    f"Claude CLI not authenticated on this server. "
-                    f"Go to Settings → LLM Vault → claude_cli → Get Auth URL to log in. "
-                    f"Raw: {text[:200]}"
-                )
+            # Detect a CLI-level failure from the JSON envelope.
+            #
+            # `is_error` is the ONLY trustworthy trigger here. The previous
+            # condition also fired on "Not logged in" or "/login" appearing in
+            # `text` -- but `text` is the MODEL'S OWN GENERATED CONTENT, so any
+            # review of authentication code was thrown away and reported as an
+            # auth failure purely for quoting a login route. ab#17 is exactly
+            # that: a complete, valid {"verdict": "Approve", "confidence": 0.91}
+            # discarded and logged as "Claude CLI not authenticated".
+            #
+            # And when is_error IS set, it is not necessarily about auth, so the
+            # sentinels now only decide WHICH error to report rather than
+            # whether one occurred. They are matched against stderr plus the
+            # error text the CLI itself produced.
+            if data.get("is_error"):
+                auth_blob = f"{text or ''} {stderr}".lower()
+                if ("not logged in" in auth_blob or "/login" in auth_blob
+                        or "invalid api key" in auth_blob):
+                    raise Exception(
+                        f"Claude CLI not authenticated on this server. "
+                        f"Go to Settings → LLM Vault → claude_cli → Get Auth URL to log in. "
+                        f"Raw: {(text or stderr)[:200]}"
+                    )
+                raise Exception(f"claude CLI reported an error: {(text or stderr)[:300]}")
         except json.JSONDecodeError:
             text = output or stderr
             if "session limit" in text.lower():
                 raise Exception(f"claude_cli_rate_limit:Session limit reached")
 
         if proc.returncode != 0:
-            if "Not logged in" in (output + stderr) or "/login" in (output + stderr):
+            # Same contamination risk as above: `output` is the JSON envelope,
+            # which CARRIES the model's content. Only scan it when it did NOT
+            # parse -- then it is raw CLI text, not something the model wrote.
+            exit_blob = stderr if envelope_parsed else (output + " " + stderr)
+            if "Not logged in" in exit_blob or "/login" in exit_blob:
                 raise Exception(
                     "Claude CLI not authenticated. Go to Settings → LLM Vault → claude_cli → Get Auth URL."
                 )
@@ -2926,6 +3009,39 @@ def is_llm_cooldown_error(e) -> bool:
     s = str(e).lower()
     return any(k in s for k in ("credit_cooldown", "credit_exhausted",
                                 "rate_limited", "providers cooling down"))
+
+
+_LLM_AUTH_MARKERS = ("not authenticated", "not logged in", "forbidden", "unauthorized",
+                     "invalid api key", "invalid_api_key", "authentication_error",
+                     "permission denied", "missing scope")
+_LLM_AUTH_STATUS_RE = re.compile(r"\b(401|403)\b")
+
+
+def is_llm_auth_error(e) -> bool:
+    """True when an LLM call failed on CREDENTIALS or PERMISSIONS -- a provider
+    that is not logged in, a token without access, a subscription that does not
+    cover the model.
+
+    These are operator-actionable configuration states, not AppBuilder defects.
+    The panel already degrades gracefully when one reviewer is unavailable: the
+    remaining reviewers carry the verdict. So a credential problem is a WARNING
+    about configuration, not an ERROR about a fault -- and at ERROR it was
+    harvested by AppBuilder's own log scanner and filed as a bug against
+    AppBuilder (ab#17, ab#190), which no code change could ever close.
+
+    A rate-limit / quota cooldown is deliberately excluded and left to
+    is_llm_cooldown_error: it is a transient, and reporting it as an auth
+    problem would send an operator to re-authenticate a provider that is
+    perfectly well authenticated.
+
+    The 401/403 codes are matched on word boundaries, so a token count or a
+    commit SHA containing those digits is not mistaken for a status code."""
+    if e is None:
+        return False
+    if is_llm_cooldown_error(e):
+        return False
+    s = str(e).lower()
+    return any(k in s for k in _LLM_AUTH_MARKERS) or bool(_LLM_AUTH_STATUS_RE.search(s))
 
 
 LOG_ANALYSIS_SYSTEM_PROMPT = (

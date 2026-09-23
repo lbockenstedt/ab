@@ -75,6 +75,44 @@ CHAT_CONFIG_DEFAULTS = {
 }
 
 
+def _atomic_write_json(path, data, *, indent=2, chmod=None):
+    """Write `data` as JSON to `path` atomically, creating its directory first.
+
+    Two separate hazards, one helper, because every writer here needs both:
+
+    * ENOENT. Only save_config ever called os.makedirs(CONFIG_DIR); the other
+      four writers opened paths under /etc/ab directly, so whenever that
+      directory was absent each one failed with
+      "[Errno 2] No such file or directory" — and because those failures are
+      logged at ERROR, the self-log scanner filed a fresh issue per occurrence
+      (twelve of them before this was tracked down).
+    * Truncation. open(path, "w") truncates before writing, so a crash in that
+      window leaves an empty file that the next load cannot parse. Writing to a
+      temp file and swapping with os.replace (atomic on POSIX) means readers
+      only ever see the fully-written old or new file.
+
+    Raises on failure after removing the temp file: callers own their own
+    fallback and logging, so the error must still reach them.
+    """
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=indent)
+        if chmod is not None:
+            try:
+                os.chmod(tmp, chmod)
+            except Exception:
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        raise
+
+
 def save_config(config):
     """Saves configuration to persistent storage, falling back to local if needed.
 
@@ -87,26 +125,18 @@ def save_config(config):
     on POSIX, so readers only ever see the fully-written old or new file.
     """
     try:
-        if os.path.exists(CONFIG_DIR) or os.access(CONFIG_DIR, os.W_OK):
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            tmp = CONFIG_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(config, f, indent=2)
-            try:
-                os.chmod(tmp, 0o600)
-            except Exception:
-                pass
-            os.replace(tmp, CONFIG_FILE)
-            logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
-        else:
-            raise IOError("Persistent config directory not writable")
+        # No pre-flight existence/access check: os.access(CONFIG_DIR, W_OK) is
+        # False for a directory that merely does not exist yet, so the old guard
+        # sent a first-boot host down the cwd-fallback branch and left config in
+        # a throwaway ./config.json instead of creating /etc/ab. Just attempt the
+        # write -- _atomic_write_json creates the directory, and a genuine
+        # permission failure still raises and still lands in the fallback below.
+        _atomic_write_json(CONFIG_FILE, config, chmod=0o600)
+        logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
     except Exception as e:
         logger.warning(f"Could not save to persistent storage ({e}), falling back to local config.json")
         try:
-            tmp = "config.json.tmp"
-            with open(tmp, "w") as f:
-                json.dump(config, f, indent=2)
-            os.replace(tmp, "config.json")
+            _atomic_write_json("config.json", config)
         except Exception as fe:
             logger.error(f"Critical failure saving config: {fe}")
 
@@ -181,18 +211,12 @@ def save_processed(processed):
     """
     try:
         # Primary: Persistent storage
-        tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(processed, f, indent=2)
-        os.replace(tmp, STATE_FILE)
+        _atomic_write_json(STATE_FILE, processed)
     except Exception as e:
         logger.error(f"Error saving to persistent state file {STATE_FILE}: {e}")
         try:
             # Fallback: Local directory
-            tmp = "processed_issues.json.tmp"
-            with open(tmp, "w") as f:
-                json.dump(processed, f, indent=2)
-            os.replace(tmp, "processed_issues.json")
+            _atomic_write_json("processed_issues.json", processed)
         except Exception as fe:
             logger.error(f"Critical failure saving processed history to both locations: {fe}")
 
@@ -221,10 +245,7 @@ def save_pr_reviews(pr_reviews):
     can't leave a truncated/empty PR_REVIEWS_FILE for the next load to choke on.
     """
     try:
-        tmp = PR_REVIEWS_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(pr_reviews, f, indent=2)
-        os.replace(tmp, PR_REVIEWS_FILE)
+        _atomic_write_json(PR_REVIEWS_FILE, pr_reviews)
     except Exception as e:
         logger.error(f"Error saving PR reviews to {PR_REVIEWS_FILE}: {e}")
 
@@ -272,10 +293,7 @@ def save_llm_tps(llm_tps):
     then discards -- losing the very history the cache exists to keep.
     """
     try:
-        tmp = LLM_TPS_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(llm_tps, f)
-        os.replace(tmp, LLM_TPS_FILE)
+        _atomic_write_json(LLM_TPS_FILE, llm_tps, indent=None)
     except Exception as e:
         logger.error(f"Error saving LLM tok/s cache to {LLM_TPS_FILE}: {e}")
 
@@ -298,10 +316,7 @@ def save_update_state(state):
     would defeat the recovery mechanism it exists for.
     """
     try:
-        tmp = UPDATE_STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp, UPDATE_STATE_FILE)
+        _atomic_write_json(UPDATE_STATE_FILE, state)
     except Exception as e:
         logger.error(f"Error saving update state: {e}")
 
@@ -332,14 +347,14 @@ def write_startup_stamp():
             "pid": os.getpid(),
             "main_mtime": os.path.getmtime(main.__file__),
         }
-        with open(STARTUP_STAMP_FILE, "w") as f:
-            json.dump(stamp, f, indent=2)
+        _atomic_write_json(STARTUP_STAMP_FILE, stamp)
         logger.info(f"Startup stamp written: commit={commit[:7] if commit != 'unknown' else 'unknown'} pid={os.getpid()}")
     except Exception as e:
         logger.warning(f"Could not write startup stamp: {e}")
 
 
 __all__ = [
+    "_atomic_write_json",
     "load_llm_tps", "save_llm_tps", "LLM_TPS_FILE", "LLM_PERF_FILE",
 
     "CONFIG_DIR",
