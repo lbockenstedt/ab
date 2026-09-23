@@ -67,7 +67,7 @@ import re
 from datetime import timedelta
 
 from github_ops import get_monitored_repos
-from app_state import update_task_state, record_pr_review, update_pr_review, mark_pr_approved, state
+from app_state import update_task_state, set_task_step, record_pr_review, update_pr_review, mark_pr_approved, state
 import feature_boundary
 import feature_allowlist
 from branch_policy import AUTO_BRANCH_PREFIXES_BY_KIND, is_release_locked
@@ -1340,17 +1340,29 @@ def _review_one(gh, repo, pr, config, force=False):
         logger.info("pr_review: skipping AppBuilder's own fix PR %s #%s", repo.full_name, pr.number)
         return
     head_sha = pr.head.sha
+    # Each stage announces itself so the Active Tasks card shows real progress
+    # instead of one opaque "scanning open PRs" line for the whole cycle. The
+    # task_id is constant ("PRReview"); set_task_step is a no-op when the review
+    # is invoked outside the scan loop (Reprocess/Fix buttons).
+    def _step(what):
+        set_task_step("PRReview", "%s #%s — %s" % (repo.full_name, pr.number, what))
     # Compute findings every scan (cheap, deterministic, no LLM) so the UI
     # 'PRs Reviewed' list stays populated even after a restart. The COMMENT +
     # status are only (re)posted when the head SHA changed — dedup keeps us from
     # spamming, but we still RECORD the review below regardless.
+    _step("fetching changed files")
     files = list(pr.get_files())
     changed = [f.filename for f in files]
+    _step("checking twin/repo parity across %d file(s)" % len(changed))
     findings = check_parity(repo.full_name, changed)
     findings = _resolve_cross_repo_twins(gh, findings, since=getattr(pr, "created_at", None))
+    _step("scanning for committed secrets")
     findings += check_secrets(files)
+    _step("checking for missing tooltips")
     findings += find_missing_tooltips_in_files(files)
+    _step("checking for undefined names")
     findings += check_undefined_names(repo, files, head_sha)
+    _step("checking for unattended mutation")
     findings += check_unattended_mutation(files)
     existing = _find_marker_comment(pr)
     _prior_review = (state.get("pr_reviews") or {}).get("%s#%s" % (repo.full_name, pr.number)) or {}
@@ -1377,6 +1389,7 @@ def _review_one(gh, repo, pr, config, force=False):
     if already_current:
         # Recover the previously-generated summary from the comment — no LLM call
         # on a cached re-scan / post-restart.
+        _step("unchanged since last review — reusing cached result")
         summary = _extract_summary(existing.body if existing else "")
         action = "cached"
         # Recover the last persisted panel result(s) rather than leaving `review`/
@@ -1410,10 +1423,15 @@ def _review_one(gh, repo, pr, config, force=False):
         # every poll of an unchanged PR. OFF by default
         # (pr_test_regression_enabled); see check_test_regressions.py.
         token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+        _step("running test-regression check")
         findings += check_test_regressions(repo, pr, config, token)
+        _step("summarising the change (LLM)")
         summary = _summarize_changes(pr, files, config, repo=repo)
+        _step("running the skeptical reviewer panel (LLM)")
         review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh)
+        _step("running the state-logic reviewer panel (LLM)")
         state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
+        _step("rendering and posting the review comment")
         body = _render(findings, head_sha, summary, review=review, state_review=state_review,
                        base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
                        head_ref=_head_ref,
@@ -1761,16 +1779,31 @@ def scan_open_prs(gh, config):
         return
     # Surface PR-review as a distinct 'pr'-kind task so the UI badges it apart
     # from bug scans/fixes (see templates/index.html Active Tasks).
-    update_task_state("PRReview", "PR pre-review — scanning open PRs", "start", kind="pr")
+    update_task_state("PRReview", "PR pre-review — scanning %d repo(s)" % len(repos),
+                      "start", kind="pr")
     seen_open = set()
+    reviewed = 0
     try:
-        for repo_name in repos:
+        for i, repo_name in enumerate(repos, 1):
             try:
                 repo = gh.get_repo(repo_name)
-                for pr in repo.get_pulls(state="open"):
+                set_task_step("PRReview", "repo %d/%d — %s: listing open PRs" % (i, len(repos), repo_name))
+                # Materialised so the UI can show "PR 2 of 7" rather than an
+                # opaque, unbounded stream of pages.
+                prs = list(repo.get_pulls(state="open"))
+                for j, pr in enumerate(prs, 1):
                     try:
+                        # Re-start the SAME task_id to re-label the phase with the
+                        # PR actually in flight. start_time is carried forward by
+                        # update_task_state, so the elapsed clock keeps running.
+                        update_task_state("PRReview",
+                                          "Reviewing %s PR #%s (%d/%d)" % (repo.full_name, pr.number, j, len(prs)),
+                                          "start", kind="pr")
+                        set_task_step("PRReview", "%s #%s — %s" % (
+                            repo.full_name, pr.number, (pr.title or "")[:80]))
                         _review_one(gh, repo, pr, config)
                         seen_open.add("%s#%s" % (repo.full_name, pr.number))
+                        reviewed += 1
                     except Exception as e:  # noqa: BLE001
                         logger.warning("pr_review: PR #%s in %s failed: %s",
                                        getattr(pr, "number", "?"), repo_name, e)
@@ -1778,8 +1811,12 @@ def scan_open_prs(gh, config):
                 logger.warning("pr_review: repo %s failed: %s", repo_name, e)
         # Backfill the target-branch badge on older records (see below), then
         # self-heal listed PRs that are no longer open (merged elsewhere or closed).
+        update_task_state("PRReview", "PR pre-review — housekeeping", "start", kind="pr")
+        set_task_step("PRReview", "backfilling target-branch badges on older records")
         _backfill_pr_review_refs(gh)
+        set_task_step("PRReview", "reconciling PRs that are no longer open")
         _reconcile_closed_prs(gh, seen_open)
+        set_task_step("PRReview", "done — reviewed %d open PR(s)" % reviewed)
     finally:
         update_task_state("PRReview", action="end")
 

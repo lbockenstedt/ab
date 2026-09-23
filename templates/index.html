@@ -494,16 +494,14 @@
                                             <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#01A982]/10 text-[#01A982] border border-[#01A982]/30"><i class="fas fa-search"></i> SCAN / FIX</span>
                                         {% endif %}
                                     </div>
-                                    <p class="text-slate-700 font-mono text-xs break-all font-bold">{{ task.name }}</p>
+                                    <p class="task-name text-slate-700 font-mono text-xs break-all font-bold">{{ task.name }}</p>
                                     <!-- The task id (issue / repo / worker) shown regardless of
                                          what the name happens to say. Task names are written by
                                          many call sites and some describe only the mechanism
                                          ("CPU build <model>"), leaving an operator unable to tell
                                          WHICH issue is in flight. Rendering the id here fixes that
                                          for every task, not just the ones whose name remembers. -->
-                                    {% if tid and tid not in task.name %}
-                                    <p class="text-slate-500 font-mono text-[10px] break-all mt-0.5">{{ tid }}</p>
-                                    {% endif %}
+                                    <p class="task-tid text-slate-500 font-mono text-[10px] break-all mt-0.5">{% if tid and tid not in task.name %}{{ tid }}{% endif %}</p>
                                     <!-- Filled/kept live by startActiveTasksLiveRefresh() below so an
                                          operator can see elapsed time and the current step without
                                          waiting for the 30s full-page reload. -->
@@ -3339,18 +3337,89 @@
         // Keeps the "Active Tasks" card fresh without the 30s full-page reload:
         // ticks each task's elapsed time locally every second, and separately
         // polls /api/task-details (lightweight, no full stream) every 4s to
-        // update each task's one-line "current step" so an operator can see
-        // what's happening in near-real-time instead of only when a PR/fix
-        // suddenly appears after the next full reload.
+        // re-render the whole list, so an operator sees what's happening in
+        // near-real-time instead of only when a PR/fix suddenly appears after
+        // the next full reload. The list itself is re-rendered (not just the
+        // step line) because tasks start and finish between polls, and because
+        // a single task id re-labels itself as it moves through its phases
+        // (e.g. "Reviewing org/repo PR #12 (3/7)").
         function startActiveTasksLiveRefresh() {
-            function formatElapsed(startIso) {
+            let lastTaskIds = null;
+
+            // The total is recomputed locally every second so the clock stays
+            // smooth between the 4s polls; the phase string comes from the API,
+            // which is the only side that knows when the current sub-step began.
+            function formatElapsed(startIso, phaseDuration) {
                 const start = new Date(startIso).getTime();
-                if (isNaN(start)) return '';
+                if (isNaN(start)) return phaseDuration ? phaseDuration + ' this step' : '';
                 const totalSeconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
                 const h = Math.floor(totalSeconds / 3600);
                 const m = Math.floor((totalSeconds % 3600) / 60);
                 const s = totalSeconds % 60;
-                return `${h}h ${m}m ${s}s`;
+                const total = `${h}h ${m}m ${s}s total`;
+                return phaseDuration ? `${total} · ${phaseDuration} this step` : total;
+            }
+
+            function buildRow(tid, task) {
+                const isPr = task.kind === 'pr';
+                const row = document.createElement('div');
+                row.className = 'p-3 rounded-xl border ' +
+                    (isPr ? 'bg-indigo-50 border-indigo-300' : 'bg-slate-100 border-slate-200');
+                row.dataset.tid = tid;
+
+                const badgeWrap = document.createElement('div');
+                badgeWrap.className = 'mb-1';
+                const badge = document.createElement('span');
+                badge.className = isPr
+                    ? 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-300'
+                    : 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#01A982]/10 text-[#01A982] border border-[#01A982]/30';
+                const icon = document.createElement('i');
+                icon.className = isPr ? 'fas fa-code-branch' : 'fas fa-search';
+                badge.appendChild(icon);
+                badge.appendChild(document.createTextNode(isPr ? ' PR REVIEW' : ' SCAN / FIX'));
+                badgeWrap.appendChild(badge);
+
+                const nameP = document.createElement('p');
+                nameP.className = 'task-name text-slate-700 font-mono text-xs break-all font-bold';
+                const tidP = document.createElement('p');
+                tidP.className = 'task-tid text-slate-500 font-mono text-[10px] break-all mt-0.5';
+                const elapsedP = document.createElement('p');
+                elapsedP.className = 'task-elapsed text-slate-400 font-mono text-[10px] mt-0.5';
+                const stepP = document.createElement('p');
+                stepP.className = 'task-current-step text-slate-500 text-[11px] italic mt-1 truncate';
+
+                row.appendChild(badgeWrap);
+                row.appendChild(nameP);
+                row.appendChild(tidP);
+                row.appendChild(elapsedP);
+                row.appendChild(stepP);
+                return row;
+            }
+
+            // textContent/dataset only, never innerHTML, so a task name or step
+            // carrying a PR title can't inject markup.
+            function fillRow(row, tid, task) {
+                if (task.start_time) row.dataset.start = task.start_time;
+                row.dataset.phaseDuration = task.phase_duration || '';
+                const nameEl = row.querySelector('.task-name');
+                if (nameEl) nameEl.textContent = task.name || tid;
+                const tidEl = row.querySelector('.task-tid');
+                if (tidEl) tidEl.textContent = (task.name || '').includes(tid) ? '' : tid;
+                const stepEl = row.querySelector('.task-current-step');
+                if (stepEl) stepEl.textContent = task.step || task.current_step || '';
+                const elapsedEl = row.querySelector('.task-elapsed');
+                if (elapsedEl) elapsedEl.textContent = formatElapsed(row.dataset.start, row.dataset.phaseDuration);
+            }
+
+            function renderEmpty(list) {
+                list.innerHTML = '';
+                const empty = document.createElement('div');
+                empty.className = 'p-4 bg-slate-100 rounded-xl border border-slate-200 text-center';
+                const p = document.createElement('p');
+                p.className = 'text-slate-500 font-mono text-sm italic';
+                p.textContent = 'Standing by for issues...';
+                empty.appendChild(p);
+                list.appendChild(empty);
             }
 
             setInterval(function () {
@@ -3358,7 +3427,7 @@
                     document.querySelectorAll('#active-tasks-list [data-start]').forEach(function (el) {
                         try {
                             const elapsedEl = el.querySelector('.task-elapsed');
-                            if (elapsedEl) elapsedEl.textContent = formatElapsed(el.dataset.start);
+                            if (elapsedEl) elapsedEl.textContent = formatElapsed(el.dataset.start, el.dataset.phaseDuration);
                         } catch (innerErr) { /* one bad element shouldn't stop the rest */ }
                     });
                 } catch (e) { /* no-op — list may not be present on this view */ }
@@ -3368,13 +3437,35 @@
                 fetch('/api/task-details').then(function (resp) {
                     return resp.json();
                 }).then(function (data) {
+                    const list = document.getElementById('active-tasks-list');
+                    if (!list) return;
                     const activeTasks = (data && data.active_tasks) || {};
-                    Object.keys(activeTasks).forEach(function (tid) {
+                    const tids = Object.keys(activeTasks);
+                    if (!tids.length) {
+                        if (lastTaskIds !== '') { renderEmpty(list); lastTaskIds = ''; }
+                        return;
+                    }
+                    // Rebuild only when the SET of tasks changed; otherwise update in
+                    // place so the 1s ticker and scroll position survive. The name is
+                    // refreshed either way: a long-running task re-labels itself per
+                    // phase (e.g. each PR under review) while keeping one task id.
+                    const key = tids.join('|');
+                    if (key !== lastTaskIds) {
+                        list.innerHTML = '';
+                        tids.forEach(function (tid) {
+                            try {
+                                const row = buildRow(tid, activeTasks[tid]);
+                                fillRow(row, tid, activeTasks[tid]);
+                                list.appendChild(row);
+                            } catch (innerErr) { /* skip this task, render the rest */ }
+                        });
+                        lastTaskIds = key;
+                        return;
+                    }
+                    tids.forEach(function (tid) {
                         try {
-                            const el = document.querySelector('#active-tasks-list [data-tid="' + CSS.escape(tid) + '"]');
-                            if (!el) return;
-                            const stepEl = el.querySelector('.task-current-step');
-                            if (stepEl) stepEl.textContent = activeTasks[tid].current_step || '';
+                            const row = list.querySelector('[data-tid="' + CSS.escape(tid) + '"]');
+                            if (row) fillRow(row, tid, activeTasks[tid]);
                         } catch (innerErr) { /* skip this task, keep polling */ }
                     });
                 }).catch(function (e) { /* transient network error — next tick will retry */ });
