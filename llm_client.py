@@ -1354,6 +1354,45 @@ _UNSUPPORTED_SCHEMA_HINTS = (
 )
 
 
+#: Bodies that are just a restatement of the HTTP status — they name no
+#: parameter, no model and no code, so nothing can be attributed to them.
+#: Compared after lower-casing and stripping surrounding whitespace/punctuation.
+_OPAQUE_4XX_BODIES = frozenset((
+    "", "bad request", "400 bad request", "400", "client error",
+    "invalid request", "error", "unprocessable entity", "not found",
+))
+
+
+def _is_uninformative_4xx_body(body):
+    """True when a 4xx body tells us nothing we can attribute the failure to.
+
+    Copilot's /chat/completions answers some rejections with the bare string
+    "Bad Request\\n" — no code, no message, no mention of response_format and
+    no mention of the model. That matches none of the hints above, so the
+    schema-free retry below never fired and a call that would have succeeded
+    without response_format failed outright (ab#263).
+
+    Deliberately an exact match against a closed set of status restatements
+    rather than a length heuristic: a short body can still be perfectly
+    informative ("maximum context length exceeded" is 31 characters), and
+    retrying that one would fail identically at double the cost.
+    """
+    low = (body or "").strip().strip(".!").lower()
+    if low in _OPAQUE_4XX_BODIES:
+        return True
+    # A JSON error object always carries a reason, however terse.
+    try:
+        parsed = json.loads(body)
+    except Exception:  # noqa: BLE001 — a non-JSON body is judged above
+        return False
+    if isinstance(parsed, dict):
+        err = parsed.get("error")
+        if isinstance(err, dict):
+            return not (err.get("code") or err.get("message"))
+        return not (err or parsed.get("message") or parsed.get("detail"))
+    return False
+
+
 def _post_maybe_structured(endpoint, payload, headers, config, stream, provider, json_schema):
     """POST via _llm_retry_post, asking for schema-constrained output when a
     json_schema is supplied.
@@ -1364,6 +1403,9 @@ def _post_maybe_structured(endpoint, payload, headers, config, stream, provider,
     silently broke), this degrades: on a 4xx that looks like an
     unsupported-parameter complaint, it retries ONCE without response_format,
     which is precisely the old behaviour. Any other error propagates unchanged.
+
+    Handles opaque 4xx bodies (e.g. "Bad Request\n") by retrying without schema
+    enforcement if the body gives no attributable reason.
     """
     rf = _response_format_from_schema(json_schema)
     if not rf or payload.get("tools"):
@@ -1383,9 +1425,15 @@ def _post_maybe_structured(endpoint, payload, headers, config, stream, provider,
         except Exception:  # noqa: BLE001
             body = ""
         detail = (body or str(e).lower())
-        if status in (400, 404, 422) and any(h in detail for h in _UNSUPPORTED_SCHEMA_HINTS):
-            logger.info("llm: %s/%s rejected response_format — retrying without schema enforcement.",
-                        provider, payload.get("model"))
+        if status in (400, 404, 422) and (
+            any(h in detail for h in _UNSUPPORTED_SCHEMA_HINTS) or _is_uninformative_4xx_body(body)
+        ):
+            if _is_uninformative_4xx_body(body):
+                logger.info("llm: %s/%s had uninformative 4xx body — retrying without schema enforcement.",
+                            provider, payload.get("model"))
+            else:
+                logger.info("llm: %s/%s rejected response_format — retrying without schema enforcement.",
+                            provider, payload.get("model"))
             return _llm_retry_post(endpoint, payload, headers, config, stream=stream, provider=provider)
         raise
 

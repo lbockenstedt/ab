@@ -16,8 +16,9 @@ import ast
 import pytest
 
 
-_WANT_FUNCS = {"_response_format_from_schema", "_post_maybe_structured", "_call_provider"}
-_WANT_ASSIGNS = {"_UNSUPPORTED_SCHEMA_HINTS"}
+_WANT_FUNCS = {"_response_format_from_schema", "_post_maybe_structured", "_call_provider",
+               "_is_uninformative_4xx_body"}
+_WANT_ASSIGNS = {"_UNSUPPORTED_SCHEMA_HINTS", "_OPAQUE_4XX_BODIES"}
 
 
 def _extract(path, assigns, funcs):
@@ -251,3 +252,76 @@ def test_providers_without_a_structured_path_are_unchanged(ns, provider, expecte
     ns["_call_provider"](provider, "m", "k", None, [], None, False, "t", {},
                          json_schema={"type": "object"})
     assert "json_schema" not in got[expected]
+
+
+# --------------------------------------------------------------------------
+# Opaque 4xx bodies — ab#263
+# --------------------------------------------------------------------------
+# Copilot's /chat/completions answers some response_format rejections with the
+# bare body "Bad Request\n". It names no parameter, no code and no model, so it
+# matched none of _UNSUPPORTED_SCHEMA_HINTS and the schema-free retry — the
+# exact request AB sent successfully before response_format existed — was never
+# attempted. Every such call failed outright and the self-log scan filed each
+# one as a fresh issue.
+
+@pytest.mark.parametrize("opaque", ["Bad Request\n", "bad request", "", "   ",
+                                    "400 Bad Request", "Client Error."])
+def test_opaque_4xx_body_degrades_to_plain_request(ns, opaque):
+    calls = {"n": 0}
+
+    def behaviour(payload):
+        calls["n"] += 1
+        if "response_format" in payload:
+            raise _HTTPError("bad", response=_Resp(400, opaque))
+        return _Resp()
+
+    seen = _wire_post(ns, behaviour)
+    out = ns["_post_maybe_structured"]("u", {"model": "m"}, {}, {}, False, "copilot",
+                                       {"type": "object"})
+    assert out.status_code == 200
+    assert calls["n"] == 2
+    assert "response_format" in seen[0] and "response_format" not in seen[1]
+
+
+@pytest.mark.parametrize("informative", [
+    "maximum context length exceeded",
+    "you exceeded your current quota",
+    '{"error":{"code":"context_length_exceeded"}}',
+    '{"error":{"message":"too many tokens"}}',
+    '{"message":"repository not found"}',
+])
+def test_informative_4xx_body_is_still_not_retried(ns, informative):
+    """The opaque-body allowance must not become a blanket retry-on-400: a body
+    that states a reason would fail identically the second time."""
+    def behaviour(payload):
+        raise _HTTPError("nope", response=_Resp(400, informative))
+
+    seen = _wire_post(ns, behaviour)
+    with pytest.raises(_HTTPError):
+        ns["_post_maybe_structured"]("u", {"model": "m"}, {}, {}, False, "copilot",
+                                     {"type": "object"})
+    assert len(seen) == 1
+
+
+def test_opaque_body_on_a_5xx_is_not_retried(ns):
+    """Only 400/404/422 carry the 'you sent something I don't accept' meaning;
+    an opaque 500 is a server fault and must surface."""
+    def behaviour(payload):
+        raise _HTTPError("boom", response=_Resp(500, "Bad Request\n"))
+
+    seen = _wire_post(ns, behaviour)
+    with pytest.raises(_HTTPError):
+        ns["_post_maybe_structured"]("u", {"model": "m"}, {}, {}, False, "copilot",
+                                     {"type": "object"})
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("body,want", [
+    ("Bad Request\n", True), ("", True), ("400", True),
+    ("maximum context length exceeded", False),
+    ('{"error":{"message":"x"}}', False),
+    ('{"error":{}}', True),
+    ('{"error":null}', True),
+])
+def test_uninformative_body_classifier(ns, body, want):
+    assert ns["_is_uninformative_4xx_body"](body) is want
