@@ -28,23 +28,30 @@ import sys
 def _load_filter():
     src = open("log_scan.py").read()
     tree = ast.parse(src)
-    noise_node = next(
+    # filter_error_logs now calls _explicit_log_level, which in turn needs the
+    # _LOG_LEVEL_* constants -- an extracted function only sees what is execed
+    # into its namespace, so omitting any of these is a NameError at run time.
+    _want_assigns = ("_SELF_SCAN_NOISE", "_LOG_LEVEL_NAMES", "_LOG_LEVEL_RE",
+                     "_LOG_LEVEL_PREFIX_CHARS")
+    _want_funcs = ("_explicit_log_level", "filter_error_logs")
+    assign_nodes = [
         n for n in tree.body
         if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "_SELF_SCAN_NOISE" for t in n.targets)
-    )
-    fn = next(
-        n for n in tree.body
-        if isinstance(n, ast.FunctionDef) and n.name == "filter_error_logs"
-    )
+        and any(getattr(t, "id", None) in _want_assigns for t in n.targets)
+    ]
+    fns = [n for n in tree.body
+           if isinstance(n, ast.FunctionDef) and n.name in _want_funcs]
+    assert len(assign_nodes) == len(_want_assigns), "missing a module constant"
+    assert len(fns) == len(_want_funcs), "missing a module function"
 
     class _NoLog:
         def __getattr__(self, _):
             return lambda *a, **k: None
 
     ns = {"json": json, "re": re, "logger": _NoLog(), "load_config": lambda: {}}
-    exec(compile(ast.Module([noise_node], []), "<noise>", "exec"), ns)
-    exec(ast.get_source_segment(src, fn), ns)
+    exec(compile(ast.Module(assign_nodes, []), "<consts>", "exec"), ns)
+    for fn in fns:
+        exec(ast.get_source_segment(src, fn), ns)
     return ns["filter_error_logs"]
 
 

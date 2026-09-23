@@ -264,6 +264,52 @@ _SELF_SCAN_NOISE = re.compile(
 )
 
 
+_LOG_LEVEL_NAMES = ("CRITICAL", "FATAL", "ERROR", "WARNING", "WARN",
+                    "NOTICE", "INFO", "DEBUG", "TRACE")
+#: Bracketed (``[ERROR]``) or python-logging dash style (``- AppBuilder - ERROR -``).
+#: The alternation is built from the level names ONLY, so a logger/module name
+#: such as ``AppBuilder`` can never be read as a level -- it is the first
+#: ``- WORD -`` group on a standard line, and a bare ``- ([A-Z]+) -`` pattern
+#: reports it as the severity.
+_LOG_LEVEL_RE = re.compile(
+    r"\[(" + "|".join(_LOG_LEVEL_NAMES) + r")\]"
+    r"|(?:^|\s)-\s(" + "|".join(_LOG_LEVEL_NAMES) + r")\s-",
+    re.IGNORECASE,
+)
+#: Only the line PREFIX is inspected. This is the crux: the level tag always
+#: appears early, and scanning the whole line is exactly what lets prose such as
+#: "...the reported error originates from..." masquerade as a severity.
+_LOG_LEVEL_PREFIX_CHARS = 120
+
+
+def _explicit_log_level(text):
+    """Return the severity a log line explicitly declares, or None if it declares none.
+
+    filter_error_logs documents that "WARNINGs are excluded: the LLM task is to
+    find actionable *errors*, not routine warnings" -- but nothing implemented
+    that. Its inclusion regex searched the ENTIRE line for ``Error[: ]``/
+    ``Failed``/``Exception``, so a WARNING or even INFO line whose message text
+    happened to contain the word "error" was scooped up as an error. Reviewer
+    rejections are the worst case, because the reviewer's explanation is prose
+    that routinely says things like "the reported error originates from...":
+    ab#137, #138, #173 and #174 are all WARNING lines filed as faults.
+
+    Normalizes WARN -> WARNING and FATAL -> CRITICAL. Returns the FIRST level tag
+    found in the prefix, so the line's own level wins over any later mention.
+    """
+    if not text:
+        return None
+    m = _LOG_LEVEL_RE.search(text[:_LOG_LEVEL_PREFIX_CHARS])
+    if not m:
+        return None
+    level = (m.group(1) or m.group(2) or "").upper()
+    if level == "WARN":
+        return "WARNING"
+    if level == "FATAL":
+        return "CRITICAL"
+    return level or None
+
+
 def filter_error_logs(logs):
     """Scrubs raw logs down to error-relevant entries before sending to the LLM.
 
@@ -310,7 +356,17 @@ def filter_error_logs(logs):
             module = ''
             text = str(entry)
 
-        if not error_pattern.search(text):
+        # Honour an explicitly-declared level before falling back to signature
+        # matching. Without this the signature scan reads the whole line --
+        # including a reviewer's prose explanation -- so a WARNING saying "the
+        # reported error originates from ..." was filed as a fault (ab#137,
+        # #138, #173, #174). Lines with NO level tag still fall through to the
+        # signature test, so a bare traceback is unaffected.
+        level = _explicit_log_level(text)
+        if level is not None:
+            if level not in ("ERROR", "CRITICAL"):
+                continue
+        elif not error_pattern.search(text):
             continue
 
         # Skip AppBuilder's own operational chatter (fix-engine mechanics + config
