@@ -1269,15 +1269,44 @@ class HubAgentClient:
 
         Fire-and-forget swallows exceptions and lets the task be garbage-collected
         mid-flight, so the task is held in ``_inflight`` and its result inspected in
-        a done-callback. Over the cap we DROP: stalling the reader is the failure
-        mode being fixed, and the hub's durable mailbox redelivers.
+        a done-callback. Over the cap we shed load rather than stall the reader,
+        which is the failure mode this exists to prevent.
+
+        Shedding is NOT a silent drop. Only mailbox-pushed commands get redelivered;
+        the hub sends HELP_ASK (and the other _SLOW_CMDS reached through
+        ``request_response``) with ids that are deliberately never placed in
+        ``mailbox.pending_ack``, so for those there is nothing to redeliver and a
+        bare ``return`` left the hub-side waiter blocked until its full timeout
+        elapsed -- surfacing to the operator as a hung Help assistant rather than a
+        busy one. We therefore answer with a FAILED COMMAND_RESULT correlated to the
+        inbound message_id, so the caller fails fast with an accurate reason and can
+        retry. A mailbox-pushed command is unaffected: the same reply clears its
+        pending_ack entry and the hub redelivers on its own schedule.
         """
         cmd = (msg.get("payload") or {}).get("type")
         if len(self._inflight) >= _MAX_INFLIGHT_HANDLERS:
-            logger.error(
-                "Dropping %s — %d handlers already in flight (cap %d). The hub will "
-                "redeliver from its mailbox; the receive loop stays responsive.",
+            # WARNING, not ERROR: this is designed backpressure with a definite
+            # reply, not a fault. At ERROR the self-log scanner filed an issue
+            # every time the agent was merely busy (ab#209, #183, #179, #13, #12).
+            logger.warning(
+                "Shedding %s — %d handlers already in flight (cap %d). Replying "
+                "FAILED so the caller retries; the receive loop stays responsive.",
                 cmd, len(self._inflight), _MAX_INFLIGHT_HANDLERS)
+            async def _busy_reply():
+                # Wrapped so a send failure is reported here rather than
+                # surfacing as an unhandled task exception on the event loop.
+                try:
+                    await self._ack(
+                        msg, status="FAILED",
+                        message=(f"agent busy: {_MAX_INFLIGHT_HANDLERS} handlers "
+                                 f"in flight, {cmd} shed — retry shortly"))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("busy-reply for %s failed to send: %s", cmd, e)
+
+            try:
+                asyncio.get_event_loop().create_task(_busy_reply())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("busy-reply for %s could not be scheduled: %s", cmd, e)
             return
         task = asyncio.create_task(self._handle_message(msg))
         self._inflight.add(task)

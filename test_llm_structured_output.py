@@ -325,3 +325,76 @@ def test_opaque_body_on_a_5xx_is_not_retried(ns):
 ])
 def test_uninformative_body_classifier(ns, body, want):
     assert ns["_is_uninformative_4xx_body"](body) is want
+
+
+# ── "" from an UNREADABLE body must not be read as "" from an EMPTY body ────
+# _OPAQUE_4XX_BODIES contains "", so both collapsed to "opaque" and fired the
+# schema-free retry. But an unreadable body tells us nothing about the
+# rejection, and this function's own docstring is explicit that retrying a
+# rejection we cannot attribute "would fail identically at double the cost".
+# Flagged on ab#267.
+
+class _UnreadableResp:
+    """A 4xx whose body raises on access — a decode error or a connection
+    reset mid-read, both of which requests surfaces from ``.text``."""
+
+    def __init__(self, status_code=400):
+        self.status_code = status_code
+
+    @property
+    def text(self):
+        raise UnicodeDecodeError("utf-8", b"", 0, 1, "invalid start byte")
+
+
+def test_unreadable_4xx_body_is_not_treated_as_opaque(ns):
+    def behaviour(payload):
+        raise _HTTPError("nope", response=_UnreadableResp(400))
+
+    seen = _wire_post(ns, behaviour)
+    with pytest.raises(_HTTPError):
+        ns["_post_maybe_structured"]("u", {"model": "m"}, {}, {}, False, "copilot",
+                                     {"type": "object"})
+    assert len(seen) == 1, "retried a rejection whose body we could not read"
+
+
+def test_unreadable_body_still_retries_when_the_exception_names_the_parameter(ns):
+    """We lost the body, but the exception text itself names response_format —
+    that IS attributable, so the degrade path is still correct here."""
+    def behaviour(payload):
+        if "response_format" in payload:
+            raise _HTTPError("400: unsupported parameter: response_format",
+                             response=_UnreadableResp(400))
+        return _Resp()
+
+    seen = _wire_post(ns, behaviour)
+    out = ns["_post_maybe_structured"]("u", {"model": "m"}, {}, {}, False, "copilot",
+                                       {"type": "object"})
+    assert out.status_code == 200
+    assert len(seen) == 2
+    assert "response_format" in seen[0] and "response_format" not in seen[1]
+
+
+def test_genuinely_empty_body_is_still_opaque_and_retried(ns):
+    """The fix must not regress ab#263: a body that really is empty stays
+    opaque, because the read succeeded and the server said nothing."""
+    def behaviour(payload):
+        if "response_format" in payload:
+            raise _HTTPError("bad", response=_Resp(400, ""))
+        return _Resp()
+
+    seen = _wire_post(ns, behaviour)
+    assert ns["_post_maybe_structured"]("u", {"model": "m"}, {}, {}, False, "copilot",
+                                        {"type": "object"}).status_code == 200
+    assert len(seen) == 2
+
+
+def test_missing_response_object_is_not_retried(ns):
+    """No response at all → no status → nothing to attribute, no retry."""
+    def behaviour(payload):
+        raise _HTTPError("connection aborted", response=None)
+
+    seen = _wire_post(ns, behaviour)
+    with pytest.raises(_HTTPError):
+        ns["_post_maybe_structured"]("u", {"model": "m"}, {}, {}, False, "copilot",
+                                     {"type": "object"})
+    assert len(seen) == 1

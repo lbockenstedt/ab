@@ -49,6 +49,42 @@ def _is_merge_conflict(exc):
     return "conflict" in str(data.get("message", exc.data)).lower()
 
 
+def _merge_refusal(exc):
+    """A GitHub *policy* refusal of a merge as ``(status_code, message)``, or
+    None if *exc* is not one.
+
+    A refusal is a condition only a human can clear -- branch protection or a
+    repository ruleset rejecting the merge, a token without the ``workflow``
+    scope, a required check still red. None of those are AppBuilder defects;
+    the repository is behaving exactly as configured.
+
+    They used to propagate out of merge_pr as an exception, so the caller
+    logged them at ERROR with a stack trace -- and AppBuilder's own log scanner
+    then filed each one as a bug report against AppBuilder (ab#107, #170,
+    #192). Returning them as a structured result instead lets the caller log at
+    WARNING, which is what an operator-actionable condition is, and lets it
+    record the reason ONCE rather than re-reporting the identical refusal on
+    every poll of an unchanged PR.
+
+    Merge conflicts are deliberately NOT claimed here: they have their own
+    auto-resolve recovery path in merge_pr, which must still run."""
+    if not isinstance(exc, GithubException):
+        return None
+    data = exc.data if isinstance(exc.data, dict) else {}
+    msg = str(data.get("message", exc.data) or "")
+    low = msg.lower()
+    if exc.status == 405 and "conflict" in low:
+        return None
+    if "rule violation" in low:
+        return (409, f"branch protection / repository rules refused the merge: {msg}")
+    if exc.status == 403 and "workflow" in low and "scope" in low:
+        return (403, "the configured GitHub token lacks the `workflow` scope needed to "
+                     f"update a workflow file: {msg}")
+    if exc.status == 405:
+        return (409, f"GitHub refused the merge (the PR is not in a mergeable state): {msg}")
+    return None
+
+
 def _conflicted_paths(repo_git):
     out = repo_git.git.diff("--name-only", "--diff-filter=U")
     return [p for p in out.splitlines() if p.strip()]
@@ -224,7 +260,15 @@ def merge_pr(gh, repo_name, number):
         res = pr.merge()  # default merge commit; raises if not mergeable
     except GithubException as e:
         if not _is_merge_conflict(e):
-            raise
+            refusal = _merge_refusal(e)
+            if refusal is None:
+                raise
+            status, why = refusal
+            logger.warning("pr_actions: %s #%s merge refused by GitHub — %s",
+                           repo_name, number, why)
+            update_pr_review(repo_name, number, merge_blocked_reason=why)
+            return status, {"status": "error", "blocked": True, "retryable": False,
+                            "message": f"PR #{number}: {why}"}
         # The base advanced under a stale branch. Try the same recovery a human
         # would: merge the base into the branch, auto-resolve only cosmetic
         # (VERSION) conflicts, push, then retry the merge once. Any real code
@@ -247,7 +291,7 @@ def merge_pr(gh, repo_name, number):
         _wait_mergeable(pr)
         res = pr.merge()  # retry once, now that the branch carries the base
         logger.info(f"pr_actions: {repo_name} #{number} merged after auto-resolving conflicts")
-    update_pr_review(repo_name, number, merged=True)
+    update_pr_review(repo_name, number, merged=True, merge_blocked_reason=None)
     _delete_pr_branch(repo, pr)
     logger.info(f"pr_actions: {repo_name} #{number} MERGED")
     return 200, {"status": "success", "merged": bool(getattr(res, "merged", True)),
