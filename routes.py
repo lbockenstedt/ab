@@ -2242,6 +2242,12 @@ def ensure_config_defaults(config):
     """Ensure runtime defaults for config options including PR auto-remediation."""
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
+    # Documentation PRs are reviewed but not accuracy-gated: a docs-only diff
+    # skips the panels' verdict/confidence gate, and is not auto-remediated to
+    # satisfy a critique nothing is waiting on. Containment gates (release
+    # branch, locks, secrets/Tier-1, boundaries) still apply.
+    config.setdefault("feature_automerge_docs_bypass_panel", True)
+    config.setdefault("pr_auto_remediate_skip_docs_only", True)
     # How many times fix_one_pr may regenerate a fix, each retry told exactly why
     # the previous one failed (parse reason / panel critique / verification
     # error). Capped at 5 in pr_review.fix_one_pr.
@@ -2281,6 +2287,8 @@ async def settings_page(request: Request):
     config.setdefault("pr_review_state_logic_enabled", False)
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
+    config.setdefault("feature_automerge_docs_bypass_panel", True)
+    config.setdefault("pr_auto_remediate_skip_docs_only", True)
     config.setdefault("pr_fix_max_attempts", 3)
     config.setdefault("batch_enabled", False)
     config.setdefault("prompt_caching_enabled", True)

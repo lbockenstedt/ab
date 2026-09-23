@@ -76,8 +76,14 @@ TOOLTIP_ONLY = "tooltip-only"
 DEFAULT_ALLOWLIST = [DOCS_ONLY, LOG_ONLY, TOOLTIP_ONLY]
 
 # Documentation file shapes — edits here cannot change runtime behaviour.
+# NOTE: no blanket "*.txt"/"**/*.txt" glob here (PR #261 review finding). This
+# repo ships requirements.txt at the root, which fnmatch's "*.txt" would have
+# matched as docs-only — letting a dependency-version change (a real supply
+# -chain risk) skip both skeptical panels via the docs auto-merge bypass.
+# README*/CHANGELOG* already cover the *.txt files this classifier is meant
+# to recognise (e.g. CHANGELOG.txt) without opening that door.
 _DOC_GLOBS = [
-    "*.md", "**/*.md", "*.rst", "**/*.rst", "*.txt", "**/*.txt",
+    "*.md", "**/*.md", "*.rst", "**/*.rst",
     "**/docs/**", "docs/**", "README*", "**/README*", "CHANGELOG*", "**/CHANGELOG*",
 ]
 

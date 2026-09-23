@@ -1025,6 +1025,14 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     blackout; plus a per-repo allowlist, a per-target-branch allowlist, and
     the feature_allowlist diff-shape gate).
 
+    THE ONE RELAXATION (feature_automerge_docs_bypass_panel, default on): a
+    diff PROVEN documentation-only skips the two panels' verdict/confidence
+    gates. Docs are still reviewed and the review is still posted; they are
+    just not held on a subjective accuracy judgement, since a .md edit cannot
+    change runtime behaviour. Every containment gate — release branch, release
+    lock, opt-in lists, mergeable/draft/state, Tier-1 clean (secrets), boundary
+    deny-list, allowlist — is unchanged and still applies to docs PRs.
+
     rec: state["pr_reviews"]["repo#num"] — panel_*/panel2_*/errors/warnings/
          merged/auto_merged.
     changed_paths: the PR's REAL changed-file list (pr.get_files() filenames)
@@ -1036,7 +1044,10 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     config: live config (feature_drive_enabled, feature_automerge_*,
             feature_boundaries).
     pr_meta: {"repo": str, "base_ref": str, "is_feature_drive": bool,
-              "draft": bool, "state": "open"|"closed", "mergeable": bool|None}.
+              "draft": bool, "state": "open"|"closed", "mergeable": bool|None,
+              "head_sha": str|None — the PR's current head; when given, must
+              match rec["head"] or this refuses (proves rec was written for
+              THIS commit, not a stale/empty record — see PR #261 review)}.
     state_flags: {"paused": bool, "blackout": bool}.
     """
     state_flags = state_flags or {}
@@ -1092,14 +1103,48 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     if state_flags.get("blackout"):
         return False, "AppBuilder is in a blackout window"
 
-    if rec.get("panel_status"):
-        return False, "panel 1 (skeptical review) could not run"
-    if rec.get("panel_verdict") != "Approve":
-        return False, "panel 1 (skeptical review) did not Approve"
-    if rec.get("panel2_status"):
-        return False, "panel 2 (state-logic review) could not run"
-    if rec.get("panel2_verdict") != "Approve":
-        return False, "panel 2 (state-logic review) did not Approve"
+    # PR #261 review finding (state-logic panel): the docs bypass below infers
+    # "Tier-1 ran and found nothing" from rec.get("errors")/("warnings") being
+    # 0 — which is indistinguishable from "Tier-1 never ran / rec is empty or
+    # stale" (rec defaults to {} at the call site). Require POSITIVE proof the
+    # record was actually written for the CURRENT head before any bypass logic
+    # runs, rather than trusting the caller's "always fresh" convention alone.
+    _head_sha = pr_meta.get("head_sha")
+    if _head_sha and rec.get("head") != _head_sha:
+        return False, ("no pre-review record for the current head yet — Tier-1/panel "
+                        "results are stale or missing, not eligible for auto-merge")
+
+    # Documentation-only diffs are REVIEWED but not ACCURACY-GATED (operator
+    # policy). A docs edit cannot change runtime behaviour, so holding it
+    # because a skeptical panel doubts a sentence's accuracy buys no safety and
+    # costs a human round-trip. In practice this is also what held docs PRs
+    # indefinitely: the panel penalised "intent fidelity" on promote PRs whose
+    # generated body says "carries code only" while the diff is a README
+    # rewrite — a critique the PR can never satisfy.
+    #
+    # This relaxes ONLY the two panels' subjective verdict/confidence. Every
+    # containment gate still applies, above and below: release-branch refusal,
+    # release locks, repo/target-branch opt-in, draft/open/mergeable, paused/
+    # blackout, the Tier-1 clean gate (which is what catches a secret committed
+    # into a .md), the boundary deny-list, and the allowlist itself. classify()
+    # fails closed, so anything that cannot be PROVEN docs-only from the real
+    # changed-file list keeps the full panel gate.
+    docs_bypass = False
+    if config.get("feature_automerge_docs_bypass_panel", True):
+        _docs_verdict = feature_allowlist.classify(
+            changed_files or [], config.get("feature_automerge_allowlist"))
+        docs_bypass = (_docs_verdict.get("category") == feature_allowlist.DOCS_ONLY
+                       and _docs_verdict.get("auto_approvable") is True)
+
+    if not docs_bypass:
+        if rec.get("panel_status"):
+            return False, "panel 1 (skeptical review) could not run"
+        if rec.get("panel_verdict") != "Approve":
+            return False, "panel 1 (skeptical review) did not Approve"
+        if rec.get("panel2_status"):
+            return False, "panel 2 (state-logic review) could not run"
+        if rec.get("panel2_verdict") != "Approve":
+            return False, "panel 2 (state-logic review) did not Approve"
 
     threshold = config.get("feature_automerge_min_confidence")
     try:
@@ -1110,10 +1155,11 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
 
     conf1 = rec.get("panel_confidence")
     conf2 = rec.get("panel2_confidence")
-    if conf1 is None or conf1 < threshold:
-        return False, f"panel 1 confidence {conf1} is below the threshold {threshold:.2f}"
-    if conf2 is None or conf2 < threshold:
-        return False, f"panel 2 confidence {conf2} is below the threshold {threshold:.2f}"
+    if not docs_bypass:
+        if conf1 is None or conf1 < threshold:
+            return False, f"panel 1 confidence {conf1} is below the threshold {threshold:.2f}"
+        if conf2 is None or conf2 < threshold:
+            return False, f"panel 2 confidence {conf2} is below the threshold {threshold:.2f}"
 
     if config.get("feature_automerge_require_clean", True):
         if (rec.get("errors") or 0) > 0 or (rec.get("warnings") or 0) > 0:
@@ -1137,6 +1183,20 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
                                              config.get("feature_automerge_allowlist"))
         if not verdict.get("auto_approvable"):
             return False, "not on additive auto-approve allowlist: " + verdict.get("reason", "")
+
+    if docs_bypass:
+        # PR #261 review finding (broad panel): don't claim "reviewed" when the
+        # panel(s) could not actually run for this diff — surfaced in the merge
+        # reason (persisted + shown on the PR) so a failed-panel docs auto-merge
+        # is visibly distinguishable from a normal one, instead of both saying
+        # "reviewed but not accuracy-gated".
+        _panel_ran = not rec.get("panel_status") and not rec.get("panel2_status")
+        _panel_note = ("reviewed but not accuracy-gated" if _panel_ran
+                       else "panel could not run for this diff — Tier-1/boundary/allowlist "
+                            "gates still applied")
+        return True, ("cleared: documentation-only diff — %s "
+                      "(panel verdict/confidence not required for docs), no boundary touched"
+                      % _panel_note)
 
     score = min(conf1, conf2)
     return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
@@ -1213,6 +1273,9 @@ def _maybe_auto_merge(gh, repo, pr, config):
             "draft": bool(getattr(pr, "draft", False)),
             "state": (pr.state or "open"),
             "mergeable": mergeable,
+            # Proves `rec` was actually written for THIS commit (see the
+            # head-freshness check in _automerge_decision) — PR #261 review finding.
+            "head_sha": getattr(getattr(pr, "head", None), "sha", None),
         }
         state_flags = {"paused": bool(state.get("paused")), "blackout": bool(state.get("blackout"))}
         should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags, changed_files)
