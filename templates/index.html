@@ -2317,9 +2317,16 @@
                                     <span class="block text-amber-700 mt-1">On (default) is why a normal code change never auto-merges, however high its confidence — behaviour-changing diffs route to a human. <strong>Unticking this widens auto-merge to ANY diff</strong> that clears the other gates: both panels Approve above the confidence floor, no Tier-1 findings, no boundary touched, on an allowlisted branch in an allowlisted repo. main/master stay owner-only either way.</span>
                                 </label>
                             </div>
+                            <div class="flex items-start gap-3 mt-2 p-3 rounded-lg bg-red-50 border border-red-300">
+                                <input type="checkbox" name="feature_automerge_allow_release_branch" id="feature_automerge_allow_release_branch" {{ 'checked' if settings.get('feature_automerge_allow_release_branch', False) else '' }} class="w-4 h-4 mt-0.5 text-[#01A982] focus:ring-[#01A982]">
+                                <label for="feature_automerge_allow_release_branch" class="text-xs text-slate-700">
+                                    <span class="font-semibold text-red-700">Allow auto-merge into the release branch (main/master)</span>
+                                    <span class="block text-red-700 mt-1">Off by default: merges into main are owner-only and refused in code. Ticking this lifts that structural refusal for rapid-development phases — unattended merges can then land on the branch you cut releases from. <strong>This alone is not enough:</strong> main must ALSO be ticked in Auto-Merge Target Branches below (it only appears there once this is on). Every other gate still applies — both panels, confidence floor, Tier-1 clean, boundaries, release locks.</span>
+                                </label>
+                            </div>
                             <div class="space-y-2 mt-2">
                                 <label class="text-sm font-medium text-slate-600">Auto-Merge Target Branches <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
-                                <p class="text-xs text-red-600 font-medium">⚠️ This is what stands between "unattended merge" and "human required" now that PR authorship no longer matters. Tick only lower-stakes branches that aren't wired to deploy/restart anything on push. main/master (and the repo's default branch) are not listed and cannot be added: merges into the release branch are owner-only and are refused in code, at any confidence.</p>
+                                <p class="text-xs text-red-600 font-medium">⚠️ This is what stands between "unattended merge" and "human required" now that PR authorship no longer matters. Tick only lower-stakes branches that aren't wired to deploy/restart anything on push. main/master (and the repo's default branch) appear here only while "Allow auto-merge into the release branch" above is ticked; otherwise merges into the release branch are owner-only and are refused in code, at any confidence.</p>
                                 {% if feature_automerge_branch_options %}
                                 <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
                                     {% for branch in feature_automerge_branch_options %}
