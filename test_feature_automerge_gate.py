@@ -138,6 +138,58 @@ def main():
     should, reason = decide(_clean_rec(), [], _clean_config(feature_automerge_target_branches=[]),
                             _clean_pr_meta())
     ok &= _check("target branch allowlist empty (default) -> blocked", should is False)
+
+    # ── the release-branch opt-out (feature_automerge_allow_release_branch) ──
+    # Rapid-development escape hatch. It must be a TWO-key unlock: the switch
+    # lifts the structural refusal, but the branch allowlist still has to name
+    # the branch. Either one alone must still block, or a single stray edit
+    # puts unattended merges onto the branch releases are cut from.
+    should, reason = decide(_clean_rec(), ["some/file.py"],
+                            _clean_config(feature_automerge_allow_release_branch=True),
+                            _clean_pr_meta(base_ref="main"))
+    ok &= _check("opt-out ON but main NOT in target branches -> still blocked "
+                 "(the switch alone must never be sufficient)", should is False)
+
+    should, reason = decide(_clean_rec(), ["some/file.py"],
+                            _clean_config(feature_automerge_target_branches=["dev", "main"]),
+                            _clean_pr_meta(base_ref="main"))
+    ok &= _check("main listed but opt-out OFF (default) -> still blocked "
+                 "(listing main in the free-text box must stay inert)",
+                 should is False)
+
+    should, reason = decide(_clean_rec(), ["some/file.py"],
+                            _clean_config(feature_automerge_allow_release_branch=True,
+                                          feature_automerge_target_branches=["dev", "main"]),
+                            _clean_pr_meta(base_ref="main"))
+    ok &= _check("opt-out ON *and* main listed -> auto-merge permitted", should is True)
+
+    # The opt-out lifts ONE gate and nothing else: every other containment must
+    # still bite on a release-branch PR.
+    should, reason = decide(_clean_rec(), ["some/file.py"],
+                            _clean_config(feature_automerge_allow_release_branch=True,
+                                          feature_automerge_target_branches=["main"],
+                                          release_locked_branches=["main"]),
+                            _clean_pr_meta(base_ref="main"))
+    ok &= _check("opt-out ON but main under a release lock -> still held", should is False)
+
+    should, reason = decide(_clean_rec(panel_verdict="Reject", panel_confidence=0.99),
+                            ["some/file.py"],
+                            _clean_config(feature_automerge_allow_release_branch=True,
+                                          feature_automerge_target_branches=["main"]),
+                            _clean_pr_meta(base_ref="main"))
+    ok &= _check("opt-out ON but a panel Rejects -> still blocked", should is False)
+
+    should, reason = decide(_clean_rec(errors=1), ["some/file.py"],
+                            _clean_config(feature_automerge_allow_release_branch=True,
+                                          feature_automerge_target_branches=["main"]),
+                            _clean_pr_meta(base_ref="main"))
+    ok &= _check("opt-out ON but a Tier-1 error -> still blocked", should is False)
+
+    # The refusal reason must tell the operator the switch exists, otherwise
+    # the only way to find it is reading the source.
+    _, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(base_ref="main"))
+    ok &= _check("release-branch refusal names the opt-out key",
+                 "feature_automerge_allow_release_branch" in (reason or ""))
     should, reason = decide(_clean_rec(), [], _clean_config(feature_automerge_target_branches=["staging"]),
                             _clean_pr_meta())
     ok &= _check("target branch not the specific one allowlisted -> blocked", should is False)
