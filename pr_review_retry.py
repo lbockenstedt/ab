@@ -9,6 +9,16 @@ built standalone to avoid).
 """
 
 
+# One automatic retry (2 total attempts: the initial pass + 1 retry) with the
+# frontier/opus-tier reviewer is the ceiling for a PR whose second panel seat
+# never fills. Retrying every poll cycle forever just re-burns an LLM call for
+# the same "panel unavailable" outcome — so once this cap is hit, the
+# automatic scan stops re-running the panel and waits for a human to either
+# Approve (accept the single-reviewer result) or click Reprocess (routes.py
+# /api/pr-review/reprocess, which bypasses this cap via force=True).
+MAX_AUTO_QUEUE_RETRIES = 2
+
+
 def is_queued_for_retry_stale(prior_review, head_sha):
     """True when the LAST recorded review for this PR, at the SAME head_sha,
     was a "queue_for_retry" (every skeptical-panel reviewer was transiently
@@ -27,9 +37,18 @@ def is_queued_for_retry_stale(prior_review, head_sha):
 
     A different head_sha means the PR moved since the queued review — that's
     already a fresh review via the normal (not-already_current) path, so this
-    returns False rather than double-triggering."""
+    returns False rather than double-triggering.
+
+    Capped at MAX_AUTO_QUEUE_RETRIES: once queue_retry_count (persisted by
+    app_state.record_pr_review) reaches that ceiling for the current head,
+    this returns False so _review_one treats the existing "panel unavailable"
+    comment as already_current and stops calling the LLM panel every poll —
+    a human must Approve or Reprocess to try again."""
     prior = prior_review or {}
-    return bool(
+    queued = bool(
         (prior.get("panel_status") == "queue_for_retry" or prior.get("panel2_status") == "queue_for_retry")
         and prior.get("head") == head_sha
     )
+    if not queued:
+        return False
+    return int(prior.get("queue_retry_count") or 0) < MAX_AUTO_QUEUE_RETRIES
