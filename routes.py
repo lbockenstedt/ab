@@ -3992,6 +3992,24 @@ async def retry_issue(request: Request):
     return {"status": "triggered", "message": f"Retry started for {issue_id}"}
 
 
+def _issue_is_deleted(exc):
+    """True when *exc* is GitHub's "this issue was deleted" response (410 Gone).
+
+    Deletion is permanent -- unlike a 404, which can be a transient lookup or a
+    permissions artefact, a 410 for an issue means the record is gone forever
+    and no amount of retrying can succeed. The caller therefore drops its own
+    record of the issue and reports the outcome at WARNING as an expected
+    result, rather than at ERROR: an ERROR here is harvested by AppBuilder's own
+    log scanner and filed as a bug report against AppBuilder (ab#197), which it
+    then cannot fix, because there is nothing wrong with it.
+
+    Duck-typed on purpose -- routes.py imports Github but not GithubException."""
+    status = getattr(exc, "status", None)
+    data = getattr(exc, "data", None)
+    msg = str(data.get("message", "")) if isinstance(data, dict) else str(data)
+    return status == 410 or "was deleted" in msg.lower()
+
+
 @router.post("/reopen_issue")
 async def reopen_issue(request: Request):
     """Reopen a AppBuilder-closed issue on GitHub and re-queue it — for when AppBuilder
@@ -4037,6 +4055,24 @@ async def reopen_issue(request: Request):
         # stall the whole app.
         await asyncio.get_event_loop().run_in_executor(None, _do_reopen)
     except Exception as e:  # noqa: BLE001
+        if _issue_is_deleted(e):
+            # Gone for good. Drop our record so the UI stops offering Reopen for
+            # an issue that can never be reopened, and so the closed/resolved
+            # counters stop counting a row that no longer exists.
+            logger.warning(f"Reopen skipped for {issue_id}: the issue was deleted on GitHub — "
+                           f"removing it from AppBuilder's records")
+            try:
+                processed = load_processed()
+                if processed.pop(issue_id, None) is not None:
+                    save_processed(processed)
+                    recompute_issue_counters(processed)
+                    state["processed"] = processed
+            except Exception as e2:  # noqa: BLE001
+                logger.warning(f"Reopen: could not drop record for deleted {issue_id}: {e2}")
+            return JSONResponse(status_code=410, content={
+                "deleted": True,
+                "message": f"{issue_id} was deleted on GitHub and cannot be reopened. "
+                           f"Removed it from AppBuilder's records."})
         logger.error(f"Reopen failed for {issue_id}: {e}")
         return JSONResponse(status_code=500, content={"message": f"Reopen failed: {e}"})
     # Mark the issue "reopened" (rather than deleting its record) so: (a) the base
