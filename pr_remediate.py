@@ -488,7 +488,8 @@ def maybe_auto_remediate(
         try:
             files = feature_allowlist.files_from_pr_files(pr.get_files())
             verdict = feature_allowlist.classify(files, config.get("feature_automerge_allowlist"))
-            if verdict.get("category") == feature_allowlist.DOCS_ONLY:
+            if (verdict.get("category") == feature_allowlist.DOCS_ONLY
+                    and verdict.get("auto_approvable") is True):
                 return False, "documentation-only PR — reviewed but not accuracy-gated"
         except Exception as e:  # noqa: BLE001
             logger.debug("maybe_auto_remediate: docs-only check skipped for %s: %s", key, e)
