@@ -191,6 +191,19 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "panel2_critique": panel2_critique,
                 "panel_avg_confidence": panel_avg_confidence,
                 "composite_verdict": composite_verdict,
+                # Cap on automatic "panel unavailable" retries (pr_review_retry.
+                # is_queued_for_retry_stale reads this). Increments only while the
+                # panel keeps returning queue_for_retry AT THE SAME head; resets to
+                # 0 the moment a real verdict is reached or the head moves, so a
+                # fresh commit or a human Reprocess always gets its own full budget.
+                "queue_retry_count": (
+                    (int(prev.get("queue_retry_count") or 0) + 1)
+                    if (panel_status == "queue_for_retry" or panel2_status == "queue_for_retry")
+                    and prev.get("head") == head_sha
+                    and (prev.get("panel_status") == "queue_for_retry"
+                         or prev.get("panel2_status") == "queue_for_retry")
+                    else (1 if (panel_status == "queue_for_retry" or panel2_status == "queue_for_retry") else 0)
+                ),
                 # Preserve a human's Approve across re-scans; reset if the head moved.
                 "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
                 # Merged is terminal — keep it so the PR stays listed with its badge.
