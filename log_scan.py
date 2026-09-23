@@ -248,7 +248,18 @@ _SELF_SCAN_NOISE = re.compile(
     r'|Manual retry failed for \S+:\d+:'
     r'|Reviewers rejected the fix'
     r'|Held for human review'
-    r'|AI returned no edits after',
+    r'|AI returned no edits after'
+    # (5) provider rate-limiting that the LLM client already fully absorbs.
+    # On the final 429 the client honours Retry-After (_parse_retry_after),
+    # trips the global breaker (_llm_cb_trip, _RATELIMIT_COOLDOWN_SECONDS),
+    # marks the entry unhealthy with a retry_after so _entry_is_unhealthy
+    # excludes it, and fails over to the next candidate. The ERROR line is
+    # operator visibility for an EXTERNAL condition, not a defect -- ten
+    # duplicate issues were filed off it. Anchored to the client's own
+    # "at <endpoint> after N attempts" wording so an unrelated message that
+    # merely contains "429" is still reported.
+    r'|LLM 429 at \S+ after \d+ attempts'
+    r'|LLM HTTPError 429 at \S+',
     re.IGNORECASE,
 )
 

@@ -102,6 +102,16 @@ def main():
         {"module": "ab-core",
          "log": "[ERROR] Manual retry failed for lbockenstedt/lm:440: Reviewers rejected the "
                 "fix after 3 attempt(s) — confidence 57%"},
+        # (5) provider rate-limiting the LLM client already absorbs (Retry-After,
+        # breaker trip, entry backoff, failover to the next candidate).
+        {"module": "ab-core",
+         "log": "2026-08-22 11:03:12 - AppBuilder - ERROR - LLM 429 at "
+                "https://ollama.com/api/chat after 6 attempts."},
+        {"module": "ab-core",
+         "log": "[ERROR] LLM 429 at https://api.githubcopilot.com/chat/completions "
+                "after 4 attempts."},
+        {"module": "ab-core",
+         "log": "[ERROR] LLM HTTPError 429 at https://ollama.com/api/chat. Backing off 12.0s."},
     ]
     real = [
         {"module": "spoke",
@@ -117,6 +127,10 @@ def main():
          "log": "[ERROR] Switch rejected the fix-up VLAN push: insufficient privilege"},
         {"module": "spoke",
          "log": "[ERROR] Manual retry failed for the SNMP walk on 10.0.0.5: timeout"},
+        # A PRODUCT error that merely mentions 429 is not the LLM client's own
+        # handled rate-limit outcome, and must still be reported.
+        {"module": "spoke",
+         "log": "[ERROR] NetBox API returned 429 while pushing prefixes; sync incomplete"},
     ]
 
     kept = fel(noise + real)
@@ -156,7 +170,13 @@ def main():
           any("insufficient privilege" in t for t in kept_texts))
     check("product 'manual retry' error preserved",
           any("SNMP walk" in t for t in kept_texts))
-    check("only the 5 real errors survive", len(kept) == 5)
+    check("handled 429 exhaustion dropped",
+          not any("after 6 attempts" in t or "after 4 attempts" in t for t in kept_texts))
+    check("handled 429 backoff line dropped",
+          not any("LLM HTTPError 429" in t for t in kept_texts))
+    check("product 429 error preserved",
+          any("sync incomplete" in t for t in kept_texts))
+    check("only the 6 real errors survive", len(kept) == 6)
 
     print("RESULT:", "PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
