@@ -2260,6 +2260,12 @@ def ensure_config_defaults(config):
     # satisfy a critique nothing is waiting on. Containment gates (release
     # branch, locks, secrets/Tier-1, boundaries) still apply.
     config.setdefault("feature_automerge_docs_bypass_panel", True)
+    # Opt out of the structural "never auto-merge into main/master" refusal.
+    # OFF by default: merges into the release branch are owner-only unless the
+    # operator deliberately turns this on (rapid-development mode). Enabling it
+    # is NOT sufficient — the branch must also appear in
+    # feature_automerge_target_branches.
+    config.setdefault("feature_automerge_allow_release_branch", False)
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
     # How many times fix_one_pr may regenerate a fix, each retry told exactly why
     # the previous one failed (parse reason / panel critique / verification
@@ -2301,6 +2307,7 @@ async def settings_page(request: Request):
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
     config.setdefault("feature_automerge_docs_bypass_panel", True)
+    config.setdefault("feature_automerge_allow_release_branch", False)
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
     config.setdefault("pr_fix_max_attempts", 3)
     config.setdefault("batch_enabled", False)
@@ -2458,13 +2465,20 @@ async def settings_page(request: Request):
     _am_dev = config.get("dev_branch") or "dev"
     if _am_dev not in _am_chain:
         _am_chain.append(_am_dev)
-    feature_automerge_branch_options = [b for b in _am_chain if b not in _am_release]
+    _am_allow_release = bool(config.get("feature_automerge_allow_release_branch", False))
+    if _am_allow_release:
+        # The opt-out is on, so main/master CAN now take effect — offer them
+        # rather than hiding a choice that is currently real.
+        feature_automerge_branch_options = list(_am_chain)
+    else:
+        feature_automerge_branch_options = [b for b in _am_chain if b not in _am_release]
     feature_automerge_target_branches = parse_branch_names(
         config.get("feature_automerge_target_branches"))
     # Keep any already-configured branch visible even if it isn't in the chain,
     # so opening Settings can never silently drop a value the operator set.
     for _am_b in feature_automerge_target_branches:
-        if _am_b not in feature_automerge_branch_options and _am_b not in _am_release:
+        if _am_b not in feature_automerge_branch_options and (
+                _am_allow_release or _am_b not in _am_release):
             feature_automerge_branch_options.append(_am_b)
     feature_automerge_target_branches_set = set(feature_automerge_target_branches)
 
@@ -3050,6 +3064,12 @@ async def save_settings(request: Request):
     # single most consequential switch in this block. main stays owner-only
     # regardless — pr_review refuses release branches structurally.
     config_data["feature_automerge_require_allowlist"] = data.get("feature_automerge_require_allowlist") == "on"
+    # Opt out of the structural release-branch refusal (rapid-development mode).
+    # Deliberately a separate switch from the branch list below: unlocking the
+    # invariant and choosing the branch stay two distinct acts, so no single
+    # stray edit can put main back in scope.
+    config_data["feature_automerge_allow_release_branch"] = \
+        data.get("feature_automerge_allow_release_branch") == "on"
     _amc = str(data.get("feature_automerge_min_confidence") or "").strip()
     try:
         config_data["feature_automerge_min_confidence"] = max(0.0, min(1.0, float(_amc))) if _amc else 1.0
@@ -3087,8 +3107,12 @@ async def save_settings(request: Request):
     for _b3 in parse_branch_names(_am_branches_raw):
         if _b3 not in _am_branches:
             _am_branches.append(_b3)
-    _am_release_save = {"main", "master", (config_data.get("default_branch") or "main")}
-    _am_branches = [b for b in _am_branches if b not in _am_release_save]
+    # Release branches are stripped unless the operator has explicitly opted
+    # out above — otherwise ticking main could never persist and the knob would
+    # unlock a gate the UI can't actually aim at.
+    if not config_data.get("feature_automerge_allow_release_branch"):
+        _am_release_save = {"main", "master", (config_data.get("default_branch") or "main")}
+        _am_branches = [b for b in _am_branches if b not in _am_release_save]
     config_data["feature_automerge_target_branches"] = list(dict.fromkeys(_am_branches))
 
     # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical

@@ -112,6 +112,28 @@ def main():
                  "not a hardcoded name)",
                  saved.get("feature_automerge_target_branches") == ["dev"])
 
+    # ── the release-branch opt-out persists and unblocks the strip ──────────
+    # Without this, ticking "main" could never survive a save and the new
+    # switch would unlock a gate the operator has no way to aim at.
+    saved = _save(ns, _base_pairs() + [
+        ("feature_automerge_allow_release_branch", "on"),
+        ("feature_automerge_target_branches", "dev"),
+        ("feature_automerge_target_branches", "main"),
+    ])
+    ok &= _check("opt-out posted -> persisted as True",
+                 saved.get("feature_automerge_allow_release_branch") is True)
+    ok &= _check("opt-out ON -> main survives the save alongside dev",
+                 saved.get("feature_automerge_target_branches") == ["dev", "main"])
+
+    # Unchecked box sends nothing at all — the switch must fall back to OFF,
+    # not silently stay on from a previous save.
+    saved = _save(ns, _base_pairs() + [("feature_automerge_target_branches", "dev")],
+                  base_config={"feature_automerge_allow_release_branch": True})
+    ok &= _check("opt-out box unticked -> persisted as False (fails closed)",
+                 saved.get("feature_automerge_allow_release_branch") is False)
+    ok &= _check("opt-out back OFF -> main is stripped again",
+                 saved.get("feature_automerge_target_branches") == ["dev"])
+
     print()
     print("ALL CASES PASSED" if ok else "SOME CASES FAILED")
     return 0 if ok else 1
