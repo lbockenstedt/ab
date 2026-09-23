@@ -225,6 +225,16 @@ def vet_shell_command(cmd, allow_mutation=False):
                            f"to permit it")
     if _SED_INPLACE_RE.search(low):
         return False, "in-place sed edit (sed -i) is a mutation; enable CHAT_AZURE_ALLOW_MUTATION"
+    # Newlines/CRs are command separators the segment split below doesn't
+    # know about, so a leading read-only binary would hide whatever follows.
+    if "\n" in cmd or "\r" in cmd:
+        return False, ("newlines/carriage returns separate commands; enable "
+                       "CHAT_AZURE_ALLOW_MUTATION to permit them")
+    # A lone `&` backgrounds the command and starts another one after it;
+    # only `&&` (already a segment separator below) is not a mutation marker.
+    if re.search(r"(?<!&)&(?!&)", cmd):
+        return False, ("'&' runs a command in the background and starts another; "
+                       "enable CHAT_AZURE_ALLOW_MUTATION to permit it")
     # Split into segments on ; | && || and vet each segment's leading binary.
     segments = re.split(r"\|\||&&|[;|]", cmd)
     for seg in segments:
