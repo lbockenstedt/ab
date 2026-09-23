@@ -200,3 +200,101 @@ def test_skeptical_review_prompt_includes_intent_vs_diff_fidelity():
     assert "INTENT vs DIFF FIDELITY" in src
     assert "Extract the PR's stated INTENT from the description and compare it against the actual DIFF" in src
     assert "Does the diff introduce unstated side effects, scope creep, or contradict the stated intent?" in src
+
+
+class MockHead:
+    def __init__(self, ref):
+        self.ref = ref
+
+
+def test_auto_remediate_skips_promotion_branch():
+    """A promote/* PR must never be rewritten: pushing a remediation commit onto
+    it injects code into qa/main that was never on dev AND moves the head SHA,
+    which resets the review + mergeability so the PR never stabilises."""
+    repo = MockRepo("lbockenstedt/nw")
+    files = [MockFile("src/clean.py", "+ def clean(): pass")]
+    pr = MockPR(title="promote: dev -> qa", body="Automated promotion", number=112, files=files)
+    pr.head = MockHead("promote/dev-to-qa")
+
+    pr_remediate.state["pr_reviews"] = {}
+    called = False
+
+    def dummy_fix(*args, **kwargs):
+        nonlocal called
+        called = True
+        return True, "fixed"
+
+    success, msg = auto_remediate_pr(None, repo, pr, {}, fix_fn=dummy_fix)
+    assert success is False
+    assert "promotion pr" in msg.lower()
+    assert not called, "remediation must not push a commit onto a promotion branch"
+
+
+def test_auto_remediate_skips_backmerge_branch():
+    repo = MockRepo("lbockenstedt/nw")
+    pr = MockPR(number=113, files=[MockFile("a.py", "+x")])
+    pr.head = MockHead("backmerge/main-to-qa")
+    pr_remediate.state["pr_reviews"] = {}
+    success, msg = auto_remediate_pr(None, repo, pr, {}, fix_fn=lambda *a, **k: (True, "fixed"))
+    assert success is False and "promotion pr" in msg.lower()
+
+
+def test_auto_remediate_promotion_skip_is_config_overridable():
+    repo = MockRepo("lbockenstedt/nw")
+    pr = MockPR(number=114, files=[MockFile("a.py", "+x")])
+    pr.head = MockHead("promote/dev-to-qa")
+    pr_remediate.state["pr_reviews"] = {}
+    success, _ = auto_remediate_pr(
+        None, repo, pr, {"pr_auto_remediate_skip_promotion": False},
+        fix_fn=lambda *a, **k: (True, "fixed"))
+    assert success is True
+
+
+def test_audit_warnings_do_not_crash_on_int_findings_count(monkeypatch):
+    """Regression: the persisted record stores "findings" as an int COUNT and the
+    finding LIST in "items". The audit block used to call
+    rec["findings"].extend(...) -> AttributeError: 'int' object has no attribute
+    'extend', which aborted remediation for any PR tripping a contract/perf audit.
+    """
+    repo = MockRepo("lbockenstedt/lm")
+    pr = MockPR(number=1008, files=[MockFile("src/x.py", "+x")])
+
+    warn = {"level": "warning", "title": "Wire contract constant removed", "detail": "d"}
+    adv = {"level": "advisory", "title": "Hot path", "detail": "d"}
+    monkeypatch.setattr(pr_remediate.contract_guard, "audit_wire_contract", lambda f: [warn])
+    monkeypatch.setattr(pr_remediate.perf_auditor, "audit_performance_hotpaths", lambda f: [adv])
+
+    # Exactly the shape app_state.record_pr_review persists.
+    pr_remediate.state["pr_reviews"] = {
+        "lbockenstedt/lm#1008": {
+            "findings": 0, "items": [], "errors": 0, "warnings": 0, "advisories": 0,
+        }
+    }
+
+    success, _ = auto_remediate_pr(None, repo, pr, {}, fix_fn=lambda *a, **k: (True, "fixed"))
+    assert success is True
+
+    rec = pr_remediate.state["pr_reviews"]["lbockenstedt/lm#1008"]
+    assert rec["items"] == [warn, adv]
+    assert rec["findings"] == 2, "findings must stay an int count, not become a list"
+    assert isinstance(rec["findings"], int)
+    assert rec["warnings"] == 1
+    assert rec["advisories"] == 1
+    assert rec["errors"] == 0
+
+
+def test_audit_warnings_preserve_existing_items():
+    repo = MockRepo("lbockenstedt/lm")
+    pr = MockPR(number=1009, files=[MockFile("src/x.py", "+x")])
+    prior = {"level": "error", "title": "prior", "detail": "d"}
+    pr_remediate.state["pr_reviews"] = {
+        "lbockenstedt/lm#1009": {
+            "findings": 1, "items": [prior], "errors": 1, "warnings": 0, "advisories": 0,
+        }
+    }
+    # No audit warnings -> record must be left completely untouched.
+    success, _ = auto_remediate_pr(None, repo, pr, {}, fix_fn=lambda *a, **k: (True, "fixed"))
+    rec = pr_remediate.state["pr_reviews"]["lbockenstedt/lm#1009"]
+    assert success is True
+    assert rec["items"] == [prior]
+    assert rec["findings"] == 1

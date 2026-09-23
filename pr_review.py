@@ -1254,13 +1254,25 @@ def _maybe_auto_merge(gh, repo, pr, config):
         changed_paths = [f.filename for f in pr_files]
         changed_files = feature_allowlist.files_from_pr_files(pr_files)
         marker_match = _FEATURE_DRIVE_MARKER_RE.search(pr.body or "")
+        # GitHub computes mergeability ASYNCHRONOUSLY. Right after a PR opens (or
+        # after any push — including one of our own remediation commits) the first
+        # read is None, and _automerge_decision fails closed on "not True",
+        # latching a misleading "not cleanly mergeable" hold on a PR that is in
+        # fact clean. Resolve the ambiguity before deciding rather than after.
+        mergeable = getattr(pr, "mergeable", None)
+        if mergeable is None:
+            try:
+                from pr_actions import _wait_mergeable
+                mergeable = _wait_mergeable(pr, timeout=10.0)
+            except Exception:  # noqa: BLE001 — best effort; stay fail-closed
+                mergeable = getattr(pr, "mergeable", None)
         pr_meta = {
             "repo": repo.full_name,
             "base_ref": getattr(getattr(pr, "base", None), "ref", None),
             "is_feature_drive": bool(marker_match),
             "draft": bool(getattr(pr, "draft", False)),
             "state": (pr.state or "open"),
-            "mergeable": getattr(pr, "mergeable", None),
+            "mergeable": mergeable,
             # Proves `rec` was actually written for THIS commit (see the
             # head-freshness check in _automerge_decision) — PR #261 review finding.
             "head_sha": getattr(getattr(pr, "head", None), "sha", None),
@@ -1575,47 +1587,136 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             except Exception as e:
                 return False, "Could not check out PR branch %s: %s" % (branch, e)
 
+            # Closed-loop fix generation. This was previously a SINGLE blind
+            # attempt: a parse failure, a panel rejection or a verification
+            # failure each returned immediately, and the reason — which the fix
+            # engine already computes precisely — was flattened into a UI
+            # message and then discarded. fix_engine's ISSUE loop has always fed
+            # that reason back to the model via apply_ai_fix(error_context=...);
+            # the PR path never did, so every "Fix" click regenerated the same
+            # rejected fix from identical inputs and the skeptical panel
+            # rejected it again for the same reason. Mirror the issue loop:
+            # bounded attempts, each told exactly what went wrong last time.
             try:
-                fix_code = apply_ai_fix(path, fix_body, files_override=changed, task_id=lock_id,
-                                        requirements=requirements, used_model_out=used_model_out)
-            except Exception as e:
-                return False, "Fix generation failed: %s" % e
-            success_applied, fixes, confidence = parse_and_apply(fix_code, path)
-            if not success_applied:
-                return False, "AI generated invalid JSON format for the fix."
+                max_attempts = int(config.get("pr_fix_max_attempts", 3) or 1)
+            except (TypeError, ValueError):
+                max_attempts = 3
+            max_attempts = max(1, min(max_attempts, 5))
 
-            review = review_fix(path, fix_body, fixes, task_id=lock_id, builder_n=0, repo=repo, head_sha=head_sha)
-            if isinstance(review, dict) and review.get("status") == "queue_for_retry":
-                _q_reason = review.get("reason") or "reviewers unavailable"
-                return False, f"Reviewer panel could not run ({_q_reason}) — click Fix again shortly."
-            review_conf = review.get("confidence", 0.0) if isinstance(review, dict) else 0.0
-            review_verdict = review.get("verdict", "Reject") if isinstance(review, dict) else "Reject"
-            critique = review.get("critique", "") if isinstance(review, dict) else ""
-            if review_verdict != "Approve":
-                try:
-                    pr.create_issue_comment(
-                        "\U0001F916 **AppBuilder — Fix attempt rejected**\n\nGenerated a fix for the "
-                        "findings above, but the skeptical reviewer panel rejected it (not pushed):"
-                        "\n\n%s" % (critique or "no critique given"))
-                except Exception:  # noqa: BLE001
-                    pass
-                return False, "Reviewer panel rejected the generated fix: %s" % critique
+            error_context = None
+            last_failure = "Fix generation failed."
+            fixes, confidence, review_conf = None, 0.0, 0.0
+            attempt_succeeded = False
 
-            if config.get("qa_enabled", True):
-                try:
-                    prepare_environment(path)
-                    verified, failure_msg = verify_fix(path, repo_full_name, config)
-                except Exception as e:  # noqa: BLE001
-                    verified, failure_msg = False, str(e)
-                if not verified:
+            for attempt in range(1, max_attempts + 1):
+                is_last = attempt == max_attempts
+                if attempt > 1:
+                    # Discard the rejected attempt's edits — every retry must
+                    # start from the PR head, never from a half-applied fix.
                     try:
-                        pr.create_issue_comment(
-                            "\U0001F916 **AppBuilder — Fix attempt failed verification**\n\nA fix was "
-                            "generated and approved by the reviewer panel, but failed verification "
-                            "(not pushed):\n\n%s" % (failure_msg or "unknown failure"))
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return False, "Fix failed verification: %s" % failure_msg
+                        repo_git.git.reset("--hard")
+                        repo_git.git.clean("-fd")
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("fix_one_pr: could not reset worktree for retry: %s", e)
+                        last_failure = "Could not reset worktree for retry: %s" % e
+                        break
+                    logger.info("fix_one_pr: %s#%s retry %s/%s — feedback: %s",
+                                repo_full_name, number, attempt, max_attempts,
+                                (error_context or "")[:200])
+
+                try:
+                    fix_code = apply_ai_fix(path, fix_body, error_context, files_override=changed,
+                                            task_id=lock_id, requirements=requirements,
+                                            used_model_out=used_model_out)
+                except Exception as e:
+                    last_failure = "Fix generation failed: %s" % e
+                    error_context = last_failure
+                    if is_last:
+                        return False, last_failure
+                    continue
+
+                success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                if not success_applied:
+                    # Classify WHY, exactly as the issue loop does. Telling a
+                    # model to "fix its JSON" when the JSON was valid but the
+                    # search anchors missed is what stops retries converging.
+                    _reason = getattr(parse_and_apply, "last_reason", None) or "invalid_json"
+                    _misses = getattr(parse_and_apply, "last_failures", None) or []
+                    if _reason == "edit_anchor_miss":
+                        last_failure = (
+                            "The JSON was valid, but the edits' \"search\" text was not found in the "
+                            "file. Copy the EXACT current file text (byte-for-byte, correct "
+                            "indentation) into each \"search\", or use a larger unique anchor. "
+                            "Anchors that did not match: " + "; ".join(_misses)[:800])
+                    elif _reason == "no_edits":
+                        last_failure = ("The response contained no edits. Return at least one edit "
+                                        "object with \"file\", \"search\" and \"replace\".")
+                    elif _reason == "empty":
+                        last_failure = "The model returned an empty response."
+                    elif _reason == "no_json":
+                        last_failure = ("No JSON object was found in the response. Return ONLY a JSON "
+                                        "object with \"confidence\" and \"edits\".")
+                    else:
+                        last_failure = ("The response was not valid JSON. Return ONLY a single "
+                                        "well-formed JSON object with \"confidence\" and \"edits\".")
+                    error_context = last_failure
+                    if is_last:
+                        return False, last_failure
+                    continue
+
+                review = review_fix(path, fix_body, fixes, task_id=lock_id, builder_n=0, repo=repo, head_sha=head_sha)
+                if isinstance(review, dict) and review.get("status") == "queue_for_retry":
+                    _q_reason = review.get("reason") or "reviewers unavailable"
+                    # The panel being DOWN is not the fix's fault — regenerating
+                    # would burn tokens against the same outage.
+                    return False, f"Reviewer panel could not run ({_q_reason}) — click Fix again shortly."
+                review_conf = review.get("confidence", 0.0) if isinstance(review, dict) else 0.0
+                review_verdict = review.get("verdict", "Reject") if isinstance(review, dict) else "Reject"
+                critique = review.get("critique", "") if isinstance(review, dict) else ""
+                if review_verdict != "Approve":
+                    logger.warning("fix_one_pr: panel REJECTED fix for %s#%s (attempt %s/%s): %s",
+                                   repo_full_name, number, attempt, max_attempts, critique)
+                    last_failure = "Reviewer panel rejected the generated fix: %s" % critique
+                    error_context = ("The skeptical reviewer panel rejected your previous fix. "
+                                     "Address this critique specifically and do not repeat the same "
+                                     "approach:\n%s" % (critique or "no critique given"))
+                    if is_last:
+                        try:
+                            pr.create_issue_comment(
+                                "\U0001F916 **AppBuilder — Fix attempt rejected**\n\nGenerated a fix for the "
+                                "findings above, but the skeptical reviewer panel rejected it after %s "
+                                "attempt(s) (not pushed):\n\n%s" % (max_attempts, critique or "no critique given"))
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return False, last_failure
+                    continue
+
+                if config.get("qa_enabled", True):
+                    try:
+                        prepare_environment(path)
+                        verified, failure_msg = verify_fix(path, repo_full_name, config)
+                    except Exception as e:  # noqa: BLE001
+                        verified, failure_msg = False, str(e)
+                    if not verified:
+                        last_failure = "Fix failed verification: %s" % failure_msg
+                        error_context = ("Your previous fix was approved by review but FAILED "
+                                         "verification:\n%s" % (failure_msg or "unknown failure"))
+                        if is_last:
+                            try:
+                                pr.create_issue_comment(
+                                    "\U0001F916 **AppBuilder — Fix attempt failed verification**\n\nA fix was "
+                                    "generated and approved by the reviewer panel, but failed verification "
+                                    "(not pushed):\n\n%s" % (failure_msg or "unknown failure"))
+                            except Exception:  # noqa: BLE001
+                                pass
+                            return False, last_failure
+                        continue
+
+                attempt_succeeded = True
+                break
+
+            if not attempt_succeeded:
+                return False, last_failure
 
             final_confidence = (confidence + review_conf) / 2
             files_list = ", ".join(fixes.keys())
