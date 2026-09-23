@@ -204,6 +204,24 @@ def get_hub_state():
 #     — ensure the file is valid JSON" (e.g. ab#806); a code edit cannot
 #     fix a corrupt file on disk.
 #
+#  3. Reviewer-panel verdict-parsing chatter. A reviewer reply that isn't
+#     parseable JSON is logged at ERROR/WARNING and then RECOVERED from in the
+#     same call: _review_one retries once against the same candidate with an
+#     explicit re-prompt, and a raised parse error escalates the seat to a
+#     cloud frontier fallback (or the next panel candidate). The panel's
+#     verdict is unaffected. Models answering a "return JSON" prompt in prose
+#     is routine, so each occurrence filed a near-identical issue — ab#191,
+#     #202, #213, #214, #215 and #216 are all the same non-fact.
+#
+#  4. Terminal fix-pipeline OUTCOMES, logged at ERROR by the manual-retry
+#     route. "Reviewers rejected the fix after 3 attempt(s)", "Held for human
+#     review (no model meets this fix's requirements)" and "AI returned no
+#     edits after 3 attempt(s)" are _FAILURE_LABELS values — the pipeline
+#     deciding, correctly and by design, not to ship a fix. The decision is
+#     already recorded on the issue and shown in the status table; filing a
+#     NEW issue about it (ab#198, #199, #203, #210) asks the fixer to fix the
+#     fact that it declined to fix something.
+#
 # The lines are still logged (humans and the Diagnostics view see them); they
 # just no longer seed an auto-fix issue.
 _SELF_SCAN_NOISE = re.compile(
@@ -215,7 +233,22 @@ _SELF_SCAN_NOISE = re.compile(
     r'|No verified fix found after'
     r'|Error reading persistent config'
     r'|Could not save to persistent storage'
-    r'|Critical failure saving config',
+    r'|Critical failure saving config'
+    # (3) reviewer-panel chatter — retried and/or escalated in the same call.
+    r'|Reviewer \([^)]*\) JSON parse failed'
+    r'|returned no parseable verdict'
+    r'|reply had no parseable verdict'
+    r'|deferred — LLM providers cooling down'
+    # (4) terminal pipeline outcomes — already surfaced on the issue and in the
+    # status table. Anchored to AppBuilder's own "<repo>:<issue-number>:"
+    # manual-retry format and to the exact _FAILURE_LABELS wording, NOT to the
+    # bare phrase: a spoke legitimately logs things like "Manual retry failed
+    # for the SNMP walk on 10.0.0.5: timeout", and swallowing that would hide a
+    # real product error. test_self_scan_noise.py pins exactly that case.
+    r'|Manual retry failed for \S+:\d+:'
+    r'|Reviewers rejected the fix'
+    r'|Held for human review'
+    r'|AI returned no edits after',
     re.IGNORECASE,
 )
 

@@ -74,12 +74,49 @@ def main():
                 "/etc/ab/config.json: Expecting value: line 1 column 1 (char 0)"},
         {"module": "ab-core",
          "log": "[ERROR] Critical failure saving config: [Errno 28] No space left on device"},
+        # (3) reviewer-panel verdict chatter — RECOVERED in the same call: the
+        # reply is retried once against the same candidate, and a raised parse
+        # error escalates the seat to a cloud fallback. ab#191/#202/#213/#214/
+        # #215/#216 are six issues asserting the same non-fact.
+        {"module": "ab-core",
+         "log": "2026-09-20 16:42:54 [ERROR] Reviewer (copilot) JSON parse failed "
+                "(Expecting property name enclosed in double quotes: line 1 column 2 "
+                "(char 1)) — raw response: 'The actual file at this commit looks clean'"},
+        {"module": "ab-core",
+         "log": "[ERROR] Reviewer (openrouter/qwen) JSON parse failed (Extra data: line 2)"},
+        {"module": "ab-core",
+         "log": "[WARNING] Reviewer (copilot/claude-opus-5) returned no parseable verdict "
+                "after retry - raw response: 'Looks fine to me.'"},
+        {"module": "ab-core",
+         "log": "[INFO] Reviewer (copilot) reply had no parseable verdict — retrying once"},
+        {"module": "ab-core",
+         "log": "[WARNING] Reviewer (ollama-local) deferred — LLM providers cooling down: 429"},
+        # (4) terminal pipeline OUTCOMES — the decision is already recorded on
+        # the issue and shown in the status table (ab#198/#199/#203/#210).
+        {"module": "ab-core",
+         "log": "2026-09-17 15:36:36 [ERROR] Manual retry failed for lbockenstedt/lm:440: "
+                "Held for human review (no model meets this fix's requirements)"},
+        {"module": "ab-core",
+         "log": "[ERROR] Manual retry failed for lbockenstedt/lm:487: AI returned no edits "
+                "after 3 attempt(s) — The JSON parsed but contained no applicable changes."},
+        {"module": "ab-core",
+         "log": "[ERROR] Manual retry failed for lbockenstedt/lm:440: Reviewers rejected the "
+                "fix after 3 attempt(s) — confidence 57%"},
     ]
     real = [
         {"module": "spoke",
          "log": "2026-08-13 22:50:06 [ERROR] KeyError: 'lookback_minutes' in get_recent_sessions"},
         {"module": "spoke",
          "log": "2026-08-13 22:50:07 [ERROR] Traceback (most recent call last): ZeroDivisionError"},
+        # Discriminators: a PRODUCT error may legitimately mention JSON parsing
+        # or a rejection. Only AppBuilder's OWN reviewer/pipeline wording is
+        # noise, so these must survive — over-filtering would hide real bugs.
+        {"module": "spoke",
+         "log": "[ERROR] JSON parse failed reading /etc/lm/state.json — device sync aborted"},
+        {"module": "spoke",
+         "log": "[ERROR] Switch rejected the fix-up VLAN push: insufficient privilege"},
+        {"module": "spoke",
+         "log": "[ERROR] Manual retry failed for the SNMP walk on 10.0.0.5: timeout"},
     ]
 
     kept = fel(noise + real)
@@ -102,7 +139,24 @@ def main():
           any("KeyError" in t for t in kept_texts))
     check("genuine traceback preserved",
           any("ZeroDivisionError" in t for t in kept_texts))
-    check("only the 2 real errors survive", len(kept) == 2)
+    check("reviewer JSON-parse chatter dropped",
+          not any("Reviewer (copilot) JSON parse failed" in t for t in kept_texts))
+    check("no-parseable-verdict chatter dropped",
+          not any("no parseable verdict" in t for t in kept_texts))
+    check("cooldown deferral dropped",
+          not any("providers cooling down" in t for t in kept_texts))
+    check("terminal pipeline outcomes dropped",
+          not any(t.startswith("2026-09-17") or "Manual retry failed for lbockenstedt" in t
+                  for t in kept_texts))
+    # Over-filtering is the dangerous failure mode: these three read like the
+    # suppressed wording but come from a SPOKE and are genuine product errors.
+    check("product JSON-parse error preserved",
+          any("device sync aborted" in t for t in kept_texts))
+    check("product rejection error preserved",
+          any("insufficient privilege" in t for t in kept_texts))
+    check("product 'manual retry' error preserved",
+          any("SNMP walk" in t for t in kept_texts))
+    check("only the 5 real errors survive", len(kept) == 5)
 
     print("RESULT:", "PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
