@@ -1314,8 +1314,84 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
     raise Exception(f"LLM request to {endpoint} exhausted all {max_retries+1} attempts")
 
 
+def _response_format_from_schema(json_schema):
+    """Translate a JSON-Schema dict into an OpenAI-compatible ``response_format``.
+
+    claude_cli enforces schemas natively via --json-schema, so a claude_cli fix
+    response was VALID BY CONSTRUCTION. Every HTTP provider used to silently
+    drop the caller's json_schema (see _call_provider), leaving the model merely
+    *asked* in prose to "return JSON" — which is why switching the fix engine
+    from claude_cli to Copilot produced the recurring "AI generated invalid JSON
+    format for the fix." failures. Copilot's API is OpenAI-compatible and
+    supports structured outputs, so pass the schema through.
+
+    ``strict`` is deliberately False: strict mode additionally requires
+    ``additionalProperties: false`` on every object and every property listed in
+    ``required``, which AppBuilder's existing schemas do not satisfy. Non-strict
+    still constrains the response to the schema's shape, which is all the
+    downstream json.loads needs.
+    """
+    if not json_schema:
+        return None
+    schema = json_schema
+    if isinstance(schema, str):
+        try:
+            schema = json.loads(schema)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(schema, dict):
+        return None
+    return {"type": "json_schema",
+            "json_schema": {"name": "ab_response", "schema": schema, "strict": False}}
+
+
+# Substrings that mark a 4xx as "this endpoint/model doesn't accept
+# response_format" rather than a real problem with the request.
+_UNSUPPORTED_SCHEMA_HINTS = (
+    "response_format", "json_schema", "structured output", "structured_output",
+    "unsupported_api_for_model", "unsupported parameter", "unknown parameter",
+    "invalid parameter", "not supported",
+)
+
+
+def _post_maybe_structured(endpoint, payload, headers, config, stream, provider, json_schema):
+    """POST via _llm_retry_post, asking for schema-constrained output when a
+    json_schema is supplied.
+
+    Not every model behind an OpenAI-compatible endpoint accepts
+    response_format. Rather than maintaining a per-model capability table (which
+    would go stale the moment a new model ships — exactly how "gpt-5.6-sol"
+    silently broke), this degrades: on a 4xx that looks like an
+    unsupported-parameter complaint, it retries ONCE without response_format,
+    which is precisely the old behaviour. Any other error propagates unchanged.
+    """
+    rf = _response_format_from_schema(json_schema)
+    if not rf or payload.get("tools"):
+        # Tool-calling and forced-JSON are mutually exclusive on most backends;
+        # the tools path has its own structured contract already.
+        return _llm_retry_post(endpoint, payload, headers, config, stream=stream, provider=provider)
+    attempt = dict(payload)
+    attempt["response_format"] = rf
+    try:
+        return _llm_retry_post(endpoint, attempt, headers, config, stream=stream, provider=provider)
+    except requests.exceptions.HTTPError as e:
+        resp = getattr(e, "response", None)
+        status = getattr(resp, "status_code", None)
+        body = ""
+        try:
+            body = (resp.text or "")[:600].lower() if resp is not None else ""
+        except Exception:  # noqa: BLE001
+            body = ""
+        detail = (body or str(e).lower())
+        if status in (400, 404, 422) and any(h in detail for h in _UNSUPPORTED_SCHEMA_HINTS):
+            logger.info("llm: %s/%s rejected response_format — retrying without schema enforcement.",
+                        provider, payload.get("model"))
+            return _llm_retry_post(endpoint, payload, headers, config, stream=stream, provider=provider)
+        raise
+
+
 def _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                    provider_name="openai", extra_headers=None, usage_out=None):
+                    provider_name="openai", extra_headers=None, usage_out=None, json_schema=None):
     """Call an OpenAI-compatible endpoint. Returns text string or tool-call dict.
 
     ``provider_name``/``extra_headers`` let an OpenAI-compatible-but-distinct
@@ -1347,7 +1423,7 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     if tools:
         payload["tools"] = _tools_to_openai(tools)
 
-    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider=provider_name)
+    resp = _post_maybe_structured(endpoint, payload, headers, config, use_stream, provider_name, json_schema)
 
     if not use_stream:
         # A non-streamed request (tools always forces this, but a caller can also
@@ -1914,7 +1990,7 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
                         "on this server, or set 'claude_binary' in Settings.")
 
 
-def _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None):
+def _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None, json_schema=None):
     """Call the GitHub Copilot chat API (OpenAI-compatible). api_key is the stored GitHub
     OAuth token; we exchange it for a short-lived Copilot token and add the editor headers
     Copilot requires. Mirrors _request_openai's response handling."""
@@ -1933,7 +2009,7 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
         payload["max_tokens"] = out_tok
     if tools:
         payload["tools"] = _tools_to_openai(tools)
-    resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="copilot")
+    resp = _post_maybe_structured(endpoint, payload, headers, config, use_stream, "copilot", json_schema)
     if not use_stream:
         # See _request_openai's matching branch: a non-streamed response is ONE
         # JSON object with choices[].message.content, not delta chunks — the SSE
@@ -1981,10 +2057,20 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
 def _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream, task_id, config,
                    repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None,
                    profile="readonly", extra_add_dirs=None, usage_out=None):
-    """Dispatch to the correct provider implementation. The last 6 kwargs
-    (before usage_out) are claude_cli-specific (see _request_claude_cli's
-    docstring) — every other provider ignores them; they are not the generic
-    `tools=` param.
+    """Dispatch to the correct provider implementation.
+
+    ``repo_checkout_path``/``enable_native_tools``/``search_model``/``profile``/
+    ``extra_add_dirs`` remain claude_cli-specific (see _request_claude_cli's
+    docstring); they are not the generic `tools=` param.
+
+    ``json_schema`` is NOT claude_cli-only. claude_cli enforces it natively via
+    --json-schema; OpenAI-compatible providers (Copilot, OpenAI, Groq,
+    OpenRouter, LM Studio) now receive it as ``response_format`` instead of
+    having it silently discarded. Dropping it was why the fix engine's
+    "AI generated invalid JSON format for the fix." failures appeared once the
+    default provider moved off claude_cli — the schema was being passed by
+    fix_engine.apply_ai_fix and thrown away here. Providers still without a
+    structured-output path (anthropic, google, ollama) continue to ignore it.
 
     ``usage_out``, when given a dict, is populated IN PLACE by whichever
     `_request_*` function runs — {"output_tokens", "input_tokens", "source":
@@ -1999,7 +2085,7 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     p = (provider or "openai").lower().strip()
     if _is_copilot(p):
         return _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                                usage_out=usage_out)
+                                usage_out=usage_out, json_schema=json_schema)
     if p == "anthropic":
         return _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
                                   usage_out=usage_out)
@@ -2012,23 +2098,24 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     if p == "groq":
         effective_url = base_url or "https://api.groq.com/openai/v1"
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config,
-                               usage_out=usage_out)
+                               usage_out=usage_out, json_schema=json_schema)
     if p == "openrouter":
         effective_url = base_url or OPENROUTER_BASE_URL
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config,
-                               provider_name="openrouter", extra_headers=OPENROUTER_HEADERS, usage_out=usage_out)
+                               provider_name="openrouter", extra_headers=OPENROUTER_HEADERS, usage_out=usage_out,
+                               json_schema=json_schema)
     if _is_lmstudio(p):
         # LM Studio exposes an OpenAI-compatible API; no auth key required.
         effective_url = _normalize_lmstudio_url(base_url)
         return _request_openai(model, api_key, effective_url, messages, tools, effective_stream, task_id, config,
-                               usage_out=usage_out)
+                               usage_out=usage_out, json_schema=json_schema)
     if p == "claude_cli":
         return _request_claude_cli(model, messages, task_id, config,
                                    repo_checkout_path=repo_checkout_path, json_schema=json_schema,
                                    enable_native_tools=enable_native_tools, search_model=search_model,
                                    profile=profile, extra_add_dirs=extra_add_dirs, usage_out=usage_out)
     return _request_openai(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
-                           usage_out=usage_out)
+                           usage_out=usage_out, json_schema=json_schema)
 
 
 # ============================================================================

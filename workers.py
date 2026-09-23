@@ -22,6 +22,8 @@ import json
 import os
 import py_compile
 import requests
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -666,6 +668,27 @@ def check_for_updates():
                     save_update_state(update_state)
                 return None, f"Update failed: Syntax error detected. Rolled back to {old_commit[:7]}."
 
+            # Dependency sync. install.sh and update.sh both run
+            # `pip install -r requirements.txt`, but self-update previously went
+            # straight from `git pull` to a restart — so a commit that ADDS a
+            # dependency restarted into a process that had never installed it,
+            # producing a silent degradation (or a crash loop) on every
+            # self-updating host. Only runs when requirements.txt actually
+            # changed, so the normal update path stays fast.
+            if _requirements_changed(self_repo, old_commit, new_commit):
+                ok, pip_msg = _sync_dependencies()
+                if not ok:
+                    # Roll back to the last known good commit so the service keeps
+                    # running on code whose dependencies are satisfied. Deliberately
+                    # NOT added to failed_commits: a pip failure is often transient
+                    # (network/index), and permanently blacklisting the commit would
+                    # wedge a perfectly good update forever. The next hourly cycle
+                    # retries it.
+                    logger.error("Self-update: dependency sync failed (%s). Rolling back to %s.",
+                                 pip_msg, old_commit[:7])
+                    self_repo.git.reset("--hard", old_commit)
+                    return None, f"Update failed: dependency install failed ({pip_msg}). Rolled back to {old_commit[:7]}."
+
             try:
                 with open(os.path.join(CONFIG_DIR, "update_pending"), "w") as f:
                     f.write(new_commit)
@@ -684,6 +707,47 @@ def check_for_updates():
     except Exception as e:
         logger.warning(f"Self-update check failed: {e}")
         return None, f"Update check failed: {e}"
+
+def _requirements_changed(self_repo, old_commit, new_commit):
+    """True if requirements.txt differs between the two commits (best-effort:
+    on any git error assume it DID change, so a dependency sync is attempted
+    rather than silently skipped)."""
+    try:
+        changed = self_repo.git.diff("--name-only", old_commit, new_commit)
+        return any(line.strip().endswith("requirements.txt")
+                   for line in (changed or "").splitlines())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Self-update: could not diff requirements.txt (%s); syncing anyway.", e)
+        return True
+
+
+def _sync_dependencies(timeout=600):
+    """Install requirements.txt into the venv this process is running from.
+
+    Uses ``sys.executable -m pip`` so it always targets AppBuilder's own
+    interpreter rather than whatever "pip" happens to be on PATH (the systemd
+    unit runs with a minimal PATH that excludes the venv's bin dir).
+    Returns (ok, message).
+    """
+    req = os.path.join(os.getcwd(), "requirements.txt")
+    if not os.path.isfile(req):
+        return True, "no requirements.txt"
+    logger.info("Self-update: requirements.txt changed — syncing dependencies...")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", req, "-q"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "pip install timed out"
+    except Exception as e:  # noqa: BLE001
+        return False, f"pip install could not run: {e}"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return False, "; ".join(detail[-3:]) or f"pip exited {proc.returncode}"
+    logger.info("Self-update: dependencies synced.")
+    return True, "ok"
+
 
 def updater_worker():
     """Dedicated worker to check for updates every hour."""

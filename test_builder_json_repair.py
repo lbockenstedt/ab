@@ -31,10 +31,10 @@ import json
 import re
 
 _WANT_FUNCS = {"_json_string_spans", "_looks_truncated_json",
-               "_close_truncated_json",
+               "_close_truncated_json", "_robust_json_loads",
                "_enclosing_flat_object", "_flat_object_keys",
                "_repair_missing_object_keys", "_first_json_array_of_strings"}
-_WANT_ASSIGNS = {"_EDIT_OBJECT_KEYS"}
+_WANT_ASSIGNS = {"_EDIT_OBJECT_KEYS", "_JSON_BAD_ESCAPE_RE"}
 
 
 def _load():
