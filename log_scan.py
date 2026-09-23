@@ -395,6 +395,64 @@ def filter_error_logs(logs):
     return kept
 
 
+def _json_string_spans(text):
+    """(start, end) index pairs of every JSON string literal in *text*."""
+    spans, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == '\\':
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    break
+                j += 1
+            spans.append((i, j))
+            i = j + 1
+            continue
+        i += 1
+    return spans
+
+def _first_json_array_of_objects(text):
+    """Find the first JSON array in *text* where all elements are dicts.
+    
+    Replaces a greedy `\[.*\]` DOTALL match which spanned from the first `[`
+    anywhere in the reply to the LAST `]` anywhere in it, producing "Expecting
+    value: line 1 column 2 (char 1)" and "Extra data: line 23 column 1".
+    
+    Returns the list if found, or None if no valid candidate is found.
+    """
+    spans = _json_string_spans(text)
+    ends = {s: e for s, e in spans}
+    i, n = 0, len(text)
+    while i < n:
+        if i in ends:
+            i = ends[i] + 1
+            continue
+        if text[i] == '[':
+            depth, j = 0, i
+            while j < n:
+                if j in ends:
+                    j = ends[j] + 1
+                    continue
+                if text[j] in '[{':
+                    depth += 1
+                elif text[j] in ']}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            val = json.loads(text[i:j + 1])
+                        except Exception:
+                            val = None
+                        if isinstance(val, list) and all(isinstance(x, dict) for x in val):
+                            return val
+                        break
+                j += 1
+        i += 1
+    return None
+
+
 def analyze_logs_for_errors(logs):
     """Uses LLM to identify actionable errors in aggregated logs.
 
@@ -441,50 +499,48 @@ def analyze_logs_for_errors(logs):
                                min_context_tokens=len(prompt) // 4)
         res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.",
                        requirements=reqs)
-        import re
-        match = re.search(r'\[.*\]', res, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group())
-            # Defensive: the LLM might return a single object instead of an array.
-            if isinstance(parsed, dict):
-                logger.warning(f"LLM returned a single JSON object instead of an array for log analysis. Wrapping in list.")
-                parsed = [parsed]
-            if not isinstance(parsed, list):
-                logger.warning(f"LLM returned non-array JSON for log analysis: {type(parsed).__name__}. Discarding.")
-                return []
-            cleaned = []
-            for entry in parsed:
-                if not isinstance(entry, dict):
-                    logger.debug(f"Dropping malformed log-analysis entry (not a dict): {entry}")
-                    continue
-                module_val = entry.get('module')
-                title_val = entry.get('title')
-                body_val = entry.get('body')
-                if not module_val or not str(module_val).strip():
-                    logger.warning(f"Hub log analysis found an actionable error but it's missing a module identifier. Log snippet: {body_val[:200]!r}")
-                    continue
-                if not title_val or not str(title_val).strip():
-                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty title): {entry}")
-                    continue
-                if not body_val or not str(body_val).strip():
-                    logger.debug(f"Dropping malformed log-analysis entry (missing/empty body): {entry}")
-                    continue
+        parsed = _first_json_array_of_objects(res or "")
+        if parsed is None:
+            logger.warning(
+                "Log analysis produced no parseable JSON array of objects; discarding this "
+                f"sweep. Response head: {str(res)[:300]!r}"
+            )
+            return []
+        # _first_json_array_of_objects already guarantees a list whose entries are
+        # all dicts, so the old isinstance(parsed, dict) / non-list guards here are
+        # gone: they existed only because the greedy regex could hand back anything.
+        cleaned = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                logger.debug(f"Dropping malformed log-analysis entry (not a dict): {entry}")
+                continue
+            module_val = entry.get('module')
+            title_val = entry.get('title')
+            body_val = entry.get('body')
+            if not module_val or not str(module_val).strip():
+                logger.warning(f"Hub log analysis found an actionable error but it's missing a module identifier. Log snippet: {body_val[:200]!r}")
+                continue
+            if not title_val or not str(title_val).strip():
+                logger.debug(f"Dropping malformed log-analysis entry (missing/empty title): {entry}")
+                continue
+            if not body_val or not str(body_val).strip():
+                logger.debug(f"Dropping malformed log-analysis entry (missing/empty body): {entry}")
+                continue
 
-                # Try to find the original source entry to preserve full context (host, path, etc.)
-                source_entry = next((log for log in logs if isinstance(log, dict)
-                                   and str(log.get('module')) == str(module_val)
-                                   and str(body_val) in str(log.get('log', ''))), {})
+            # Try to find the original source entry to preserve full context (host, path, etc.)
+            source_entry = next((log for log in logs if isinstance(log, dict)
+                               and str(log.get('module')) == str(module_val)
+                               and str(body_val) in str(log.get('log', ''))), {})
 
-                # Normalise all fields to strings so downstream code never receives None.
-                cleaned.append({
-                    'module': str(module_val),
-                    'title': str(title_val),
-                    'body': str(body_val),
-                    'repo': str(entry.get('repo')) if entry.get('repo') and str(entry.get('repo')).strip() else '',
-                    'source_data': source_entry
-                })
-            return cleaned
-        return []
+            # Normalise all fields to strings so downstream code never receives None.
+            cleaned.append({
+                'module': str(module_val),
+                'title': str(title_val),
+                'body': str(body_val),
+                'repo': str(entry.get('repo')) if entry.get('repo') and str(entry.get('repo')).strip() else '',
+                'source_data': source_entry
+            })
+        return cleaned
     except Exception as e:
         if is_llm_cooldown_error(e):
             logger.warning(f"Log analysis deferred — LLM providers cooling down: {e}")

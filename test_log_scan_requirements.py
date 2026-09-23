@@ -24,9 +24,17 @@ import json
 def _load_ns(call_llm_stub):
     src = open("log_scan.py").read()
     tree = ast.parse(src)
-    node = next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "analyze_logs_for_errors")
-    seg = ast.get_source_segment(src, node)
+    # analyze_logs_for_errors calls _first_json_array_of_objects (which calls
+    # _json_string_spans), and an exec'd function only sees what is exec'd into
+    # its namespace -- omitting either is a NameError at call time, which the
+    # function's broad `except Exception` then swallows into an empty result.
+    _want = ("_json_string_spans", "_first_json_array_of_objects",
+             "analyze_logs_for_errors")
+    nodes = {n.name: n for n in tree.body
+             if isinstance(n, ast.FunctionDef) and n.name in _want}
+    missing = [n for n in _want if n not in nodes]
+    assert not missing, f"missing from log_scan.py: {missing}"
+    seg = "\n\n".join(ast.get_source_segment(src, nodes[n]) for n in _want)
 
     class _NoLog:
         def __getattr__(self, _):
@@ -77,10 +85,10 @@ def main():
     ok &= _check("valid entries kept, malformed (missing title) entries dropped",
                  len(out) == 1 and out[0]["module"] == "m1" and out[0]["title"] == "T")
 
-    # NB: the regex match requires literal [...] brackets, so a bare JSON
-    # object response (no array brackets) never reaches the "wrap single
-    # object" defensive branch below -- pre-existing behavior, unrelated to
-    # this call site's requirements= conversion, left unchanged here.
+    # NB: the extractor only accepts a balanced `[...]`, so a bare JSON object
+    # response (no array brackets) still yields no matches -- unchanged from the
+    # old greedy-regex behaviour, and unrelated to this call site's
+    # requirements= conversion.
     ns_obj = _load_ns(lambda *a, **k: '{"module": "m2", "title": "T2", "body": "B2"}')
     out2 = ns_obj["analyze_logs_for_errors"]([{"module": "m2", "log": "x"}])
     ok &= _check("a bare JSON object (no array brackets) yields no matches (pre-existing behavior)",
