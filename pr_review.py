@@ -1194,13 +1194,25 @@ def _maybe_auto_merge(gh, repo, pr, config):
         changed_paths = [f.filename for f in pr_files]
         changed_files = feature_allowlist.files_from_pr_files(pr_files)
         marker_match = _FEATURE_DRIVE_MARKER_RE.search(pr.body or "")
+        # GitHub computes mergeability ASYNCHRONOUSLY. Right after a PR opens (or
+        # after any push — including one of our own remediation commits) the first
+        # read is None, and _automerge_decision fails closed on "not True",
+        # latching a misleading "not cleanly mergeable" hold on a PR that is in
+        # fact clean. Resolve the ambiguity before deciding rather than after.
+        mergeable = getattr(pr, "mergeable", None)
+        if mergeable is None:
+            try:
+                from pr_actions import _wait_mergeable
+                mergeable = _wait_mergeable(pr, timeout=10.0)
+            except Exception:  # noqa: BLE001 — best effort; stay fail-closed
+                mergeable = getattr(pr, "mergeable", None)
         pr_meta = {
             "repo": repo.full_name,
             "base_ref": getattr(getattr(pr, "base", None), "ref", None),
             "is_feature_drive": bool(marker_match),
             "draft": bool(getattr(pr, "draft", False)),
             "state": (pr.state or "open"),
-            "mergeable": getattr(pr, "mergeable", None),
+            "mergeable": mergeable,
         }
         state_flags = {"paused": bool(state.get("paused")), "blackout": bool(state.get("blackout"))}
         should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags, changed_files)
