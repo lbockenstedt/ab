@@ -314,14 +314,82 @@ async def log_requests(request: Request, call_next):
         logger.debug(f"Response status: {response.status_code} for {request.url}")
         return response
     except Exception as e:
-        logger.exception(f"Request failed: {e}")
+        # This middleware is INNER to catch_exceptions_mid, so it logs first.
+        # Without this guard a malformed client body still produced a full
+        # ERROR + traceback here before the outer handler got to downgrade it,
+        # and the log scanner would file that one instead.
+        if _is_malformed_request_body(e):
+            logger.debug("Request body unparseable on %s %s: %s",
+                         request.method, request.url.path, e)
+        else:
+            logger.exception(f"Request failed: {e}")
         raise e
+
+_MALFORMED_BODY_EXC = tuple()
+try:
+    from starlette.formparsers import MultiPartException
+    _MALFORMED_BODY_EXC += (MultiPartException,)
+except Exception:  # noqa: BLE001
+    pass
+
+try:
+    from starlette.requests import ClientDisconnect
+    _MALFORMED_BODY_EXC += (ClientDisconnect,)
+except Exception:  # noqa: BLE001
+    pass
+
+
+def _is_malformed_request_body(exc):
+    """
+    Determine if an exception represents a malformed client request.
+
+    These are MALFORMED CLIENT REQUESTS, not server faults: the body arriving
+    on the wire was not valid multipart, which is overwhelmingly an internet
+    scanner or a truncated upload. The correct answer is 400 Bad Request.
+    Returning 500 and logging ERROR made AppBuilder's own log scanner harvest
+    the line and file it as a bug against AppBuilder, which cannot be fixed
+    because AppBuilder is not at fault.
+
+    Args:
+        exc: The exception to check.
+
+    Returns:
+        bool: True if the request body was malformed, False otherwise.
+    """
+    if _MALFORMED_BODY_EXC and isinstance(exc, _MALFORMED_BODY_EXC):
+        return True
+
+    if exc is None:
+        return False
+
+    msg = str(exc).lower()
+    substrings = [
+        "did not find cr at end of boundary",
+        "did not find a valid boundary",
+        "missing boundary",
+        "malformed multipart",
+        "can't parse multipart",
+        "client disconnected"
+    ]
+    return any(sub in msg for sub in substrings)
+
 
 @app.middleware("http")
 async def catch_exceptions_mid(request: Request, call_next):
     try:
         return await call_next(request)
     except Exception as e:
+        if _is_malformed_request_body(e):
+            # The CLIENT sent a body we cannot parse. No traceback: it says
+            # nothing about AppBuilder, and at ERROR the log scanner files it
+            # as a bug against AppBuilder (ab#39).
+            logger.warning("Malformed request body on %s %s from %s: %s",
+                           request.method, request.url.path,
+                           getattr(getattr(request, "client", None), "host", "?"), e)
+            return JSONResponse(
+                status_code=400,
+                content={"message": "Malformed request body.", "error": str(e)}
+            )
         tb = traceback.format_exc()
         logger.error(f"UNCAUGHT EXCEPTION: {e}\n{tb}")
         return JSONResponse(

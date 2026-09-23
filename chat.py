@@ -7,6 +7,7 @@ import az_console
 
 from main import (
     CHAT_HISTORY_FILE,
+    _atomic_write_json,
     _chat_lock,
     _task_state_lock,
     call_llm,
@@ -210,8 +211,7 @@ def save_chats(store):
     """Persists the whole multi-conversation store under _chat_lock."""
     with _chat_lock:
         try:
-            with open(CHAT_HISTORY_FILE, "w") as f:
-                json.dump(store, f, indent=2)
+            _atomic_write_json(CHAT_HISTORY_FILE, store)
         except Exception as e:
             logger.error(f"Could not save chats to {CHAT_HISTORY_FILE}: {e}")
 
