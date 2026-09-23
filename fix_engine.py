@@ -336,7 +336,7 @@ def _close_truncated_json(text):
         a truncated one closed into shape would otherwise replace its search
         anchor with nothing."""
         try:
-            parsed = json.loads(candidate)
+            parsed = _robust_json_loads(candidate)
         except (json.JSONDecodeError, ValueError):
             return None
         if not isinstance(parsed, dict):
@@ -3045,14 +3045,26 @@ def parse_and_apply(content, repo_path):
 
     try:
         match = _re.search(r'\{.*\}', content, _re.DOTALL)
-        if not match:
-            # LLM returned prose / "None" / refusal — no JSON object present.
-            # This is a non-error transient failure; caller will retry.
-            logger.debug(f"parse_and_apply: no JSON object in response (first 120 chars: {content[:120]!r})")
-            parse_and_apply.last_reason = "no_json"
-            return False, {}, 0.0
+        if match:
+            raw = match.group()
+        else:
+            # No CLOSED object — but a response that stopped mid-object still
+            # has an opening brace, and fallback 4 below (_close_truncated_json)
+            # exists specifically to rescue that case. Requiring a closing '}'
+            # up front meant a genuinely truncated response never reached that
+            # repair: it was misreported as "no_json" (a transient, no-retry-
+            # hint failure) instead of "truncated_json" (which asks for
+            # smaller edits), making a from-scratch truncation indistinguishable
+            # from the model returning no JSON at all.
+            brace = content.find('{')
+            if brace == -1:
+                # LLM returned prose / "None" / refusal — no JSON object present.
+                # This is a non-error transient failure; caller will retry.
+                logger.debug(f"parse_and_apply: no JSON object in response (first 120 chars: {content[:120]!r})")
+                parse_and_apply.last_reason = "no_json"
+                return False, {}, 0.0
+            raw = content[brace:]
 
-        raw = match.group()
         try:
             data = _robust_json_loads(raw)
         except json.JSONDecodeError:

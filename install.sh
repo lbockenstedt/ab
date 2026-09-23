@@ -239,6 +239,11 @@ Environment=AB_HOST=0.0.0.0
 Environment=AB_PORT=443
 Environment=AB_SSL_CERT=${CERT_FILE}
 Environment=AB_SSL_KEY=${KEY_FILE}
+# The venv's bin dir must lead PATH: tools installed by requirements.txt
+# (notably ruff, used by lint_python's undefined-name pass) live there, and
+# systemd's default PATH does NOT include it — a bare "ruff" would raise
+# FileNotFoundError and silently disable that check.
+Environment=PATH=${INSTALL_DIR}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 # svc_bg binds the privileged 443 without being root (mirrors lm.service's
 # AmbientCapabilities=CAP_NET_BIND_SERVICE). CapabilityBoundingSet drops
 # everything else, so the unit has no other ambient root powers.
@@ -266,6 +271,7 @@ WorkingDirectory=${INSTALL_DIR}
 Environment=AB_PORT=443
 Environment=AB_SSL_CERT=${CERT_FILE}
 Environment=AB_SSL_KEY=${KEY_FILE}
+Environment=PATH=${INSTALL_DIR}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 ExecStart=${INSTALL_DIR}/venv/bin/python3 watchdog.py
 Restart=always
 RestartSec=15
