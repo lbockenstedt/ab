@@ -258,6 +258,60 @@ def test_already_merged_docs_pr_is_idempotent(decide):
 
 
 # ---------------------------------------------------------------------------
+# PR #261 review findings (state-logic panel + broad panel)
+# ---------------------------------------------------------------------------
+
+def test_docs_bypass_refuses_when_record_is_for_a_different_head(decide):
+    """rec["errors"]/["warnings"] being 0 is indistinguishable from "Tier-1
+    never ran" unless the record is proven fresh for the CURRENT head — a
+    stale/mismatched record must not clear the docs bypass."""
+    should, reason = decide(_rec(head="old-sha"), ["README.md"],
+                            _cfg(), _meta(head_sha="new-sha"), changed_files=DOCS)
+    assert should is False
+    assert "no pre-review record" in reason
+
+
+def test_docs_bypass_refuses_when_no_record_exists_yet(decide):
+    """The empty-dict rec a caller falls back to (no record at all) must not
+    be treated as "Tier-1 ran clean"."""
+    should, _ = decide({}, ["README.md"], _cfg(), _meta(head_sha="new-sha"),
+                       changed_files=DOCS)
+    assert should is False
+
+
+def test_docs_bypass_still_clears_when_head_matches(decide):
+    should, _ = decide(_rec(head="abc123"), ["README.md"], _cfg(),
+                       _meta(head_sha="abc123"), changed_files=DOCS)
+    assert should is True
+
+
+def test_docs_bypass_freshness_check_is_a_noop_without_head_sha(decide):
+    """Callers that don't pass pr_meta["head_sha"] (e.g. older/other call
+    sites, and every existing test in this file) keep prior behaviour."""
+    should, _ = decide(_rec(**REJECTED), ["README.md"], _cfg(), _meta(),
+                       changed_files=DOCS)
+    assert should is True
+
+
+def test_docs_bypass_reason_is_honest_when_panel_could_not_run(decide):
+    """Don't claim "reviewed" in the merge reason when the panel(s) never
+    actually ran for this diff — the earlier wording said "reviewed but not
+    accuracy-gated" even when panel_status showed a failure."""
+    should, reason = decide(_rec(panel_status="unavailable", panel2_status="unavailable"),
+                            ["README.md"], _cfg(), _meta(), changed_files=DOCS)
+    assert should is True
+    assert "could not run" in reason
+    assert "reviewed but not accuracy-gated" not in reason
+
+
+def test_docs_bypass_reason_still_says_reviewed_when_panel_ran(decide):
+    should, reason = decide(_rec(**REJECTED), ["README.md"], _cfg(), _meta(),
+                            changed_files=DOCS)
+    assert should is True
+    assert "reviewed but not accuracy-gated" in reason
+
+
+# ---------------------------------------------------------------------------
 # maybe_auto_remediate — don't rewrite docs to satisfy a non-gate
 # ---------------------------------------------------------------------------
 

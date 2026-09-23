@@ -1044,7 +1044,10 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     config: live config (feature_drive_enabled, feature_automerge_*,
             feature_boundaries).
     pr_meta: {"repo": str, "base_ref": str, "is_feature_drive": bool,
-              "draft": bool, "state": "open"|"closed", "mergeable": bool|None}.
+              "draft": bool, "state": "open"|"closed", "mergeable": bool|None,
+              "head_sha": str|None — the PR's current head; when given, must
+              match rec["head"] or this refuses (proves rec was written for
+              THIS commit, not a stale/empty record — see PR #261 review)}.
     state_flags: {"paused": bool, "blackout": bool}.
     """
     state_flags = state_flags or {}
@@ -1099,6 +1102,17 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         return False, "AppBuilder is paused"
     if state_flags.get("blackout"):
         return False, "AppBuilder is in a blackout window"
+
+    # PR #261 review finding (state-logic panel): the docs bypass below infers
+    # "Tier-1 ran and found nothing" from rec.get("errors")/("warnings") being
+    # 0 — which is indistinguishable from "Tier-1 never ran / rec is empty or
+    # stale" (rec defaults to {} at the call site). Require POSITIVE proof the
+    # record was actually written for the CURRENT head before any bypass logic
+    # runs, rather than trusting the caller's "always fresh" convention alone.
+    _head_sha = pr_meta.get("head_sha")
+    if _head_sha and rec.get("head") != _head_sha:
+        return False, ("no pre-review record for the current head yet — Tier-1/panel "
+                        "results are stale or missing, not eligible for auto-merge")
 
     # Documentation-only diffs are REVIEWED but not ACCURACY-GATED (operator
     # policy). A docs edit cannot change runtime behaviour, so holding it
@@ -1171,8 +1185,18 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
             return False, "not on additive auto-approve allowlist: " + verdict.get("reason", "")
 
     if docs_bypass:
-        return True, ("cleared: documentation-only diff — reviewed but not accuracy-gated "
-                      "(panel verdict/confidence not required for docs), no boundary touched")
+        # PR #261 review finding (broad panel): don't claim "reviewed" when the
+        # panel(s) could not actually run for this diff — surfaced in the merge
+        # reason (persisted + shown on the PR) so a failed-panel docs auto-merge
+        # is visibly distinguishable from a normal one, instead of both saying
+        # "reviewed but not accuracy-gated".
+        _panel_ran = not rec.get("panel_status") and not rec.get("panel2_status")
+        _panel_note = ("reviewed but not accuracy-gated" if _panel_ran
+                       else "panel could not run for this diff — Tier-1/boundary/allowlist "
+                            "gates still applied")
+        return True, ("cleared: documentation-only diff — %s "
+                      "(panel verdict/confidence not required for docs), no boundary touched"
+                      % _panel_note)
 
     score = min(conf1, conf2)
     return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
@@ -1237,6 +1261,9 @@ def _maybe_auto_merge(gh, repo, pr, config):
             "draft": bool(getattr(pr, "draft", False)),
             "state": (pr.state or "open"),
             "mergeable": getattr(pr, "mergeable", None),
+            # Proves `rec` was actually written for THIS commit (see the
+            # head-freshness check in _automerge_decision) — PR #261 review finding.
+            "head_sha": getattr(getattr(pr, "head", None), "sha", None),
         }
         state_flags = {"paused": bool(state.get("paused")), "blackout": bool(state.get("blackout"))}
         should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags, changed_files)
