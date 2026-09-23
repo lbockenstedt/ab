@@ -49,11 +49,23 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
                 carried = prev.get("stream") or ""
                 if carried:
                     carried = carried.rstrip() + f"\n\n── {task_name} ──\n"
+                # Total elapsed must span the WHOLE job, not the current sub-step:
+                # the same task_id is re-started for each phase (Triaging → Fix
+                # Attempt → Reviewing → Verifying), and resetting start_time here
+                # is why the UI's timer read ~"0h 0m 0s" forever.
+                started = prev.get("start_time") or datetime.now()
+                # The step describes work INSIDE a phase, so it only survives a
+                # re-start of the same phase; a new phase name starts blank
+                # rather than showing the previous phase's last step.
+                carried_step = prev.get("step") or "" if prev.get("name") == task_name else ""
                 state["active_tasks"][task_id] = {
                     "name": task_name,
-                    "start_time": datetime.now(),
+                    "start_time": started,
+                    # When the CURRENT phase began, so the UI can show both.
+                    "phase_start": datetime.now(),
                     "stream": carried,
                     "kind": kind,
+                    "step": carried_step,
                 }
             logger.info(f"Task started: {task_id} - {task_name}")
         elif action == "end":
@@ -66,6 +78,27 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
 
 
 _PR_REVIEWS_MAX = 100
+
+
+def set_task_step(task_id, step):
+    """Record a human-readable "what the system is doing right now" line on an
+    active task, for the UI's Active Tasks card.
+
+    update_task_state's name covers the PHASE; this covers the step inside it.
+    Needed because the card otherwise derives its one-liner from the tail of the
+    task's streamed LLM reasoning, which leaves every non-LLM stage (static
+    parity/secrets checks, GitHub API calls, cloning, test runs) showing nothing
+    at all. No-op for an unknown/finished task; never raises.
+    """
+    if not task_id:
+        return
+    try:
+        with _task_state_lock:
+            task = state["active_tasks"].get(task_id)
+            if task is not None:
+                task["step"] = str(step)[:200]
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"set_task_step failed for task_id={task_id!r}: {e}")
 
 
 def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None, review2=None,

@@ -953,11 +953,17 @@ async def get_task_details(task_id: str = None):
 
         task = state["active_tasks"][task_id]
         duration = datetime.now() - task["start_time"]
+        # task["step"] is the explicit "doing X right now" line (set_task_step);
+        # the streamed-reasoning tail is only the fallback for LLM-only stages.
+        current_step = task.get("step") or _current_step(task.get("stream"))
 
         return {
             "status": state["status"],
             "task": task["name"],
             "duration": _duration_str(duration.total_seconds()),
+            "elapsed_seconds": int(duration.total_seconds()),
+            "phase": task["name"],
+            "step": current_step,
             "stream": task["stream"]
         }
 
@@ -968,12 +974,19 @@ async def get_task_details(task_id: str = None):
     tasks = {}
     for tid, task in state["active_tasks"].items():
         start_time = task.get("start_time") or now
+        # phase_start tracks the CURRENT sub-step; start_time spans the whole job.
+        phase_start = task.get("phase_start") or start_time
+        current_step = task.get("step") or _current_step(task.get("stream"))
         tasks[tid] = {
             "name": task.get("name", "Unknown Task"),
             "kind": task.get("kind", "scan"),
             "start_time": start_time.isoformat(),
             "duration": _duration_str((now - start_time).total_seconds()),
-            "current_step": _current_step(task.get("stream")),
+            "elapsed_seconds": int((now - start_time).total_seconds()),
+            "phase_duration": _duration_str((now - phase_start).total_seconds()),
+            "step": current_step,
+            # Retained under its original name for the existing dashboard JS.
+            "current_step": current_step,
         }
 
     return {
