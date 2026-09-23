@@ -1420,16 +1420,27 @@ def _post_maybe_structured(endpoint, payload, headers, config, stream, provider,
     except requests.exceptions.HTTPError as e:
         resp = getattr(e, "response", None)
         status = getattr(resp, "status_code", None)
+        # "" means two very different things and they must not be conflated:
+        # the server genuinely returned an empty body (opaque — a retry is the
+        # whole point), or we could not READ the body (decode error, connection
+        # reset mid-read). In the second case we know nothing about the
+        # rejection, so treating it as opaque fires the schema-free retry that
+        # this function's docstring specifically warns costs double and fails
+        # identically. Only a successful read may be judged opaque.
         body = ""
+        body_readable = False
         try:
             body = (resp.text or "")[:600].lower() if resp is not None else ""
+            body_readable = resp is not None
         except Exception:  # noqa: BLE001
             body = ""
+            body_readable = False
         detail = (body or str(e).lower())
+        uninformative = body_readable and _is_uninformative_4xx_body(body)
         if status in (400, 404, 422) and (
-            any(h in detail for h in _UNSUPPORTED_SCHEMA_HINTS) or _is_uninformative_4xx_body(body)
+            any(h in detail for h in _UNSUPPORTED_SCHEMA_HINTS) or uninformative
         ):
-            if _is_uninformative_4xx_body(body):
+            if uninformative:
                 logger.info("llm: %s/%s had uninformative 4xx body — retrying without schema enforcement.",
                             provider, payload.get("model"))
             else:
