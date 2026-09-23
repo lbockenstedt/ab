@@ -174,8 +174,11 @@ def test_custom_allowlist_seats_only_that_model():
     assert _models(panel) == ["gemini-3.7-flash"]
 
 
-# ---- 3b. _select_review_panel local Ollama backfill ----
-def test_local_backfill_reaches_minimum_and_stops_there():
+# ---- 3b. _select_review_panel does NOT auto-backfill with local Ollama ----
+def test_local_candidates_are_never_auto_backfilled():
+    # Local Ollama is only ever seated when the operator explicitly adds it to
+    # the allowlist -- it must never be auto-inserted just because the panel
+    # is short. Only the allowlisted frontier candidate is seated here.
     cands = [
         _cand("copilot", "claude-opus-5", tier="frontier"),
         _cand("ollama", "qwen-something"),
@@ -184,9 +187,21 @@ def test_local_backfill_reaches_minimum_and_stops_there():
     ]
     ns = _engine(cands)
     panel = ns["_select_review_panel"]({}, builder_n=0)
-    assert _models(panel)[0] == "claude-opus-5"
-    assert len(panel) == 2  # _REVIEW_PANEL_MIN — the 3rd local candidate is not seated
-    assert panel[1]["provider"] in ("ollama", "ollama2")
+    assert _models(panel) == ["claude-opus-5"]
+    assert all(c["provider"] not in ("ollama", "ollama2") for c in panel)
+
+
+def test_local_candidate_is_selectable_when_explicitly_allowlisted():
+    # An operator who explicitly allowlists a local model gets it seated like
+    # any other candidate -- the policy blocks auto-backfill, not opt-in use.
+    cands = [
+        _cand("copilot", "claude-opus-5", tier="frontier"),
+        _cand("ollama", "qwen-something"),
+    ]
+    ns = _engine(cands)
+    panel = ns["_select_review_panel"](
+        {"pr_review_panel_allowlist": ["claude-opus-5*", "qwen-something"]}, builder_n=0)
+    assert set(_models(panel)) == {"claude-opus-5", "qwen-something"}
 
 
 def test_local_backfill_does_not_run_when_frontier_alone_reaches_minimum():
@@ -207,19 +222,22 @@ def test_no_local_candidates_leaves_panel_short_no_crash():
     panel = ns["_select_review_panel"]({}, builder_n=0)
     assert _models(panel) == ["claude-opus-5"]
     warns = [m for lvl, m in log.records if lvl == "warning"]
-    assert any("only 1 of 2 reviewer seat(s) filled (frontier allowlist):" in m for m in warns)
+    assert any("only 1 of 2 reviewer seat(s) filled (frontier allowlist, no weaker-model backfill):" in m
+               for m in warns)
     assert not any("local Ollama backfill" in m for m in warns)
 
 
-def test_short_panel_with_local_backfill_logs_both_clauses():
-    # 0 frontier candidates, but 1 local candidate available: panel has 1 local reviewer (< 2 minimum)
+def test_short_panel_with_only_local_candidates_seats_none():
+    # 0 frontier (allowlisted) candidates; the 1 local candidate is not
+    # allowlisted, so it is not auto-seated and the panel is empty.
     cands = [_cand("ollama", "qwen-local")]
     log = _RecLog()
     ns = _engine(cands, logger=log)
     panel = ns["_select_review_panel"]({}, builder_n=0)
-    assert _models(panel) == ["qwen-local"]
+    assert _models(panel) == []
     warns = [m for lvl, m in log.records if lvl == "warning"]
-    assert any("only 1 of 2 reviewer seat(s) filled (frontier allowlist + local Ollama backfill):" in m for m in warns)
+    assert any("only 0 of 2 reviewer seat(s) filled (frontier allowlist, no weaker-model backfill):" in m
+               for m in warns)
 
 
 # ---- 3c. _cloud_frontier_fallback ----

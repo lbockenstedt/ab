@@ -1775,6 +1775,23 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
                                  # own model can also be picked as a reviewer.
             logger.debug(f"_select_review_panel: could not resolve builder slot {builder_n}: {e}")
 
+    _FAMILY_KEYWORDS = (
+        ("anthropic", ("claude", "opus", "sonnet", "haiku")),
+        ("openai", ("gpt", "o1-", "o3-", "o4-")),
+        ("google", ("gemini",)),
+        ("xai", ("grok",)),
+    )
+
+    def _vendor_family(model):
+        """Best-effort vendor family from a model id, used only to diversify the
+        review panel across vendors (e.g. one Anthropic + one OpenAI reviewer
+        instead of two Anthropic ones) -- not a capability gate."""
+        m = (model or "").lower()
+        for family, needles in _FAMILY_KEYWORDS:
+            if any(n in m for n in needles):
+                return family
+        return "other"
+
     panel = []
     for _ in range(max_reviewers):
         # Skeptical reviewer: demand a genuinely strong model (large-capability
@@ -1785,54 +1802,48 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
         # is relaxed to seat every allowlisted model the registry doesn't tag large.)
         reqs = LlmRequirements(complexity="small" if patterns else "large",
                                needs_structured_output=True, exclude_models=tuple(excluded))
-        sel = select_model(reqs, candidates, perf)
+        pool = candidates
+        if panel:
+            # Prefer a reviewer from a vendor family not already seated: two
+            # reviewers from the same vendor share that vendor's blind spots,
+            # which weakens the whole point of a cross-check panel. Only
+            # narrow the pool when a different-family candidate is actually
+            # available -- otherwise seating a same-family second opinion
+            # still beats leaving the seat empty.
+            seated_families = {_vendor_family(c.get("model")) for c in panel}
+            diverse_pool = [c for c in candidates
+                            if c["key"] not in excluded and _vendor_family(c.get("model")) not in seated_families]
+            if diverse_pool:
+                pool = diverse_pool
+        sel = select_model(reqs, pool, perf)
+        if sel is None and pool is not candidates:
+            # The vendor-diversity-preferred pool had no qualifying candidate
+            # (e.g. only weaker models remained in the other families) --
+            # retry against the full pool so a same-family strong reviewer
+            # still gets seated instead of leaving the slot empty.
+            sel = select_model(reqs, candidates, perf)
+            pool = candidates
         if sel is None:
             break
-        matched = next((c for c in candidates if c["key"] == sel.key), None)
+        matched = next((c for c in pool if c["key"] == sel.key), None)
         if matched is None:
             break
         panel.append(matched)
         excluded.add(sel.key)
 
     if patterns:
-        # Never backfill a weaker (non-local, non-allowlisted) model to reach the minimum.
+        # Frontier-only policy: NEVER backfill a weaker or unlisted model to reach
+        # the minimum, local Ollama included -- a local model is only ever seated
+        # when the operator has explicitly added it to the allowlist above (it is
+        # then just another allowlisted candidate in `candidates`, picked by the
+        # loop like any other). This only logs when the allowlist alone falls
+        # short; it never substitutes anything in its place.
         _ids = [c.get("model") for c in panel]
         logger.info("review panel (allowlist): seated %s", _ids)
         if len(panel) < _REVIEW_PANEL_MIN:
-            # The frontier allowlist alone couldn't reach the minimum -- self-hosted
-            # Ollama (ollama/ollama2, NOT ollama_cloud) is trusted enough to fill the
-            # remaining slot(s) before the panel gives up on a second opinion.
-            local_candidates = [c for c in llm_client._enumerate_candidates(config)
-                                if _is_local_provider(c.get("provider")) and c.get("key") not in excluded]
-            _before = len(panel)
-            for fallback_complexity in ("medium", "small"):
-                while len(panel) < _REVIEW_PANEL_MIN:
-                    reqs = LlmRequirements(complexity=fallback_complexity, needs_structured_output=True,
-                                           exclude_models=tuple(excluded))
-                    sel = select_model(reqs, local_candidates, perf)
-                    if sel is None:
-                        break
-                    matched = next((c for c in local_candidates if c["key"] == sel.key), None)
-                    if matched is None:
-                        break
-                    panel.append(matched)
-                    excluded.add(sel.key)
-            if len(panel) > _before:
-                logger.info("review panel (allowlist): backfilled %d local Ollama reviewer(s): %s",
-                            len(panel) - _before, [c.get("model") for c in panel[_before:]])
-            _ids = [c.get("model") for c in panel]  # refresh so the warning below reflects the backfill
-        if len(panel) < _REVIEW_PANEL_MIN:
-            # _ids may now include a local-Ollama backfill seat (still short of the
-            # minimum) alongside any frontier seats - never call a seated local model
-            # "frontier" here, that's exactly the state this warning exists to flag.
-            if len(panel) > _before:
-                logger.warning("review panel: only %d of %d reviewer seat(s) filled (frontier "
-                               "allowlist + local Ollama backfill): %s",
-                               len(panel), _REVIEW_PANEL_MIN, _ids)
-            else:
-                logger.warning("review panel: only %d of %d reviewer seat(s) filled (frontier "
-                               "allowlist): %s",
-                               len(panel), _REVIEW_PANEL_MIN, _ids)
+            logger.warning("review panel: only %d of %d reviewer seat(s) filled (frontier "
+                           "allowlist, no weaker-model backfill): %s",
+                           len(panel), _REVIEW_PANEL_MIN, _ids)
         return panel
 
     # Multiple opinions whenever possible: a single reviewer is one opinion, and
