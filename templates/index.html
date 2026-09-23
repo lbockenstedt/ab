@@ -1314,6 +1314,8 @@
                                             <input type="checkbox" onchange="toggleEntryEnabled('{{ entry.id }}', this.checked)" {{ 'checked' if entry.enabled != False else '' }} class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
                                             on
                                         </label>
+                                        <span id="entry-test-result-{{ entry.id }}" class="text-[10px] px-1.5 py-0.5 rounded font-mono"></span>
+                                        <button type="button" onclick="testEntry('{{ entry.id }}')" id="entry-test-btn-{{ entry.id }}" class="text-slate-400 hover:text-slate-700 text-xs px-1" title="Send a real test prompt to this model and measure response time + tok/s">▶ Test</button>
                                         <button type="button" onclick="editEntry('{{ entry.id }}')" class="text-slate-400 hover:text-slate-700 text-xs px-1" title="Edit">✏</button>
                                         <button type="button" onclick="deleteEntry('{{ entry.id }}')" class="text-red-400 hover:text-red-600 text-xs font-bold px-1">✕</button>
                                     </div>
@@ -5380,6 +5382,41 @@
             const resp = await fetch(`/api/llm/entries/${entryId}`, {method: 'DELETE'});
             if ((await resp.json()).status === 'ok') location.reload();
             else showToast('Failed to delete entry.', 'error');
+        }
+
+        async function testEntry(id) {
+            // Sends ONE real prompt straight to this candidate (bypassing the
+            // picker) — proves the model actually completes a request, not just
+            // that the provider endpoint is reachable (connectivity_worker's
+            // /models ping can't catch a model-specific 400 like gpt-5.6-sol's).
+            const btn = document.getElementById(`entry-test-btn-${id}`);
+            const badge = document.getElementById(`entry-test-result-${id}`);
+            if (!btn || !badge) return;
+            btn.disabled = true;
+            btn.textContent = '… testing';
+            badge.className = 'text-[10px] px-1.5 py-0.5 rounded font-mono';
+            badge.textContent = '';
+            try {
+                const resp = await fetch(`/api/llm/entries/${id}/test`, {method: 'POST'});
+                const data = await resp.json();
+                if (data.ok) {
+                    const tps = data.tps != null ? `, ${data.tps} tok/s` : '';
+                    badge.className = 'text-[10px] px-1.5 py-0.5 rounded font-mono bg-green-100 text-green-700';
+                    badge.textContent = `✓ ${data.latency_ms}ms${tps}`;
+                    badge.title = data.response || '';
+                } else {
+                    badge.className = 'text-[10px] px-1.5 py-0.5 rounded font-mono bg-red-100 text-red-700';
+                    badge.textContent = `✗ ${data.latency_ms}ms`;
+                    badge.title = data.error || 'Test failed';
+                }
+            } catch (e) {
+                badge.className = 'text-[10px] px-1.5 py-0.5 rounded font-mono bg-red-100 text-red-700';
+                badge.textContent = '✗ error';
+                badge.title = String(e);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '▶ Test';
+            }
         }
 
         async function toggleEntryEnabled(id, enabled) {

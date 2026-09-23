@@ -3416,6 +3416,57 @@ async def delete_llm_entry(entry_id: str):
     return {"status": "ok"}
 
 
+_TEST_ENTRY_PROMPT = [{"role": "user", "content":
+    "Reply with exactly this line and nothing else: AppBuilder model test OK"}]
+
+
+@router.post("/api/llm/entries/{entry_id}/test")
+async def test_llm_entry(entry_id: str):
+    """Send ONE real prompt to a single configured entry and report whether it
+    actually completes, plus wall-clock latency and tokens/sec.
+
+    connectivity_worker's periodic probe only confirms the PROVIDER endpoint is
+    reachable (e.g. a bare /models list) — it does not confirm that THIS
+    specific model serves a real chat completion. That gap is exactly how
+    gpt-5.6-sol sat "online" while every real reviewer call 400'd with
+    unsupported_api_for_model. This is an on-demand, per-model equivalent a
+    human can trigger from Settings.
+
+    Routes through llm_client._call_provider_timed directly (bypassing the
+    capability/cost picker and any credit/rate/health cooldown) so it always
+    tests the EXACT candidate the operator picked, whether or not the picker
+    would currently select it — and reuses the same wire-latency + tok/s
+    telemetry _call_provider_timed already records for every real call, so a
+    manual test also refreshes the perf numbers shown elsewhere in Settings."""
+    import llm_client
+    config = load_config()
+    match = next(((eid, provider, api_key, model, base_url)
+                  for eid, provider, api_key, model, base_url, _rpm in llm_client._iter_configured_endpoints(config)
+                  if eid == entry_id), None)
+    if match is None:
+        return JSONResponse(status_code=404, content={"error": "entry not found or disabled"})
+    _eid, provider, api_key, model, base_url = match
+    no_key_needed = (llm_client._is_ollama(provider) or llm_client._is_lmstudio(provider)
+                     or (provider or "").lower().strip() == "claude_cli")
+    if not model or (not api_key and not no_key_needed):
+        return JSONResponse(status_code=400, content={"error": "entry is missing a model or credential"})
+
+    def _run():
+        t0 = time.monotonic()
+        try:
+            text = llm_client._call_provider_timed(
+                provider, model, api_key, base_url, _TEST_ENTRY_PROMPT, None, False, None, config)
+            latency_ms = (time.monotonic() - t0) * 1000.0
+            key = llm_client._model_key(provider, base_url, model)
+            perf = llm_client.get_llm_perf_snapshot().get(key) or {}
+            return {"ok": True, "response": str(text or "")[:300], "latency_ms": round(latency_ms),
+                    "tps": round(perf["tps"], 1) if perf.get("tps") else None}
+        except Exception as e:  # noqa: BLE001 — reported to the caller, not raised
+            return {"ok": False, "error": str(e)[:500], "latency_ms": round((time.monotonic() - t0) * 1000.0)}
+
+    return await asyncio.to_thread(_run)
+
+
 @router.get("/api/llm/config")
 async def get_llm_config():
     """Return current vault credentials (keys redacted) and entries (keys redacted)."""

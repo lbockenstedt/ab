@@ -1,6 +1,42 @@
-# 🤖 AppBuilder
+# 🤖 AppBuilder — Autonomous Defect Remediation & Audit Spoke (Lab Manager Module)
 
-An automated GitHub issue fixer that polls repositories for the `automated-fix` label, generates code fixes using local or cloud LLMs, and synchronizes changes with an infrastructure API.
+**AppBuilder (`ab`)** is an autonomous GitHub issue and Pull Request auditor, defect remediation engine, and code quality orchestrator. It continuously monitors fleet repositories, performs multi-panel code reviews, generates automated fixes via local GPU and cloud LLMs, and verifies changes against comprehensive test suites before promotion.
+
+See [`docs/ab.md`](docs/ab.md) for the complete architecture reference and [`docs/architecture-topology.md`](docs/architecture-topology.md) for fleet topology.
+
+## Core Capabilities & Architecture
+
+1. **Dual-Panel Review Engine (`reviewers.py`):**
+   - **Skeptical Review Panel (`### 🧠 Skeptical review (panel)`):** Deep adversarial audit examining PR intent, scope creep, unintended regressions, missing tests, and contract violations.
+   - **State-Logic & Control-Flow Panel (`### 🔀 State-logic / control-flow review (panel)`):** Formal verification of asynchronous state transitions, race conditions, error recovery, idempotency, and rollback handling.
+   - **Composite Scoring:** Combines panel verdicts into a deterministic composite recommendation (`Recommendation: APPROVE` or `Recommendation: DENY`).
+2. **Automated PR Fix Loop (`pr_fix_loop.py`):**
+   - Scans active PRs across all 16 fleet repositories.
+   - Parses AppBuilder panel rejections and extracts complete defect specifications.
+   - Penalizes failing models with rework penalties in the native model reliability registry (`reliability.db`).
+   - Dispatches targeted remediation tasks to the best replacement workers.
+3. **Model Router & Reliability Database (`model_router.py` / `router.py`):**
+   - Dynamically selects workers across local GPU (Ollama Apple M4 Max), Anthropic Claude, OpenAI, and Google Gemini based on capability tiers, latency, and real-world reliability scores.
+   - Implements an amplified rework penalty ($2\times$) and a 45-minute cooldown for repeated model failures.
+4. **Twin Repository Synchronization (`twin_sync.py`):**
+   - Maintains real-time parity across twin repository mirrors with automated bidirectional sync and branch policy enforcement.
+5. **Deterministic Tier-1 Linters:**
+   - **`check_tooltips.py`:** Zero-LLM deterministic UI tooltip verification ensuring all interactive HTML/JS controls carry descriptive `title=` attributes.
+   - **`secrets_scan.py`:** Pre-review regex scan blocking accidental leaks of credentials, keys, or tokens.
+
+## Agent & Spoke Commands Reference
+
+AppBuilder operates as an autonomous worker and optionally as a connected hub agent (`module_type = "agent"`):
+
+| Command | Direction | Payload | Description |
+| :--- | :--- | :--- | :--- |
+| `APPROVAL_REQUIRED` | Inbound from Hub | `{"request_id": "...", ...}` | Prompts operator approval for sensitive actions |
+| `APPROVED` | Inbound from Hub | `{"request_id": "..."}` | Continues execution of an approved action |
+| `DENIED` | Inbound from Hub | `{"request_id": "..."}` | Aborts denied action execution |
+| `SET_LOG_LEVEL` | Inbound from Hub | `{"level": "DEBUG\|INFO"}` | Dynamically adjusts logging verbosity |
+| `GET_VERSION` | Inbound from Hub | `{}` | Returns current AppBuilder engine version |
+| `GET_LOGS` | Outbound to Hub | `{"spoke_id": "...", "lines": N}` | Requests aggregated spoke logs from the hub |
+| `TRIGGER_ALL_UPDATES` | Outbound to Hub | `{}` | Broadcasts update signals across connected spokes |
 
 <!-- INSTALLERS:START -->
 ## Installation
@@ -23,69 +59,23 @@ curl -sSL https://raw.githubusercontent.com/lbockenstedt/ab/main/install.sh | HU
 
 | Argument | Purpose |
 | :--- | :--- |
-| *(positional 1)* | Hub WebSocket URL. A bare host is fine — the agent normalizes it to `wss://<host>:443/ws/spoke`. |
-
-**Environment overrides:**
-
-| Variable | Purpose |
-| :--- | :--- |
-| `HUB_WS_URL` | Same as the positional argument. |
-| `HUB_QUERY_URL` | Hub WebUI URL, used for approvals and as the log fallback. Derived as `https://<host>` when unset. |
-| `IP_FOR_CERT` | SAN baked into the self-signed WebUI certificate. Default `127.0.0.1`. |
+| `HUB_WS_URL` | Hub WebSocket URL. |
+| `HUB_QUERY_URL` | Hub WebUI URL, used for approvals and log fallback. |
+| `IP_FOR_CERT` | SAN for self-signed WebUI certificate (default `127.0.0.1`). |
 
 Installs to `/opt/ab`, config in `/etc/ab`, log at `/var/log/ab.log`.
-
-**The WebUI requires a login.** On first visit you are sent to `/setup-admin` to
-create the initial account; every account is a full admin. Locked out:
-
-```bash
-python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; auth.set_password('user','newpass')"
-```
 <!-- INSTALLERS:END -->
-
-## 🌟 Features
-- **Hybrid LLM**: Local-first (MacBook/Proxmox) with automatic failover to Cloud Ollama.
-- **WebUI Dashboard**: Real-time status, Heartbeat monitoring, and Settings management.
-- **Git Workflow**: Automated cloning, fixing, and pushing.
-- **Direct Commit**: Support for "Trusted Repositories" that allow direct pushes to the main branch.
-- **Infra Sync**: Triggers an external API update after every fix.
-- **Auto-Update**: Automatically pulls the latest version of the bot from GitHub every hour.
-
-## 🛠️ Setup & Configuration
-1. Run the installer above.
-2. Visit `http://<LXC-IP>:8000` to access the dashboard.
-3. Navigate to the **Settings** page to configure your API tokens, LLM endpoints, and repository lists. No manual CLI editing of config files is required.
 
 ## 🔀 LLM Router Proxy (point Claude Code at AppBuilder)
 
-AppBuilder exposes an **Anthropic Messages API-compatible** endpoint at `/v1/messages`
-on its normal listener. Any Anthropic client — notably **Claude Code** — can send
-requests to it, and AppBuilder routes each one to the **best available LLM for the job**
-using its capability/cost-aware model selection (the same routing the fix engine uses).
-Tool use, streaming (`stream: true`), and `system` prompts are supported.
+AppBuilder exposes an **Anthropic Messages API-compatible** endpoint at `/v1/messages` on its normal listener. Any Anthropic client — notably **Claude Code** — can send requests to it, and AppBuilder routes each one to the **best available LLM for the job** using its capability/cost-aware model selection.
 
 Point Claude Code at it with environment variables:
 
 ```bash
 export ANTHROPIC_BASE_URL="https://<ab-host>:<port>"
-export ANTHROPIC_API_KEY="<your-proxy-key>"   # matches AB_PROXY_KEY / llm_proxy_api_key
+export ANTHROPIC_API_KEY="<your-proxy-key>"
 claude
 ```
 
-**Auth: a token is required.** The `/v1/*` endpoints are exempt from the WebUI
-login and do their own API-key check, and they **fail closed** — with no key
-configured every request is refused with `401`. Set a key in
-**Settings → Automation → LLM Router API Key** (there is a *Generate* button; the
-value is stored redacted and never re-displayed), or via the `AB_PROXY_KEY` env
-var / `llm_proxy_api_key` config value. `AB_PROXY_KEY` wins if both are set.
-Clients send it as `x-api-key` or `Authorization: Bearer`.
-
 Endpoints: `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models`.
-
-## ⚙️ How it Works
-1. **Scan**: Poller finds open issues with the `automated-fix` label.
-2. **Fix**: LLM generates a fix based on the issue body.
-3. **Verify**: The bot runs internal tests or an external QA suite.
-4. **Iterate**: If verification fails, the error is fed back to the LLM (up to 3 attempts).
-5. **Deploy**: Once verified, the bot pushes to a branch (PR) or directly to main (Trusted).
-6. **Sync**: An external infrastructure API is notified of the change.
