@@ -40,6 +40,7 @@ from main import (
     OPENROUTER_BASE_URL,
     CONFIG_DIR,
     SELF_SCAN_OFFSET_FILE,
+    _atomic_write_json,
     _any_provider_available,
     _get_provider_config,
     _is_lmstudio,
@@ -1115,8 +1116,7 @@ def load_self_scan_offset():
 def save_self_scan_offset(offset, inode):
     """Persists the last-read byte offset and inode for incremental self-scans."""
     try:
-        with open(SELF_SCAN_OFFSET_FILE, "w") as f:
-            json.dump({"offset": offset, "inode": inode}, f)
+        _atomic_write_json(SELF_SCAN_OFFSET_FILE, {"offset": offset, "inode": inode}, indent=None)
     except Exception as e:
         logger.debug(f"Could not save self-scan offset: {e}")
 
