@@ -79,7 +79,7 @@ from check_unattended_mutation import check_unattended_mutation
 from check_test_regressions import check_test_regressions
 from attr_definition_lookup import (
     extract_getattr_names, find_attr_definitions, format_wiring_context)
-from pr_review_retry import is_queued_for_retry_stale
+from pr_review_retry import is_queued_for_retry_stale, MAX_AUTO_QUEUE_RETRIES
 from config_store import load_config
 
 logger = logging.getLogger(__name__)
@@ -1285,6 +1285,20 @@ def _review_one(gh, repo, pr, config, force=False):
     if _prior_queued and not force:
         logger.info("pr_review: %s PR #%s retrying — prior scan queued for retry (panel unavailable)",
                     repo.full_name, pr.number)
+    elif not force and not _prior_queued and (
+        _prior_review.get("head") == head_sha
+        and (_prior_review.get("panel_status") == "queue_for_retry"
+             or _prior_review.get("panel2_status") == "queue_for_retry")
+    ):
+        # Automatic retry budget (MAX_AUTO_QUEUE_RETRIES) is exhausted for this
+        # head — stop re-running the LLM panel every poll cycle. Waits for a
+        # human to Approve (accept the single-reviewer result) or click
+        # Reprocess (bypasses this via force=True) before trying again.
+        logger.info(
+            "pr_review: %s PR #%s — automatic retries exhausted after 'panel "
+            "unavailable' (%s/%s); awaiting human Approve or Reprocess.",
+            repo.full_name, pr.number,
+            _prior_review.get("queue_retry_count") or 0, MAX_AUTO_QUEUE_RETRIES)
     if already_current:
         # Recover the previously-generated summary from the comment — no LLM call
         # on a cached re-scan / post-restart.
