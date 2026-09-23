@@ -40,6 +40,18 @@ def main():
     ok &= _check("docs + one code file -> NOT docs-only (mixed) -> blocked",
                  fa.classify([_f("ab/docs/x.md", patch="@@\n+hi\n"),
                               _f("ab/routes.py", patch="@@\n+code()\n")])["auto_approvable"] is False)
+    # PR #261 review finding: a blanket "*.txt" glob would have classified
+    # requirements.txt (a real dependency-supply-chain file, read at runtime,
+    # not documentation) as docs-only — letting a version bump skip both
+    # skeptical panels via the docs auto-merge bypass.
+    ok &= _check("requirements.txt is NOT docs-only (read at runtime, not docs)",
+                 fa.classify([_f("requirements.txt",
+                                 patch="@@\n-foo==1.0\n+foo==9.9.9\n")])["auto_approvable"] is False)
+    ok &= _check("an arbitrary .txt file is NOT docs-only either",
+                 fa.classify([_f("config/settings.txt", patch="@@\n+enabled=true\n")]
+                             )["auto_approvable"] is False)
+    ok &= _check("CHANGELOG.txt is still recognised as docs-only",
+                 fa.classify([_f("CHANGELOG.txt", patch="@@\n+v2\n")])["category"] == "docs-only")
 
     # ── log-only ────────────────────────────────────────────────────────────
     ok &= _check("pure added logger.* line -> log-only auto-approvable",
