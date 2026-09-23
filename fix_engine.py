@@ -1681,7 +1681,12 @@ _REVIEW_PANEL_MIN = 2  # a lone reviewer is a single opinion; get a second whene
 #: Reviewer models allowed on the panels (fnmatch patterns, case-insensitive, matched against the
 #: model id with any "vendor/" prefix removed). Override with config `pr_review_panel_allowlist`
 #: (list or comma/space-separated string); an explicit empty list DISABLES the policy (legacy picker).
-DEFAULT_PANEL_ALLOWLIST = ("claude-opus-5*", "claude-opus-6*", "gpt-5.6-sol*")
+#: "gpt-5.6-*" (not "gpt-5.6-sol*") deliberately: Copilot serves this family under several
+#: variant suffixes (sol, terra, ...) and a suffix-pinned pattern silently locks the panel out
+#: of every one it doesn't happen to name whenever the configured variant changes/renames —
+#: exactly what happened when "gpt-5.6-sol" (rejected by Copilot's /chat/completions with
+#: "unsupported_api_for_model") was replaced in config by "gpt-5.6-terra".
+DEFAULT_PANEL_ALLOWLIST = ("claude-opus-5*", "claude-opus-6*", "gpt-5.6-*")
 
 
 def _panel_allowlist(config):
