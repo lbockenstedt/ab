@@ -25,3 +25,6 @@ certs/
 keys.json
 hub_secret.json
 secrets.json
+
+# pytest scratch (legacy location; tests now use a temp dir)
+.test_agentic_repo_tools/

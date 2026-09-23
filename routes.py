@@ -1,5 +1,5 @@
 """FastAPI HTTP routes exposed via an APIRouter, included by main.app (extracted from main.py)."""
-import asyncio, git, json, os, re, shutil, threading, time, traceback, uuid
+import asyncio, git, json, os, re, shutil, subprocess, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
