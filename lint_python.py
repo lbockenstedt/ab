@@ -25,6 +25,8 @@ import logging
 import subprocess
 import tempfile
 import os
+import shutil
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,25 @@ def _fetch_full_content(repo, path, ref):
         return None
 
 
+def _ruff_executable():
+    """Locate the ruff binary.
+
+    ruff is installed into AppBuilder's own virtualenv (``<venv>/bin/ruff``),
+    but the systemd unit runs with a minimal PATH
+    (/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin) that does NOT contain
+    the venv's bin dir. Invoking a bare "ruff" therefore raised
+    FileNotFoundError in production and silently degraded EVERY review to
+    "ruff not installed — skipping undefined-name pass".
+
+    Resolve against the running interpreter's own directory first (which is
+    the venv that ruff was installed into), then fall back to PATH.
+    """
+    candidate = os.path.join(os.path.dirname(sys.executable), "ruff")
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return shutil.which("ruff") or "ruff"
+
+
 def _run_ruff(source, filename_hint):
     """Run ruff on one file's content in isolation (no repo config picked up,
     so ab's OWN pyproject.toml/ruff.toml can't accidentally suppress or
@@ -67,7 +88,7 @@ def _run_ruff(source, filename_hint):
             tmp_path = tf.name
         try:
             proc = subprocess.run(
-                ["ruff", "check", "--isolated", "--select", _RUFF_RULES,
+                [_ruff_executable(), "check", "--isolated", "--select", _RUFF_RULES,
                  "--output-format=json", tmp_path],
                 capture_output=True, text=True, timeout=_TIMEOUT_S,
             )
