@@ -1543,6 +1543,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         repo_git.git.clean("-fd")
                     except Exception as e:  # noqa: BLE001
                         logger.warning("fix_one_pr: could not reset worktree for retry: %s", e)
+                        last_failure = "Could not reset worktree for retry: %s" % e
                         break
                     logger.info("fix_one_pr: %s#%s retry %s/%s — feedback: %s",
                                 repo_full_name, number, attempt, max_attempts,
