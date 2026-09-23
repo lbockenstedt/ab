@@ -108,7 +108,7 @@ def _models(panel):
 # ---- 1. _model_allowed ----
 @pytest.mark.parametrize("model", [
     "claude-opus-5", "claude-opus-5.1", "anthropic/claude-opus-6", "gpt-5.6-sol", "GPT-5.6-SOL",
-    "gpt-5.6-sol-preview"])
+    "gpt-5.6-sol-preview", "gpt-5.6-terra", "GPT-5.6-TERRA"])
 def test_model_allowed_true(model):
     ns = _load_fix_engine()
     assert ns["_model_allowed"](model, ns["DEFAULT_PANEL_ALLOWLIST"])
