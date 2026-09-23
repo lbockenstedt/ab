@@ -72,6 +72,21 @@ def main():
         is_queued_for_retry_stale(
             {"panel_status": "some_other_status", "head": "abc123"}, "abc123") is False)
 
+    # (6) queue_for_retry at the same head, but the automatic retry budget
+    # (MAX_AUTO_QUEUE_RETRIES) is already exhausted — must NOT retry again; a
+    # human must Approve or Reprocess.
+    from pr_review_retry import MAX_AUTO_QUEUE_RETRIES
+    ok &= _check(
+        "queue_for_retry at the same head but retry budget exhausted is not stale",
+        is_queued_for_retry_stale(
+            {"panel_status": "queue_for_retry", "head": "abc123",
+             "queue_retry_count": MAX_AUTO_QUEUE_RETRIES}, "abc123") is False)
+    ok &= _check(
+        "queue_for_retry at the same head just under the retry budget is still stale",
+        is_queued_for_retry_stale(
+            {"panel_status": "queue_for_retry", "head": "abc123",
+             "queue_retry_count": MAX_AUTO_QUEUE_RETRIES - 1}, "abc123") is True)
+
     print()
     if ok:
         print("ALL CASES PASSED")
