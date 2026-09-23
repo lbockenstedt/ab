@@ -10,6 +10,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import contract_guard
+import feature_allowlist
 import feature_boundary
 import fleet_guardrails
 import perf_auditor
@@ -475,5 +476,21 @@ def maybe_auto_remediate(
         return False, "PR remediation is blocked by guardrail"
     if rec.get("auto_remediate_status") == "exhausted_human_review":
         return False, "PR remediation attempt limit reached"
+
+    # Documentation PRs are reviewed but not accuracy-gated (same operator
+    # policy as pr_review._automerge_decision's docs bypass). Remediation
+    # exists to make a PR pass the skeptical panel; for a docs-only diff the
+    # panel's accuracy critique is not a gate, so "fixing" it would rewrite
+    # the author's prose to satisfy a judgement nothing is waiting on — churn
+    # that moves the head SHA, re-triggers the panel and burns tokens.
+    # Fails closed: a diff not provably docs-only remediates as before.
+    if config.get("pr_auto_remediate_skip_docs_only", True):
+        try:
+            files = feature_allowlist.files_from_pr_files(pr.get_files())
+            verdict = feature_allowlist.classify(files, config.get("feature_automerge_allowlist"))
+            if verdict.get("category") == feature_allowlist.DOCS_ONLY:
+                return False, "documentation-only PR — reviewed but not accuracy-gated"
+        except Exception as e:  # noqa: BLE001
+            logger.debug("maybe_auto_remediate: docs-only check skipped for %s: %s", key, e)
 
     return auto_remediate_pr(gh, repo, pr, config)
