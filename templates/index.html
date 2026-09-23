@@ -5887,6 +5887,11 @@
                 const data = await resp.json();
                 if (data.status === 'triggered') {
                     reloadWithToast(data.message || 'Reopened + re-queued.', 'success');
+                } else if (data.deleted) {
+                    // The issue no longer exists on GitHub and the server has just
+                    // dropped its record. Reload, or the dead row stays on screen
+                    // and invites the same click again.
+                    reloadWithToast(data.message || 'Issue was deleted on GitHub.', 'error');
                 } else {
                     showToast(data.message || 'Error reopening issue.', 'error');
                 }

@@ -39,6 +39,7 @@ def _load_ns():
     tree = ast.parse(src)
 
     want_funcs = {
+        "_atomic_write_json",
         "save_config", "load_config",
         "save_processed", "load_processed",
         "save_pr_reviews", "load_pr_reviews",
@@ -158,6 +159,82 @@ def main():
                       ns["load_update_state"]()["last_known_good_commit"] == "abc123")
         ok &= _check("save_update_state leaves no leftover .tmp file",
                       not os.path.exists(ns["UPDATE_STATE_FILE"] + ".tmp"))
+
+        # --- ENOENT: the writers must CREATE the persistent dir ----------
+        # Regression guard. Only save_config ever called os.makedirs(CONFIG_DIR);
+        # save_processed / save_pr_reviews / save_llm_tps / save_update_state and
+        # the chat/self-scan/startup-stamp writers opened their paths under
+        # /etc/ab directly. On any host where that directory did not exist, every
+        # one of them failed with "[Errno 2] No such file or directory" -- and
+        # since those failures log at ERROR, the self-log scanner filed a fresh
+        # duplicate issue per occurrence (twelve before the cause was found).
+        # Point the paths at a directory that does NOT exist and require the
+        # writes to succeed anyway.
+        missing_dir = os.path.join(tmpdir, "no_such_dir", "etc_ab")
+        ok &= _check("test precondition: target dir absent",
+                      not os.path.exists(missing_dir))
+        ns["CONFIG_DIR"] = missing_dir
+        ns["CONFIG_FILE"] = os.path.join(missing_dir, "config.json")
+        ns["STATE_FILE"] = os.path.join(missing_dir, "processed_issues.json")
+        ns["PR_REVIEWS_FILE"] = os.path.join(missing_dir, "pr_reviews.json")
+        ns["UPDATE_STATE_FILE"] = os.path.join(missing_dir, "update_state.json")
+
+        ns["save_processed"]({"o/r": [7]})
+        ok &= _check("save_processed creates missing dir (no ENOENT)",
+                      os.path.exists(ns["STATE_FILE"]))
+        ok &= _check("save_processed round-trips into created dir",
+                      ns["load_processed"]() == {"o/r": [7]})
+        ok &= _check("save_processed did NOT fall back to cwd",
+                      not os.path.exists(os.path.join(tmpdir, "processed_issues.json")))
+
+        ns["save_pr_reviews"]({"o/r#2": {"status": "denied"}})
+        ok &= _check("save_pr_reviews creates missing dir (no ENOENT)",
+                      ns["load_pr_reviews"]() == {"o/r#2": {"status": "denied"}})
+
+        ns["save_update_state"]({"last_known_good_commit": "def456"})
+        ok &= _check("save_update_state creates missing dir (no ENOENT)",
+                      ns["load_update_state"]()["last_known_good_commit"] == "def456")
+
+        deep = os.path.join(tmpdir, "a", "b", "c", "cfg.json")
+        ns["save_config"].__globals__  # noqa: B018  (ns funcs share `ns` as globals)
+        ns["CONFIG_DIR"] = os.path.dirname(deep)
+        ns["CONFIG_FILE"] = deep
+        ns["save_config"]({"monitored_repos": ["deep/repo"]})
+        ok &= _check("save_config creates nested missing dirs",
+                      os.path.exists(deep))
+
+        # --- _atomic_write_json contract ---------------------------------
+        aw = ns["_atomic_write_json"]
+        p = os.path.join(tmpdir, "mk", "x.json")
+        aw(p, {"k": 1})
+        ok &= _check("_atomic_write_json creates parent dir",
+                      json.load(open(p)) == {"k": 1})
+        ok &= _check("_atomic_write_json leaves no .tmp",
+                      not os.path.exists(p + ".tmp"))
+
+        pc = os.path.join(tmpdir, "mk", "compact.json")
+        aw(pc, {"k": 1}, indent=None)
+        ok &= _check("_atomic_write_json indent=None writes compact JSON",
+                      open(pc).read() == '{"k": 1}')
+
+        pm = os.path.join(tmpdir, "mk", "mode.json")
+        aw(pm, {"k": 1}, chmod=0o600)
+        ok &= _check("_atomic_write_json applies chmod before replace",
+                      (os.stat(pm).st_mode & 0o777) == 0o600)
+
+        # Unserialisable payload: must re-raise (callers own the fallback) and
+        # must not leave the temp file behind for the next reader to trip on.
+        pbad = os.path.join(tmpdir, "mk", "bad.json")
+        raised = False
+        try:
+            aw(pbad, {"k": object()})
+        except Exception:
+            raised = True
+        ok &= _check("_atomic_write_json re-raises on failure", raised)
+        ok &= _check("_atomic_write_json cleans up .tmp on failure",
+                      not os.path.exists(pbad + ".tmp"))
+        ok &= _check("_atomic_write_json wrote no target file on failure",
+                      not os.path.exists(pbad))
 
     finally:
         os.chdir(orig_cwd)

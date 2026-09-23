@@ -1288,6 +1288,10 @@ def _maybe_auto_merge(gh, repo, pr, config):
                 logger.info("pr_review: auto-merge held for %s: %s", key, reason)
                 _update_automerge_comment(pr, key, _automerge_note(reason, False))
             return
+        # Read BEFORE the update below, which clears auto_merge_blocked_reason:
+        # this must survive across polls to suppress a repeated refusal, and it
+        # is deliberately a separate field for that reason.
+        prior_refusal = rec.get("auto_merge_refusal")
         logger.info("pr_review: auto-merging %s — %s", key, reason)
         approve_pr(gh, repo.full_name, pr.number, actor="ab-auto")
         mark_pr_approved(repo.full_name, pr.number, True)
@@ -1297,8 +1301,20 @@ def _maybe_auto_merge(gh, repo, pr, config):
         _update_automerge_comment(pr, key, _automerge_note(reason, True))
         status_code, result = merge_pr(gh, repo.full_name, pr.number)
         if status_code == 200 and result.get("status") == "success":
-            update_pr_review(repo.full_name, pr.number, auto_merged=True)
+            update_pr_review(repo.full_name, pr.number, auto_merged=True,
+                             auto_merge_refusal=None)
             logger.info("pr_review: auto-merge succeeded for %s", key)
+        elif result.get("retryable") is False:
+            # A policy refusal (branch protection, a ruleset, a token missing the
+            # `workflow` scope). The PR has not changed, so re-attempting it on
+            # every poll only reprints the same line -- which is how ab#192
+            # recorded the SAME refusal five times inside forty seconds. Record
+            # it once, using the same changed-reason guard the held path above
+            # uses, and stay quiet until the reason actually changes.
+            why = result.get("message") or str(result)
+            update_pr_review(repo.full_name, pr.number, auto_merge_refusal=why)
+            if why != prior_refusal:
+                logger.warning("pr_review: auto-merge refused for %s — %s", key, why)
         else:
             logger.warning("pr_review: auto-merge's own merge_pr call did not succeed for %s: %s",
                            key, result)

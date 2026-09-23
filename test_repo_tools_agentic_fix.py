@@ -1,7 +1,9 @@
 import ast
+import atexit
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -11,8 +13,17 @@ import model_selection
 import repo_tools
 
 
+#: Scratch roots are created under a per-run temp dir and removed at exit.
+#: These used to be written to ``.test_agentic_repo_tools/`` in the repo root,
+#: where nothing cleaned them up and nothing ignored them -- so a ``git add -A``
+#: after a test run committed four scratch files, which were then promoted all
+#: the way to qa (flagged on ab#267).
+_SCRATCH_ROOT = tempfile.mkdtemp(prefix="ab-agentic-repo-tools-")
+atexit.register(shutil.rmtree, _SCRATCH_ROOT, True)
+
+
 def _scratch(name):
-    p = Path(".test_agentic_repo_tools") / name
+    p = Path(_SCRATCH_ROOT) / name
     shutil.rmtree(p, ignore_errors=True)
     p.mkdir(parents=True)
     return p

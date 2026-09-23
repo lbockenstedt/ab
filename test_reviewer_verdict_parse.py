@@ -66,7 +66,14 @@ class _FakeLlmClient:
 def fe():
     ns = {"re": re, "json": json, "fnmatch": fnmatch, "logger": _RecLog(),
           "llm_client": _FakeLlmClient()}
-    exec("\n\n".join(_extract("llm_client.py", {"is_llm_cooldown_error"})), ns)
+    # is_llm_auth_error + its module constants must come across too: an exec'd
+    # function only sees what is exec'd into its namespace, so omitting them is
+    # a NameError raised from inside the very handler meant to report an error.
+    exec("\n\n".join(_extract(
+        "llm_client.py", {"is_llm_cooldown_error", "is_llm_auth_error"},
+        {"_LLM_AUTH_MARKERS", "_LLM_AUTH_STATUS_RE"})), ns)
+    for _n in ("is_llm_auth_error", "_LLM_AUTH_MARKERS", "_LLM_AUTH_STATUS_RE"):
+        assert _n in ns, "extraction incomplete: %s missing from llm_client.py" % _n
     exec("\n\n".join(_extract("fix_engine.py", _FE_FUNCS, _FE_ASSIGNS)), ns)
     missing = sorted((_FE_FUNCS | _FE_ASSIGNS) - set(ns))
     assert not missing, "extraction incomplete: %s" % missing
