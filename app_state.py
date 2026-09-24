@@ -101,6 +101,53 @@ def set_task_step(task_id, step):
         logger.debug(f"set_task_step failed for task_id={task_id!r}: {e}")
 
 
+def _panel_dissent_stats(review):
+    """Per-reviewer outcomes inside ONE panel result: (dissents, rated, min_conf).
+
+    A panel reports a single aggregate verdict, so a panel can come back
+    "Approve" while an individual reviewer still dissented or rated the change
+    low. Only the aggregate was ever persisted, which made those residual
+    concerns invisible to everything downstream — AppBuilder would merge a PR
+    that a reviewer had actually objected to, because the panel as a whole said
+    yes. These counts are what let it keep improving a PR that technically
+    passed but still carries unresolved reviewer concerns.
+    """
+    if not review or review.get("status"):
+        return (0, 0, None)
+
+    reviews = review.get("reviews")
+    if not isinstance(reviews, list) or not reviews:
+        return (0, 0, None)
+
+    dissents = 0
+    rated = 0
+    min_conf = None
+
+    for item in reviews:
+        if not isinstance(item, dict):
+            continue
+
+        verdict = item.get("verdict")
+        if verdict:
+            rated += 1
+            if str(verdict).strip().lower() != "approve":
+                dissents += 1
+
+        confidence = item.get("confidence")
+        if confidence is not None:
+            try:
+                conf_float = float(confidence)
+            except (TypeError, ValueError):
+                continue
+            if conf_float > 1.0:
+                conf_float /= 100.0
+            conf_float = max(0.0, min(1.0, conf_float))
+            if min_conf is None or conf_float < min_conf:
+                min_conf = conf_float
+
+    return (dissents, rated, min_conf)
+
+
 def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None, review2=None,
                      base_ref="", head_ref=""):
     """Persist a PR pre-review result so the UI can list/filter 'PRs Reviewed'.
@@ -164,6 +211,11 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
         except (TypeError, ValueError):
             panel2_confidence = None
 
+    # Per-reviewer dissent inside each panel — see _panel_dissent_stats. An
+    # aggregate "Approve" can still hide a reviewer who objected.
+    panel_dissents, panel_rated, panel_min_conf = _panel_dissent_stats(_r)
+    panel2_dissents, panel2_rated, panel2_min_conf = _panel_dissent_stats(_r2)
+
     # Composite consensus & average confidence computation
     valid_confs = [c for c in (panel_confidence, panel2_confidence) if c is not None]
     panel_avg_confidence = (sum(valid_confs) / len(valid_confs)) if valid_confs else None
@@ -222,6 +274,12 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "panel2_confidence": panel2_confidence,
                 "panel2_status": panel2_status,
                 "panel2_critique": panel2_critique,
+                "panel_dissents": panel_dissents,
+                "panel_rated": panel_rated,
+                "panel_min_reviewer_confidence": panel_min_conf,
+                "panel2_dissents": panel2_dissents,
+                "panel2_rated": panel2_rated,
+                "panel2_min_reviewer_confidence": panel2_min_conf,
                 "panel_avg_confidence": panel_avg_confidence,
                 "composite_verdict": composite_verdict,
                 # Cap on automatic "panel unavailable" retries (pr_review_retry.
