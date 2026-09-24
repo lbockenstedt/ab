@@ -2278,6 +2278,12 @@ def ensure_config_defaults(config):
     # feature_automerge_target_branches.
     config.setdefault("feature_automerge_allow_release_branch", False)
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
+    # Promotion PRs (promote/*, backmerge/*) are skipped by default: a fix
+    # committed onto a promotion branch reaches qa/main without ever having been
+    # on dev. Turning this OFF is safe now that backmerge.yml carries qa back to
+    # dev, and is required for an unattended dev -> qa -> main flow — otherwise a
+    # panel that denies a promotion PR stalls the chain with nothing to repair it.
+    config.setdefault("pr_auto_remediate_skip_promotion", True)
     # How many times fix_one_pr may regenerate a fix, each retry told exactly why
     # the previous one failed (parse reason / panel critique / verification
     # error). Capped at 5 in pr_review.fix_one_pr.
@@ -2323,6 +2329,7 @@ async def settings_page(request: Request):
     config.setdefault("feature_automerge_docs_bypass_panel", True)
     config.setdefault("feature_automerge_allow_release_branch", False)
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
+    config.setdefault("pr_auto_remediate_skip_promotion", True)
     config.setdefault("pr_fix_max_attempts", 3)
     config.setdefault("batch_enabled", False)
     config.setdefault("prompt_caching_enabled", True)

@@ -340,15 +340,41 @@ def should_remediate(rec, config):
 
     panel_status = rec.get("panel_status")
     panel2_status = rec.get("panel2_status")
-    if panel_status or panel2_status:
-        # A panel that could not RUN produced no recommendation to act on.
-        # Regenerating a fix against an outage burns tokens and moves the head
-        # SHA for nothing; pr_review's own retry path re-runs the panel instead.
-        status = panel_status or panel2_status
-        return False, "panel could not run (%s) — nothing to act on" % status, 0.0
 
-    verdicts = [v for v in (rec.get("panel_verdict"), rec.get("panel2_verdict")) if v is not None]
+    # A panel's verdict is USABLE only when it actually produced one AND did not
+    # error. The previous guard bailed out whenever EITHER panel carried a
+    # status, which collapsed four distinct states into one "nothing to act on"
+    # answer: both ran, both failed, panel 1 ran while panel 2 errored, and vice
+    # versa. In the mixed cases there IS a recommendation on the table — a full
+    # DENY from the panel that ran — and remediation was silently suppressed for
+    # it, which is precisely the failure this function exists to eliminate.
+    # Bail out only when NO panel produced a usable verdict.
+    panels = (
+        (rec.get("panel_verdict"), panel_status, rec.get("panel_confidence")),
+        (rec.get("panel2_verdict"), panel2_status, rec.get("panel2_confidence")),
+    )
+    verdicts = []
+    confs = []
+    for verdict, status, confidence in panels:
+        if verdict is None or status:
+            continue
+        verdicts.append(verdict)
+        # Confidence counts only when it belongs to a panel whose verdict we
+        # are actually using — carried alongside the verdict rather than looked
+        # up afterwards, so the two can never be attributed to the wrong panel.
+        if confidence is not None:
+            try:
+                confs.append(float(confidence))
+            except (TypeError, ValueError):
+                pass
+
     if not verdicts:
+        status = panel_status or panel2_status
+        if status:
+            # A panel that could not RUN produced no recommendation to act on.
+            # Regenerating a fix against an outage burns tokens and moves the
+            # head SHA for nothing; pr_review's own retry path re-runs the panel.
+            return False, "panel could not run (%s) — nothing to act on" % status, 0.0
         return False, "no panel verdict recorded", 0.0
 
     try:
@@ -357,9 +383,17 @@ def should_remediate(rec, config):
         target = DEFAULT_TARGET_SCORE
     target = max(0.0, min(1.0, target))
 
-    confs = [c for c in (rec.get("panel_confidence"), rec.get("panel2_confidence")) if c is not None]
-    score = min(confs) if confs else 0.0
-    deficit = round(max(0.0, target - score), 4)
+    # "No confidence was reported" is NOT "confidence 0%". Scoring an absent
+    # metric as zero made the deficit the full target, which forced the largest
+    # (most expensive) remediation tier and made an Approve-with-no-number look
+    # maximally deficient. Unknown stays unknown: score is None and the
+    # confidence-driven branches below simply do not fire.
+    if confs:
+        score = min(confs)
+        deficit = round(max(0.0, target - score), 4)
+    else:
+        score = None
+        deficit = 0.0
 
     # A non-Approve verdict is the strongest possible signal and is NOT
     # redeemable by a high confidence number: a reviewer that is 85% sure the
@@ -373,7 +407,7 @@ def should_remediate(rec, config):
                     % (v, target * 100),
                     max(deficit, target))
 
-    if score < target:
+    if score is not None and score < target:
         return True, "panel score %.2f is below the %.2f target" % (score, target), deficit
 
     # Every panel says Approve and the aggregate score clears the bar — but an
@@ -399,11 +433,29 @@ def should_remediate(rec, config):
                     % (worst, target),
                     round(max(0.0, target - worst), 4))
 
+        # A seat that returned no usable verdict is not a seat that approved.
+        # The per-reviewer counts were persisted but never consulted, so a panel
+        # where one reviewer failed and one approved cleared this branch exactly
+        # as if it had been unanimous — "we could not see whether a reviewer
+        # dissented" being read as "no reviewer dissented" is the merge-over-an-
+        # objection bug this branch exists to prevent.
+        unrated = int(rec.get("panel_unrated") or 0) + int(rec.get("panel2_unrated") or 0)
+        if unrated:
+            return (True,
+                    "%d reviewer seat(s) produced no usable verdict — unanimity cannot be "
+                    "confirmed, so the concern is treated as still open" % unrated,
+                    max(deficit, round(target / 2.0, 4)))
+
     errors = int(rec.get("errors") or 0)
     warnings = int(rec.get("warnings") or 0)
     if errors > 0 or warnings > 0:
         return (True, "Tier-1 findings present (%d error(s), %d warning(s))" % (errors, warnings),
                 deficit)
+
+    if score is None:
+        return (False,
+                "panel verdict(s) Approve; no confidence reported — nothing further to act on",
+                0.0)
 
     return False, "panel score %.2f already meets the %.2f target" % (score, target), 0.0
 
@@ -759,9 +811,18 @@ def maybe_auto_remediate(
     # look at the PR again for the rest of its life. Re-evaluate on a new head;
     # if the diff still trips a guardrail, auto_remediate_pr re-latches it.
     if rec.get("auto_remediate_blocked"):
-        if head_sha and rec.get("auto_remediate_blocked_head") not in (None, head_sha):
-            logger.info("maybe_auto_remediate: %s — head moved to %s, re-evaluating the "
-                        "guardrail block", key, head_sha[:8])
+        # A record latched BEFORE auto_remediate_blocked_head existed has no
+        # stored head at all. Treating that missing value as "same head" (it
+        # used to fall into the `in (None, head_sha)` arm) left exactly the
+        # records this change was meant to free — the ones already stuck —
+        # blocked forever, so the one-way door was only ever removed for
+        # latches written afterwards. A latch we cannot attribute to a
+        # specific commit is stale by definition: re-evaluate it.
+        _blocked_head = rec.get("auto_remediate_blocked_head")
+        if head_sha and _blocked_head != head_sha:
+            logger.info("maybe_auto_remediate: %s — guardrail block was recorded for %s, "
+                        "current head is %s, re-evaluating",
+                        key, (_blocked_head or "an unknown head"), head_sha[:8])
             update_pr_review(repo_full_name, pr.number, auto_remediate_blocked=False,
                              auto_remediate_blocked_head=None)
             rec = (state.get("pr_reviews") or {}).get(key) or {}
