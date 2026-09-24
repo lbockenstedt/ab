@@ -1295,6 +1295,22 @@ def _maybe_auto_merge(gh, repo, pr, config):
         }
         state_flags = {"paused": bool(state.get("paused")), "blackout": bool(state.get("blackout"))}
         should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags, changed_files)
+        # "As close to 100% as possible BEFORE merging": _automerge_decision only
+        # asks whether the PR is good ENOUGH (>= feature_automerge_min_confidence).
+        # If AppBuilder still intends to raise the score further, merging now
+        # throws that improvement away. Bounded by the remediation attempt
+        # ceiling, so this can only defer a merge, never block it forever.
+        if should_merge:
+            try:
+                import pr_remediate
+                pending, why = pr_remediate.remediation_pending(rec, config)
+            except Exception as e:  # noqa: BLE001 — never let this break a merge
+                logger.warning("pr_review: remediation_pending check skipped for %s: %s", key, e)
+                pending, why = False, ""
+            if pending:
+                should_merge = False
+                reason = ("holding the merge while AppBuilder improves this PR toward the "
+                          "approval target — %s" % why)
         if not should_merge:
             # The scan runs every poll: record + log + edit the comment only when the
             # refusal reason CHANGED, so an operator can see why a high-confidence PR
@@ -1339,11 +1355,15 @@ def _maybe_auto_merge(gh, repo, pr, config):
 
 
 def _maybe_auto_remediate(gh, repo, pr, config):
+    """Best-effort; returns True only when a remediation commit was actually
+    pushed (which moves the head and invalidates everything computed above)."""
     try:
         import pr_remediate
-        pr_remediate.maybe_auto_remediate(gh, repo, pr, config)
+        pushed, _reason = pr_remediate.maybe_auto_remediate(gh, repo, pr, config)
+        return bool(pushed)
     except Exception as e:
         logger.exception("pr_review: auto-remediate failed for %s#%s: %s", repo.full_name, pr.number, e)
+        return False
 
 
 def _review_one(gh, repo, pr, config, force=False):
@@ -1506,8 +1526,27 @@ def _review_one(gh, repo, pr, config, force=False):
     # feature_automerge_target_branches (see _automerge_decision's own
     # docstring for the full gate list) — a no-op read+return for every PR
     # targeting main or any other non-allowlisted branch.
+    # ORDER MATTERS: remediate FIRST, then consider merging.
+    #
+    # These two used to run the other way round, which quietly defeated the
+    # whole point of remediation: the merge gate's threshold
+    # (feature_automerge_min_confidence, e.g. 0.90) is LOWER than the
+    # remediation target (pr_remediate_target_score, 0.95), so any PR good
+    # enough to merge was merged on the spot and the remediation pass that
+    # would have carried it closer to 100% never got to run. AppBuilder's job
+    # is to raise a PR's approval score as far as it can BEFORE merging it, not
+    # to merge it the moment it becomes merely acceptable.
+    #
+    # When remediation actually pushes a commit, the head has moved: every
+    # finding, panel verdict and mergeability answer computed above now
+    # describes the PREVIOUS commit. Merging on that stale record would merge
+    # code no panel has seen. Skip the merge this cycle — the push re-triggers
+    # a full review, and the merge is reconsidered against the new head.
+    if _maybe_auto_remediate(gh, repo, pr, config):
+        logger.info("pr_review: %s #%s — remediation pushed a fix; deferring the auto-merge "
+                    "decision to the re-review of the new head", repo.full_name, pr.number)
+        return
     _maybe_auto_merge(gh, repo, pr, config)
-    _maybe_auto_remediate(gh, repo, pr, config)
 
 
 def reprocess_one_pr(repo_full_name, number, config=None):
@@ -1597,6 +1636,13 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
         rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}
         panel_critique = (rec.get("panel_critique") or "").strip()
+        # The SECOND (state-logic / control-flow) panel's critique used to be
+        # persisted for the UI and then dropped on the floor here — only panel 1
+        # was ever folded into the fix prompt. On a PR both panels denied, that
+        # discarded the more concrete half of the objections (lm#1019: panel 2
+        # named the exact conflated states and the exact over-broad branch),
+        # so the fixer was asked to satisfy a review it had only half of.
+        panel2_critique = (rec.get("panel2_critique") or "").strip()
 
         # Self-improvement: also read the pre-review AB actually POSTED on this PR
         # and fold every below-target panel's dissent into the fix prompt. This
@@ -1610,12 +1656,22 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         except Exception as e:  # noqa: BLE001
             logger.debug("fix_one_pr: pre-review score read skipped: %s", e)
 
-        if not findings and not panel_critique and not score_feedback:
+        if not findings and not panel_critique and not panel2_critique and not score_feedback:
             return False, "No findings to fix — this PR has a clean pre-review."
 
         lines = ["PR #%s: %s" % (pr.number, pr.title or "")]
         if pr.body:
             lines.append((pr.body or "").strip()[:2000])
+        # State the OBJECTIVE to the model explicitly. Without it the prompt is
+        # just a pile of complaints, and the model optimises for "respond to the
+        # comments" rather than "make both panels approve" — which is the only
+        # outcome that actually unblocks the PR.
+        lines.append(
+            "\nYOUR OBJECTIVE: make the reviewer panels APPROVE this PR. Every critique below "
+            "is a reason it is currently not approved. Resolve each one in the code — do not "
+            "argue with it, do not merely add a comment acknowledging it, and do not widen the "
+            "change beyond what the critiques require. If two critiques conflict, satisfy the "
+            "one that concerns correctness or security.")
         if findings:
             lines.append("\nAppBuilder pre-review findings to fix:")
             for f in findings:
@@ -1623,6 +1679,9 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     (f.get("level") or "advisory").upper(), f.get("title") or "", f.get("detail") or ""))
         if panel_critique:
             lines.append("\nSkeptical reviewer critique (from the last panel pass):\n" + panel_critique)
+        if panel2_critique:
+            lines.append("\nState-logic / control-flow reviewer critique (from the last panel pass):\n"
+                         + panel2_critique)
         if score_feedback:
             lines.append("\n" + score_feedback)
         fix_body = "\n".join(lines)

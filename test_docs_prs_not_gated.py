@@ -336,8 +336,15 @@ class _Repo:
 def remediate_calls(monkeypatch):
     calls = []
     monkeypatch.setattr(pr_remediate, "auto_remediate_pr",
-                        lambda gh, repo, pr, config: (calls.append(pr) or (True, "remediated")))
-    monkeypatch.setattr(pr_remediate, "state", {"pr_reviews": {}})
+                        lambda gh, repo, pr, config, **kw: (calls.append(pr) or (True, "remediated")))
+    # Remediation is now verdict-driven (pr_remediate.should_remediate): a PR is
+    # only repaired while its panel score sits below the approval target. Seed a
+    # denied record so these docs-policy tests still exercise the path they are
+    # about, rather than being skipped for having nothing to act on.
+    monkeypatch.setattr(pr_remediate, "state", {"pr_reviews": {"owner/repo#5": {
+        "panel_verdict": "Deny", "panel_confidence": 0.60,
+        "panel2_verdict": "Deny", "panel2_confidence": 0.60,
+    }}})
     return calls
 
 
