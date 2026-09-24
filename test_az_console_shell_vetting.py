@@ -53,21 +53,34 @@ ATTACKS = [
     ("systemctl restart", "systemctl restart ab"),
 ]
 
+# Backgrounding and multi-line input are separators the old segment split
+# regex (`\|\||&&|[;|]`) didn't know about, so a read-only leading binary
+# hid whatever ran after it.
+BYPASSES = [
+    ("background op", "uptime & reboot"),
+    ("background op no spaces", "uptime&reboot"),
+    ("newline", "uptime\nreboot"),
+    ("carriage return newline", "uptime\r\nreboot"),
+]
+
 # Real diagnostics the console must keep supporting.
 LEGITIMATE = [
     "systemctl status ab",
     "service ab status",
+    "systemctl status nginx && journalctl -n 5",
     "journalctl -u ab -n 50",
     "journalctl -u ab | grep -i error | tail -20",
     "df -h",
     "du -sh /opt/ab",
     "uptime; whoami; id",
+    "uptime; df -h",
     # `cat` was wrongly rejected before: the substring marker "at " matched "cat ".
     "cat /opt/ab/VERSION",
     "cat /etc/hostname | grep -i lm",
     "head -50 /opt/ab/ab.log",
     "ls -la /opt/ab && df -h",
     "ps aux | grep ab",
+    "ps aux | grep python",
     # "cp " used to substring-match inside "tcp".
     "ss -tlnp | grep tcp",
     "curl -sk https://127.0.0.1/auth/oidc/enabled",
@@ -83,6 +96,13 @@ LEGITIMATE = [
 
 @pytest.mark.parametrize("label,cmd", ATTACKS, ids=[a[0] for a in ATTACKS])
 def test_attack_is_blocked_in_read_only_mode(label, cmd):
+    ok, reason = az_console.vet_shell_command(cmd, allow_mutation=False)
+    assert not ok, f"{label}: read-only mode allowed {cmd!r}"
+    assert reason, "a refusal must explain itself"
+
+
+@pytest.mark.parametrize("label,cmd", BYPASSES, ids=[b[0] for b in BYPASSES])
+def test_bypass_is_blocked_in_read_only_mode(label, cmd):
     ok, reason = az_console.vet_shell_command(cmd, allow_mutation=False)
     assert not ok, f"{label}: read-only mode allowed {cmd!r}"
     assert reason, "a refusal must explain itself"
