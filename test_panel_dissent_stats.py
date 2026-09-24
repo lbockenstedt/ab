@@ -37,7 +37,7 @@ def test_all_reviewers_approve():
             {"verdict": "Approve", "confidence": 0.99}
         ]
     }
-    assert _panel_dissent_stats(review) == (0, 2, 0.95)
+    assert _panel_dissent_stats(review) == (0, 2, 0.95, 0)
 
 def test_one_reviewer_dissents_inside_an_approving_panel():
     """One reviewer dissents while others approve."""
@@ -47,7 +47,7 @@ def test_one_reviewer_dissents_inside_an_approving_panel():
             {"verdict": "Deny", "confidence": 0.30}
         ]
     }
-    assert _panel_dissent_stats(review) == (1, 2, 0.30)
+    assert _panel_dissent_stats(review) == (1, 2, 0.30, 0)
 
 def test_request_changes_counts_as_a_dissent():
     """A 'Request changes' verdict counts as a dissent."""
@@ -57,7 +57,7 @@ def test_request_changes_counts_as_a_dissent():
             {"verdict": "Request changes", "confidence": 0.30}
         ]
     }
-    assert _panel_dissent_stats(review) == (1, 2, 0.30)
+    assert _panel_dissent_stats(review) == (1, 2, 0.30, 0)
 
 def test_verdict_matching_is_case_and_whitespace_insensitive():
     """Verdict matching is case and whitespace insensitive."""
@@ -67,7 +67,7 @@ def test_verdict_matching_is_case_and_whitespace_insensitive():
             {"verdict": "APPROVE", "confidence": 0.99}
         ]
     }
-    assert _panel_dissent_stats(review) == (0, 2, 0.95)
+    assert _panel_dissent_stats(review) == (0, 2, 0.95, 0)
 
 def test_percentage_confidences_are_normalised():
     """Confidences given as percentages are normalised to 0-1."""
@@ -77,7 +77,7 @@ def test_percentage_confidences_are_normalised():
             {"verdict": "Approve", "confidence": 40}
         ]
     }
-    assert _panel_dissent_stats(review) == (0, 2, 0.40)
+    assert _panel_dissent_stats(review) == (0, 2, 0.40, 0)
 
 def test_confidence_is_clamped_to_one():
     """Confidences greater than 1 are clamped to 1, and less than 0 to 0."""
@@ -86,14 +86,14 @@ def test_confidence_is_clamped_to_one():
             {"verdict": "Approve", "confidence": 150}
         ]
     }
-    assert _panel_dissent_stats(review1) == (0, 1, 1.0)
+    assert _panel_dissent_stats(review1) == (0, 1, 1.0, 0)
     
     review2 = {
         "reviews": [
             {"verdict": "Approve", "confidence": -5}
         ]
     }
-    assert _panel_dissent_stats(review2) == (0, 1, 0.0)
+    assert _panel_dissent_stats(review2) == (0, 1, 0.0, 0)
 
 def test_missing_confidence_is_ignored():
     """Missing confidence is ignored, but the verdict is still counted."""
@@ -103,7 +103,7 @@ def test_missing_confidence_is_ignored():
             {"verdict": "Approve", "confidence": 0.8}
         ]
     }
-    assert _panel_dissent_stats(review) == (0, 2, 0.8)
+    assert _panel_dissent_stats(review) == (0, 2, 0.8, 0)
 
 def test_missing_verdict_is_not_rated():
     """Missing verdict is not counted as rated."""
@@ -113,7 +113,7 @@ def test_missing_verdict_is_not_rated():
             {"verdict": "Approve", "confidence": 0.8}
         ]
     }
-    assert _panel_dissent_stats(review) == (0, 1, 0.8)
+    assert _panel_dissent_stats(review) == (0, 1, 0.8, 1)
 
 def test_unparseable_confidence_is_skipped():
     """Unparseable confidence is skipped without raising an exception."""
@@ -123,7 +123,7 @@ def test_unparseable_confidence_is_skipped():
             {"verdict": "Approve", "confidence": 0.7}
         ]
     }
-    assert _panel_dissent_stats(review) == (0, 2, 0.7)
+    assert _panel_dissent_stats(review) == (0, 2, 0.7, 0)
 
 def test_non_dict_entries_are_skipped():
     """Non-dict entries in the reviews list are skipped."""
@@ -135,12 +135,12 @@ def test_non_dict_entries_are_skipped():
             {"verdict": "Approve", "confidence": 0.9}
         ]
     }
-    assert _panel_dissent_stats(review) == (0, 1, 0.9)
+    assert _panel_dissent_stats(review) == (0, 1, 0.9, 3)
 
 @pytest.mark.parametrize("review", [None, {}, {"reviews": []}, {"reviews": None}, {"reviews": "notalist"}])
 def test_empty_or_missing_inputs(review):
     """Empty or missing inputs return (0, 0, None)."""
-    assert _panel_dissent_stats(review) == (0, 0, None)
+    assert _panel_dissent_stats(review) == (0, 0, None, 0)
 
 def test_a_panel_that_failed_to_run_reports_nothing():
     """A panel that failed to run reports nothing."""
@@ -148,4 +148,49 @@ def test_a_panel_that_failed_to_run_reports_nothing():
         "status": "timeout",
         "reviews": [{"verdict": "Deny", "confidence": 0.1}]
     }
-    assert _panel_dissent_stats(review) == (0, 0, None)
+    assert _panel_dissent_stats(review) == (0, 0, None, 0)
+
+
+# ---------------------------------------------------------------------------
+# ab#275 state-logic panel: an unfinished reviewer must not read as an
+# approving one. These pin the `unrated` count that finding added.
+# ---------------------------------------------------------------------------
+
+def test_a_failed_seat_is_not_silently_unanimous():
+    """The headline defect: a two-seat panel where one seat errored and one
+    approved used to be byte-identical to unanimous approval (dissents=0,
+    rated=1) with nothing recording that a seat was missing."""
+    failed_then_approved = {"reviews": [{}, {"verdict": "Approve", "confidence": 0.99}]}
+    unanimous = {"reviews": [{"verdict": "Approve", "confidence": 0.99},
+                             {"verdict": "Approve", "confidence": 0.99}]}
+    assert _panel_dissent_stats(failed_then_approved) != _panel_dissent_stats(unanimous)
+    assert _panel_dissent_stats(failed_then_approved)[3] == 1
+    assert _panel_dissent_stats(unanimous)[3] == 0
+
+
+def test_blank_and_whitespace_verdicts_count_as_unrated():
+    """A verdict key that is present but empty is still nothing we can score."""
+    review = {"reviews": [{"verdict": ""}, {"verdict": None},
+                          {"verdict": "Approve", "confidence": 0.9}]}
+    dissents, rated, _min_conf, unrated = _panel_dissent_stats(review)
+    assert (dissents, rated, unrated) == (0, 1, 2)
+
+
+def test_unrated_seat_still_contributes_its_confidence():
+    """A seat that reported a number but no parseable verdict still told us how
+    sure it was — dropping that would hide a low rating behind an unusable
+    verdict."""
+    review = {"reviews": [{"confidence": 0.10},
+                          {"verdict": "Approve", "confidence": 0.95}]}
+    dissents, rated, min_conf, unrated = _panel_dissent_stats(review)
+    assert (dissents, rated, unrated) == (0, 1, 1)
+    assert min_conf == 0.10
+
+
+def test_dissent_still_outranks_unrated():
+    """An explicit dissent and an unreadable seat are counted separately."""
+    review = {"reviews": [{"verdict": "Reject", "confidence": 0.2},
+                          {"junk": True},
+                          {"verdict": "Approve", "confidence": 0.9}]}
+    dissents, rated, _min_conf, unrated = _panel_dissent_stats(review)
+    assert (dissents, rated, unrated) == (1, 2, 1)

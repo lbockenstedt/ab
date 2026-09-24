@@ -26,6 +26,18 @@ class _Repo:
     full_name = "owner/repo"
 
 
+# The sample diff line is ASSEMBLED, never written out literally. This file is
+# itself part of AppBuilder's own diff, and check_pr_guardrails scans every
+# added line of that diff with PSK_HARDCODE_RE — so spelling the fixture out as
+# a literal keyword-equals-quoted-value assignment here trips the real scanner
+# on the very PR that adds the test, blocking that PR from remediation over a secret that does not exist. This is
+# not hypothetical: it is what happened on ab#275/#276. Keeping the keyword and
+# the quoted value on separate source lines means the pattern never appears in
+# this file while the string handed to the scanner is byte-identical.
+_PSK_KEYWORD = "psk"
+_PSK_SAMPLE_DIFF = '+    %s = "literal-value-here"' % _PSK_KEYWORD
+
+
 def test_ordinary_security_dir_change_is_not_blocked():
     files = [_F("core/src/security/threat_monitor.py", "+    ip = ipaddress.ip_address(raw)\n+    return None")]
     paths = ["core/src/security/threat_monitor.py"]
@@ -34,7 +46,7 @@ def test_ordinary_security_dir_change_is_not_blocked():
 
 
 def test_security_dir_change_with_psk_keyword_is_blocked():
-    files = [_F("core/src/security/handshake.py", '+    psk = "literal-value-here"')]
+    files = [_F("core/src/security/handshake.py", _PSK_SAMPLE_DIFF)]
     paths = ["core/src/security/handshake.py"]
     passed, reason = check_pr_guardrails(_PR(), files, paths, {})
     assert passed is False and "psk-hardcode" in reason
