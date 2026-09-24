@@ -26,7 +26,7 @@ class _DummyLogger:
 
 @pytest.fixture
 def pr_env():
-    src = _extract("app_state.py", set(), {"record_pr_review"})
+    src = _extract("app_state.py", set(), {"record_pr_review", "_panel_dissent_stats"})
     state = {"pr_reviews": {}}
     ns = {
         "state": state,

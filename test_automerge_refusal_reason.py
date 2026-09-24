@@ -229,7 +229,7 @@ def test_idempotent_already_merged_is_not_recorded_as_a_refusal():
 
 
 def test_record_pr_review_preserves_blocked_reason_for_same_head():
-    src = _extract("app_state.py", set(), {"record_pr_review"})
+    src = _extract("app_state.py", set(), {"record_pr_review", "_panel_dissent_stats"})
     state = {"pr_reviews": {}}
     ns = {"state": state, "_task_state_lock": threading.Lock(), "datetime": datetime,
           "save_pr_reviews": lambda x: None, "_PR_REVIEWS_MAX": 100, "logger": _Logger()}

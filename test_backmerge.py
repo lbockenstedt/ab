@@ -36,15 +36,54 @@ def _jobs():
 # --------------------------------------------------------------------------
 # Trigger and direction
 # --------------------------------------------------------------------------
-def test_triggered_only_by_a_push_to_main():
+def test_triggered_by_a_push_to_main_or_qa():
+    """qa is a source too, otherwise a fix committed onto `promote/dev-to-qa`
+    while that promotion was under review lands on qa and NOTHING carries it
+    back to dev — dev then re-promotes the unfixed code every cycle."""
     # yaml parses a bare `on:` key as the boolean True.
     on = _wf().get("on", _wf().get(True))
     assert list(on) == ["push"]
-    assert on["push"]["branches"] == ["main"]
+    assert sorted(on["push"]["branches"]) == ["main", "qa"]
 
 
-def test_targets_are_exactly_qa_and_dev():
-    assert sorted(_jobs()["strategy"]["matrix"]["target"]) == ["dev", "qa"]
+def _edges():
+    return {(p["source"], p["target"]) for p in _jobs()["strategy"]["matrix"]["include"]}
+
+
+def test_back_merge_edges_are_exactly_the_downward_ones():
+    assert _edges() == {("main", "qa"), ("main", "dev"), ("qa", "dev")}
+
+
+def test_every_edge_points_downward_so_the_graph_cannot_cycle():
+    """THE loop guard. The flow is dev -> qa -> main; a back-merge must always
+    move down that order. An upward edge here would feed a branch that is
+    itself a trigger source and the workflow would re-trigger itself forever."""
+    rank = {"dev": 0, "qa": 1, "main": 2}
+    for src, tgt in _edges():
+        assert rank[src] > rank[tgt], f"{src} -> {tgt} is not a downward back-merge"
+
+
+def test_dev_is_never_a_source_so_the_chain_terminates():
+    """dev is the terminal node: main -> qa -> dev is the longest possible
+    chain. Making dev a source would close the cycle."""
+    assert not any(src == "dev" for src, _ in _edges())
+
+
+def test_every_trigger_branch_is_also_a_source():
+    """A branch that triggers the workflow but is not a source would spawn
+    three no-op jobs on every push and carry nothing."""
+    on = _wf().get("on", _wf().get(True))
+    assert sorted({src for src, _ in _edges()}) == sorted(on["push"]["branches"])
+
+
+def test_pairs_are_filtered_by_a_step_not_a_job_level_if():
+    """The `matrix` context is NOT available in a job-level `if` (GitHub
+    evaluates it before the matrix expands), so filtering there would silently
+    drop every pair. The filter has to be the first step."""
+    assert "if" not in _jobs(), "a job-level `if` cannot see matrix.source"
+    first = next(s for s in _jobs()["steps"] if "run" in s)
+    assert "github.ref_name" in first["run"], \
+        "the first step does not filter the matrix down to the pushed branch"
 
 
 def test_never_writes_to_main():
@@ -209,6 +248,109 @@ def test_backmerge_refuses_to_auto_resolve_a_real_conflict(tmp_path):
     res = _run_script(r, "main", "qa", "backmerge", tmp_path / "out")
     assert res.returncode != 0
     assert "merge conflict outside VERSION" in res.stdout + res.stderr
+
+
+def test_a_fix_made_during_a_qa_promotion_is_back_ported_to_dev(tmp_path):
+    """THE case this edge exists for, end to end.
+
+    dev is promoted to qa; the promotion PR is reviewed and a defect is found,
+    so the repair is committed onto the promotion branch and lands on qa. That
+    repair now exists ONLY on qa. Without qa -> dev, dev still carries the
+    unfixed code and re-promotes it next cycle — the same defect is found
+    again, forever.
+    """
+    r = _repo(tmp_path)
+    _git(r, "checkout", "-q", "qa")
+    (r / "app.py").write_text("x = 1\nfixed_during_promotion = True\n")
+    _git(r, "commit", "-q", "-am", "fix found while reviewing promote/dev-to-qa")
+    _git(r, "checkout", "-q", "dev")
+    _git(r, "fetch", "-q", "origin")
+
+    out = tmp_path / "out"
+    res = _run_script(r, "qa", "dev", "backmerge", out)
+    assert res.returncode == 0, res.stderr
+    assert "changed=true" in out.read_text()
+    assert "fixed_during_promotion" in (r / "app.py").read_text(), \
+        "the fix made on qa never reached dev"
+    assert "backmerge: qa -> dev" in _git(r, "log", "-1", "--pretty=%s")
+
+
+def test_qa_to_dev_keeps_devs_own_version(tmp_path):
+    """qa's VERSION must not leak backwards any more than main's does."""
+    r = _repo(tmp_path)
+    _git(r, "checkout", "-q", "dev")
+    (r / "VERSION").write_text("10.00\n")
+    _git(r, "commit", "-q", "-am", "dev version")
+    _git(r, "checkout", "-q", "qa")
+    (r / "VERSION").write_text("1.45\n")
+    (r / "app.py").write_text("x = 'fixed on qa'\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-q", "-m", "qa version + fix")
+    _git(r, "fetch", "-q", "origin")
+
+    res = _run_script(r, "qa", "dev", "backmerge", tmp_path / "out")
+    assert res.returncode == 0, res.stderr
+    version = (r / "VERSION").read_text().strip()
+    assert version.startswith("10."), f"qa's VERSION leaked into dev ({version})"
+
+
+def test_qa_to_dev_is_a_noop_when_dev_is_already_current(tmp_path):
+    """Every dev -> qa promotion pushes qa, so this edge runs constantly and
+    usually has nothing to carry. It must not open an empty PR each time."""
+    r = _repo(tmp_path)
+    out = tmp_path / "out"
+    res = _run_script(r, "qa", "dev", "backmerge", out)
+    assert res.returncode == 0, res.stderr
+    assert "changed=false" in out.read_text()
+    assert "Nothing to backmerge" in res.stdout
+
+
+# --------------------------------------------------------------------------
+# The matrix filter step, actually executed
+# --------------------------------------------------------------------------
+def _run_filter_step(tmp_path, source, target, pushed, make_target=True):
+    """Run the first step's real shell with the ${{ }} expressions substituted,
+    the same way GitHub would before handing it to bash."""
+    step = next(s for s in _jobs()["steps"] if "run" in s)
+    script = (step["run"]
+              .replace("${{ matrix.source }}", source)
+              .replace("${{ matrix.target }}", target)
+              .replace("${{ github.ref_name }}", pushed))
+    r = _repo(tmp_path)
+    if not make_target:
+        _git(r, "branch", "-D", target)
+        _git(r, "fetch", "-q", "--prune", "origin")
+        subprocess.run(["git", "update-ref", "-d", f"refs/remotes/origin/{target}"],
+                       cwd=r, check=True)
+    out = tmp_path / "gh_out"
+    out.write_text("")
+    res = subprocess.run(["bash", "-c", script], cwd=r,
+                         env=dict(os.environ, GITHUB_OUTPUT=str(out)),
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    return out.read_text(), res.stdout
+
+
+@pytest.mark.parametrize("source,target,pushed,expected", [
+    ("main", "qa", "main", "ok=true"),
+    ("main", "dev", "main", "ok=true"),
+    ("qa", "dev", "qa", "ok=true"),
+    # The pairs that must stand down so a push to qa does not re-run main's.
+    ("main", "qa", "qa", "ok=false"),
+    ("main", "dev", "qa", "ok=false"),
+    ("qa", "dev", "main", "ok=false"),
+])
+def test_filter_step_runs_only_the_pairs_for_the_pushed_branch(
+        tmp_path, source, target, pushed, expected):
+    written, _ = _run_filter_step(tmp_path, source, target, pushed)
+    assert written.strip() == expected
+
+
+def test_filter_step_stands_down_when_the_target_branch_is_missing(tmp_path):
+    """Not every fleet repo has all three branches."""
+    written, stdout = _run_filter_step(tmp_path, "qa", "dev", "qa", make_target=False)
+    assert written.strip() == "ok=false"
+    assert "nothing to back-merge" in stdout
 
 
 def test_promote_direction_still_works_after_the_label_change(tmp_path):

@@ -2253,8 +2253,19 @@ def _fetch_github_repos_sync(token: str) -> list:
 
 def ensure_config_defaults(config):
     """Ensure runtime defaults for config options including PR auto-remediation."""
+    # Local import: pr_remediate pulls in fix_engine, and routes.py is imported
+    # very early in app start-up — keep it off the module-level import chain.
+    from pr_remediate import DEFAULT_TARGET_SCORE as PR_REMEDIATE_DEFAULT_TARGET
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
+    # AppBuilder's remediation OBJECTIVE, in one number: keep repairing a PR
+    # until BOTH panels Approve at or above this confidence. See
+    # pr_remediate.should_remediate — the single choke point that reads it.
+    config.setdefault("pr_remediate_target_score", PR_REMEDIATE_DEFAULT_TARGET)
+    # Remediate on ANY unresolved reviewer concern, not just an outright panel
+    # denial: a single dissenting reviewer, or a low individual confidence,
+    # is enough to ask for a repair.
+    config.setdefault("pr_remediate_address_all_concerns", True)
     # Documentation PRs are reviewed but not accuracy-gated: a docs-only diff
     # skips the panels' verdict/confidence gate, and is not auto-remediated to
     # satisfy a critique nothing is waiting on. Containment gates (release
@@ -2276,6 +2287,7 @@ def ensure_config_defaults(config):
 
 @router.get("/settings")
 async def settings_page(request: Request):
+    from pr_remediate import DEFAULT_TARGET_SCORE as PR_REMEDIATE_DEFAULT_TARGET
     load_dotenv(override=True)
     settings = DEFAULT_ENV.copy()
     for k in DEFAULT_ENV:
@@ -2306,6 +2318,8 @@ async def settings_page(request: Request):
     config.setdefault("pr_review_state_logic_enabled", False)
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
+    config.setdefault("pr_remediate_target_score", PR_REMEDIATE_DEFAULT_TARGET)
+    config.setdefault("pr_remediate_address_all_concerns", True)
     config.setdefault("feature_automerge_docs_bypass_panel", True)
     config.setdefault("feature_automerge_allow_release_branch", False)
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
