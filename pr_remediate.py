@@ -96,6 +96,40 @@ def _extract_added_lines(raw_patch: str) -> str:
     return raw_patch
 
 
+def _boundary_content_corroborated(boundary, files) -> bool:
+    """Does the diff's ADDED content actually corroborate a path-matched boundary?
+
+    A path glob alone (e.g. psk-hardcode's ``**/security/**``) proves only that a
+    PR touched a sensitive DIRECTORY — not that it did the dangerous THING. Path
+    matching alone is right for the auto-MERGE deny-list (where the cost of being
+    wrong is an unattended merge), but using it to gate REMEDIATION meant every
+    ordinary change under a ``security/`` directory was permanently locked out of
+    automated repair: lm#1018 was refused with "Diff touches protected
+    architectural boundary: psk-hardcode" for a diff that hardcoded nothing.
+
+    So a path hit is now necessary but not sufficient: the added lines must also
+    carry the boundary's own keywords, or trip the precise content regex this
+    module already defines for it. Fails closed in every ambiguous case (no
+    readable patch, no keywords to test), and pr_review._automerge_decision's
+    boundary deny-list is deliberately NOT changed by any of this.
+    """
+    added = "\n".join(_extract_added_lines(getattr(f, "patch", None) or "") for f in (files or []))
+    if not added.strip():
+        return True
+    added_cf = added.lower()
+
+    bid = (boundary.get("id") or "").strip().lower()
+    if bid == "psk-hardcode" and PSK_HARDCODE_RE.search(added):
+        return True
+    if bid == "transport-scheme" and TLS_VERIFY_BYPASS_RE.search(added):
+        return True
+
+    keywords = [str(k).strip().lower() for k in (boundary.get("keywords") or []) if str(k).strip()]
+    if not keywords:
+        return True
+    return any(k in added_cf for k in keywords)
+
+
 def check_pr_guardrails(
     pr: Any,
     files: Optional[List[Any]] = None,
@@ -136,9 +170,16 @@ def check_pr_guardrails(
         if b.get("id") in TARGET_GUARDRAIL_BOUNDARIES
     ]
     hits = feature_boundary.boundary_hits(paths, guardrail_boundaries)
-    if hits:
-        ids = ", ".join(h.get("id", "?") for h in hits)
+    # A path hit is necessary but NOT sufficient — see _boundary_content_corroborated.
+    corroborated = [h for h in hits if _boundary_content_corroborated(h, files)]
+    if corroborated:
+        ids = ", ".join(h.get("id", "?") for h in corroborated)
         return False, f"Diff touches protected architectural boundary: {ids}"
+    if hits:
+        logger.info(
+            "check_pr_guardrails: boundary path hit(s) %s not corroborated by the diff's "
+            "added lines — allowing remediation",
+            ", ".join(h.get("id", "?") for h in hits))
 
     # 2. Credential checks using secrets_scan.check_secrets(files)
     if files:
@@ -266,6 +307,146 @@ def assess_fix_complexity(
     return "small"
 
 
+DEFAULT_TARGET_SCORE = 0.95  # "as close to 100% as possible", in practice
+
+
+def should_remediate(rec, config):
+    """THE SINGLE CHOKE POINT that defines AppBuilder's remediation OBJECTIVE.
+
+    AppBuilder's job on a PR is not merely to publish an opinion — it is to
+    drive that PR's skeptical-panel approval score as close to 100% as it can
+    get it, unattended. This function states that objective in one place so it
+    is explicit, auditable and testable, instead of being implied by whatever
+    fix_one_pr happens to bail out on.
+
+    Before this existed there was NO verdict-driven trigger at all: remediation
+    was attempted on every open PR on every scan and then silently no-opped
+    inside fix_one_pr ("No findings to fix"), which posts nothing and records
+    nothing. A panel could return a detailed DENY (see lm#1019: both panels
+    🔴 DENY, auto-merge held) and AppBuilder would leave no trace that it had
+    even considered repairing it, so the operator had to click Fix by hand.
+
+    Pure function — no I/O, no side effects, no state writes.
+
+    rec:    state["pr_reviews"]["repo#num"] — panel_*/panel2_*/errors/warnings.
+    config: live config; "pr_remediate_target_score" (default 0.95) is the bar
+            a PR must clear before AppBuilder stops trying to improve it.
+
+    Returns (should: bool, reason: str, deficit: float) where `deficit` is how
+    far below target the PR currently sits (0.0 when it already clears).
+    """
+    if not rec:
+        return False, "no review record yet", 0.0
+
+    panel_status = rec.get("panel_status")
+    panel2_status = rec.get("panel2_status")
+    if panel_status or panel2_status:
+        # A panel that could not RUN produced no recommendation to act on.
+        # Regenerating a fix against an outage burns tokens and moves the head
+        # SHA for nothing; pr_review's own retry path re-runs the panel instead.
+        status = panel_status or panel2_status
+        return False, "panel could not run (%s) — nothing to act on" % status, 0.0
+
+    verdicts = [v for v in (rec.get("panel_verdict"), rec.get("panel2_verdict")) if v is not None]
+    if not verdicts:
+        return False, "no panel verdict recorded", 0.0
+
+    try:
+        target = float(config.get("pr_remediate_target_score", DEFAULT_TARGET_SCORE))
+    except (TypeError, ValueError):
+        target = DEFAULT_TARGET_SCORE
+    target = max(0.0, min(1.0, target))
+
+    confs = [c for c in (rec.get("panel_confidence"), rec.get("panel2_confidence")) if c is not None]
+    score = min(confs) if confs else 0.0
+    deficit = round(max(0.0, target - score), 4)
+
+    # A non-Approve verdict is the strongest possible signal and is NOT
+    # redeemable by a high confidence number: a reviewer that is 85% sure the
+    # PR is wrong is a 0% approval, not an 85% one. Floor the deficit at the
+    # full target so the model tiering in assess_fix_complexity/
+    # next_remediation_requirements treats it as the large job it is.
+    for v in verdicts:
+        if str(v).strip().lower() != "approve":
+            return (True,
+                    "panel verdict %r is below Approve — remediating toward the %.0f%% target"
+                    % (v, target * 100),
+                    max(deficit, target))
+
+    if score < target:
+        return True, "panel score %.2f is below the %.2f target" % (score, target), deficit
+
+    # Every panel says Approve and the aggregate score clears the bar — but an
+    # aggregate hides dissent. A panel of two that returns "Approve · 91%" can
+    # contain one reviewer who rejected outright, and AppBuilder used to merge
+    # straight over the top of that objection because only the aggregate was
+    # ever consulted. If ANY individual reviewer withheld approval, or rated the
+    # change below target, there is still a concern on the table and the PR is
+    # not yet as close to 100% as it can be.
+    if config.get("pr_remediate_address_all_concerns", True):
+        dissents = int(rec.get("panel_dissents") or 0) + int(rec.get("panel2_dissents") or 0)
+        if dissents:
+            return (True,
+                    "%d individual reviewer(s) did not approve despite the panel verdict — "
+                    "addressing their concerns before merging" % dissents,
+                    max(deficit, round(target / 2.0, 4)))
+        reviewer_confs = [c for c in (rec.get("panel_min_reviewer_confidence"),
+                                      rec.get("panel2_min_reviewer_confidence")) if c is not None]
+        if reviewer_confs and min(reviewer_confs) < target:
+            worst = min(reviewer_confs)
+            return (True,
+                    "lowest individual reviewer confidence %.2f is below the %.2f target"
+                    % (worst, target),
+                    round(max(0.0, target - worst), 4))
+
+    errors = int(rec.get("errors") or 0)
+    warnings = int(rec.get("warnings") or 0)
+    if errors > 0 or warnings > 0:
+        return (True, "Tier-1 findings present (%d error(s), %d warning(s))" % (errors, warnings),
+                deficit)
+
+    return False, "panel score %.2f already meets the %.2f target" % (score, target), 0.0
+
+
+def remediation_pending(rec, config):
+    """The "improve before merging" gate.
+
+    AppBuilder's objective is to get a PR as close to 100% panel approval as it
+    can BEFORE merging it, so merging a PR that AppBuilder was about to improve
+    defeats the purpose — and that is exactly what happened, because the merge
+    threshold (feature_automerge_min_confidence) sits below the remediation
+    target (pr_remediate_target_score).
+
+    Every "stop trying" condition — guardrail block, exhausted attempts, kill
+    switch, target already met — returns False, so this can only ever delay a
+    merge by a bounded number of remediation attempts and can never deadlock
+    a PR.
+    """
+    if not rec:
+        return False, "no review record"
+    if not config.get("pr_auto_remediate_enabled", True):
+        return False, "auto-remediation is off"
+    if rec.get("auto_remediate_blocked"):
+        return False, "remediation is blocked by a guardrail"
+    if rec.get("auto_remediate_status") == "exhausted_human_review":
+        return False, "remediation attempts exhausted"
+
+    try:
+        attempts = int(rec.get("remediation_attempts") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    try:
+        max_attempts = int(config.get("pr_auto_remediate_max_attempts", 3))
+    except (TypeError, ValueError):
+        max_attempts = 3
+
+    if attempts >= max_attempts:
+        return False, "remediation attempts exhausted (%d/%d)" % (attempts, max_attempts)
+
+    should, reason, _deficit = should_remediate(rec, config)
+    return (True, reason) if should else (False, reason)
+
+
 def next_remediation_requirements(
     prev_reqs: Any,
     failure_kind: Optional[str] = None,
@@ -301,8 +482,14 @@ def auto_remediate_pr(
     pr: Any,
     config: Optional[Dict[str, Any]] = None,
     fix_fn: Optional[Any] = None,
+    deficit: float = 0.0,
 ) -> Tuple[bool, str]:
-    """Execute automated closed-loop remediation for an open PR with review findings."""
+    """Execute automated closed-loop remediation for an open PR with review findings.
+
+    `deficit` is how far below the approval target should_remediate judged this
+    PR to be; it floors the complexity tier so a flat-out DENY is not handed to
+    a "small" model just because the diff happens to be one file.
+    """
     config = config or {}
     repo_full_name = getattr(repo, "full_name", str(repo))
     key = f"{repo_full_name}#{pr.number}"
@@ -315,6 +502,26 @@ def auto_remediate_pr(
 
     files = list(pr.get_files())
     changed_paths = [getattr(f, "filename", "") for f in files if getattr(f, "filename", "")]
+    head_sha = getattr(getattr(pr, "head", None), "sha", None)
+
+    def _post_once(marker: str, body: str, **fields) -> None:
+        """Post a notice at most ONCE per (marker, head) pair.
+
+        The scan re-runs every poll cycle, and both the guardrail banner and the
+        attempt-ceiling banner used to be posted unconditionally — lm#1018
+        collected the same multi-hundred-word guardrail banner twice inside
+        eighteen seconds. Mirror the "record it once, stay quiet until the
+        reason actually changes" guard pr_review._maybe_auto_merge already uses.
+        """
+        stamp = "%s@%s" % (marker, head_sha or "?")
+        if rec.get("auto_remediate_notice") != stamp:
+            try:
+                pr.create_issue_comment(body)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("auto_remediate_pr: failed to post %s comment on %s: %s",
+                               marker, key, e)
+            fields["auto_remediate_notice"] = stamp
+        update_pr_review(repo_full_name, pr.number, **fields)
 
     # Never rewrite a promotion/backmerge PR — see _PROMOTION_HEAD_RE.
     head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
@@ -325,6 +532,8 @@ def auto_remediate_pr(
         )
         logger.info("auto_remediate_pr: %s: %s", key, reason)
         update_pr_review(repo_full_name, pr.number, auto_remediate_blocked=True,
+                         auto_remediate_blocked_head=head_sha,
+                         auto_remediate_reason=reason,
                          auto_remediate_failure=reason)
         return False, reason
 
@@ -344,12 +553,9 @@ def auto_remediate_pr(
             "**Action**: This PR has been locked from automated fixes and requires mandatory human review.\n\n"
             f"{guidance}"
         )
-        try:
-            pr.create_issue_comment(banner)
-        except Exception as e:
-            logger.warning("auto_remediate_pr: failed to post guardrail comment on %s: %s", key, e)
-
-        update_pr_review(repo_full_name, pr.number, guardrail_violation=violation, auto_remediate_blocked=True)
+        _post_once("guardrail", banner, guardrail_violation=violation,
+                   auto_remediate_blocked=True, auto_remediate_blocked_head=head_sha,
+                   auto_remediate_reason=f"Guardrail violation: {violation}")
         return False, f"Guardrail violation: {violation}"
 
     # Attempt ceiling check
@@ -369,13 +575,11 @@ def auto_remediate_pr(
             f"AppBuilder attempted to remediate review findings {attempts} times but was unable to resolve all critiques. Leaving for human review.\n\n"
             f"{guidance}"
         )
-        try:
-            pr.create_issue_comment(exhausted_comment)
-        except Exception as e:
-            logger.warning("auto_remediate_pr: failed to post attempt ceiling comment on %s: %s", key, e)
-
-        update_pr_review(repo_full_name, pr.number, auto_remediate_status="exhausted_human_review")
+        _post_once("exhausted", exhausted_comment,
+                   auto_remediate_status="exhausted_human_review",
+                   auto_remediate_reason="Remediation attempt limit reached")
         return False, "Remediation attempt limit reached"
+
 
     # Twin-parity detection and auto-mirroring on pxmx
     if "pxmx" in repo_full_name.lower():
@@ -411,7 +615,7 @@ def auto_remediate_pr(
                 rec[_field] = int(rec.get(_field) or 0) + 1
 
     # Assess complexity & requirements
-    critique = rec.get("panel_critique") or ""
+    critique = "\n".join(c for c in (rec.get("panel_critique"), rec.get("panel2_critique")) if c)
     dissent_feedback = rec.get("dissent_feedback") or ""
     if not dissent_feedback:
         try:
@@ -424,6 +628,16 @@ def auto_remediate_pr(
     # "items" (not "findings") is the finding list — see the audit block above.
     findings = rec.get("items") or []
     assessed_complexity = assess_fix_complexity(critique, dissent_feedback, findings, files)
+
+    # A large approval deficit means the panel doubts the change itself, not its
+    # spelling. assess_fix_complexity only reads the critique TEXT and the file
+    # count, so a one-file diff that both panels flatly denied was being sent to
+    # a "small" model — the cheapest model asked to solve the hardest objection.
+    # Floor the tier by how far under target the PR actually sits.
+    if deficit >= 0.30 and _COMPLEXITY_RANK_ORDER.index(assessed_complexity) < _COMPLEXITY_RANK_ORDER.index("large"):
+        assessed_complexity = "large"
+    elif deficit >= 0.10 and _COMPLEXITY_RANK_ORDER.index(assessed_complexity) < _COMPLEXITY_RANK_ORDER.index("medium"):
+        assessed_complexity = "medium"
 
     from model_selection import LlmRequirements as _ReqClass
     prev_complexity = rec.get("last_remediation_complexity")
@@ -495,8 +709,34 @@ def maybe_auto_remediate(
     pr: Any,
     config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
-    """Entry point called from pr_review._review_one when PR is open, not merged, and auto-merge did not merge the PR."""
+    """Entry point called from pr_review._review_one when PR is open, not merged,
+    and auto-merge did not merge the PR.
+
+    AppBuilder's objective on a PR is to drive its skeptical-panel approval
+    score as close to 100% as possible — see should_remediate, which is the
+    single place that objective is defined. This function is only the
+    containment wrapper around it (kill switch, draft/open/merged, guardrail
+    latch, docs policy).
+
+    Every exit records WHY on the review record (auto_remediate_reason) so a
+    DENY that AppBuilder chose not to act on is visible in the UI instead of
+    being an invisible no-op.
+    """
     config = config or {}
+    repo_full_name = getattr(repo, "full_name", str(repo))
+    key = f"{repo_full_name}#{pr.number}"
+
+    def _skip(reason, **fields):
+        """Record the decision, then refuse. Without this an operator staring at
+        a 🔴 DENY review has no way to tell 'AppBuilder decided not to act' from
+        'AppBuilder never ran'."""
+        try:
+            update_pr_review(repo_full_name, pr.number,
+                             auto_remediate_reason=reason, **fields)
+        except Exception as e:  # noqa: BLE001 — never let bookkeeping break the scan
+            logger.debug("maybe_auto_remediate: could not record skip for %s: %s", key, e)
+        return False, reason
+
     if not config.get("pr_auto_remediate_enabled", True):
         return False, "pr_auto_remediate_enabled is false"
     if getattr(pr, "draft", False):
@@ -506,16 +746,29 @@ def maybe_auto_remediate(
     if (getattr(pr, "state", "") or "open").lower() != "open":
         return False, "PR is not open"
 
-    repo_full_name = getattr(repo, "full_name", str(repo))
-    key = f"{repo_full_name}#{pr.number}"
     rec = (state.get("pr_reviews") or {}).get(key) or {}
+    head_sha = getattr(getattr(pr, "head", None), "sha", None)
 
     if rec.get("auto_merged"):
         return False, "PR was auto-merged"
+
+    # The guardrail latch is PER-HEAD, not permanent. It used to be a one-way
+    # door: a single tripped boundary (or a promotion-branch skip) set
+    # auto_remediate_blocked=True forever, so even after the author pushed a
+    # commit that no longer touched the boundary at all, AppBuilder refused to
+    # look at the PR again for the rest of its life. Re-evaluate on a new head;
+    # if the diff still trips a guardrail, auto_remediate_pr re-latches it.
     if rec.get("auto_remediate_blocked"):
-        return False, "PR remediation is blocked by guardrail"
+        if head_sha and rec.get("auto_remediate_blocked_head") not in (None, head_sha):
+            logger.info("maybe_auto_remediate: %s — head moved to %s, re-evaluating the "
+                        "guardrail block", key, head_sha[:8])
+            update_pr_review(repo_full_name, pr.number, auto_remediate_blocked=False,
+                             auto_remediate_blocked_head=None)
+            rec = (state.get("pr_reviews") or {}).get(key) or {}
+        else:
+            return _skip("PR remediation is blocked by guardrail")
     if rec.get("auto_remediate_status") == "exhausted_human_review":
-        return False, "PR remediation attempt limit reached"
+        return _skip("PR remediation attempt limit reached")
 
     # Documentation PRs are reviewed but not accuracy-gated (same operator
     # policy as pr_review._automerge_decision's docs bypass). Remediation
@@ -530,8 +783,19 @@ def maybe_auto_remediate(
             verdict = feature_allowlist.classify(files, config.get("feature_automerge_allowlist"))
             if (verdict.get("category") == feature_allowlist.DOCS_ONLY
                     and verdict.get("auto_approvable") is True):
-                return False, "documentation-only PR — reviewed but not accuracy-gated"
+                return _skip("documentation-only PR — reviewed but not accuracy-gated")
         except Exception as e:  # noqa: BLE001
             logger.debug("maybe_auto_remediate: docs-only check skipped for %s: %s", key, e)
 
-    return auto_remediate_pr(gh, repo, pr, config)
+    # THE OBJECTIVE. Everything above is containment; this is the actual "is
+    # this PR good enough yet?" question, and it is what makes a panel
+    # recommendation trigger a repair instead of just being published.
+    should, reason, deficit = should_remediate(rec, config)
+    if not should:
+        return _skip(reason, auto_remediate_deficit=0.0)
+    logger.info("maybe_auto_remediate: %s — %s (deficit %.2f)", key, reason, deficit)
+    update_pr_review(repo_full_name, pr.number, auto_remediate_reason=reason,
+                     auto_remediate_deficit=deficit)
+
+    return auto_remediate_pr(gh, repo, pr, config, deficit=deficit)
+
