@@ -52,11 +52,23 @@ class MockRepo:
 
 def test_guardrails_blocks_transport_scheme_tampering():
     pr = MockPR(title="Update ws transport", body="Modify connection scheme")
-    files = [MockFile("src/transports/ws_client.py", "+ def connect(): pass")]
+    files = [MockFile("src/transports/ws_client.py", '+ url = url.replace("wss://", "ws://")')]
     passed, reason = check_pr_guardrails(pr, files, ["src/transports/ws_client.py"], {})
     assert passed is False
     assert reason is not None
     assert "transport-scheme" in reason or "boundary" in reason.lower()
+
+
+def test_guardrails_allow_innocuous_change_in_a_boundary_path():
+    """A boundary path glob proves the PR touched a sensitive FILE, not that it
+    did the dangerous THING. Blocking on the path alone locked every ordinary
+    change under e.g. `**/security/**` out of automated remediation for good
+    (lm#1018). The deny-list that gates auto-MERGE is unchanged."""
+    pr = MockPR(title="Add a docstring", body="no behaviour change")
+    files = [MockFile("src/transports/ws_client.py", "+ def connect(): pass")]
+    passed, reason = check_pr_guardrails(pr, files, ["src/transports/ws_client.py"], {})
+    assert passed is True
+    assert reason is None
 
 
 def test_guardrails_blocks_hardcoded_psk():

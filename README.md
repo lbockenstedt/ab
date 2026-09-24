@@ -10,6 +10,7 @@ See [`docs/ab.md`](docs/ab.md) for the complete architecture reference and [`doc
    - **Skeptical Review Panel (`### 🧠 Skeptical review (panel)`):** Deep adversarial audit examining PR intent, scope creep, unintended regressions, missing tests, and contract violations.
    - **State-Logic & Control-Flow Panel (`### 🔀 State-logic / control-flow review (panel)`):** Formal verification of asynchronous state transitions, race conditions, error recovery, idempotency, and rollback handling.
    - **Composite Scoring:** Combines panel verdicts into a deterministic composite recommendation (`Recommendation: APPROVE` or `Recommendation: DENY`).
+   - **Remediation Objective (`pr_remediate.should_remediate`):** AppBuilder's job on a PR is not to publish an opinion — it is to **drive the panel approval score as close to 100% as it can get it, unattended, and only then merge**. Any verdict below Approve, any panel score under `pr_remediate_target_score` (default 0.95), or *any* individual reviewer who dissented or rated the change low (`pr_remediate_address_all_concerns`, default on) triggers an automatic repair. Remediation always runs **before** the auto-merge decision, because the merge threshold sits below the remediation target.
 2. **Automated PR Fix Loop (`pr_fix_loop.py`):**
    - Scans active PRs across all 16 fleet repositories.
    - Parses AppBuilder panel rejections and extracts complete defect specifications.
