@@ -118,6 +118,12 @@ def _panel_dissent_stats(review):
     `dissents` nor `rated`, so a two-seat panel where one seat failed and one
     approved was byte-identical to unanimous approval. "We never heard from
     this reviewer" must not look like "this reviewer approved".
+
+    "Nothing parseable" includes a whitespace-only verdict. `""` was already
+    counted as unrated, but `"   "` is truthy and so used to be counted as a
+    rated DISSENT — the same non-answer landing in two different buckets
+    depending on whether the provider happened to emit a space. Both now mean
+    the same thing: we did not hear from this seat.
     """
     if not review or review.get("status"):
         return (0, 0, None, 0)
@@ -138,7 +144,7 @@ def _panel_dissent_stats(review):
             continue
 
         verdict = item.get("verdict")
-        if verdict:
+        if verdict is not None and str(verdict).strip():
             rated += 1
             if str(verdict).strip().lower() != "approve":
                 dissents += 1

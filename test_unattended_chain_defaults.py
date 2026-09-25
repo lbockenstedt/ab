@@ -19,15 +19,21 @@ round-trip.
 """
 
 import ast
+import os
 
 KEY = "pr_auto_remediate_skip_promotion"
 # Registered alongside these, which are the other headless (no UI control)
 # remediation knobs — if they ever grow a settings widget, KEY should too.
 SIBLING = "pr_auto_remediate_skip_docs_only"
 
+# Resolve from this file rather than the CWD: opening "routes.py" relatively
+# made the test pass only when pytest happened to be invoked from the repo
+# root, and fail with FileNotFoundError from anywhere else.
+_ROUTES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "routes.py")
+
 
 def _tree():
-    with open("routes.py", encoding="utf-8") as fh:
+    with open(_ROUTES, encoding="utf-8") as fh:
         return ast.parse(fh.read())
 
 
