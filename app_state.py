@@ -348,6 +348,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "auto_remediate_status": prev.get("auto_remediate_status"),
                 "auto_remediate_failure": prev.get("auto_remediate_failure"),
                 "auto_remediate_blocked": prev.get("auto_remediate_blocked"),
+                "auto_remediate_blocked_head": prev.get("auto_remediate_blocked_head"),
                 "auto_remediate_reason": prev.get("auto_remediate_reason"),
                 "last_remediation_complexity": prev.get("last_remediation_complexity"),
                 "last_remediation_model": prev.get("last_remediation_model"),
