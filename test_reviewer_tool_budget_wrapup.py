@@ -101,7 +101,9 @@ def _build(dispatch_results):
             return nxt, None
 
     ns["llm_client"] = _FakeLlmClient
-    exec(_extract({"_run_reviewer_turn"}), ns)  # noqa: S102 — repo-standard test pattern
+    exec(_extract({"_run_reviewer_turn", "_extract_reviewer_verdict", "_parse_reviewer_json",
+                   "_has_verdict_key", "_canon_verdict_keys", "_balanced_brace_span"}),
+         ns)  # noqa: S102 — repo-standard test pattern
     return ns["_run_reviewer_turn"], calls
 
 
@@ -204,3 +206,60 @@ def test_non_dict_dispatch_result_short_circuits():
     out, calls = _run([VERDICT])
     assert json.loads(out)["verdict"] == "Reject"
     assert len(calls) == 1
+
+
+# --- narration-only stop -------------------------------------------------
+#
+# The second half of the live defect. These turns make NO tool call, so the
+# loop's `if not tool_calls: return text` returned the prose immediately and
+# never reached the wrap-up. Observed on LM-AB after the first fix shipped:
+#
+#   raw response: 'Need to verify the endpoints and port in api_server.py.'
+#   raw response: 'Key uncertainties: `_console_creds_for_tenant` exists? ...'
+
+NARRATION = "Need to verify the endpoints and port in api_server.py."
+
+
+def test_narration_without_tool_call_still_returns_a_verdict():
+    out, calls = _run([{"text": NARRATION, "tool_calls": []},
+                       {"text": VERDICT, "tool_calls": []}])
+    assert json.loads(out)["verdict"] == "Reject"
+    assert len(calls) == 2
+    assert calls[-1]["tools"] is None, "wrap-up must be tools-free"
+
+
+def test_narration_stop_asks_for_the_verdict():
+    _, calls = _run([{"text": NARRATION, "tool_calls": []},
+                     {"text": VERDICT, "tool_calls": []}])
+    body = calls[-1]["messages"][-1]["content"].lower()
+    assert "do not ask for more files" in body
+    assert "verdict" in body
+
+
+def test_narration_is_kept_in_context_for_the_wrapup():
+    """The model should see its own half-finished reasoning when concluding."""
+    _, calls = _run([{"text": NARRATION, "tool_calls": []},
+                     {"text": VERDICT, "tool_calls": []}])
+    roles = [(m["role"], m.get("content")) for m in calls[-1]["messages"]]
+    assert ("assistant", NARRATION) in roles
+
+
+def test_empty_stop_with_no_tool_call_reaches_wrapup():
+    """The '' case must not be mistaken for a finished answer."""
+    out, calls = _run([{"text": "", "tool_calls": []},
+                       {"text": VERDICT, "tool_calls": []}])
+    assert json.loads(out)["verdict"] == "Reject"
+    assert len(calls) == 2
+
+
+def test_narration_wrapup_failure_falls_back_to_narration():
+    out, _ = _run([{"text": NARRATION, "tool_calls": []}, RuntimeError("down")])
+    assert out == NARRATION
+
+
+def test_verdict_with_surrounding_prose_is_accepted_without_a_wrapup():
+    """Don't burn an extra call when the verdict is merely wrapped in commentary."""
+    wrapped = f"Here is my assessment:\n```json\n{VERDICT}\n```\nHappy to expand."
+    out, calls = _run([{"text": wrapped, "tool_calls": []}])
+    assert len(calls) == 1, "a parseable verdict must return immediately"
+    assert out == wrapped
