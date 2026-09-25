@@ -343,11 +343,15 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 # moves between attempts. Resetting on head movement would make the
                 # budget un-spendable and reinstate the loop. The budget is per-PR,
                 # which is what makes remediation_pending's "can never deadlock a
-                # PR" guarantee true.
+                # PR" guarantee true. Head-scoped guardrail blocks (`auto_remediate_blocked`)
+                # carry their latching SHA in `auto_remediate_blocked_head`, which
+                # `pr_remediate.maybe_auto_remediate` compares against the new head to
+                # re-evaluate guardrails when a commit changes.
                 "remediation_attempts": int(prev.get("remediation_attempts") or 0),
                 "auto_remediate_status": prev.get("auto_remediate_status"),
                 "auto_remediate_failure": prev.get("auto_remediate_failure"),
                 "auto_remediate_blocked": prev.get("auto_remediate_blocked"),
+                "auto_remediate_blocked_head": prev.get("auto_remediate_blocked_head"),
                 "auto_remediate_reason": prev.get("auto_remediate_reason"),
                 "last_remediation_complexity": prev.get("last_remediation_complexity"),
                 "last_remediation_model": prev.get("last_remediation_model"),
