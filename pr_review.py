@@ -78,7 +78,8 @@ from branch_policy import AUTO_BRANCH_PREFIXES_BY_KIND, is_release_locked
 from pr_actions import approve_pr, merge_pr
 from secrets_scan import check_secrets
 from check_tooltips import find_missing_tooltips_in_files
-from lint_python import check_undefined_names
+from lint_python import (check_undefined_names, check_undefined_names_verified,
+                         format_undefined_name_context)
 from check_unattended_mutation import check_unattended_mutation
 from check_test_regressions import check_test_regressions
 from attr_definition_lookup import (
@@ -459,7 +460,8 @@ def _pr_diff_text(files):
     return _truncate_diff("\n\n".join(parts), _PANEL_DIFF_CHARS)
 
 
-def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
+def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
+                      undefined_verified=None):
     """Run the cross-provider skeptical reviewer panel on the PR diff — the SAME
     panel (``fix_engine.review_fix``, ≥0.80 confidence gate) the bug/feature fix
     pipeline uses, now unified so a human PR and a bot fix are judged by one
@@ -517,6 +519,13 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None):
         issue_body += format_wiring_context(wiring_defs)
     except Exception as e:  # noqa: BLE001 — this only ever ADDS context; never block the review over it
         logger.info("pr_review: wiring-context lookup skipped (%s)", e)
+    # Same idea as the wiring context above, for the undefined-name class of
+    # doubt: state what ruff already proved rather than letting a reviewer
+    # spend its tool budget re-asking, then block because it ran out.
+    try:
+        issue_body += format_undefined_name_context(undefined_verified)
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: undefined-name context skipped (%s)", e)
     try:
         # builder_n=0 → no builder to exclude, so EVERY configured provider reviews
         # the human's diff (there is no bot author to leave out). repo+head_sha
@@ -1413,7 +1422,8 @@ def _review_one(gh, repo, pr, config, force=False):
     _step("checking for missing tooltips")
     findings += find_missing_tooltips_in_files(files)
     _step("checking for undefined names")
-    findings += check_undefined_names(repo, files, head_sha)
+    _undef_findings, _undef_verified = check_undefined_names_verified(repo, files, head_sha)
+    findings += _undef_findings
     _step("checking for unattended mutation")
     findings += check_unattended_mutation(files)
     existing = _find_marker_comment(pr)
@@ -1480,7 +1490,8 @@ def _review_one(gh, repo, pr, config, force=False):
         _step("summarising the change (LLM)")
         summary = _summarize_changes(pr, files, config, repo=repo)
         _step("running the skeptical reviewer panel (LLM)")
-        review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh)
+        review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh,
+                                   undefined_verified=_undef_verified)
         _step("running the state-logic reviewer panel (LLM)")
         state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
         _step("rendering and posting the review comment")
