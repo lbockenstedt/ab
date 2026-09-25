@@ -1723,12 +1723,31 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 max_attempts = 3
             max_attempts = max(1, min(max_attempts, 5))
 
+            # A retry that produced NO PARSEABLE OUTPUT tested no hypothesis. An
+            # empty completion or a reply with no JSON object in it tells us
+            # nothing about whether the fix approach was wrong — the model simply
+            # failed to answer. Spending the attempt ceiling on those is what
+            # stranded cs#143 and lm#1047 at exhausted_human_review without a
+            # single fix ever having been evaluated ("retry 3/3 — The model
+            # returned an empty response"). Barren attempts get their own small,
+            # separate allowance so a flaky generation cannot consume the budget,
+            # while a hard cap still prevents an endless retry loop against a
+            # provider that is down.
+            try:
+                max_barren = int(config.get("pr_fix_max_barren_retries", 2) or 0)
+            except (TypeError, ValueError):
+                max_barren = 2
+            max_barren = max(0, min(max_barren, 3))
+
             error_context = None
             last_failure = "Fix generation failed."
             fixes, confidence, review_conf = None, 0.0, 0.0
             attempt_succeeded = False
+            barren = 0
 
-            for attempt in range(1, max_attempts + 1):
+            attempt = 0
+            while attempt < max_attempts:
+                attempt += 1
                 is_last = attempt == max_attempts
                 if attempt > 1:
                     # Discard the rejected attempt's edits — every retry must
@@ -1751,6 +1770,14 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 except Exception as e:
                     last_failure = "Fix generation failed: %s" % e
                     error_context = last_failure
+                    # Generation raised before producing anything — barren.
+                    if barren < max_barren:
+                        barren += 1
+                        attempt -= 1
+                        logger.warning(
+                            "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
+                            "budget: %s", repo_full_name, number, barren, max_barren, last_failure)
+                        continue
                     if is_last:
                         return False, last_failure
                     continue
@@ -1780,6 +1807,19 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         last_failure = ("The response was not valid JSON. Return ONLY a single "
                                         "well-formed JSON object with \"confidence\" and \"edits\".")
                     error_context = last_failure
+                    # "empty", "no_json" and "invalid_json" all mean the model
+                    # returned nothing we could evaluate. Unlike an anchor miss
+                    # or a no_edits reply — where the model did produce a
+                    # structured fix that simply did not apply — these carry no
+                    # signal about the fix itself, so they get the barren
+                    # allowance rather than the fix budget.
+                    if _reason in ("empty", "no_json", "invalid_json") and barren < max_barren:
+                        barren += 1
+                        attempt -= 1
+                        logger.warning(
+                            "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
+                            "budget: %s", repo_full_name, number, barren, max_barren, last_failure)
+                        continue
                     if is_last:
                         return False, last_failure
                     continue
