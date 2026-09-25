@@ -102,7 +102,7 @@ def set_task_step(task_id, step):
 
 
 def _panel_dissent_stats(review):
-    """Per-reviewer outcomes inside ONE panel result: (dissents, rated, min_conf).
+    """Per-reviewer outcomes inside ONE panel: (dissents, rated, min_conf, unrated).
 
     A panel reports a single aggregate verdict, so a panel can come back
     "Approve" while an individual reviewer still dissented or rated the change
@@ -111,20 +111,30 @@ def _panel_dissent_stats(review):
     that a reviewer had actually objected to, because the panel as a whole said
     yes. These counts are what let it keep improving a PR that technically
     passed but still carries unresolved reviewer concerns.
+
+    A seat we could not score is counted as `unrated` rather than being dropped
+    on the floor. Previously a reviewer item with no usable verdict — one that
+    errored, timed out, or returned nothing parseable — incremented neither
+    `dissents` nor `rated`, so a two-seat panel where one seat failed and one
+    approved was byte-identical to unanimous approval. "We never heard from
+    this reviewer" must not look like "this reviewer approved".
     """
     if not review or review.get("status"):
-        return (0, 0, None)
+        return (0, 0, None, 0)
 
     reviews = review.get("reviews")
     if not isinstance(reviews, list) or not reviews:
-        return (0, 0, None)
+        return (0, 0, None, 0)
 
     dissents = 0
     rated = 0
     min_conf = None
+    unrated = 0
 
     for item in reviews:
         if not isinstance(item, dict):
+            # A seat we cannot read at all is still a seat we did not hear from.
+            unrated += 1
             continue
 
         verdict = item.get("verdict")
@@ -132,7 +142,12 @@ def _panel_dissent_stats(review):
             rated += 1
             if str(verdict).strip().lower() != "approve":
                 dissents += 1
+        else:
+            unrated += 1
 
+        # Confidence is read even for an unrated seat: a reviewer that reported
+        # a number but no parseable verdict still told us how sure it was, and
+        # dropping that would hide a low rating behind an unusable verdict.
         confidence = item.get("confidence")
         if confidence is not None:
             try:
@@ -145,7 +160,7 @@ def _panel_dissent_stats(review):
             if min_conf is None or conf_float < min_conf:
                 min_conf = conf_float
 
-    return (dissents, rated, min_conf)
+    return (dissents, rated, min_conf, unrated)
 
 
 def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None, review2=None,
@@ -213,8 +228,8 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
 
     # Per-reviewer dissent inside each panel — see _panel_dissent_stats. An
     # aggregate "Approve" can still hide a reviewer who objected.
-    panel_dissents, panel_rated, panel_min_conf = _panel_dissent_stats(_r)
-    panel2_dissents, panel2_rated, panel2_min_conf = _panel_dissent_stats(_r2)
+    panel_dissents, panel_rated, panel_min_conf, panel_unrated = _panel_dissent_stats(_r)
+    panel2_dissents, panel2_rated, panel2_min_conf, panel2_unrated = _panel_dissent_stats(_r2)
 
     # Composite consensus & average confidence computation
     valid_confs = [c for c in (panel_confidence, panel2_confidence) if c is not None]
@@ -276,9 +291,11 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "panel2_critique": panel2_critique,
                 "panel_dissents": panel_dissents,
                 "panel_rated": panel_rated,
+                "panel_unrated": panel_unrated,
                 "panel_min_reviewer_confidence": panel_min_conf,
                 "panel2_dissents": panel2_dissents,
                 "panel2_rated": panel2_rated,
+                "panel2_unrated": panel2_unrated,
                 "panel2_min_reviewer_confidence": panel2_min_conf,
                 "panel_avg_confidence": panel_avg_confidence,
                 "composite_verdict": composite_verdict,
