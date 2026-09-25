@@ -88,7 +88,6 @@ def _build(dispatch_results):
         "_fetch_repo_file_for_review": lambda *a, **k: {"content": "x = 1"},
         "call_llm": lambda *a, **k: "",
     }
-
     calls = []
 
     class _FakeLlmClient:
@@ -101,8 +100,9 @@ def _build(dispatch_results):
             return nxt, None
 
     ns["llm_client"] = _FakeLlmClient
-    exec(_extract({"_run_reviewer_turn", "_extract_reviewer_verdict", "_parse_reviewer_json",
-                   "_has_verdict_key", "_canon_verdict_keys", "_balanced_brace_span"}),
+    exec(_extract({"_run_reviewer_turn", "_full_file_context", "_extract_reviewer_verdict",
+                   "_parse_reviewer_json", "_has_verdict_key", "_canon_verdict_keys",
+                   "_balanced_brace_span"}),
          ns)  # noqa: S102 — repo-standard test pattern
     return ns["_run_reviewer_turn"], calls
 

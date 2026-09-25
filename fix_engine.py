@@ -1470,6 +1470,41 @@ def _fetch_repo_file_for_review(repo, head_sha, path, checkout_path=None, patter
 _DIFF_FILE_HEADER_RE = re.compile(r'^diff --git a/(\S+) b/\S+', re.MULTILINE)
 
 
+def _full_file_context(repo, head_sha, prompt, can_fetch_itself):
+    """Full text of the files this diff touches, as a prompt addendum ("" if none).
+
+    Reviewers overwhelmingly reject on one question: "does this symbol exist /
+    is this module already imported above the hunk?" The diff alone cannot
+    answer it, so handing the reviewer the touched files up front removes the
+    single largest source of unverifiable-therefore-Reject verdicts.
+
+    Best-effort by construction — a file that can't be fetched is skipped, never
+    raised, because a review must not fail over missing context."""
+    if repo is None or head_sha is None:
+        return ""
+    paths = _DIFF_FILE_HEADER_RE.findall(prompt)[:_REVIEW_TOOL_MAX_FILES]
+    blocks = []
+    for p in paths:
+        try:
+            out = _fetch_repo_file_for_review(repo, head_sha, p)
+        except Exception:  # noqa: BLE001 — context is optional; skip this file
+            continue
+        if "content" in out:
+            blocks.append("\n--- FULL FILE: %s ---\n%s\n" % (p, out["content"]))
+    if not blocks:
+        return ""
+    why = ("this reviewer can't fetch files on its own"
+           if not can_fetch_itself else
+           "you do NOT need to spend your fetch budget re-reading them")
+    return (
+        "\n\nThe file(s) below are shown in FULL (not just the diff above) — %s. "
+        "Use them to verify whether a referenced symbol exists elsewhere in the "
+        "file, an import is already present above the visible diff, etc. Do not "
+        "reject or call something 'unverifiable' when the file below would "
+        "settle it:\n" % why
+    ) + "".join(blocks)
+
+
 def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo, head_sha,
                        repo_checkout_path=None):
     """One reviewer's turn. With repo+head_sha AND a provider that can actually
@@ -1565,30 +1600,21 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
                          json_schema=_REVIEWER_JSON_SCHEMA)
     supports_tools = not (repo is None or head_sha is None or is_claude_cli)
     if not supports_tools:
-        extra = ""
-        if repo is not None and head_sha is not None:
-            paths = _DIFF_FILE_HEADER_RE.findall(prompt)[:_REVIEW_TOOL_MAX_FILES]
-            blocks = []
-            for p in paths:
-                out = _fetch_repo_file_for_review(repo, head_sha, p)
-                if "content" in out:
-                    blocks.append(
-                        "\n--- FULL FILE (for cross-reference — this reviewer "
-                        "can't fetch files on its own): %s ---\n%s\n" % (p, out["content"])
-                    )
-            if blocks:
-                extra = (
-                    "\n\nThe file(s) below are shown in FULL (not just the diff "
-                    "above) so you can verify whether a referenced symbol exists "
-                    "elsewhere in the file, an import is already present above "
-                    "the visible diff, etc. Do not reject or call something "
-                    "'unverifiable' when the file below would settle it:\n"
-                    + "".join(blocks)
-                )
+        extra = _full_file_context(repo, head_sha, prompt, can_fetch_itself=False)
         messages = [{"role": "system", "content": system_prompt},
                    {"role": "user", "content": prompt + extra}]
         return _dispatch(messages)
 
+    # Tool-capable reviewers got NONE of the context above and had to spend
+    # fetch calls rediscovering it. Measured on LM-AB: 9 of 35 panel-1 Rejects
+    # (26%) cited something the reviewer could not verify rather than a real
+    # defect — every one of them with zero findings, and on lm#1047 the two
+    # blocking doubts (is `ipaddress` imported, does `_console_creds_for_tenant`
+    # exist) were both answerable from files the diff already touched, and were
+    # in fact confirmed fine by the OTHER reviewer on the same panel. Hand them
+    # the same files up front; the tool then covers only genuinely out-of-diff
+    # questions.
+    file_ctx = _full_file_context(repo, head_sha, prompt, can_fetch_itself=True)
     prompt = prompt + (
         "\n\nThe diff above may be TRUNCATED (large files/diffs are capped). "
         "You have a fetch_repo_file tool that reads the ACTUAL file at this "
@@ -1599,7 +1625,7 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
         "rather than the truncated start of the file. Most reviews won't "
         "need it; use it when a specific, nameable uncertainty would change "
         "your verdict, not as a first step."
-    )
+    ) + file_ctx
     messages = [{"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}]
     files_fetched = 0
