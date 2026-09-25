@@ -330,6 +330,32 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 # (dropping the note), so the next decision must write it again.
                 "auto_merge_blocked_reason": (
                     prev.get("auto_merge_blocked_reason") if prev.get("head") == head_sha else None),
+                # Remediation bookkeeping. pr_remediate writes these through
+                # update_pr_review, but this function REBUILDS the record on every
+                # scan -- so leaving them out silently reset the attempt counter,
+                # the terminal "exhausted_human_review" state and the failed-model
+                # exclusion list once per poll. remediation_pending then never saw
+                # the ceiling bind, held the auto-merge forever, and re-remediated
+                # the same PR with the same model on every cycle.
+                #
+                # Deliberately preserved ACROSS a head change, unlike `approved`
+                # above: a remediation attempt PUSHES A COMMIT, so the head always
+                # moves between attempts. Resetting on head movement would make the
+                # budget un-spendable and reinstate the loop. The budget is per-PR,
+                # which is what makes remediation_pending's "can never deadlock a
+                # PR" guarantee true. Head-scoped guardrail blocks (`auto_remediate_blocked`)
+                # carry their latching SHA in `auto_remediate_blocked_head`, which
+                # `pr_remediate.maybe_auto_remediate` compares against the new head to
+                # re-evaluate guardrails when a commit changes.
+                "remediation_attempts": int(prev.get("remediation_attempts") or 0),
+                "auto_remediate_status": prev.get("auto_remediate_status"),
+                "auto_remediate_failure": prev.get("auto_remediate_failure"),
+                "auto_remediate_blocked": prev.get("auto_remediate_blocked"),
+                "auto_remediate_blocked_head": prev.get("auto_remediate_blocked_head"),
+                "auto_remediate_reason": prev.get("auto_remediate_reason"),
+                "last_remediation_complexity": prev.get("last_remediation_complexity"),
+                "last_remediation_model": prev.get("last_remediation_model"),
+                "excluded_models": list(prev.get("excluded_models") or []),
                 # Denied does NOT persist here: record_pr_review only runs for OPEN
                 # PRs, and Deny CLOSES the PR — so a still-denied PR is never re-scanned
                 # (its badge persists via the stored record). Reaching this line means
