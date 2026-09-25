@@ -98,4 +98,28 @@ SRC=dev TGT=qa BR=promote/dev-to-qa bash .github/scripts/promote.sh >/dev/null
 chk "batched takes every unit at once (gamma)" "$(cat gamma.py 2>/dev/null)" "gamma"
 chk "batched takes every unit at once (delta)" "$(cat delta.py 2>/dev/null)" "delta"
 
+echo "== the running script is immutable mid-promotion =="
+# stage_to checks out the TARGET branch into the working tree, which replaces
+# .github/scripts/* underneath the running script. If the run then picked its
+# tooling back up from the working tree it would be executing the TARGET's code
+# halfway through -- which is how a split promotion silently continued as the
+# target's older batched script and swept up every remaining unit at once.
+# Sabotaging the target's copy makes that hijack deterministic to detect.
+git checkout -q -B qa origin/qa
+cat > .github/scripts/bump_version.py <<'SAB'
+import sys
+open(sys.argv[1], "w").write("SABOTAGED\n")
+SAB
+git commit -qam "qa: tooling that must never run"
+git push -q origin qa
+git checkout -q -B dev origin/dev
+echo "epsilon" > epsilon.py; git add epsilon.py; git commit -qm "add epsilon"
+git push -q origin dev; git fetch -q origin
+PROMOTE_SPLIT=1 SRC=dev TGT=qa BR=promote/dev-to-qa bash .github/scripts/promote.sh >/dev/null
+case "$(cat VERSION)" in
+  SABOTAGED) chk "target's tooling cannot hijack the run" "hijacked" "clean" ;;
+  *)         chk "target's tooling cannot hijack the run" "clean"    "clean" ;;
+esac
+chk "and it still promoted the oldest unit" "$(cat gamma.py 2>/dev/null)" "gamma"
+
 echo; echo "RESULT: $pass passed, $fail failed"; rm -rf "$T"; [ "$fail" -eq 0 ]

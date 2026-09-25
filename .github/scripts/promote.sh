@@ -54,6 +54,23 @@ SPLIT="${PROMOTE_SPLIT:-0}"
 out="${GITHUB_OUTPUT:-/dev/null}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Run from a private copy. `stage_to` below does `git checkout -B "$BR"
+# "origin/$TGT"`, which rewrites the working tree -- INCLUDING THIS FILE. bash
+# reads a script incrementally rather than slurping it, so once promote.sh
+# differs between branches (exactly what happens while a change to it is being
+# promoted) the interpreter can continue the run against the TARGET branch's
+# version of itself. Observed: a split promotion correctly promoted unit 1,
+# then silently continued as the target's older batched script and swept up
+# every remaining unit in one go. Re-exec so the running code is immutable.
+if [ -z "${PROMOTE_REEXEC:-}" ]; then
+  PROMOTE_TMPDIR="$(mktemp -d)"
+  cp "$here/promote.sh" "$PROMOTE_TMPDIR/"
+  [ -f "$here/bump_version.py" ] && cp "$here/bump_version.py" "$PROMOTE_TMPDIR/"
+  export PROMOTE_REEXEC=1 PROMOTE_TMPDIR
+  exec bash "$PROMOTE_TMPDIR/promote.sh" "$@"
+fi
+trap '[ -n "${PROMOTE_TMPDIR:-}" ] && rm -rf "$PROMOTE_TMPDIR"' EXIT
+
 version_files() { git ls-tree -r --name-only "origin/$TGT" | grep -E '(^|/)VERSION$' || true; }
 
 git rev-parse --verify "origin/$TGT" >/dev/null 2>&1 || { echo "::error::target branch $TGT does not exist"; exit 1; }
@@ -158,7 +175,7 @@ if [ "$SPLIT" = "1" ]; then
     echo "$unit_subject"
     echo "PROMOTE_EOF"
   } >> "$out"
-  echo "Promoting unit $((picked_idx + 1)) of ${#units[@]}: ${unit_pr:+#$unit_pr }$unit_subject"
+  echo "Promoting the oldest of ${#units[@]} un-promoted unit(s): ${unit_pr:+#$unit_pr }$unit_subject"
   echo "  up to $remaining further unit(s) will follow in later runs"
 fi
 
