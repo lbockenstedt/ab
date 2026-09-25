@@ -23,6 +23,8 @@ from main import (
     load_pr_reviews,
     load_llm_tps,
     save_pr_reviews,
+    load_pr_merge_ledger,
+    save_pr_merge_ledger,
     get_version,
     _llm_cb_snapshot,
     _provider_credit_cb_snapshot,
@@ -118,6 +120,12 @@ def _panel_dissent_stats(review):
     `dissents` nor `rated`, so a two-seat panel where one seat failed and one
     approved was byte-identical to unanimous approval. "We never heard from
     this reviewer" must not look like "this reviewer approved".
+
+    "Nothing parseable" includes a whitespace-only verdict. `""` was already
+    counted as unrated, but `"   "` is truthy and so used to be counted as a
+    rated DISSENT — the same non-answer landing in two different buckets
+    depending on whether the provider happened to emit a space. Both now mean
+    the same thing: we did not hear from this seat.
     """
     if not review or review.get("status"):
         return (0, 0, None, 0)
@@ -138,7 +146,7 @@ def _panel_dissent_stats(review):
             continue
 
         verdict = item.get("verdict")
-        if verdict:
+        if verdict is not None and str(verdict).strip():
             rated += 1
             if str(verdict).strip().lower() != "approve":
                 dissents += 1
@@ -380,6 +388,34 @@ def mark_pr_approved(repo, number, approved=True):
     return update_pr_review(repo, number, approved=bool(approved))
 
 
+def _record_merge_milestone(key, fields):
+    """Add ``key`` to the lifetime merge ledger when ``fields`` turns a merge
+    flag on. Called from update_pr_review, which is the only place either flag
+    is ever set (pr_actions.merge_pr, pr_review's auto-merge and its
+    already-merged-on-GitHub reconciler all route through it).
+
+    The displayed totals used to be tallied by scanning state["pr_reviews"],
+    which is capped at _PR_REVIEWS_MAX and trimmed oldest-first — so once the
+    buffer saturated, every newly reviewed PR evicted an older record and the
+    "PRs Merged" number DROPPED if that record happened to be a merged one.
+    The ledger is never trimmed, so the count is monotonic.
+    """
+    if not any(fields.get(f) for f in ("merged", "auto_merged")):
+        return
+    ledger = state.setdefault("pr_merge_ledger", {})
+    dirty = False
+    for flag in ("merged", "auto_merged"):
+        if not fields.get(flag):
+            continue
+        bucket = ledger.setdefault(flag, set())
+        if key not in bucket:
+            bucket.add(key)
+            dirty = True
+    if dirty:
+        save_pr_merge_ledger(ledger)
+        state["pr_merge_totals"] = pr_merge_totals()
+
+
 def update_pr_review(repo, number, **fields):
     """Merge fields (e.g. merged=True, denied=True) into a reviewed-PR record,
     KEEPING it in the list (so merged/denied PRs stay visible with a badge instead
@@ -393,10 +429,50 @@ def update_pr_review(repo, number, **fields):
                 return False
             rec.update(fields)
             save_pr_reviews(state["pr_reviews"])
+            # After the record is safely persisted: the ledger is a derived
+            # tally, so losing it is recoverable, but losing the review is not.
+            _record_merge_milestone(key, fields)
             return True
     except Exception as e:
         logger.error(f"update_pr_review failed for {repo}#{number}: {e}")
         return False
+
+
+def pr_merge_totals():
+    """Lifetime ``{"merged": int, "auto_merged": int}`` for the UI badges.
+
+    A PR that auto-merged carries both flags, and the template renders it in
+    the auto_merged bucket only, so "merged" here excludes those to keep the
+    two badges disjoint and their sum equal to the number of PRs merged.
+    """
+    ledger = state.get("pr_merge_ledger") or {}
+    auto = ledger.get("auto_merged") or set()
+    merged = (ledger.get("merged") or set()) - auto
+    return {"merged": len(merged), "auto_merged": len(auto)}
+
+
+def _seed_merge_ledger(ledger, pr_reviews):
+    """Back-fill the ledger from whatever merged records are still in the ring
+    buffer, so upgrading does not reset the badges to zero.
+
+    Only the surviving (at most _PR_REVIEWS_MAX) records are visible here, so
+    merges that already aged out before this shipped are gone for good — the
+    ledger starts from what can still be observed and is exact from then on.
+    Runs on every boot, not just the first: it is a union into a set, so
+    re-seeding is harmless, and it re-captures anything written while an older
+    build without the ledger was running.
+    """
+    ledger = dict(ledger or {})
+    try:
+        for key, rec in (pr_reviews or {}).items():
+            if not isinstance(rec, dict):
+                continue
+            for flag in ("merged", "auto_merged"):
+                if rec.get(flag):
+                    ledger.setdefault(flag, set()).add(key)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"_seed_merge_ledger failed: {e}")
+    return ledger
 
 
 config_on_start = load_config()
@@ -456,6 +532,9 @@ state = {
     # happens to run again.
     "llm_tps": load_llm_tps(),
     "active_tasks": {}, "pr_reviews": load_pr_reviews(), "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
+    # Lifetime merge tally, kept outside the capped pr_reviews ring buffer so
+    # the UI badges can only ever go up (see _record_merge_milestone).
+    "pr_merge_ledger": _seed_merge_ledger(load_pr_merge_ledger(), load_pr_reviews()),
     "feature_flagged_count": feature_flagged_count,
     "feature_needs_info_count": feature_needs_info_count,
     "feature_built_count": feature_built_count,
@@ -492,6 +571,10 @@ state = {
     "hub_agent_connected": False,          # LIVE socket state (≠ approval status)
     "hub_agent_last_disconnect": "",
 }
+
+# Seed the rendered totals once at boot so the badges are correct before the
+# first merge of this process (which is what would otherwise populate them).
+state["pr_merge_totals"] = pr_merge_totals()
 
 
 def recompute_issue_counters(processed=None):

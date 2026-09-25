@@ -27,6 +27,11 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ENV_FILE = os.path.join(CONFIG_DIR, ".env")
 STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
 PR_REVIEWS_FILE = os.path.join(CONFIG_DIR, "pr_reviews.json")
+# Lifetime merge ledger. pr_reviews.json is a ring buffer capped at
+# _PR_REVIEWS_MAX, so counting merged PRs by scanning it yields "merged among
+# the last N reviewed" — a number that goes DOWN whenever an older merged
+# record is evicted to make room. This file is never trimmed.
+PR_MERGE_LEDGER_FILE = os.path.join(CONFIG_DIR, "pr_merge_ledger.json")
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
 CHAT_HISTORY_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
@@ -250,6 +255,37 @@ def save_pr_reviews(pr_reviews):
         logger.error(f"Error saving PR reviews to {PR_REVIEWS_FILE}: {e}")
 
 
+def load_pr_merge_ledger():
+    """Load the lifetime merge ledger: ``{"merged": [key...],
+    "auto_merged": [key...]}`` where key is the usual ``'repo#number'``.
+
+    Sets of KEYS rather than running integers, for the same reason the issue
+    counters are derived from the processed store: an increment drifts the
+    moment anything is recorded twice, and PR records are rewritten on every
+    poll. Re-recording a key that is already present is a no-op, so the tally
+    is idempotent by construction and can only ever go up.
+    """
+    if os.path.exists(PR_MERGE_LEDGER_FILE):
+        try:
+            with open(PR_MERGE_LEDGER_FILE, "r") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {k: set(v) for k, v in data.items()
+                        if k in ("merged", "auto_merged") and isinstance(v, list)}
+        except Exception as e:
+            logger.error(f"Error loading PR merge ledger from {PR_MERGE_LEDGER_FILE}: {e}")
+    return {}
+
+
+def save_pr_merge_ledger(ledger):
+    """Persist the lifetime merge ledger. Sets are stored as sorted lists so the
+    file is stable/diffable and does not churn on every write."""
+    try:
+        _atomic_write_json(PR_MERGE_LEDGER_FILE,
+                           {k: sorted(v) for k, v in (ledger or {}).items()})
+    except Exception as e:
+        logger.error(f"Error saving PR merge ledger to {PR_MERGE_LEDGER_FILE}: {e}")
+
 
 def load_llm_tps():
     """Warm-load the per-model tok/s samples measured before the last restart.
@@ -362,6 +398,7 @@ __all__ = [
     "ENV_FILE",
     "STATE_FILE",
     "PR_REVIEWS_FILE",
+    "PR_MERGE_LEDGER_FILE",
     "UPDATE_STATE_FILE",
     "SELF_SCAN_OFFSET_FILE",
     "CHAT_HISTORY_FILE",
@@ -374,6 +411,8 @@ __all__ = [
     "save_processed",
     "load_pr_reviews",
     "save_pr_reviews",
+    "load_pr_merge_ledger",
+    "save_pr_merge_ledger",
     "load_update_state",
     "save_update_state",
     "get_version",
