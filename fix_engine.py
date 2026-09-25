@@ -1614,7 +1614,16 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
             text, tool_calls = _parse_review_text_tool_calls(text)
         last_text = text
         if not tool_calls:
-            return text
+            # A turn that neither calls a tool nor carries a verdict is the
+            # model narrating its intent and stopping ("Need to verify the
+            # endpoints and port in api_server.py."). Returning that hands the
+            # caller prose it cannot parse; fall through to the wrap-up turn
+            # below and ask for the verdict instead.
+            if _extract_reviewer_verdict(text) is not None:
+                return text
+            if text.strip():
+                messages.append({"role": "assistant", "content": text})
+            break
         messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
         for tc in tool_calls:
             fn = tc.get("function") or {}
@@ -1638,10 +1647,11 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
             messages.append({"role": "tool", "name": name or "unknown",
                              "content": json.dumps(out)[:_REVIEW_FILE_MAX_CHARS + 500],
                              "tool_call_id": tc.get("id") or f"call_{name}"})
-    # Iteration cap reached without a tool-free turn. `last_text` here is the
-    # narration that came ALONGSIDE the final tool call ("Key uncertainties:
-    # whether `_console_probe` ...") or "" — never a verdict, because the model
-    # was still mid-investigation when the budget ran out. Returning it made
+    # Reached either by exhausting the iteration budget or by a narration-only
+    # turn above. In both cases `last_text` is something the model said while
+    # still mid-investigation — the narration alongside its final tool call
+    # ("Key uncertainties: whether `_console_probe` ...") or "" — never a
+    # verdict, because it was never asked to conclude. Returning it made
     # _extract_reviewer_verdict find nothing, so the reviewer was logged as
     # "returned no parseable verdict" and dropped from the panel. Give it one
     # final turn with NO tools, so the only thing it can do is answer.
