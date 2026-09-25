@@ -194,3 +194,21 @@ def test_dissent_still_outranks_unrated():
                           {"verdict": "Approve", "confidence": 0.9}]}
     dissents, rated, _min_conf, unrated = _panel_dissent_stats(review)
     assert (dissents, rated, unrated) == (1, 2, 1)
+
+
+def test_whitespace_only_verdict_is_unrated_not_a_dissent():
+    """ab#278 panel finding: `""` was bucketed as unrated but `"   "` is truthy
+    and so landed as a rated DISSENT. The same non-answer must not change
+    buckets depending on whether the provider emitted a space."""
+    review = {"reviews": [{"verdict": "   ", "confidence": 0.4},
+                          {"verdict": "\n\t", "confidence": 0.5},
+                          {"verdict": "Approve", "confidence": 0.9}]}
+    dissents, rated, _min_conf, unrated = _panel_dissent_stats(review)
+    assert (dissents, rated, unrated) == (0, 1, 2)
+
+
+def test_blank_and_whitespace_verdicts_agree():
+    """`""`, `None` and `"  "` are all 'we did not hear from this seat'."""
+    blank = _panel_dissent_stats({"reviews": [{"verdict": ""}]})
+    spaces = _panel_dissent_stats({"reviews": [{"verdict": "  "}]})
+    assert blank == spaces == (0, 0, None, 1)
