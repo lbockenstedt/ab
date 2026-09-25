@@ -1313,7 +1313,10 @@ _REVIEW_TOOLS = [
                        "required": ["path"]},
     }},
 ]
-_REVIEW_TOOL_MAX_ITER = 3
+_REVIEW_TOOL_MAX_ITER = 7  # >= _REVIEW_TOOL_MAX_FILES + 1, so the file budget below is actually
+                           # reachable: at 3 a reviewer fetching one file per turn ran out of turns
+                           # after 2 files and never got to answer. The wrap-up turn at the end of
+                           # _run_reviewer_turn bounds the cost of raising this to one extra call.
 _REVIEW_TOOL_MAX_FILES = 5
 _REVIEW_FILE_MAX_CHARS = 20000
 # The reviewer's required output shape (confidence/verdict/critique) — passed
@@ -1635,10 +1638,27 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
             messages.append({"role": "tool", "name": name or "unknown",
                              "content": json.dumps(out)[:_REVIEW_FILE_MAX_CHARS + 500],
                              "tool_call_id": tc.get("id") or f"call_{name}"})
-    # Iteration cap reached without a tool-free turn — use whatever text the
-    # last turn produced (existing JSON-extraction just won't find a match if
-    # it's incomplete, same as any other malformed reviewer response today).
-    return last_text
+    # Iteration cap reached without a tool-free turn. `last_text` here is the
+    # narration that came ALONGSIDE the final tool call ("Key uncertainties:
+    # whether `_console_probe` ...") or "" — never a verdict, because the model
+    # was still mid-investigation when the budget ran out. Returning it made
+    # _extract_reviewer_verdict find nothing, so the reviewer was logged as
+    # "returned no parseable verdict" and dropped from the panel. Give it one
+    # final turn with NO tools, so the only thing it can do is answer.
+    messages.append({"role": "user", "content": (
+        "Your file-inspection budget for this review is now exhausted and no further "
+        "tool calls are available. Decide from what you have already seen and reply "
+        "with ONLY one JSON object and no other text: "
+        '{"confidence": <fraction 0.0-1.0>, "verdict": "Approve"|"Reject", '
+        '"critique": "<explanation>"}. Do not ask for more files. If something '
+        "remains unverified, weigh it in `confidence` and say so in `critique`.")})
+    try:
+        final = _dispatch(messages)
+    except Exception as e:  # noqa: BLE001 — fall back to the old behaviour on any failure
+        logger.info(f"reviewer wrap-up turn failed ({e}) — falling back to last tool-turn text")
+        return last_text
+    final_text = (final.get("text") or "") if isinstance(final, dict) else str(final or "")
+    return final_text.strip() or last_text
 
 
 def _ensure_review_checkout(repo_path, repo, head_sha, config):
