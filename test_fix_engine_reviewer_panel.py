@@ -222,7 +222,12 @@ def main():
                 return try_candidate_stub(candidate, messages, tools, stream, task_id, config, **kwargs)
 
         return _load_ns(
-            {"_run_reviewer_turn", "_parse_review_text_tool_calls", "_fetch_repo_file_for_review"},
+            {"_run_reviewer_turn", "_parse_review_text_tool_calls", "_fetch_repo_file_for_review",
+             # _run_reviewer_turn checks whether a tool-free turn actually carries a
+             # verdict before returning it, so the extractor and its helpers have to
+             # be in the namespace too.
+             "_extract_reviewer_verdict", "_parse_reviewer_json", "_has_verdict_key",
+             "_canon_verdict_keys", "_balanced_brace_span"},
             {
                 "llm_client": _FakeLlmClient2(),
                 "load_config": lambda: {},
