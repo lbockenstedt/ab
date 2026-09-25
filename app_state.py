@@ -426,6 +426,9 @@ def update_pr_review(repo, number, **fields):
         with _task_state_lock:
             rec = state["pr_reviews"].get(key)
             if not rec:
+                # Even if the review record was evicted or absent, a merge milestone
+                # is lifetime and must still be tallied in the ledger.
+                _record_merge_milestone(key, fields)
                 return False
             rec.update(fields)
             save_pr_reviews(state["pr_reviews"])
