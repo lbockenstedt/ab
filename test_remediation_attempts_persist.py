@@ -40,6 +40,10 @@ class _DummyLogger:
 
 @pytest.fixture
 def pr_env():
+    # Isolated AST extraction matches test_dual_panel_composite_scoring to test
+    # record_pr_review / update_pr_review without importing main.py's full runtime;
+    # _panel_dissent_stats is extracted because record_pr_review calls it directly
+    # to compute reviewer dissent and rating aggregates.
     src = _extract("app_state.py",
                    {"record_pr_review", "_panel_dissent_stats", "update_pr_review"})
     state = {"pr_reviews": {}}
@@ -104,11 +108,16 @@ def test_fresh_pr_starts_with_a_full_budget(pr_env):
     assert rec["auto_remediate_status"] is None
 
 
-def test_ceiling_binds_once_attempts_persist():
-    """What the wiped counter prevented: the gate releasing the merge."""
-    rec = {"remediation_attempts": 3, "panel_verdict": "Approve",
-           "panel2_verdict": "Approve", "panel_confidence": 0.90,
-           "panel2_confidence": 0.90}
+def test_ceiling_binds_once_attempts_persist(pr_env):
+    """What the wiped counter prevented: the gate releasing the merge once attempts persist."""
+    record, update, state = pr_env
+    record("o/r", 1, "t", "u", [], "sha1")
+    update("o/r", 1, remediation_attempts=3)
+    # Record rebuild across a push (head moves sha1 -> sha2) carries the attempt count forward
+    review = {"verdict": "Approve", "confidence": 0.90, "critique": "ok"}
+    record("o/r", 1, "t", "u", [], "sha2", review=review, review2=review)
+    rec = state["pr_reviews"]["o/r#1"]
+    assert rec["remediation_attempts"] == 3
     pending, why = remediation_pending(
         rec, {"pr_auto_remediate_enabled": True, "pr_auto_remediate_max_attempts": 3})
     assert pending is False
