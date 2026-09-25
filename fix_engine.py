@@ -3092,6 +3092,47 @@ def _snippet_language_mismatch_hint(search, filepath):
     return None
 
 
+def _syntax_regressed(rel_path, old_text, new_text):
+    """True when an edit turns a Python file that PARSED into one that does not.
+
+    The existing truncation guards (placeholder markers, the >60% shrink check)
+    only cover FULL-FILE rewrites. A targeted search/replace whose `replace`
+    block was itself truncated mid-expression slips past all of them: it changes
+    the file by a couple of hundred bytes, so nothing looks suspicious by size,
+    yet the result is unparseable Python. That is exactly how AppBuilder
+    committed a `core/src/routes/pxmx.py` whose `entry = {` literal ended mid-
+    key, breaking the branch it had been asked to repair.
+
+    The invariant is deliberately narrow so it can never block a legitimate fix:
+    AppBuilder may not make a file that parsed stop parsing. A file that was
+    already broken, or a brand-new file, is not a regression this guard owns.
+    """
+    try:
+        import ast as _a
+
+        if not str(rel_path or "").lower().endswith(".py"):
+            return False
+        old_text = old_text or ""
+        new_text = new_text or ""
+        if old_text == new_text:
+            return False
+        # A brand-new (or effectively empty) file had no parseable state to
+        # regress FROM — ast.parse("") succeeds, so this must be explicit.
+        if not old_text.strip():
+            return False
+        try:
+            _a.parse(old_text)
+        except (SyntaxError, ValueError):
+            return False
+        try:
+            _a.parse(new_text)
+        except (SyntaxError, ValueError):
+            return True
+        return False
+    except Exception:  # noqa: BLE001 - a guard must never break the fix path
+        return False
+
+
 def parse_and_apply(content, repo_path):
     import re as _re, ast as _ast
     parse_and_apply.last_failures = []   # reset per call; read by the retry loop
@@ -3297,6 +3338,16 @@ def parse_and_apply(content, repo_path):
                 if new_content == orig_contents.get(full_path):
                     continue  # every edit for this file failed to match — no change
                 rel = os.path.relpath(full_path, repo_root)
+                if _syntax_regressed(rel, orig_contents.get(full_path), new_content):
+                    _miss.append(
+                        "%s: edit produced unparseable Python (likely a truncated "
+                        "replacement block) — rejected" % rel)
+                    logger.error(
+                        f"REJECTING edit to {rel!r}: the file parsed before the edit and does "
+                        f"not parse after it — the replacement text was almost certainly "
+                        f"truncated. Leaving the file untouched."
+                    )
+                    continue
                 with open(full_path, "w") as f:
                     f.write(new_content)
                 applied[rel] = new_content
@@ -3347,6 +3398,13 @@ def parse_and_apply(content, repo_path):
                         f"ABORTING fix: writing {filepath} would shrink it from {old_lines} to "
                         f"{new_lines} lines (>60% deleted) — almost certainly a truncated rewrite, "
                         f"not a targeted fix."
+                    )
+                    parse_and_apply.last_reason = "unsafe_rewrite"
+                    return False, {}, 0.0
+                if _syntax_regressed(filepath, existing, new_code):
+                    logger.error(
+                        f"ABORTING fix: the rewritten {filepath} does not parse, but the file it "
+                        f"replaces did — the model's output was truncated or malformed."
                     )
                     parse_and_apply.last_reason = "unsafe_rewrite"
                     return False, {}, 0.0
