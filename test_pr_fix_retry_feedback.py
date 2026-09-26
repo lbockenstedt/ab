@@ -29,6 +29,17 @@ def _extract(path, funcs):
     return "\n\n".join(segs)
 
 
+def _extract_assigns(path, names):
+    """Module-level constants the extracted functions close over (_extract
+    only lifts functions)."""
+    src = open(path, encoding="utf-8").read()
+    segs = []
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) in names:
+            segs.append(ast.get_source_segment(src, node))
+    return "\n\n".join(segs)
+
+
 class _Logger:
     def __init__(self):
         self.calls = []
@@ -96,7 +107,11 @@ class _Repo:
 class Harness:
     """Drives fix_one_pr with scripted per-attempt outcomes."""
 
-    def __init__(self, parse_results, reviews, verify=None, qa=False, max_attempts=3):
+    def __init__(self, parse_results, reviews, verify=None, qa=False, max_attempts=3,
+                 panel_critique="", desc_fix=(False, "not exercised here")):
+        self.panel_critique = panel_critique
+        self.desc_fix = desc_fix
+        self.desc_fix_calls = []
         self.parse_results = list(parse_results)
         self.reviews = list(reviews)
         self.verify = list(verify or [])
@@ -143,6 +158,10 @@ class Harness:
         i = len(self.error_contexts) - 1
         return self.verify[min(i, len(self.verify) - 1)]
 
+    def _fix_pr_description(self, *a, **kw):
+        self.desc_fix_calls.append((a, kw))
+        return self.desc_fix
+
     def run(self):
         ns = self._namespace()
         return ns["fix_one_pr"]("o/r", 7, config={"qa_enabled": self.qa,
@@ -152,6 +171,7 @@ class Harness:
     def _namespace(self):
         import contextlib
         import os as _os
+        import re as _re
 
         fix_engine = types.ModuleType("fix_engine")
         fix_engine._claim_issue = lambda i: True
@@ -176,7 +196,8 @@ class Harness:
             sys.modules[name] = mod
 
         ns = {
-            "os": _os, "logger": self.log, "state": {},
+            "os": _os, "re": _re, "logger": self.log,
+            "state": {"pr_reviews": {"o/r#7": {"panel_critique": self.panel_critique}}},
             "load_config": lambda: {},
             "check_parity": lambda r, c: [{"level": "warning", "title": "t", "detail": "d"}],
             "_resolve_cross_repo_twins": lambda gh, f, since=None: f,
@@ -184,8 +205,17 @@ class Harness:
             "find_missing_tooltips_in_files": lambda f: [],
             "check_undefined_names": lambda r, f, s: [],
             "_review_one": lambda *a, **kw: None,
+            # fix_one_pr now short-circuits to the description-repair path when
+            # the panel's objection is about the PR body. These cases all carry
+            # an empty critique, so the REAL detector below returns False and
+            # the code-fix path under test runs exactly as before.
+            "fix_pr_description": self._fix_pr_description,
         }
-        exec(_extract("pr_review.py", {"fix_one_pr"}), ns)
+        exec(_extract_assigns("pr_review.py",
+                              {"_DESC_NOUN_RE", "_DESC_COMPLAINT_RE",
+                               "_DESC_OBJECTION_WINDOW"}), ns)
+        exec(_extract("pr_review.py",
+                      {"fix_one_pr", "_panel_objects_to_description"}), ns)
         return ns
 
 
@@ -338,3 +368,47 @@ def test_panel_outage_does_not_burn_retries():
     assert ok is False
     assert len(h.error_contexts) == 1
     assert "could not run" in msg
+
+
+# --------------------------------------------------------------------------
+# A description-level objection must be repaired as a description, not as code
+# --------------------------------------------------------------------------
+
+_DESC_CRITIQUE = (
+    "VERSION contradicts the description. The diff bumps VERSION from 1.35 to "
+    "1.36. The description says promotion pins every VERSION file back to qa's "
+    "value.")
+
+
+def test_description_objection_short_circuits_the_code_fix():
+    """The real production stall: the panel said 'needs a PR-body edit, not
+    code' and the loop spent every attempt editing files anyway."""
+    h = Harness(parse_results=[True], reviews=[APPROVE],
+                panel_critique=_DESC_CRITIQUE,
+                desc_fix=(True, "Description updated to match the diff."))
+    ok, msg = h.run()
+    assert ok is True
+    assert "Description updated" in msg
+    assert len(h.desc_fix_calls) == 1
+    assert h.error_contexts == [], "no code fix should have been attempted"
+
+
+def test_a_refused_description_fix_falls_through_to_the_code_fix():
+    """If the description cannot be rewritten, the old behaviour must remain:
+    silently doing nothing would be worse than trying a code fix."""
+    h = Harness(parse_results=[True], reviews=[APPROVE],
+                panel_critique=_DESC_CRITIQUE,
+                desc_fix=(False, "already rewritten twice for this head"))
+    ok, _msg = h.run()
+    assert ok is True
+    assert len(h.desc_fix_calls) == 1
+    assert len(h.error_contexts) == 1, "the code-fix path should still have run"
+
+
+def test_a_code_objection_never_touches_the_description():
+    h = Harness(parse_results=[True], reviews=[APPROVE],
+                panel_critique="The retry budget is off by one in fix_engine.py.")
+    ok, _msg = h.run()
+    assert ok is True
+    assert h.desc_fix_calls == []
+    assert len(h.error_contexts) == 1
