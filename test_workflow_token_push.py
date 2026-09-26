@@ -175,3 +175,94 @@ def test_preflight_warns_rather_than_silently_skipping_on_a_bad_ref():
         r = _run_preflight(run, td, {"TGT": "nosuchbranch", "BR": br,
                                      "HAS_WORKFLOW_TOKEN": "false"})
         assert "::warning::" in r.stdout, r.stdout + r.stderr
+
+
+# --- Panel-requested hardening (nw#137 skeptical review) ---------------------
+#
+# The dissenting reviewer could not verify from the diff that steps.route emits
+# a `tgt` output, and correctly identified the consequence: an empty TGT makes
+# the preflight diff `origin/...$BR`, which FAILS, and a failed diff takes the
+# warn-and-push branch -- silently disabling the credential preflight. route
+# does emit tgt (promote.yml "Resolve source and target"), but "currently true"
+# is not a guarantee, so the guard below turns that into a hard error.
+
+def test_route_step_actually_emits_tgt():
+    """The premise the preflight depends on, pinned in the file itself."""
+    route = next(s for s in _steps(PROMOTE)
+                 if s.get("id") == "route")
+    assert 'echo "tgt=$tgt" >> "$GITHUB_OUTPUT"' in route["run"], (
+        "steps.route no longer emits a 'tgt' output; the push preflight "
+        "depends on it")
+
+
+def test_push_step_refuses_an_empty_target():
+    """An empty TGT must fail loudly, not degrade into warn-and-push."""
+    for wf, label in ((PROMOTE, "promote"), (BACKMERGE, "backmerge")):
+        with tempfile.TemporaryDirectory() as td:
+            br = _repo_with_workflow_change(td)
+            run = _push_step(wf)["run"]
+            r = _run_preflight(run, td, {"TGT": "", "BR": br,
+                                         "HAS_WORKFLOW_TOKEN": "false"})
+            assert r.returncode == 1, f"{label}: {r.stdout}{r.stderr}"
+            assert "::error::" in r.stdout, label
+            assert "TGT" in r.stdout, label
+            assert "PUSHED" not in r.stdout, (
+                f"{label}: pushed with no target, so the preflight was "
+                f"silently disabled")
+            assert "::warning::" not in r.stdout, (
+                f"{label}: degraded to warn-and-push instead of failing")
+
+
+def test_empty_target_is_rejected_even_for_a_code_only_push():
+    """The guard is about a broken route, so it must not depend on the diff."""
+    with tempfile.TemporaryDirectory() as td:
+        _repo_with_workflow_change(td)
+        subprocess.run(["git", "checkout", "-q", "-b", "code-only",
+                        "refs/remotes/origin/qa"], cwd=td, check=True)
+        with open(os.path.join(td, "code.py"), "w") as fh:
+            fh.write("x = 3\n")
+        subprocess.run(["git", "commit", "-aqm", "code"], cwd=td, check=True)
+        run = _push_step(PROMOTE)["run"]
+        r = _run_preflight(run, td, {"TGT": "", "BR": "code-only",
+                                     "HAS_WORKFLOW_TOKEN": "true"})
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "PUSHED" not in r.stdout
+
+
+def test_credential_scope_and_trigger_behaviour_are_documented():
+    """The reviewer's other two findings were 'not called out' -- call them out.
+
+    A PAT persisted by actions/checkout widens the scope of every later step,
+    and a PAT push (unlike a GITHUB_TOKEN push) starts downstream workflows.
+    Both are accepted and bounded by the trigger filters; the requirement is
+    that the file says so, next to the token.
+    """
+    for path, trigger in ((PROMOTE, "[qa]"), (BACKMERGE, "[main, qa]")):
+        text = open(path, encoding="utf-8").read()
+        head = text.split("token: ${{ secrets.WORKFLOW_TOKEN")[0]
+        note = head[-1600:]
+        low = note.lower()
+        assert "persist" in low or "later step" in low, (
+            f"{path}: credential-scope expansion is not called out at the "
+            f"checkout step")
+        assert "downstream" in low or "trigger" in low, (
+            f"{path}: PAT push trigger behaviour is not called out at the "
+            f"checkout step")
+
+
+def test_push_targets_a_branch_that_triggers_nothing():
+    """The claim above must hold: promote/* and backmerge/* start no run.
+
+    This is what actually closes the recursion the reviewer worried about --
+    not the token, the trigger filter.
+    """
+    for path in (PROMOTE, BACKMERGE):
+        wf = yaml.safe_load(open(path, encoding="utf-8"))
+        on = wf.get(True, wf.get("on"))
+        branches = (on.get("push") or {}).get("branches") or []
+        for b in branches:
+            assert not b.startswith("promote/"), f"{path}: {b}"
+            assert not b.startswith("backmerge/"), f"{path}: {b}"
+            assert b in ("dev", "qa", "main"), (
+                f"{path}: unexpected push trigger {b!r} -- a promote/* or "
+                f"backmerge/* trigger would make PAT pushes recurse")
