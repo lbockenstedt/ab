@@ -235,3 +235,4 @@ def test_promote_yml_does_not_mask_a_failed_diff_as_zero_files():
     assert 'git diff --name-only "$base...$BR" 2>/dev/null | wc -l' not in code
     assert "nfiles_ok" in code
     assert "UNKNOWN number of files" in run
+    assert "Could not determine whether automation was touched" in run
