@@ -66,6 +66,7 @@ proven, load them from `.claude/skills/dual-copy-guard/reference.md` (or a share
 machine-readable pairs file) so there is a single source of truth.
 """
 import logging
+import hashlib
 import os
 import re
 from datetime import timedelta
@@ -854,11 +855,36 @@ def _render_route(base_ref, head_ref, default_branch=""):
     return [line, ""]
 
 
+def _desc_digest(pr):
+    """Short digest of a PR's title+body. The skeptical panel judges the
+    DESCRIPTION against the diff (it will reject a PR whose body contradicts
+    its own changes), so the description is a genuine review input and must
+    take part in the cache key alongside the head SHA."""
+    raw = (getattr(pr, "title", "") or "") + "\x00" + (getattr(pr, "body", "") or "")
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _desc_is_current(body, digest):
+    """True when an existing review comment still matches the PR description.
+
+    A comment written before this marker existed carries no `<!-- desc: -->`
+    line at all; treat those as current so deploying this change does not
+    re-run the LLM panel on every open PR in the fleet at once."""
+    body = body or ""
+    if "<!-- desc: " not in body:
+        return True
+    return ("<!-- desc: %s -->" % digest) in body
+
+
 def _render(findings, head_sha, summary="", review=None, state_review=None,
-            base_ref="", head_ref="", default_branch=""):
+            base_ref="", head_ref="", default_branch="", desc_digest=""):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
+    ]
+    if desc_digest:
+        lines.append("<!-- desc: %s -->" % desc_digest)
+    lines += [
         "## \U0001F916 AppBuilder PR pre-review",
         "",
     ]
@@ -1447,10 +1473,17 @@ def _review_one(gh, repo, pr, config, force=False):
     _step("checking for unattended mutation")
     findings += check_unattended_mutation(files)
     existing = _find_marker_comment(pr)
+    _desc = _desc_digest(pr)
     _prior_review = (state.get("pr_reviews") or {}).get("%s#%s" % (repo.full_name, pr.number)) or {}
     _prior_queued = is_queued_for_retry_stale(_prior_review, head_sha)
     already_current = ((not force) and not _prior_queued and bool(existing)
-                       and ("<!-- head: %s -->" % head_sha) in (existing.body or ""))
+                       and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
+                       and _desc_is_current(existing.body if existing else "", _desc))
+    if (not force) and existing and not _prior_queued and not already_current \
+            and ("<!-- head: %s -->" % head_sha) in (existing.body or ""):
+        logger.info("pr_review: %s PR #%s re-reviewing — head unchanged but the PR "
+                    "description was edited (the panel judges description vs diff)",
+                    repo.full_name, pr.number)
     if _prior_queued and not force:
         logger.info("pr_review: %s PR #%s retrying — prior scan queued for retry (panel unavailable)",
                     repo.full_name, pr.number)
@@ -1518,7 +1551,8 @@ def _review_one(gh, repo, pr, config, force=False):
         body = _render(findings, head_sha, summary, review=review, state_review=state_review,
                        base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
                        head_ref=_head_ref,
-                       default_branch=getattr(repo, "default_branch", "") or "")
+                       default_branch=getattr(repo, "default_branch", "") or "",
+                       desc_digest=_desc)
         if existing:
             existing.edit(body)
             action = "updated"
