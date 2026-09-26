@@ -2319,7 +2319,14 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         "if they correctly address the issue without regressions, they SHOULD be approved.\n\n"
         "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}\n"
         "\"confidence\" MUST be a fraction between 0.0 and 1.0 — e.g. 0.95 for 95% confidence. Do NOT return a 0-100 percentage.\n"
-        "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 0.90 confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 0.90). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back."
+        "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 0.90 confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 0.90). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back.\n"
+        "The same rule applies in the other direction: do NOT return 'Approve' with a confidence below 0.90. "
+        "'confidence' means how sure you are that this change is correct and safe to merge — it is NOT a rating of "
+        "how much you like the change, how thorough your own review felt, or how interesting the remaining nitpicks are. "
+        "If your only remaining points are ones you would describe as minor, non-blocking, cosmetic, stylistic, "
+        "defensive/harmless, or 'worth a follow-up', they do NOT justify a sub-0.90 score: say them in the critique and "
+        "score your actual belief that the change is safe. Reserve a sub-0.90 score for a doubt that would genuinely make "
+        "you stop the merge — and if you have one, return 'Reject' and name it explicitly."
     )
     # NOTE: the tool-primed addendum used to be appended here, to one shared
     # `prompt` handed to every reviewer regardless of provider. Moved into
