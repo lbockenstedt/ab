@@ -335,16 +335,43 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
 
             pr_title = f"AI Feature #{issue.number}: {(issue.title or '')[:60]}"
             marker = _FEATURE_DRIVE_MARKER.format(repo=repo_name, number=issue.number)
-            pr_body = (
-                f"Automated feature build for #{issue.number}.\n\n"
-                f"**Classifier reason:** {classify_result.get('reason', '')}\n\n"
-                f"**Skill used:** {skill_name}\n\n"
-                f"**Files changed:** {', '.join(changed)}\n\n"
-                f"**Agent's own account:**\n{agent_summary.get('pr_body', '(none provided)')}\n\n"
-                f"Touch-points done: {', '.join(agent_summary.get('touchpoints_done') or []) or '(not reported)'}\n"
-                f"Touch-points skipped: {', '.join(agent_summary.get('touchpoints_skipped') or []) or '(none reported)'}\n\n"
-                f"{marker}"
-            )
+            # Shaped to the fleet PR template. AGENTS.md requires every PR to
+            # carry an explicit Intent & Problem Statement, and the skeptical
+            # panel is told to lower confidence when one is missing -- so a body
+            # that opens with "Automated feature build for #N" was asking to be
+            # rejected on a rule this repo wrote itself. The issue is the
+            # authoritative statement of intent; quote it.
+            try:
+                import pr_template
+                _touch_done = ', '.join(agent_summary.get('touchpoints_done') or []) or '(not reported)'
+                _touch_skip = ', '.join(agent_summary.get('touchpoints_skipped') or []) or '(none reported)'
+                pr_body = pr_template.render(
+                    intent=pr_template.from_issue(
+                        issue.number, issue.title or "", issue.body or "",
+                        getattr(issue, "html_url", None)),
+                    solution=(
+                        f"Built by AppBuilder's feature drive.\n\n"
+                        f"- **Skill used:** {skill_name}\n"
+                        f"- **Classifier reason:** {classify_result.get('reason', '')}\n"
+                        f"- **Files changed:** {', '.join(changed)}\n\n"
+                        f"**Agent's own account:**\n"
+                        f"{agent_summary.get('pr_body', '(none provided)')}"),
+                    guardrails=(
+                        f"- Touch-points done: {_touch_done}\n"
+                        f"- Touch-points skipped: {_touch_skip}"),
+                    verification="Repository CI runs on this PR.",
+                ) + f"\n{marker}"
+            except Exception:  # noqa: BLE001 — never block a build on body rendering
+                pr_body = (
+                    f"Automated feature build for #{issue.number}.\n\n"
+                    f"**Classifier reason:** {classify_result.get('reason', '')}\n\n"
+                    f"**Skill used:** {skill_name}\n\n"
+                    f"**Files changed:** {', '.join(changed)}\n\n"
+                    f"**Agent's own account:**\n{agent_summary.get('pr_body', '(none provided)')}\n\n"
+                    f"Touch-points done: {', '.join(agent_summary.get('touchpoints_done') or []) or '(not reported)'}\n"
+                    f"Touch-points skipped: {', '.join(agent_summary.get('touchpoints_skipped') or []) or '(none reported)'}\n\n"
+                    f"{marker}"
+                )
 
             _ensure_label(repo_obj, "ab-feature-drive")
             existing_pr = find_existing_pull_request(repo_obj, branch_name, base_branch)
