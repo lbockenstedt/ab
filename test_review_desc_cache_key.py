@@ -154,3 +154,37 @@ class Wiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeletedCommentRecovery(unittest.TestCase):
+    """A review comment deleted mid-scan must not abort the PR's review.
+
+    Observed live: `pr_review: PR #73 in lbockenstedt/netbox failed: 404 ...
+    update-an-issue-comment`. _find_marker_comment() had found the comment, it
+    was deleted before existing.edit() ran, and the 404 propagated out of
+    _review_one — skipping record_pr_review, so the PR silently left the queue
+    with neither a comment nor a state row.
+    """
+
+    def setUp(self):
+        self.src = SRC.read_text(encoding="utf-8")
+
+    def _block(self):
+        m = re.search(r"\n        if existing:\n(.+?)\n            action = \"created\"\n",
+                      self.src, re.S)
+        self.assertIsNotNone(m, "could not locate the comment upsert block")
+        return m.group(0)
+
+    def test_edit_is_guarded(self):
+        self.assertIn("try:", self._block(),
+                      "existing.edit() is unguarded — a deleted comment aborts the review")
+
+    def test_a_404_falls_back_to_posting_a_new_comment(self):
+        blk = self._block()
+        self.assertIn('"404" not in str(e)', blk)
+        self.assertIn("create_issue_comment", blk)
+
+    def test_non_404_errors_still_propagate(self):
+        """Swallowing every exception here would hide real API failures."""
+        self.assertIn("raise", self._block(),
+                      "a non-404 failure must not be silently swallowed")

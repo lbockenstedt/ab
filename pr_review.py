@@ -1554,8 +1554,22 @@ def _review_one(gh, repo, pr, config, force=False):
                        default_branch=getattr(repo, "default_branch", "") or "",
                        desc_digest=_desc)
         if existing:
-            existing.edit(body)
-            action = "updated"
+            try:
+                existing.edit(body)
+                action = "updated"
+            except Exception as e:  # noqa: BLE001
+                # The comment was deleted between _find_marker_comment() and
+                # here (a human tidying the PR, or an operator busting the
+                # review cache). A 404 from edit() used to propagate and abort
+                # this PR's whole review — including record_pr_review — so the
+                # PR fell out of the queue entirely and looked "stuck" with no
+                # comment and no state. Re-post instead.
+                if "404" not in str(e):
+                    raise
+                logger.info("pr_review: %s PR #%s — review comment vanished; re-posting",
+                            repo.full_name, pr.number)
+                pr.create_issue_comment(body)
+                action = "re-created"
         else:
             pr.create_issue_comment(body)
             action = "created"
