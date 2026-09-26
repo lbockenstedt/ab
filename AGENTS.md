@@ -65,3 +65,12 @@ Every Pull Request created across this fleet MUST provide an explicit `Intent & 
 1. Ground-Truth Baseline: Define the root problem, the intended architectural change, and the expected runtime outcome.
 2. Review Grounding: The skeptical review panel explicitly audits the diff against this stated intent to catch scope creep, unstated regressions, or partial implementations.
 
+This applies to every author, human or agent, whatever tool is used. A PR
+that states no intent gives the panel nothing to judge the diff against, and
+it will lower confidence accordingly. `.github/pull_request_template.md`
+carries the sections to fill in.
+
+AppBuilder holds itself to the same rule: `pr_template.py` renders the
+template, fix and feature PRs quote the originating issue as their intent,
+and `promote.yml` carries the original PR's intent into the promotion PR.
+
