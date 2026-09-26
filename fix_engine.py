@@ -3282,8 +3282,16 @@ def parse_and_apply(content, repo_path):
                             # than discarding an otherwise-good fix over a
                             # missing brace — the failure mode that burned all
                             # three attempts on lm#440/#453/#486/#487.
+                            #
+                            # Repair `raw`, NOT `content`: every fallback above
+                            # works on the fence-stripped object, and this one
+                            # must too. _close_truncated_json re-parses what it
+                            # builds, so a leading ```json fence made BOTH of
+                            # its passes fail to parse and the whole repair
+                            # return None — silently discarding complete edits
+                            # from any fenced response that stopped early.
                             data = None
-                            repaired = _close_truncated_json(content)
+                            repaired = _close_truncated_json(raw)
                             if repaired is not None:
                                 try:
                                     data = _robust_json_loads(repaired)
