@@ -63,6 +63,7 @@ def _load_ns(want_funcs, extra_ns=None):
     want_assigns = {
         "_REVIEW_TOOLS", "_REVIEW_TOOL_MAX_ITER", "_REVIEW_TOOL_MAX_FILES",
         "_REVIEW_FILE_MAX_CHARS", "_REVIEWER_JSON_SCHEMA", "_DIFF_FILE_HEADER_RE",
+        "_PLAIN_FILE_HEADER_RE",
         "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN", "DEFAULT_PANEL_ALLOWLIST",
     }
     want_funcs = set(want_funcs) | {"_panel_allowlist", "_model_allowed"}
@@ -226,7 +227,7 @@ def main():
              # _run_reviewer_turn checks whether a tool-free turn actually carries a
              # verdict before returning it, and primes every reviewer with the files
              # the diff touches, so those helpers have to be in the namespace too.
-             "_full_file_context",
+             "_full_file_context", "_diff_context_paths",
              "_extract_reviewer_verdict", "_parse_reviewer_json", "_has_verdict_key",
              "_canon_verdict_keys", "_balanced_brace_span"},
             {
