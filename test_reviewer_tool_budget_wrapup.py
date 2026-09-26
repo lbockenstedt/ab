@@ -84,6 +84,9 @@ def _build(dispatch_results):
         "_REVIEW_FILE_MAX_CHARS": 20000,
         "_REVIEWER_JSON_SCHEMA": {},
         "_DIFF_FILE_HEADER_RE": re.compile(r"\+\+\+ b/(\S+)"),
+        # See test_reviewer_full_file_context: _full_file_context resolves paths
+        # through _diff_context_paths, which reads BOTH module regexes.
+        "_PLAIN_FILE_HEADER_RE": re.compile(r"^--- (?!a/)([^\s/][^\s]*)$", re.MULTILINE),
         "_parse_review_text_tool_calls": lambda t: (t, []),
         "_fetch_repo_file_for_review": lambda *a, **k: {"content": "x = 1"},
         "call_llm": lambda *a, **k: "",
@@ -100,7 +103,8 @@ def _build(dispatch_results):
             return nxt, None
 
     ns["llm_client"] = _FakeLlmClient
-    exec(_extract({"_run_reviewer_turn", "_full_file_context", "_extract_reviewer_verdict",
+    exec(_extract({"_run_reviewer_turn", "_full_file_context", "_diff_context_paths",
+                   "_extract_reviewer_verdict",
                    "_parse_reviewer_json", "_has_verdict_key", "_canon_verdict_keys",
                    "_balanced_brace_span"}),
          ns)  # noqa: S102 — repo-standard test pattern

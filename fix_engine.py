@@ -1526,6 +1526,33 @@ def _fetch_repo_file_for_review(repo, head_sha, path, checkout_path=None, patter
 
 
 _DIFF_FILE_HEADER_RE = re.compile(r'^diff --git a/(\S+) b/\S+', re.MULTILINE)
+# pr_review._pr_diff_text does NOT emit `diff --git` headers -- it assembles the
+# panel's view as "--- <filename>" + GitHub's per-file `patch`. Matching only the
+# git form meant _full_file_context found ZERO paths for every PR pre-review, so
+# the "hand the reviewer the touched files up front" mitigation was silently dead
+# on exactly the path it was written for. A claude_cli reviewer is also excluded
+# from fetch_repo_file and gets no checkout, so it was left with no file access at
+# all and said so in its critique ("I could not fetch any files"), parking those
+# reviews in the 0.85-0.895 band just under the auto-merge threshold.
+#
+# `a/` is excluded so a real unified-diff "--- a/foo" header falls to the git
+# pattern above rather than being captured with a bogus leading directory.
+_PLAIN_FILE_HEADER_RE = re.compile(r'^--- (?!a/)([^\s/][^\s]*)$', re.MULTILINE)
+
+
+def _diff_context_paths(prompt, limit):
+    """Ordered, de-duplicated file paths named by either header style.
+
+    Permissive on purpose: a false positive costs one skipped fetch (callers
+    swallow the failure) whereas a miss costs the reviewer its file context.
+    """
+    paths, seen = [], set()
+    for pat in (_DIFF_FILE_HEADER_RE, _PLAIN_FILE_HEADER_RE):
+        for p in pat.findall(prompt or ""):
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+    return paths[:limit]
 
 
 def _full_file_context(repo, head_sha, prompt, can_fetch_itself):
@@ -1540,7 +1567,7 @@ def _full_file_context(repo, head_sha, prompt, can_fetch_itself):
     raised, because a review must not fail over missing context."""
     if repo is None or head_sha is None:
         return ""
-    paths = _DIFF_FILE_HEADER_RE.findall(prompt)[:_REVIEW_TOOL_MAX_FILES]
+    paths = _diff_context_paths(prompt, _REVIEW_TOOL_MAX_FILES)
     blocks = []
     for p in paths:
         try:

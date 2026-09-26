@@ -80,6 +80,11 @@ def _build(dispatch_results, fetch=None, fetch_log=None):
         "_REVIEW_FILE_MAX_CHARS": 20000,
         "_REVIEWER_JSON_SCHEMA": {},
         "_DIFF_FILE_HEADER_RE": re.compile(r"\+\+\+ b/(\S+)"),
+        # _full_file_context now resolves paths via _diff_context_paths, which
+        # reads BOTH module regexes. The stub above stays authoritative for this
+        # harness's "+++ b/<path>" fixtures; the plain header is the real one so
+        # pr_review's "--- <path>" style is exercised here too.
+        "_PLAIN_FILE_HEADER_RE": re.compile(r"^--- (?!a/)([^\s/][^\s]*)$", re.MULTILINE),
         "_parse_review_text_tool_calls": lambda t: (t, []),
         "call_llm": lambda *a, **k: "",
     }
@@ -105,7 +110,8 @@ def _build(dispatch_results, fetch=None, fetch_log=None):
             return nxt, None
 
     ns["llm_client"] = _FakeLlmClient
-    exec(_extract({"_run_reviewer_turn", "_full_file_context", "_extract_reviewer_verdict",
+    exec(_extract({"_run_reviewer_turn", "_full_file_context", "_diff_context_paths",
+                   "_extract_reviewer_verdict",
                    "_parse_reviewer_json", "_has_verdict_key", "_canon_verdict_keys",
                    "_balanced_brace_span"}), ns)  # noqa: S102 — repo-standard test pattern
     return ns, calls
