@@ -495,10 +495,30 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
     # NOTE: the instruction block below contains literal Jinja examples (`{% for %}`,
     # `{{ }}`) whose `%` signs would be mis-parsed as %-format conversions. So only the
     # title/body header is %-formatted; the instructions are plain concatenation.
+    #
+    # Surface the stated intent as its OWN field rather than leaving the panel to
+    # hunt for it. Rule 4 below tells the reviewer to lower confidence when a PR
+    # has no clear intent statement, and AGENTS.md ("Pull Request Intent &
+    # Specification Rule") requires every fleet PR to carry one -- so whether the
+    # section is present is a merge-relevant fact, not a formatting detail. It is
+    # stated plainly here so the verdict turns on what the PR actually says.
+    try:
+        import pr_template
+        _intent = pr_template.stated_intent(pr.body or "")
+        _intent_block = (
+            "STATED INTENT (from the PR's '%s' section):\n%s\n\n"
+            % (pr_template.INTENT, _intent[:2000])
+            if _intent else
+            "STATED INTENT: none. The PR description does not carry an "
+            "'%s' section, which AGENTS.md requires of every fleet PR.\n\n"
+            % pr_template.INTENT)
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: intent extraction skipped (%s)", e)
+        _intent_block = ""
     issue_body = (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
         % (pr.title or "", (pr.body or "").strip()[:4000])
-    ) + (
+    ) + _intent_block + (
         "NOTE: This is a HUMAN-authored pull request under pre-review — not a bot "
         "fix. Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
         "correctness/regressions, weight these merge-safety defects heavily (they "
