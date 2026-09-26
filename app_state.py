@@ -364,6 +364,19 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "last_remediation_complexity": prev.get("last_remediation_complexity"),
                 "last_remediation_model": prev.get("last_remediation_model"),
                 "excluded_models": list(prev.get("excluded_models") or []),
+                # Description-rewrite budget (pr_review.fix_pr_description), keyed
+                # by head SHA. Same rebuild hazard as the remediation bookkeeping
+                # above: dropping it reset the count to 0 on every re-review, so
+                # _MAX_DESC_FIXES never bound and AppBuilder rewrote the same PR
+                # body on every poll forever. Keyed by SHA rather than reset on
+                # head movement, so a genuinely new commit still gets a fresh
+                # budget while retries at one head stay capped. Pruned to the
+                # current head so the persisted map cannot grow one entry per
+                # commit for the life of a long-running PR; a description fix
+                # never pushes a commit, so any head movement here is real new
+                # code and the older counts are dead weight.
+                "desc_fixes": {head_sha: int((prev.get("desc_fixes") or {}).get(head_sha) or 0)}
+                              if (prev.get("desc_fixes") or {}).get(head_sha) else {},
                 # Denied does NOT persist here: record_pr_review only runs for OPEN
                 # PRs, and Deny CLOSES the PR — so a still-denied PR is never re-scanned
                 # (its badge persists via the stored record). Reaching this line means
