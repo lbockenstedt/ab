@@ -223,3 +223,15 @@ def test_promote_yml_does_not_hide_the_gh_failure_with_true():
     fetch apart from a PR that simply has no Intent section."""
     run = _promote_body_step()
     assert "--json body -q .body 2>/dev/null || true" not in run
+
+
+def test_promote_yml_does_not_mask_a_failed_diff_as_zero_files():
+    """`git diff --name-only | wc -l` prints 0 when the DIFF failed, so an
+    unknown file count read as a truthful empty promotion -- the same masking
+    the ncommits fix removed. Flagged by the state-logic panel on ldap#25."""
+    run = _promote_body_step()
+    code = "\n".join(ln for ln in run.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    assert 'git diff --name-only "$base...$BR" 2>/dev/null | wc -l' not in code
+    assert "nfiles_ok" in code
+    assert "UNKNOWN number of files" in run
