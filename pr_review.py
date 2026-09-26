@@ -66,6 +66,7 @@ proven, load them from `.claude/skills/dual-copy-guard/reference.md` (or a share
 machine-readable pairs file) so there is a single source of truth.
 """
 import logging
+import hashlib
 import os
 import re
 from datetime import timedelta
@@ -354,6 +355,131 @@ def _summarize_changes(pr, files, config, repo=None):
         return ""
     if not isinstance(out, str):
         out = str(out or "")
+    return out.strip()
+
+
+# --- Description-level panel objections -------------------------------------
+#
+# The skeptical panel is asked to judge the PR's DESCRIPTION against its diff,
+# so "the description contradicts the diff" is one of the verdicts it can
+# return — and it is a verdict the code-fix loop can never satisfy, because
+# that loop only edits files. A whole promotion queue once stalled on exactly
+# this: every PR was correct, every description was wrong, and the panel said
+# so in as many words ("It needs a PR-body edit, not code").
+#
+# Matching keys on the specific nouns below and deliberately NOT on the bare
+# words "docs"/"documentation" — a critique about documentation FILES in the
+# repository is an ordinary code-fix finding and must not be routed here.
+_DESC_NOUN_RE = re.compile(
+    r"\b(?:descriptions?|PR body|PR-body|pull[- ]request body|summary)\b", re.I)
+_DESC_COMPLAINT_RE = re.compile(
+    r"\b(?:contradict(?:s|ing|ion|ions)?"
+    r"|does\s+not\s+(?:state|mention|match|say|reflect)"
+    r"|doesn't\s+(?:state|mention|match|say|reflect)"
+    r"|out\s+of\s+date|stale|inaccurate|incorrect|wrong|misleading"
+    r"|omits|fails\s+to\s+mention|claims|untouched"
+    r"|needs\s+a\s+PR-body\s+edit|inconsistent|conflicting)\b", re.I)
+
+# How close the noun and the complaint have to be, in characters, before they
+# are read as one objection. The panel joins several reviewers' prose with
+# " | ", so an unbounded search would pair one reviewer's noun with another
+# reviewer's unrelated complaint.
+_DESC_OBJECTION_WINDOW = 200
+
+# Per-head cap on description rewrites. The panel re-reviews after each edit
+# (the review cache keys on the description), so without a cap a stubborn
+# objection could rewrite the body on every cycle forever.
+_MAX_DESC_FIXES = 2
+
+
+def _panel_objects_to_description(critique):
+    """True when the panel's objection is about the PR's OWN description.
+
+    Such a finding is real — the description is a review input — but it is not
+    repairable by editing files, so it needs its own path (fix_pr_description).
+    """
+    if not critique:
+        return False
+    if not isinstance(critique, str):
+        critique = str(critique)
+    nouns = list(_DESC_NOUN_RE.finditer(critique))
+    if not nouns:
+        return False
+    complaints = list(_DESC_COMPLAINT_RE.finditer(critique))
+    for n in nouns:
+        for c in complaints:
+            gap = (c.start() - n.end()) if n.start() < c.start() else (n.start() - c.end())
+            if gap <= _DESC_OBJECTION_WINDOW:
+                return True
+    return False
+
+
+def _regenerate_pr_description(pr, files, critique, config, repo=None):
+    """Ask the LLM for a corrected PR description that matches the diff.
+
+    The panel judges the description against the diff, so a description that
+    contradicts its own changes is a genuine defect — and the only one the
+    code-fix loop structurally cannot repair. Best-effort: returns "" if
+    disabled, unavailable, or the model yields nothing, in which case the
+    caller simply leaves the description alone.
+    """
+    if not critique or not config.get("pr_review_desc_fix_enabled", True):
+        return ""
+    try:
+        from llm_client import call_llm
+        from model_selection import LlmRequirements
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(critique, str):
+        critique = str(critique)
+    critique = critique[:4000]
+    parts = []
+    for f in list(files)[:_SUMMARY_MAX_FILES]:
+        fn = getattr(f, "filename", "?")
+        stt = getattr(f, "status", "?")
+        add = getattr(f, "additions", 0)
+        dele = getattr(f, "deletions", 0)
+        patch = getattr(f, "patch", None) or ""
+        if len(patch) > _SUMMARY_PATCH_CHARS:
+            patch = patch[:_SUMMARY_PATCH_CHARS] + "\n… (patch truncated)"
+        parts.append("--- %s (%s, +%s/-%s)\n%s" % (fn, stt, add, dele, patch))
+    digest = "\n\n".join(parts)[:_SUMMARY_PROMPT_CHARS]
+    if not digest.strip():
+        return ""
+    system = (
+        "You are a senior engineer correcting a pull request's DESCRIPTION so that it "
+        "accurately describes the diff. A reviewer panel has rejected this PR because "
+        "the description and the diff disagree; the diff is correct and the description "
+        "is what must change.\n"
+        "Rules:\n"
+        "- Correct ONLY what is inaccurate or missing. Preserve the existing wording, "
+        "structure and every markdown heading wherever it is already accurate.\n"
+        "- Keep the '## Intent & Problem Statement' section, and keep it first.\n"
+        "- Never invent a change that is not in the diff. If the diff does something "
+        "the description omits, describe it plainly and say why it is expected.\n"
+        "- Output raw markdown only: no code fence around the whole answer, no "
+        "preamble, no sign-off.")
+    prompt = ("PR title: %s\n\n"
+              "=== CURRENT DESCRIPTION ===\n%s\n\n"
+              "=== REVIEWER PANEL'S OBJECTION ===\n%s\n\n"
+              "=== DIFF ===\n%s\n" % (pr.title or "", pr.body or "", critique, digest))
+    reqs = LlmRequirements(complexity="medium", deprioritize_local=True,
+                           min_context_tokens=len(prompt) // 4)
+    try:
+        out = call_llm(prompt, system_prompt=system, requirements=reqs)
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: description fix skipped (%s)", e)
+        return ""
+    if not isinstance(out, str):
+        out = str(out or "")
+    out = out.strip()
+    # Strip a fence only if the model wrapped the WHOLE answer in one.
+    if out.startswith("```"):
+        nl = out.find("\n")
+        if nl != -1:
+            out = out[nl + 1:]
+        if out.rstrip().endswith("```"):
+            out = out.rstrip()[:-3]
     return out.strip()
 
 
@@ -854,11 +980,36 @@ def _render_route(base_ref, head_ref, default_branch=""):
     return [line, ""]
 
 
+def _desc_digest(pr):
+    """Short digest of a PR's title+body. The skeptical panel judges the
+    DESCRIPTION against the diff (it will reject a PR whose body contradicts
+    its own changes), so the description is a genuine review input and must
+    take part in the cache key alongside the head SHA."""
+    raw = (getattr(pr, "title", "") or "") + "\x00" + (getattr(pr, "body", "") or "")
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _desc_is_current(body, digest):
+    """True when an existing review comment still matches the PR description.
+
+    A comment written before this marker existed carries no `<!-- desc: -->`
+    line at all; treat those as current so deploying this change does not
+    re-run the LLM panel on every open PR in the fleet at once."""
+    body = body or ""
+    if "<!-- desc: " not in body:
+        return True
+    return ("<!-- desc: %s -->" % digest) in body
+
+
 def _render(findings, head_sha, summary="", review=None, state_review=None,
-            base_ref="", head_ref="", default_branch=""):
+            base_ref="", head_ref="", default_branch="", desc_digest=""):
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
+    ]
+    if desc_digest:
+        lines.append("<!-- desc: %s -->" % desc_digest)
+    lines += [
         "## \U0001F916 AppBuilder PR pre-review",
         "",
     ]
@@ -1447,10 +1598,17 @@ def _review_one(gh, repo, pr, config, force=False):
     _step("checking for unattended mutation")
     findings += check_unattended_mutation(files)
     existing = _find_marker_comment(pr)
+    _desc = _desc_digest(pr)
     _prior_review = (state.get("pr_reviews") or {}).get("%s#%s" % (repo.full_name, pr.number)) or {}
     _prior_queued = is_queued_for_retry_stale(_prior_review, head_sha)
     already_current = ((not force) and not _prior_queued and bool(existing)
-                       and ("<!-- head: %s -->" % head_sha) in (existing.body or ""))
+                       and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
+                       and _desc_is_current(existing.body if existing else "", _desc))
+    if (not force) and existing and not _prior_queued and not already_current \
+            and ("<!-- head: %s -->" % head_sha) in (existing.body or ""):
+        logger.info("pr_review: %s PR #%s re-reviewing — head unchanged but the PR "
+                    "description was edited (the panel judges description vs diff)",
+                    repo.full_name, pr.number)
     if _prior_queued and not force:
         logger.info("pr_review: %s PR #%s retrying — prior scan queued for retry (panel unavailable)",
                     repo.full_name, pr.number)
@@ -1518,10 +1676,25 @@ def _review_one(gh, repo, pr, config, force=False):
         body = _render(findings, head_sha, summary, review=review, state_review=state_review,
                        base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
                        head_ref=_head_ref,
-                       default_branch=getattr(repo, "default_branch", "") or "")
+                       default_branch=getattr(repo, "default_branch", "") or "",
+                       desc_digest=_desc)
         if existing:
-            existing.edit(body)
-            action = "updated"
+            try:
+                existing.edit(body)
+                action = "updated"
+            except Exception as e:  # noqa: BLE001
+                # The comment was deleted between _find_marker_comment() and
+                # here (a human tidying the PR, or an operator busting the
+                # review cache). A 404 from edit() used to propagate and abort
+                # this PR's whole review — including record_pr_review — so the
+                # PR fell out of the queue entirely and looked "stuck" with no
+                # comment and no state. Re-post instead.
+                if "404" not in str(e):
+                    raise
+                logger.info("pr_review: %s PR #%s — review comment vanished; re-posting",
+                            repo.full_name, pr.number)
+                pr.create_issue_comment(body)
+                action = "re-created"
         else:
             pr.create_issue_comment(body)
             action = "created"
@@ -1605,11 +1778,94 @@ def reprocess_one_pr(repo_full_name, number, config=None):
     _review_one(gh, repo, pr, config, force=True)
 
 
+def fix_pr_description(repo_full_name, number, config=None):
+    """Repair a PR's DESCRIPTION when that is what the panel is objecting to.
+
+    The skeptical panel is asked to judge the description against the diff, so
+    "the description contradicts the diff" is a verdict it can return — and it
+    is the one verdict fix_one_pr can never satisfy, because that path clones
+    the branch and edits FILES. A whole promotion queue once stalled here:
+    every diff was correct, every description was wrong, and the panel said so
+    outright ("It needs a PR-body edit, not code"). Each PR then burned its
+    entire code-fix budget producing edits that could not address the finding.
+
+    This is the missing repair path. It edits the description and nothing
+    else: it never touches code, never pushes, and never merges. Returns
+    (True, message) on an edit, (False, reason) on any refusal — an ordinary
+    refusal is a return value, not an exception. Raises only on setup failure
+    (bad token/repo/PR number), matching reprocess_one_pr's contract.
+    """
+    from github import Github
+    from fix_engine import _claim_issue, _release_issue
+
+    config = config or load_config()
+    token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        raise RuntimeError("No GitHub token configured")
+
+    gh = Github(token)
+    repo = gh.get_repo(repo_full_name)
+    pr = repo.get_pull(int(number))
+    if pr.merged or pr.state != "open":
+        return False, "PR #%s is not open." % number
+
+    key = "%s#%s" % (repo_full_name, number)
+    rec = (state.get("pr_reviews") or {}).get(key) or {}
+    critique = rec.get("panel_critique") or ""
+    if not _panel_objects_to_description(critique):
+        return False, "The panel's objection is not about the PR description."
+
+    head_sha = pr.head.sha
+    budget = dict(rec.get("desc_fixes") or {})
+    done = int(budget.get(head_sha, 0) or 0)
+    if done >= _MAX_DESC_FIXES:
+        return False, ("Description already rewritten %d time(s) for this head — "
+                       "the objection is not being resolved by rewording." % done)
+
+    # Same concurrency guard fix_one_pr uses: the scan loop and the UI button
+    # can both land here, and a double rewrite would double-spend the budget.
+    lock_id = "pr-desc:%s#%s" % (repo_full_name, number)
+    if not _claim_issue(lock_id):
+        return False, "A description fix is already in progress for this PR."
+    try:
+        files = list(pr.get_files())
+        new_body = _regenerate_pr_description(pr, files, critique, config, repo=repo)
+
+        if not new_body or len(new_body.strip()) < 200:
+            return False, "The regenerated description was empty or implausibly short."
+        if new_body.strip() == (pr.body or "").strip():
+            return False, "The regenerated description was identical to the current one."
+        # The fleet requires this section on every PR; an LLM rewrite must not
+        # be the thing that silently drops it.
+        if ("## Intent & Problem Statement" in (pr.body or "")
+                and "## Intent & Problem Statement" not in new_body):
+            return False, ("The regenerated description dropped the required "
+                           "Intent & Problem Statement section.")
+
+        pr.edit(body=new_body)
+        budget[head_sha] = done + 1
+        try:
+            update_pr_review(repo_full_name, number, desc_fixes=budget)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("pr_review: could not persist the description-fix budget "
+                           "for %s#%s (%s)", repo_full_name, number, e)
+        logger.info("pr_review: %s #%s description rewritten to match the diff "
+                    "(%d/%d for this head)", repo_full_name, number,
+                    done + 1, _MAX_DESC_FIXES)
+        return True, "Description updated to match the diff."
+    finally:
+        _release_issue(lock_id)
+
+
 def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_model_out=None):
     """Entry point for the UI's per-PR "Fix" button (routes.py
     /api/pr-review/fix) — the ONLY way this ever runs; AppBuilder never applies a
     PR fix on its own. A human clicks Fix, and this:
 
+      0. If the persisted panel critique objects to the PR's DESCRIPTION
+         rather than its code, repairs the description instead (see
+         fix_pr_description) and returns — steps 1-5 edit files and can never
+         satisfy that finding.
       1. Recomputes this PR's Tier-1 findings (parity/secrets/lint) fresh, and
          folds in the persisted skeptical-panel critique, into a fix prompt.
       2. Clones the PR's OWN head branch (not a new branch) into a sandboxed
@@ -1641,6 +1897,29 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
     token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
     if not token:
         raise RuntimeError("No GitHub token configured")
+
+    # A description-level objection cannot be answered by editing files, so
+    # repair the description FIRST and let the re-review settle. Without this
+    # the loop below spends its whole budget producing code edits that cannot
+    # possibly address the finding, and the PR stalls with attempts exhausted.
+    _rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}
+    if _panel_objects_to_description(_rec.get("panel_critique") or ""):
+        try:
+            _ok, _msg = fix_pr_description(repo_full_name, number, config=config)
+        except Exception as e:  # noqa: BLE001
+            _ok, _msg = False, "description fix failed: %s" % e
+        if _ok:
+            try:
+                _gh = Github(token)
+                _repo = _gh.get_repo(repo_full_name)
+                _review_one(_gh, _repo, _repo.get_pull(int(number)), config, force=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("fix_one_pr: post-description-fix reprocess failed "
+                               "for %s#%s: %s", repo_full_name, number, e)
+            return True, _msg
+        logger.info("fix_one_pr: %s#%s — panel objects to the description but it was "
+                    "not rewritten (%s); continuing with the code fix",
+                    repo_full_name, number, _msg)
 
     lock_id = "pr-fix:%s#%s" % (repo_full_name, number)
     if not _claim_issue(lock_id):
