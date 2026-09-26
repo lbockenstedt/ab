@@ -177,3 +177,49 @@ def test_repo_template_matches_the_module_headings():
     for name in pr_template.SECTIONS:
         assert pr_template.extract(body, name) == "", name
         assert pr_template._section_pattern(name).search(body), name
+
+
+# --- promote.yml must not conflate distinct "no intent" states -------------
+#
+# The state-logic panel rejected cs#144 for exactly this: four different
+# situations (no originating PR, a FAILED fetch, no Intent section, an
+# unfilled template) all printed "the originating change stated no intent
+# section", which is misleading for the first and simply false for the second.
+# A failed `gh pr view` means the intent is UNKNOWN, not absent.
+
+def _promote_body_step():
+    import yaml
+    doc = yaml.safe_load(open(".github/workflows/promote.yml", encoding="utf-8"))
+    steps = doc["jobs"]["promote"]["steps"]
+    return next(s["run"] for s in steps
+                if "Open or update" in (s.get("name") or ""))
+
+
+@pytest.mark.parametrize("state", ["no-unit", "fetch-failed", "no-section",
+                                   "unfilled", "ok"])
+def test_promote_yml_tracks_each_intent_state(state):
+    assert state in _promote_body_step()
+
+
+def test_promote_yml_reports_a_failed_fetch_as_unknown_not_absent():
+    run = _promote_body_step()
+    assert "fetch\nfailed" in run or "GitHub fetch" in run
+    assert "UNKNOWN -- not absent" in run
+
+
+def test_promote_yml_does_not_mask_a_rev_list_failure_as_zero():
+    """`|| echo 0` turned a failed rev-list into a truthful-looking '0
+    commit(s)'. The count must be reported as unknown instead."""
+    run = _promote_body_step()
+    code = "\n".join(ln for ln in run.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    assert "|| echo 0" not in code
+    assert "ncommits_ok" in run
+    assert "not zero" in run
+
+
+def test_promote_yml_does_not_hide_the_gh_failure_with_true():
+    """`gh pr view ... || true` discarded the exit status that tells a failed
+    fetch apart from a PR that simply has no Intent section."""
+    run = _promote_body_step()
+    assert "--json body -q .body 2>/dev/null || true" not in run
