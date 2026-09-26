@@ -310,6 +310,68 @@ def assess_fix_complexity(
 DEFAULT_TARGET_SCORE = 0.95  # "as close to 100% as possible", in practice
 
 
+def _clears_merge_bar(rec, config):
+    """Does this PR ALREADY satisfy the auto-merge gate?
+
+    Mirrors pr_review._maybe_auto_merge's verdict/confidence criteria exactly
+    so remediation can stop once a PR is good enough to MERGE, rather than
+    chasing the (higher) remediation target forever.
+
+    This exists because the two bars are deliberately different — the merge
+    threshold (feature_automerge_min_confidence, e.g. 0.90) sits BELOW the
+    remediation target (pr_remediate_target_score, 0.95) — and that gap was a
+    livelock: a PR at 0.91 is merge-eligible, but remediation fired anyway to
+    chase 0.95, and every remediation PUSHES A COMMIT. The new head invalidated
+    the panel results the merge decision depends on ("no pre-review record for
+    the current head yet"), so the merge was deferred to a re-review that
+    scored ~0.91 again and remediated again. Merge-eligible PRs were therefore
+    never merged; they burned the attempt budget and, worse, sometimes
+    REGRESSED an Approve into a Reject and landed in exhausted_human_review —
+    which is exactly the pile of PRs an operator then has to approve by hand.
+
+    Returns (clears: bool, threshold: float). The threshold is always returned,
+    even when `clears` is False, so callers can report the bar that was missed.
+
+    Pure function — no I/O. Never raises.
+
+    NOTE: the default threshold is 1.0 ("auto-merge off"), so on a fleet that
+    has not enabled auto-merge nothing clears and remediation behaves exactly
+    as it did before. This gate only ever engages where an operator has set an
+    explicit bar. `or 1.0` is deliberately NOT used when reading the config: a
+    legitimate threshold of 0.0 is falsy and would be silently rewritten to 1.0.
+    """
+    raw = config.get("feature_automerge_min_confidence")
+    try:
+        threshold = 1.0 if raw is None else float(raw)
+    except (TypeError, ValueError):
+        threshold = 1.0
+    threshold = max(0.0, min(1.0, threshold))
+
+    if not rec:
+        return False, threshold
+
+    for status_key, verdict_key, conf_key in (
+        ("panel_status", "panel_verdict", "panel_confidence"),
+        ("panel2_status", "panel2_verdict", "panel2_confidence"),
+    ):
+        # A panel that could not RUN has not approved anything.
+        if rec.get(status_key):
+            return False, threshold
+        if rec.get(verdict_key) != "Approve":
+            return False, threshold
+        conf = rec.get(conf_key)
+        if conf is None:
+            return False, threshold
+        try:
+            conf = float(conf)
+        except (TypeError, ValueError):
+            return False, threshold
+        if conf < threshold:
+            return False, threshold
+
+    return True, threshold
+
+
 def should_remediate(rec, config):
     """THE SINGLE CHOKE POINT that defines AppBuilder's remediation OBJECTIVE.
 
@@ -395,6 +457,21 @@ def should_remediate(rec, config):
         score = None
         deficit = 0.0
 
+    # MERGE-ELIGIBLE PRs ARE DONE. Remediation's purpose is to get a PR fit to
+    # merge; once it already IS fit to merge, continuing to "improve" it is not
+    # free — every attempt pushes a commit, which moves the head, which
+    # invalidates the very panel results the merge decision reads. That is a
+    # livelock, not a refinement: the PR is re-reviewed, scores about the same,
+    # is remediated again, and never merges. Stop here and let it merge.
+    # (See _clears_merge_bar: with auto-merge off this never fires.)
+    _clears, _merge_bar = _clears_merge_bar(rec, config)
+    if _clears:
+        return (False,
+                "panel score %s already clears the %.2f auto-merge bar — merging beats "
+                "chasing the %.2f target (further fixes would invalidate the review)"
+                % ("%.2f" % score if score is not None else "n/a", _merge_bar, target),
+                0.0)
+
     # A non-Approve verdict is the strongest possible signal and is NOT
     # redeemable by a high confidence number: a reviewer that is 85% sure the
     # PR is wrong is a 0% approval, not an 85% one. Floor the deficit at the
@@ -469,10 +546,17 @@ def remediation_pending(rec, config):
     threshold (feature_automerge_min_confidence) sits below the remediation
     target (pr_remediate_target_score).
 
+    That gap cuts BOTH ways, though, and the opposite failure is worse. A PR
+    sitting between the two bars is already merge-eligible, and remediating it
+    pushes a commit that invalidates the panel results the merge gate reads —
+    so it never merged at all. should_remediate now stops at the merge bar (see
+    _clears_merge_bar), which is what makes the guarantee below hold in
+    practice and not just on paper.
+
     Every "stop trying" condition — guardrail block, exhausted attempts, kill
-    switch, target already met — returns False, so this can only ever delay a
-    merge by a bounded number of remediation attempts and can never deadlock
-    a PR.
+    switch, target already met, already merge-eligible — returns False, so this
+    can only ever delay a merge by a bounded number of remediation attempts and
+    can never deadlock a PR.
     """
     if not rec:
         return False, "no review record"
