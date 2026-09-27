@@ -28,6 +28,7 @@ tests.
 """
 
 import ast
+import json
 import os
 import sys
 
@@ -35,7 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_client.py")
 _WANT = ("_to_responses_input", "_responses_output_text", "_usage_from_responses_json",
-         "_copilot_wants_responses_api")
+         "_copilot_wants_responses_api", "_tools_to_responses", "_responses_tool_calls",
+         "_tool_spec")
 
 
 def _load():
@@ -45,7 +47,9 @@ def _load():
         if isinstance(node, ast.FunctionDef) and node.name in _WANT:
             segs.append(ast.get_source_segment(src, node))
     assert len(segs) == len(_WANT), "expected %d functions, found %d" % (len(_WANT), len(segs))
-    ns = {}
+    # The extracted functions are executed outside llm_client's module globals,
+    # so anything they reference at call time has to be seeded here.
+    ns = {"json": json}
     exec(compile("\n\n".join(segs), "llm_client.py", "exec"), ns)
     return ns
 
@@ -54,6 +58,8 @@ NS = _load()
 _to_responses_input = NS["_to_responses_input"]
 _responses_output_text = NS["_responses_output_text"]
 _usage_from_responses_json = NS["_usage_from_responses_json"]
+_tools_to_responses = NS["_tools_to_responses"]
+_responses_tool_calls = NS["_responses_tool_calls"]
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +106,130 @@ def test_none_content_becomes_empty_string():
     assert items[0]["content"][0]["text"] == ""
 
 
-def test_tool_messages_are_dropped():
+# ---------------------------------------------------------------------------
+# Tool exchanges.
+#
+# These used to be dropped, and the drop was invisible: the reviewer ALWAYS
+# passes fetch_repo_file, so _request_copilot held every tool-using call on
+# chat/completions, where a /responses-only model answers 400 and is benched for
+# 24h. That is what quietly reduced the panel to a single vendor.
+#
+# A tool exchange here is not two annotated messages but two standalone items in
+# the same flat list, correlated by call_id.
+# ---------------------------------------------------------------------------
+
+def test_tool_result_becomes_a_correlated_function_call_output():
     _, items = _to_responses_input([
         {"role": "user", "content": "q"},
         {"role": "tool", "content": "result", "tool_call_id": "x"},
     ])
-    assert [i["role"] for i in items] == ["user"]
+    assert items[0]["role"] == "user"
+    assert items[1] == {"type": "function_call_output", "call_id": "x", "output": "result"}
+
+
+def test_assistant_tool_calls_become_function_call_items_after_their_narration():
+    _, items = _to_responses_input([
+        {"role": "assistant", "content": "checking",
+         "tool_calls": [{"id": "c1", "function": {"name": "fetch_repo_file",
+                                                  "arguments": '{"path": "a.py"}'}}]},
+    ])
+    assert items[0]["role"] == "assistant"
+    assert items[0]["content"][0]["type"] == "output_text"
+    assert items[1] == {"type": "function_call", "call_id": "c1",
+                        "name": "fetch_repo_file", "arguments": '{"path": "a.py"}'}
+
+
+def test_empty_narration_emits_no_message_item():
+    # An output_text part with empty text is rejected by the API, so the
+    # message item has to be omitted entirely rather than sent blank.
+    _, items = _to_responses_input([
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}]},
+    ])
+    assert len(items) == 1 and items[0]["type"] == "function_call"
+
+
+def test_call_id_round_trips_so_the_result_correlates():
+    # The whole exchange hinges on these matching; if they drift the API
+    # rejects the output as correlating to nothing.
+    _, items = _to_responses_input([
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "abc", "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "content": "out", "tool_call_id": "abc"},
+    ])
+    assert items[0]["call_id"] == items[1]["call_id"] == "abc"
+
+
+def test_dict_arguments_are_serialised_not_passed_through():
+    _, items = _to_responses_input([
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c", "function": {"name": "f", "arguments": {"path": "a.py"}}}]},
+    ])
+    assert items[0]["arguments"] == '{"path": "a.py"}'
+
+
+def test_flat_tool_call_shape_is_accepted():
+    _, items = _to_responses_input([
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c", "name": "f", "arguments": "{}"}]},
+    ])
+    assert items[0]["name"] == "f"
+
+
+def test_malformed_tool_calls_do_not_raise():
+    _, items = _to_responses_input([
+        {"role": "assistant", "content": "x", "tool_calls": "not-a-list"},
+        {"role": "assistant", "content": "y", "tool_calls": [None, 7]},
+    ])
+    # Falls back to plain assistant messages rather than exploding.
+    assert [i.get("role") for i in items] == ["assistant", "assistant"]
+
+
+def test_missing_ids_fall_back_to_positional_and_name():
+    _, items = _to_responses_input([
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "name": "f", "content": "out"},
+    ])
+    assert items[0]["call_id"] == "call_0"
+    assert items[1]["call_id"] == "f"
+
+
+def test_tools_are_sent_flat_not_nested_under_function():
+    # chat/completions nests under "function"; /responses rejects that shape.
+    out = _tools_to_responses([{"type": "function", "function": {
+        "name": "fetch_repo_file", "description": "d", "parameters": {"type": "object"}}}])
+    assert out == [{"type": "function", "name": "fetch_repo_file",
+                    "description": "d", "parameters": {"type": "object"}}]
+    assert "function" not in out[0]
+
+
+def test_tools_to_responses_handles_none():
+    assert _tools_to_responses(None) == []
+
+
+def test_function_calls_are_read_from_the_output_item_list():
+    calls = _responses_tool_calls({"output": [
+        {"type": "reasoning", "summary": []},
+        {"type": "function_call", "call_id": "c1", "name": "fetch_repo_file",
+         "arguments": '{"path": "a.py"}'},
+    ]})
+    assert calls == [{"id": "c1", "function": {"name": "fetch_repo_file",
+                                               "arguments": '{"path": "a.py"}'}}]
+
+
+def test_no_function_calls_returns_none_not_empty_list():
+    # The caller treats "no tool calls" as "this turn is final", and [] would
+    # read as falsy anyway -- but None is the contract _request_copilot returns.
+    assert _responses_tool_calls({"output": [{"type": "message"}]}) is None
+    assert _responses_tool_calls({}) is None
+    assert _responses_tool_calls(None) is None
+
+
+def test_responses_tool_calls_tolerates_junk_items():
+    calls = _responses_tool_calls({"output": ["junk", None,
+                                              {"type": "function_call"}]})
+    assert calls == [{"id": "call_2", "function": {"name": "", "arguments": "{}"}}]
 
 
 def test_non_dict_messages_are_ignored_rather_than_raising():
@@ -194,3 +318,54 @@ def test_unknown_catalogue_falls_back_to_chat_completions():
     stays on the endpoint that works for almost everything."""
     assert _wants(None) is False
     assert _wants([]) is False
+
+
+# ---------------------------------------------------------------------------
+# Routing. _request_copilot cannot be imported (llm_client imports main), so
+# this is pinned at source level.
+# ---------------------------------------------------------------------------
+
+def _request_copilot_src():
+    src = open(_SRC).read()
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_request_copilot":
+            return ast.get_source_segment(src, node)
+    raise AssertionError("_request_copilot not found")
+
+
+def test_tool_using_calls_are_not_held_back_on_chat_completions():
+    """The regression that benched every /responses-only model.
+
+    `if not tools and _copilot_wants_responses_api(...)` sent tool-using calls to
+    chat/completions, and the reviewer always passes fetch_repo_file -- so every
+    such model 400ed on every review, was benched for 24h, and the panel quietly
+    fell back to one vendor. The routing decision must depend on the catalogue
+    alone, not on whether tools were offered.
+    """
+    src = _request_copilot_src()
+    assert "if not tools and _copilot_wants_responses_api" not in src
+    assert "if _copilot_wants_responses_api(bearer, model):" in src
+
+
+def test_tools_are_forwarded_to_the_responses_path():
+    # Routing to /responses while dropping the tools would be worse than the
+    # 400: the model would answer confidently without the file it asked for.
+    src = _request_copilot_src()
+    call = src[src.index("_request_copilot_responses("):]
+    call = call[:call.index(")\n")]
+    assert "tools=tools" in call
+
+
+def test_responses_path_accepts_tools_and_returns_the_dict_contract():
+    src = open(_SRC).read()
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_request_copilot_responses":
+            seg = ast.get_source_segment(src, node)
+            assert "tools=None" in seg.split("\"\"\"")[0]
+            # Same contract as _request_copilot: bare string without tools,
+            # {"text", "tool_calls"} with them.
+            assert "_tools_to_responses(tools)" in seg
+            assert '{"text": text, "tool_calls": _responses_tool_calls(data)}' in seg
+            assert "if not tools:\n        return text" in seg
+            return
+    raise AssertionError("_request_copilot_responses not found")
