@@ -85,7 +85,9 @@ fi
 [ "${#units[@]}" -gt 0 ] || units=("origin/$SRC")
 
 # Build $BR as "$TGT plus everything up to <endpoint>", VERSION pinned.
-# Returns 0 when that produced a real change, 1 when it is a content no-op.
+# Returns 0 when that produced a real change, 1 when it is a content no-op, and
+# 2 when a split unit conflicts against $TGT (the caller falls back to a batched
+# merge). Callers MUST capture the code -- `if stage_to ...` cannot tell 1 from 2.
 stage_to() {
   local endpoint="$1"
 
@@ -114,9 +116,14 @@ stage_to() {
   done < <(git diff --cached --name-only --diff-filter=A | grep -E '(^|/)VERSION$' || true)
 
   if git ls-files -u | grep -q .; then
-    echo "::error::merge conflict outside VERSION -- resolve $SRC -> $TGT by hand:"
+    # Diagnose, but do NOT decide. A conflict while EXTENDING a unit is
+    # recoverable -- the caller keeps the original unit -- while a conflict on
+    # the primary selection is fatal. Exiting here denied the caller that
+    # choice, and annotating every conflict as ::error:: marked recoverable
+    # runs as failures, so severity belongs to whoever called us.
+    echo "  merge conflict outside VERSION staging $SRC -> $TGT:"
     git ls-files -u | awk '{print "  " $4}' | sort -u
-    exit 1
+    return 2
   fi
 
   if git diff --cached --quiet && git diff --quiet; then
@@ -128,10 +135,19 @@ stage_to() {
 picked=""
 picked_idx=0
 for i in "${!units[@]}"; do
-  if stage_to "${units[$i]}"; then
+  sel_rc=0
+  stage_to "${units[$i]}" || sel_rc=$?
+  if [ "$sel_rc" -eq 0 ]; then
     picked="${units[$i]}"
     picked_idx="$i"
     break
+  fi
+  if [ "$sel_rc" -eq 2 ]; then
+    # A conflict on the oldest outstanding unit cannot be skipped: promoting a
+    # later unit ahead of it would reorder the branch and ship its changes out
+    # of sequence. This one is fatal, so the error annotation belongs here.
+    echo "::error::merge conflict outside VERSION -- resolve $SRC -> $TGT by hand"
+    exit 1
   fi
   [ "$SPLIT" = "1" ] && echo "  skipping ${units[$i]} -- no content change against $TGT (VERSION-only?)"
 done
@@ -181,15 +197,34 @@ if [ "$SPLIT" = "1" ]; then
   if [ "$ext_idx" -ne "$picked_idx" ]; then
     echo "  extending unit $picked_idx -> $ext_idx: later unit(s) modify the same" \
          "file(s); promoting an already-superseded version would be rejected"
-    if stage_to "${units[$ext_idx]}"; then
+    ext_rc=0
+    stage_to "${units[$ext_idx]}" || ext_rc=$?
+    if [ "$ext_rc" -eq 0 ]; then
       picked="${units[$ext_idx]}"
       picked_idx="$ext_idx"
     else
-      # Cannot happen (a superset of a real change is a real change), but if
-      # it ever did, fall back to the unextended unit rather than promoting a
-      # half-staged tree.
-      echo "::warning::extension to ${units[$ext_idx]} was a content no-op -- keeping unit $picked_idx"
-      stage_to "$picked" || true
+      # stage_to is tri-state, so 1 and 2 must not be reported alike: 2 is a real
+      # merge conflict and 1 is a genuine no-op. Collapsing them printed "content
+      # no-op" over a conflict, which sent anyone reading the CI log looking for a
+      # VERSION-only diff that was never there.
+      if [ "$ext_rc" -eq 2 ]; then
+        echo "::warning::extension to ${units[$ext_idx]} conflicts against $TGT -- keeping unit $picked_idx"
+      else
+        # Cannot happen (a superset of a real change is a real change).
+        echo "::warning::extension to ${units[$ext_idx]} was a content no-op -- keeping unit $picked_idx"
+      fi
+      # The failed extension left the worktree staged against the WRONG endpoint,
+      # so the original unit has to be restaged before anything is committed.
+      # Discarding this exit code (|| true) defeated the fallback entirely: a
+      # restage that did not reproduce a real change left a half-staged or
+      # conflicted tree, and the script committed it anyway.
+      re_rc=0
+      stage_to "$picked" || re_rc=$?
+      if [ "$re_rc" -ne 0 ]; then
+        echo "::error::could not restage $picked after the failed extension (exit $re_rc) --" \
+             "refusing to promote a half-staged tree"
+        exit 1
+      fi
     fi
   fi
 fi
