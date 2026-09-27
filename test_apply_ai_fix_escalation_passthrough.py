@@ -59,6 +59,11 @@ def _load_apply_ai_fix(call_llm_stub, llm_client_stub):
         "logger": _NoLog(),
         "call_llm": call_llm_stub,
         "llm_client": llm_client_stub,
+        # The fix-model floor (only allowlisted models may WRITE code) is applied
+        # inside apply_ai_fix. This harness is about escalation passthrough, not
+        # model policy, so it stays a no-op here -- test_fix_model_floor owns the
+        # real behaviour.
+        "_fix_model_exclusions": lambda config, existing=(): tuple(existing),
         "_FIX_GENERATION_JSON_SCHEMA": {},
     }
     exec(compile(seg, "fix_engine.py:apply_ai_fix", "exec"), ns)

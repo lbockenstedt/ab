@@ -1848,6 +1848,49 @@ def _model_allowed(model, patterns):
     return any(fnmatch.fnmatchcase(m, p) for p in patterns or ())
 
 
+#: Models allowed to WRITE code, as opposed to merely judging it. Deliberately the
+#: same bar as the review panel: a model trusted to author a fix that lands in the
+#: fleet should be at least as strong as one trusted to reject it. Without this the
+#: fix path built LlmRequirements(complexity="large") and let the cost-first picker
+#: choose, so the CHEAPEST model clearing "large" wrote our code -- in practice a
+#: flash-class model that answered with reasoning prose instead of JSON, burning the
+#: remediation budget on every PR in the fleet. Override with config
+#: `pr_fix_model_allowlist`; an explicit empty list DISABLES the policy.
+DEFAULT_FIX_ALLOWLIST = DEFAULT_PANEL_ALLOWLIST
+
+
+def _fix_allowlist(config):
+    """Active fix-model allowlist patterns; () means policy disabled."""
+    raw = (config or {}).get("pr_fix_model_allowlist")
+    if raw is None:
+        return DEFAULT_FIX_ALLOWLIST
+    if isinstance(raw, str):
+        raw = re.split(r"[,\s]+", raw)
+    return tuple(p.strip().lower() for p in raw if p and str(p).strip())
+
+
+def _fix_model_exclusions(config, existing=()):
+    """Model keys to exclude so only allowlisted models can write code.
+
+    Expressed as exclusions rather than a pool filter because `exclude_models`
+    is already a HARD filter the picker honours everywhere, so the floor cannot
+    be bypassed by whichever path happens to build the requirements.
+    """
+    patterns = _fix_allowlist(config)
+    if not patterns:
+        return tuple(existing)
+    try:
+        candidates = llm_client._enumerate_candidates(config)
+    except Exception as e:  # noqa: BLE001 -- never block fixing because enumeration broke
+        logger.debug("_fix_model_exclusions: could not enumerate candidates: %s", e)
+        return tuple(existing)
+    exclude = set(existing)
+    for c in candidates:
+        if not _model_allowed(c.get("model"), patterns):
+            exclude.add(c["key"])
+    return tuple(sorted(exclude))
+
+
 #: Self-hosted Ollama registry providers (model_registry.py's "ollama-local"/"ollama2-local"
 #: entries) -- NOT "ollama_cloud", which is a hosted service, not local.
 _LOCAL_PROVIDERS = frozenset({"ollama", "ollama2"})
@@ -3073,6 +3116,14 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
             requirements = LlmRequirements(complexity="large", needs_structured_output=True)
         requirements = dataclasses.replace(
             requirements, min_context_tokens=max(requirements.min_context_tokens, len(prompt) // 4))
+        # Hold the model that WRITES the fix to the same bar as the panel that
+        # judges it. Applied here because every fix path -- PR remediation,
+        # issue fixing, retries that escalate complexity -- funnels through this
+        # call, so the floor cannot be sidestepped by whichever caller built the
+        # requirements.
+        _fix_excl = _fix_model_exclusions(config, requirements.exclude_models or ())
+        if _fix_excl != tuple(requirements.exclude_models or ()):
+            requirements = dataclasses.replace(requirements, exclude_models=_fix_excl)
         return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", task_id=task_id,
                         repo_checkout_path=repo_path if _native else None,
                         enable_native_tools=_native,
