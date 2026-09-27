@@ -263,3 +263,118 @@ def test_premium_flag_reaches_the_requirements_builder():
 def test_can_remediate_gate_honours_the_premium_turn():
     src = open("pr_remediate.py").read()
     assert "if not premium_turn_available(rec, config):" in src
+
+
+# --------------------------------------------------------------------------
+# 6. Operator control: both knobs must be settable from the UI, not only by
+#    hand-editing /etc/ab/config.json on the box.
+# --------------------------------------------------------------------------
+
+from test_feature_settings_roundtrip import (  # noqa: E402
+    _load_ns, _FakeRequest, _base_pairs, _run,
+)
+
+
+def _fix_engine_ns():
+    """fix_engine cannot be imported here (it pulls in main.py), so lift the
+    premium-policy functions out of the source the same way the rest of this
+    suite lifts save_settings."""
+    import fnmatch as _fnmatch
+    import re as _re
+    src = open("fix_engine.py").read()
+    tree = ast.parse(src)
+    want = {"_model_allowed", "_premium_allowlist", "is_premium_fix_model"}
+    ns = {"fnmatch": _fnmatch, "re": _re}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in want:
+            exec(compile(ast.Module([node], []), "fix_engine.py", "exec"), ns)
+        elif isinstance(node, ast.Assign) and any(
+                getattr(t, "id", "") == "DEFAULT_PREMIUM_FIX_ALLOWLIST" for t in node.targets):
+            exec(compile(ast.Module([node], []), "fix_engine.py", "exec"), ns)
+    assert want <= set(ns), sorted(want - set(ns))
+    return ns
+
+
+def _save(pairs, base_config=None):
+    ns = _load_ns()
+    ns["_config_holder"]["config"] = dict(base_config or {})
+    _run(ns["save_settings"](_FakeRequest(pairs)))
+    return ns["_config_holder"]["config"]
+
+
+def test_premium_budget_is_saved_from_the_form():
+    saved = _save(_base_pairs(pr_remediate_premium_attempts="2"))
+    assert saved["pr_remediate_premium_attempts"] == 2
+
+
+def test_premium_budget_can_be_switched_off_from_the_form():
+    saved = _save(_base_pairs(pr_remediate_premium_attempts="0"),
+                  base_config={"pr_remediate_premium_attempts": 1})
+    assert saved["pr_remediate_premium_attempts"] == 0
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("9", 3), ("-1", 0), ("", 1), ("abc", 1), ("2.7", 2),
+])
+def test_premium_budget_is_clamped_on_save(raw, expected):
+    """A typo here is a bill, not a bug -- the form must not persist it."""
+    assert _save(_base_pairs(pr_remediate_premium_attempts=raw))[
+        "pr_remediate_premium_attempts"] == expected
+
+
+def test_premium_allowlist_is_saved_from_the_checkboxes():
+    saved = _save(_base_pairs() + [("premium_models", "claude-fable-5.1"),
+                                   ("premium_models", "gpt-6-astra")])
+    assert saved["pr_remediate_premium_model_allowlist"] == [
+        "claude-fable-5.1", "gpt-6-astra"]
+
+
+def test_premium_allowlist_accepts_globs_from_the_text_field():
+    saved = _save(_base_pairs(premium_models_extra="claude-fable-*, GPT-6*"))
+    assert saved["pr_remediate_premium_model_allowlist"] == ["claude-fable-*", "gpt-6*"]
+
+
+def test_premium_allowlist_merges_and_dedupes_both_inputs():
+    saved = _save(_base_pairs(premium_models_extra="gpt-6*, gpt-6*")
+                  + [("premium_models", "gpt-6*")])
+    assert saved["pr_remediate_premium_model_allowlist"] == ["gpt-6*"]
+
+
+def test_clearing_every_box_disables_the_reservation_deliberately():
+    """Empty is a real, reachable choice -- but only reachable deliberately,
+    which is why the GET renders the effective defaults already ticked."""
+    saved = _save(_base_pairs(),
+                  base_config={"pr_remediate_premium_model_allowlist": ["gpt-6*"]})
+    assert saved["pr_remediate_premium_model_allowlist"] == []
+
+
+def test_saved_allowlist_is_what_fix_engine_reads():
+    """Pin the key: a form that writes a name the policy never reads would
+    look like it worked and change nothing."""
+    fe = _fix_engine_ns()
+    saved = _save(_base_pairs(premium_models_extra="gpt-6*"))
+    assert fe["_premium_allowlist"](saved) == ("gpt-6*",)
+    assert fe["is_premium_fix_model"]("gpt-6-astra", saved) is True
+    assert fe["is_premium_fix_model"]("claude-fable-5.1", saved) is False
+
+
+def test_defaults_cover_the_models_the_operator_called_top_tier():
+    fe = _fix_engine_ns()
+    for m in ("claude-fable-5.1", "claude-fable-5", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"):
+        assert fe["is_premium_fix_model"](m, {}) is True
+    for m in ("claude-opus-5", "claude-sonnet-5", "gpt-5.6-sol"):
+        assert fe["is_premium_fix_model"](m, {}) is False
+
+
+def test_settings_get_pre_ticks_the_effective_allowlist():
+    """The GET must render defaults ticked. Without it, saving any unrelated
+    setting would submit an empty allowlist and silently un-reserve the
+    most expensive models on the roster."""
+    src = open("routes.py").read()
+    assert "premium_model_options" in src and "premium_models_set" in src
+    assert "premium_models_extra" in src
+    tpl = open("templates/index.html").read()
+    assert 'name="premium_models"' in tpl and 'in premium_models_set %}checked' in tpl
+    assert 'name="pr_remediate_premium_attempts"' in tpl
+    assert 'value="{{ premium_models_extra }}"' in tpl, (
+        "globs live only in the text field; not echoing it back drops them on save")

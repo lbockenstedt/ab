@@ -1927,7 +1927,10 @@ DEFAULT_LAST_TURN_FIX_ALLOWLIST = ("claude-opus-5*", "claude-opus-6*")
 #: tier, so such a bar would both re-admit Sonnet and swallow the
 #: Opus rung this tier is meant to sit above. Override with config
 #: `pr_remediate_premium_model_allowlist`; an explicit empty list disables it.
-DEFAULT_PREMIUM_FIX_ALLOWLIST = ("claude-fable-*", "gpt-6-astra*")
+#: Defaults only -- the operator sets this from Settings -> "Premium escalation
+#: models" (routes.save_settings writes pr_remediate_premium_model_allowlist),
+#: because which models are top-tier changes faster than AppBuilder ships.
+DEFAULT_PREMIUM_FIX_ALLOWLIST = ("claude-fable-*", "gpt-6*")
 
 
 def _premium_allowlist(config):

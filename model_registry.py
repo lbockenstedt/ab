@@ -274,7 +274,8 @@ DEFAULT_MODEL_RULES = [
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
      "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
      "capability_rank": 96, "speed_tier": "slow", "enabled": True,
-     "notes": "Served on the /responses endpoint only -- see llm_client._copilot_wants_responses_api."},
+     "notes": "Top-tier alongside fable: outranks Opus so prefer_capable can seat it. Served on "
+              "the /responses endpoint only -- see llm_client._copilot_wants_responses_api."},
     {"id": "copilot-gpt6-astra", "provider": "copilot", "match": "gpt-6-astra*",
      "label": "GPT-6 Astra (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,

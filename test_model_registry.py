@@ -506,9 +506,12 @@ def main():
                 _rank("copilot", "gpt-6-astra") > _rank("copilot", "claude-opus-5")
                 and _rank("copilot", "claude-fable-5.1") > _rank("copilot", "claude-opus-5")
                 and max(reg.capability_rank(r) for r in reg.DEFAULT_MODEL_RULES
-                        if "fable" not in (r.get("match") or "")
-                        and not (r.get("match") or "").startswith("gpt-6"))
+                        if r.get("id") not in ("copilot-claude-fable", "copilot-gpt6",
+                                               "copilot-gpt6-astra"))
                     == _rank("copilot", "claude-opus-5"))
+    ok &= _check("every premium-tier model outranks Opus",
+                min(_rank("copilot", m) for m in ("claude-fable-5.1", "gpt-6-sol", "gpt-6-astra"))
+                    > _rank("copilot", "claude-opus-5"))
     ok &= _check("capability_rank never exceeds a cheaper tier's job: it is compared "
                 "only within a tier, so Opus stays frontier (reserved), not promoted",
                 reg.resolve("copilot", "claude-opus-5", _cfg)["cost_tier"] == "frontier")
