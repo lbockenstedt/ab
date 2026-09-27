@@ -2089,7 +2089,23 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
     except Exception:
         out_tok = _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]
     if out_tok > 0:
-        payload["max_tokens"] = out_tok
+        # `max_completion_tokens`, NOT `max_tokens`. OpenAI deprecated max_tokens
+        # for chat completions and the newer Copilot-hosted GPT models reject it
+        # outright: gpt-5.4 answers a payload carrying max_tokens with a bare 400
+        # (empty body, no error code), while the identical payload using
+        # max_completion_tokens returns 200. Because the 400 carries no message,
+        # this read as "the model is broken" rather than "the field is wrong",
+        # and it silently cost us every OpenAI-family model on the panel -- the
+        # allowlist's only non-Anthropic members -- which in turn made the
+        # cross-vendor reviewer rule relax to same-vendor on every single PR.
+        #
+        # Verified against the live Copilot catalogue before changing: every
+        # chat-capable model it serves (claude-*, gemini-*, gpt-3.5 through
+        # gpt-5.4, gpt-5-mini) accepts max_completion_tokens, so this is
+        # strictly wider compatibility, not a trade. Note this is the COPILOT
+        # path only -- _request_openai still sends max_tokens, because it also
+        # serves ollama/LM Studio backends that only understand that spelling.
+        payload["max_completion_tokens"] = out_tok
     if tools:
         payload["tools"] = _tools_to_openai(tools)
     resp = _post_maybe_structured(endpoint, payload, headers, config, use_stream, "copilot", json_schema)
