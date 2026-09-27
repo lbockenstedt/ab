@@ -1848,6 +1848,12 @@ def _model_allowed(model, patterns):
     return any(fnmatch.fnmatchcase(m, p) for p in patterns or ())
 
 
+#: Defaults only -- the operator sets this from Settings -> "Premium escalation
+#: models" (routes.save_settings writes pr_remediate_premium_model_allowlist),
+#: because which models are top-tier changes faster than AppBuilder ships.
+DEFAULT_PREMIUM_FIX_ALLOWLIST = ("claude-fable-*", "gpt-6*")
+
+
 #: Models allowed to WRITE code, as opposed to merely judging it. Deliberately the
 #: same bar as the review panel: a model trusted to author a fix that lands in the
 #: fleet should be at least as strong as one trusted to reject it. Without this the
@@ -1856,17 +1862,38 @@ def _model_allowed(model, patterns):
 #: flash-class model that answered with reasoning prose instead of JSON, burning the
 #: remediation budget on every PR in the fleet. Override with config
 #: `pr_fix_model_allowlist`; an explicit empty list DISABLES the policy.
-DEFAULT_FIX_ALLOWLIST = DEFAULT_PANEL_ALLOWLIST
+#:
+#: The premium tier is unioned in because it sits ABOVE the panel bar, not
+#: below it: every premium model outranks Opus in model_registry. Without the
+#: union the two policies intersect to nothing on the escalation turn --
+#: _premium_fix_exclusions keeps everything non-premium out while this floor
+#: keeps everything non-Opus out -- so the pool is empty and the tier is
+#: silently inert. Widening the PANEL bar instead would have been wrong: the
+#: panel runs on every PR, so it would seat the most expensive models on the
+#: roster for routine reviews, which is the cost blow-up this tier avoids.
+DEFAULT_FIX_ALLOWLIST = DEFAULT_PANEL_ALLOWLIST + DEFAULT_PREMIUM_FIX_ALLOWLIST
 
 
 def _fix_allowlist(config):
-    """Active fix-model allowlist patterns; () means policy disabled."""
+    """Active fix-model allowlist patterns; () means policy disabled.
+
+    Whatever the operator marks premium is always admitted here. Settings lets
+    them name any model as premium, and a premium model the fix floor rejects
+    could never write the escalation fix it was chosen for -- the UI would
+    appear to work and change nothing. Admitting it is safe because
+    _premium_fix_exclusions still bars premium models from every ORDINARY
+    turn, so this widens exactly one turn, not the general write bar.
+    """
     raw = (config or {}).get("pr_fix_model_allowlist")
     if raw is None:
-        return DEFAULT_FIX_ALLOWLIST
-    if isinstance(raw, str):
-        raw = re.split(r"[,\s]+", raw)
-    return tuple(p.strip().lower() for p in raw if p and str(p).strip())
+        base = DEFAULT_FIX_ALLOWLIST
+    elif isinstance(raw, str):
+        base = tuple(p.strip().lower() for p in re.split(r"[,\s]+", raw) if p and p.strip())
+    else:
+        base = tuple(p.strip().lower() for p in raw if p and str(p).strip())
+    if not base:
+        return ()  # explicit empty list DISABLES the policy -- preserved exactly
+    return tuple(dict.fromkeys(base + _premium_allowlist(config)))
 
 
 def _fix_model_exclusions(config, existing=()):
@@ -1927,10 +1954,7 @@ DEFAULT_LAST_TURN_FIX_ALLOWLIST = ("claude-opus-5*", "claude-opus-6*")
 #: tier, so such a bar would both re-admit Sonnet and swallow the
 #: Opus rung this tier is meant to sit above. Override with config
 #: `pr_remediate_premium_model_allowlist`; an explicit empty list disables it.
-#: Defaults only -- the operator sets this from Settings -> "Premium escalation
-#: models" (routes.save_settings writes pr_remediate_premium_model_allowlist),
-#: because which models are top-tier changes faster than AppBuilder ships.
-DEFAULT_PREMIUM_FIX_ALLOWLIST = ("claude-fable-*", "gpt-6*")
+
 
 
 def _premium_allowlist(config):

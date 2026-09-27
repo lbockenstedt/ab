@@ -283,13 +283,17 @@ def _fix_engine_ns():
     import re as _re
     src = open("fix_engine.py").read()
     tree = ast.parse(src)
-    want = {"_model_allowed", "_premium_allowlist", "is_premium_fix_model"}
+    want = {"_model_allowed", "_premium_allowlist", "is_premium_fix_model",
+            "_fix_allowlist", "_panel_allowlist"}
     ns = {"fnmatch": _fnmatch, "re": _re}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want:
             exec(compile(ast.Module([node], []), "fix_engine.py", "exec"), ns)
         elif isinstance(node, ast.Assign) and any(
-                getattr(t, "id", "") == "DEFAULT_PREMIUM_FIX_ALLOWLIST" for t in node.targets):
+                getattr(t, "id", "") in ("DEFAULT_PREMIUM_FIX_ALLOWLIST",
+                                         "DEFAULT_PANEL_ALLOWLIST",
+                                         "DEFAULT_FIX_ALLOWLIST")
+                for t in node.targets):
             exec(compile(ast.Module([node], []), "fix_engine.py", "exec"), ns)
     assert want <= set(ns), sorted(want - set(ns))
     return ns
@@ -378,3 +382,36 @@ def test_settings_get_pre_ticks_the_effective_allowlist():
     assert 'name="pr_remediate_premium_attempts"' in tpl
     assert 'value="{{ premium_models_extra }}"' in tpl, (
         "globs live only in the text field; not echoing it back drops them on save")
+
+
+def test_the_fix_floor_admits_the_premium_tier():
+    """Regression: _premium_fix_exclusions(want_premium=True) keeps every
+    NON-premium model out, while _fix_model_exclusions keeps every non-Opus
+    model out. Before the union those two intersected to an empty pool, so
+    the escalation turn could seat nothing and the tier was silently inert --
+    no error, no log, just a feature that never fired."""
+    fe = _fix_engine_ns()
+    fix_patterns = fe["_fix_allowlist"]({})
+    for m in ("claude-fable-5.1", "gpt-6-astra", "gpt-6-sol"):
+        assert fe["is_premium_fix_model"](m, {}) is True
+        assert fe["_model_allowed"](m, fix_patterns) is True, (
+            "%s is premium but the fix floor would reject it" % m)
+
+
+def test_an_operator_named_premium_model_is_admitted_to_write():
+    """Settings lets the operator name ANY model premium; the write bar must
+    follow, or the UI silently produces an unusable configuration."""
+    fe = _fix_engine_ns()
+    cfg = {"pr_remediate_premium_model_allowlist": ["zeta-9*"]}
+    assert fe["is_premium_fix_model"]("zeta-9-pro", cfg) is True
+    assert fe["_model_allowed"]("zeta-9-pro", fe["_fix_allowlist"](cfg)) is True
+
+
+def test_widening_the_write_bar_does_not_widen_the_panel():
+    fe = _fix_engine_ns()
+    panel = fe["_panel_allowlist"]({}) if "_panel_allowlist" in fe else None
+    if panel is None:
+        pytest.skip("_panel_allowlist not extracted")
+    for m in ("claude-fable-5.1", "gpt-6-astra"):
+        assert fe["_model_allowed"](m, panel) is False, (
+            "the panel runs on every PR -- premium models must stay off it")
