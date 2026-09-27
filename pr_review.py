@@ -1517,6 +1517,13 @@ def _maybe_auto_merge(gh, repo, pr, config):
             update_pr_review(repo.full_name, pr.number, auto_merged=True,
                              auto_merge_refusal=None)
             logger.info("pr_review: auto-merge succeeded for %s", key)
+        elif result.get("released_checks"):
+            # Not a refusal to record: the PR was blocked on a check that had
+            # never reported because its workflow run was parked, and merge_pr
+            # just released it. Stay quiet and let the next poll merge it --
+            # recording this as auto_merge_refusal would suppress that retry.
+            logger.info("pr_review: auto-merge deferred for %s — %s",
+                        key, result.get("message"))
         elif result.get("retryable") is False:
             # A policy refusal (branch protection, a ruleset, a token missing the
             # `workflow` scope). The PR has not changed, so re-attempting it on
