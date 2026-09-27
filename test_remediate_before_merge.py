@@ -249,7 +249,9 @@ def test_a_broken_remediation_check_never_blocks_a_merge():
 @pytest.mark.parametrize("attempts,expected", [(0, True), (2, True), (3, False), (7, False)])
 def test_pending_gate_is_bounded_by_the_attempt_ceiling(attempts, expected):
     from pr_remediate import remediation_pending
+    # premium_attempts=1: the ordinary ceiling buys one premium escalation
+    # turn on top, so "exhausted" requires both budgets to be spent.
     rec = {"panel_verdict": "Deny", "panel_confidence": 0.4,
-           "remediation_attempts": attempts}
+           "remediation_attempts": attempts, "premium_attempts": 1}
     pending, reason = remediation_pending(rec, {"pr_auto_remediate_max_attempts": 3})
     assert pending is expected, reason

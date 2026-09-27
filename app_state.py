@@ -356,6 +356,12 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 # `pr_remediate.maybe_auto_remediate` compares against the new head to
                 # re-evaluate guardrails when a commit changes.
                 "remediation_attempts": int(prev.get("remediation_attempts") or 0),
+                # Carried for the same reason and with the same urgency: this
+                # function REBUILDS the record on every scan, so a premium
+                # attempt counter left out here would reset on every poll and
+                # the one-attempt cap on the most expensive models on the
+                # roster would silently become unbounded.
+                "premium_attempts": int(prev.get("premium_attempts") or 0),
                 "auto_remediate_status": prev.get("auto_remediate_status"),
                 "auto_remediate_failure": prev.get("auto_remediate_failure"),
                 "auto_remediate_blocked": prev.get("auto_remediate_blocked"),

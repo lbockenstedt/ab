@@ -51,6 +51,17 @@ def fake_fix_engine(monkeypatch):
         return tuple(sorted(set(existing) | {("copilot", "", "cheap-model")}))
 
     mod._last_turn_fix_exclusions = _excl
+
+    # The premium split runs BEFORE the Opus narrowing on every turn (see
+    # pr_remediate.next_remediation_requirements). Stub it as a pass-through so
+    # these tests exercise the real code path rather than the degraded one the
+    # caller's except-clause would take on AttributeError.
+    def _premium(config, existing=(), *, want_premium=False):
+        mod.premium_calls.append({"existing": tuple(existing), "want_premium": want_premium})
+        return tuple(existing)
+
+    mod.premium_calls = []
+    mod._premium_fix_exclusions = _premium
     monkeypatch.setitem(sys.modules, "fix_engine", mod)
     return mod
 

@@ -493,8 +493,21 @@ def main():
     ok &= _check("Opus carries the SAME capability_rank whichever provider serves it",
                 len({_rank(p, "claude-opus-5")
                      for p in ("copilot", "anthropic", "claude_cli")}) == 1)
-    ok &= _check("Opus is the ceiling — no default rule outranks it",
+    # Opus was the ceiling until the premium escalation tier (fable / astra)
+    # was added deliberately ABOVE it -- that tier exists precisely to be
+    # reached for after an Opus-class fix has already failed, so it has to
+    # outrank Opus for prefer_capable to ever seat it. The invariant that
+    # still matters is that the ceiling is one of those reserved models and
+    # that Opus sits directly beneath them.
+    ok &= _check("the premium tier is the ceiling — nothing outranks astra",
                 max(reg.capability_rank(r) for r in reg.DEFAULT_MODEL_RULES)
+                    == _rank("copilot", "gpt-6-astra"))
+    ok &= _check("the premium tier outranks Opus, which outranks everything else",
+                _rank("copilot", "gpt-6-astra") > _rank("copilot", "claude-opus-5")
+                and _rank("copilot", "claude-fable-5.1") > _rank("copilot", "claude-opus-5")
+                and max(reg.capability_rank(r) for r in reg.DEFAULT_MODEL_RULES
+                        if "fable" not in (r.get("match") or "")
+                        and not (r.get("match") or "").startswith("gpt-6"))
                     == _rank("copilot", "claude-opus-5"))
     ok &= _check("capability_rank never exceeds a cheaper tier's job: it is compared "
                 "only within a tier, so Opus stays frontier (reserved), not promoted",

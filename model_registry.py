@@ -254,6 +254,34 @@ DEFAULT_MODEL_RULES = [
     # strongest model was skipped for exactly the hard jobs it exists for. These
     # mirror the anthropic/claude_cli ladders so one model is tiered the same way
     # whichever provider serves it. More-specific match beats the generic `*`.
+    # The premium escalation models. WITHOUT these rules they matched only the
+    # generic "copilot"/"*" fallback, which is cost_tier "cheap" -- so the
+    # cost-first picker treated the most expensive models Copilot serves as the
+    # CHEAPEST option and reached for them first, on every job. They are priced
+    # as frontier here for the same reason copilot-opus is: so the picker
+    # RESERVES them. pr_remediate additionally caps them at a single attempt
+    # per PR (`pr_remediate_premium_attempts`).
+    {"id": "copilot-claude-fable", "provider": "copilot", "match": "*fable*",
+     "label": "Claude Fable (via Copilot)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "capability_rank": 97, "speed_tier": "slow", "enabled": True,
+     "notes": "Top-of-roster Anthropic model reserved for final-escalation fixes."},
+    {"id": "copilot-gpt6", "provider": "copilot", "match": "gpt-6*",
+     "label": "GPT-6 class (via Copilot)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "capability_rank": 96, "speed_tier": "slow", "enabled": True,
+     "notes": "Served on the /responses endpoint only -- see llm_client._copilot_wants_responses_api."},
+    {"id": "copilot-gpt6-astra", "provider": "copilot", "match": "gpt-6-astra*",
+     "label": "GPT-6 Astra (via Copilot)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "capability_rank": 98, "speed_tier": "slow", "enabled": True,
+     "notes": "Most capable/most expensive GPT-6 variant; final-escalation only."},
     {"id": "copilot-opus", "provider": "copilot", "match": "*opus*", "label": "Claude Opus (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -611,6 +639,13 @@ def upgrade_claude_cli_model_rules(rules):
 _COPILOT_MODEL_RULE_IDS = frozenset({
     "copilot-opus", "copilot-sonnet", "copilot-haiku", "copilot-gemini-pro",
     "copilot-gpt5-mini", "copilot-gpt5", "copilot-gpt4",
+    # The premium tier. These MUST be seeded into an already-persisted
+    # registry, not merely added to DEFAULT_MODEL_RULES: a config that already
+    # has a "model_registry" key never reads the defaults, so without this the
+    # newest and most expensive models keep matching the generic copilot "*"
+    # rule, which rates them "cheap" -- and a cost-first picker then PREFERS
+    # them. Seeding them is what makes the premium reservation real.
+    "copilot-claude-fable", "copilot-gpt6", "copilot-gpt6-astra",
 })
 
 
@@ -709,7 +744,8 @@ def enable_copilot_tools(rules):
     Scoped narrowly like the ollama_cloud repair: only ids AppBuilder ships,
     only where the flag is still False. Idempotent; never reorders or adds."""
     shipped = {"copilot", "copilot-opus", "copilot-sonnet", "copilot-haiku",
-               "copilot-gemini-pro", "copilot-gpt5-mini", "copilot-gpt5", "copilot-gpt4"}
+               "copilot-gemini-pro", "copilot-gpt5-mini", "copilot-gpt5", "copilot-gpt4",
+               "copilot-claude-fable", "copilot-gpt6", "copilot-gpt6-astra"}
     out = []
     changed = False
     for r in rules or []:

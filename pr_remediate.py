@@ -619,10 +619,43 @@ def remediation_pending(rec, config):
         max_attempts = 3
 
     if attempts >= max_attempts:
-        return False, "remediation attempts exhausted (%d/%d)" % (attempts, max_attempts)
+        if not premium_turn_available(rec, config):
+            return False, "remediation attempts exhausted (%d/%d)" % (attempts, max_attempts)
 
     should, reason, _deficit = should_remediate(rec, config)
     return (True, reason) if should else (False, reason)
+
+
+def _premium_budget(config):
+    """How many remediation attempts a single PR may spend on the premium
+    escalation models (fable / astra). Default 1 -- these are the most
+    expensive models on the roster, so the cap is a COUNT, not merely a
+    position in the ladder. Clamped to 0..3; 0 disables the tier."""
+    try:
+        n = int((config or {}).get("pr_remediate_premium_attempts", 1))
+    except (TypeError, ValueError):
+        n = 1
+    return max(0, min(n, 3))
+
+
+def premium_turn_available(rec, config):
+    """True when the ordinary remediation budget is spent but this PR still
+    has an unused premium escalation attempt.
+
+    This grants the premium turn IN ADDITION to
+    `pr_auto_remediate_max_attempts` rather than inside it: the premium tier
+    exists to escalate a PR the ordinary ladder has already failed, so
+    carving its attempt out of that same budget would just replace the
+    Opus-class last turn instead of following it."""
+    if not rec:
+        return False
+    if _premium_budget(config) <= 0:
+        return False
+    try:
+        used = int(rec.get("premium_attempts") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    return used < _premium_budget(config)
 
 
 def next_remediation_requirements(
@@ -631,6 +664,7 @@ def next_remediation_requirements(
     tried_key: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     attempts: int = 0,
+    premium: bool = False,
 ) -> Any:
     """Step up model complexity tier and exclude tried model on remediation failure.
 
@@ -639,17 +673,35 @@ def next_remediation_requirements(
     complexity tier alone is a no-op at the top of the ladder -- every
     allowlisted model already clears "large" -- so without this narrowing the
     picker just re-seats the same cheapest-capable model that already failed.
+
+    `premium` selects the final rung: the pool is narrowed to the premium
+    escalation models instead. On every other turn those models are excluded
+    outright, because Copilot's generic registry fallback rates unmatched
+    models "cheap" and the cost-first picker would otherwise spend the most
+    expensive models on the roster on routine first attempts.
     """
     exclude = set(getattr(prev_reqs, "exclude_models", ()) or ())
     if tried_key:
         exclude.add(tried_key)
+
+    # Cost guard FIRST, so it applies no matter which branch below runs.
+    try:
+        import fix_engine
+        exclude = set(fix_engine._premium_fix_exclusions(
+            config or {}, existing=tuple(sorted(exclude, key=str)),
+            want_premium=bool(premium)))
+        if premium:
+            logger.info("remediation turn %d: PREMIUM escalation — narrowing the fix pool to "
+                        "the reserved models (one attempt per PR)", attempts + 1)
+    except Exception as e:  # noqa: BLE001 -- a broken import must not stop the retry
+        logger.debug("next_remediation_requirements: premium pool split skipped: %s", e)
 
     try:
         threshold = int((config or {}).get("pr_remediate_last_turn_after_attempts", 2))
     except (TypeError, ValueError):
         threshold = 2
 
-    if threshold > 0 and attempts >= threshold:
+    if not premium and threshold > 0 and attempts >= threshold:
         try:
             import fix_engine
             before = set(exclude)
@@ -773,7 +825,14 @@ def auto_remediate_pr(
     # Attempt ceiling check
     attempts = rec.get("remediation_attempts", 0)
     max_attempts = int(config.get("pr_auto_remediate_max_attempts", 3))
-    if attempts >= max_attempts:
+    # The premium tier buys ONE more turn past the ordinary ceiling, once per
+    # PR -- see premium_turn_available. Everything below (the exhausted
+    # comment, the human hand-off) still fires when that turn is also spent.
+    premium_turn = attempts >= max_attempts and premium_turn_available(rec, config)
+    if premium_turn:
+        logger.info("auto_remediate_pr: %s — ordinary budget spent (%d/%d); taking the single "
+                    "premium escalation attempt", key, attempts, max_attempts)
+    if attempts >= max_attempts and not premium_turn:
         guidance = pr_concierge.generate_user_guidance(
             repo_name=repo_full_name,
             pr_number=pr.number,
@@ -861,9 +920,19 @@ def auto_remediate_pr(
             needs_structured_output=True,
             exclude_models=tuple(rec.get("excluded_models") or []),
         )
-        reqs = next_remediation_requirements(prev_reqs, failure_kind="retry", tried_key=last_tried_model, config=config, attempts=attempts)
+        reqs = next_remediation_requirements(prev_reqs, failure_kind="retry", tried_key=last_tried_model, config=config, attempts=attempts, premium=premium_turn)
     else:
-        reqs = _ReqClass(complexity=assessed_complexity, needs_structured_output=True)
+        reqs = next_remediation_requirements(
+            _ReqClass(complexity=assessed_complexity, needs_structured_output=True),
+            config=config, attempts=attempts, premium=premium_turn)
+        # next_remediation_requirements steps the complexity up a rung; on the
+        # FIRST attempt there is nothing to step away from, so keep the tier
+        # assessed from the diff and take only the premium/cost pool split.
+        reqs = _ReqClass(
+            complexity=assessed_complexity,
+            needs_structured_output=True,
+            exclude_models=getattr(reqs, "exclude_models", ()),
+        )
 
     # Invoke fix_one_pr
     if fix_fn is None:
@@ -886,11 +955,27 @@ def auto_remediate_pr(
     used_model = used_model_out.get("model") or used_model_out.get("key")
     new_attempts = attempts + 1
 
+    # Charge the premium budget by the model ACTUALLY used, not by which turn
+    # we believed we were on -- the cost is incurred the moment the call is
+    # made, so a barren or failed premium reply still spends the attempt. Any
+    # other accounting would let a PR call the most expensive models on the
+    # roster repeatedly and never record it.
+    try:
+        import fix_engine as _fe
+        _premium_used = int(rec.get("premium_attempts") or 0)
+        if used_model and _fe.is_premium_fix_model(used_model, config):
+            _premium_used += 1
+            logger.info("auto_remediate_pr: %s — premium escalation attempt %d/%d used (%s)",
+                        key, _premium_used, _premium_budget(config), used_model)
+    except Exception:  # noqa: BLE001 -- accounting must never break the fix path
+        _premium_used = int(rec.get("premium_attempts") or 0)
+
     if success:
         update_pr_review(
             repo_full_name,
             pr.number,
             remediation_attempts=new_attempts,
+            premium_attempts=_premium_used,
             auto_remediate_status="success",
             last_remediation_complexity=reqs.complexity,
             last_remediation_model=used_model,
@@ -915,6 +1000,7 @@ def auto_remediate_pr(
                     pr.number,
                     remediation_attempts=attempts,
                     remediation_barren=barren_done + 1,
+                    premium_attempts=_premium_used,
                     auto_remediate_status="barren",
                     auto_remediate_failure=msg,
                     last_remediation_complexity=reqs.complexity,
@@ -932,6 +1018,7 @@ def auto_remediate_pr(
             repo_full_name,
             pr.number,
             remediation_attempts=new_attempts,
+            premium_attempts=_premium_used,
             auto_remediate_status="failed",
             auto_remediate_failure=msg,
             last_remediation_complexity=reqs.complexity,
