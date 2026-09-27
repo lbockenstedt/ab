@@ -364,6 +364,19 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "last_remediation_complexity": prev.get("last_remediation_complexity"),
                 "last_remediation_model": prev.get("last_remediation_model"),
                 "excluded_models": list(prev.get("excluded_models") or []),
+                # Barren-reply allowance (pr_remediate.auto_remediate_pr). Same
+                # rebuild hazard as the counters above -- and the same one that
+                # already cost us the desc_fixes livelock -- so it must be carried
+                # forward explicitly or the allowance resets every poll and the
+                # ceiling never binds.
+                #
+                # Head-SCOPED, unlike remediation_attempts: a barren reply is the
+                # model failing to SPEAK, so it pushes no commit and the head does
+                # not move between barren attempts. The allowance therefore binds
+                # within a head, while genuinely new code earns a fresh one.
+                "remediation_barren": (
+                    int(prev.get("remediation_barren") or 0)
+                    if prev.get("head") == head_sha else 0),
                 # Description-rewrite budget (pr_review.fix_pr_description), keyed
                 # by head SHA. Same rebuild hazard as the remediation bookkeeping
                 # above: dropping it reset the count to 0 on every re-review, so
