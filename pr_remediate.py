@@ -13,6 +13,7 @@ import contract_guard
 import feature_allowlist
 import feature_boundary
 import fleet_guardrails
+import fix_failures
 import perf_auditor
 import pr_concierge
 import secrets_scan
@@ -822,6 +823,33 @@ def auto_remediate_pr(
         logger.info("auto_remediate_pr: remediation succeeded for %s: %s", key, msg)
         return True, msg
     else:
+        # A barren reply -- empty, no JSON, unparseable JSON -- tells us nothing
+        # about the fix, only that the model failed to speak. Charging it to the
+        # remediation budget let three prose replies exhaust all 3 attempts
+        # having made zero real fix attempts, and excluding the model on top of
+        # that permanently shrank the pool over a fault that was never the
+        # model's competence. fix_one_pr already grants these a separate barren
+        # allowance; this path never got the same lesson.
+        if fix_failures.is_barren_failure(msg):
+            barren_done = int(rec.get("remediation_barren") or 0)
+            max_barren = max(0, min(
+                int(config.get("pr_remediate_max_barren_retries", 2) or 0), 3))
+            if barren_done < max_barren:
+                update_pr_review(
+                    repo_full_name,
+                    pr.number,
+                    remediation_attempts=attempts,
+                    remediation_barren=barren_done + 1,
+                    auto_remediate_status="barren",
+                    auto_remediate_failure=msg,
+                    last_remediation_complexity=reqs.complexity,
+                    last_remediation_model=used_model,
+                )
+                logger.warning(
+                    "auto_remediate_pr: %s barren attempt (%s/%s) not charged to the "
+                    "remediation budget: %s", key, barren_done + 1, max_barren, msg)
+                return False, msg
+
         excluded = list(rec.get("excluded_models") or [])
         if used_model and used_model not in excluded:
             excluded.append(used_model)

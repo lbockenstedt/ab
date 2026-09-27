@@ -75,6 +75,7 @@ from github_ops import get_monitored_repos
 from app_state import update_task_state, set_task_step, record_pr_review, update_pr_review, mark_pr_approved, state
 import feature_boundary
 import feature_allowlist
+import fix_failures
 from branch_policy import AUTO_BRANCH_PREFIXES_BY_KIND, is_release_locked
 from pr_actions import approve_pr, merge_pr
 from secrets_scan import check_secrets
@@ -2098,13 +2099,11 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         last_failure = ("The response contained no edits. Return at least one edit "
                                         "object with \"file\", \"search\" and \"replace\".")
                     elif _reason == "empty":
-                        last_failure = "The model returned an empty response."
+                        last_failure = fix_failures.BARREN_EMPTY
                     elif _reason == "no_json":
-                        last_failure = ("No JSON object was found in the response. Return ONLY a JSON "
-                                        "object with \"confidence\" and \"edits\".")
+                        last_failure = fix_failures.BARREN_NO_JSON
                     else:
-                        last_failure = ("The response was not valid JSON. Return ONLY a single "
-                                        "well-formed JSON object with \"confidence\" and \"edits\".")
+                        last_failure = fix_failures.BARREN_INVALID_JSON
                     error_context = last_failure
                     # "empty", "no_json" and "invalid_json" all mean the model
                     # returned nothing we could evaluate. Unlike an anchor miss

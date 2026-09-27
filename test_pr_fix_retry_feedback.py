@@ -19,6 +19,8 @@ import types
 
 import pytest
 
+import fix_failures
+
 
 def _extract(path, funcs):
     src = open(path, encoding="utf-8").read()
@@ -197,6 +199,10 @@ class Harness:
 
         ns = {
             "os": _os, "re": _re, "logger": self.log,
+            # fix_one_pr builds its barren-failure strings from this shared
+            # module so pr_remediate can classify them without respelling the
+            # contract; the extracted source needs it in scope.
+            "fix_failures": fix_failures,
             "state": {"pr_reviews": {"o/r#7": {"panel_critique": self.panel_critique}}},
             "load_config": lambda: {},
             "check_parity": lambda r, c: [{"level": "warning", "title": "t", "detail": "d"}],
