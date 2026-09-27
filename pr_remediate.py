@@ -458,6 +458,50 @@ def should_remediate(rec, config):
         score = None
         deficit = 0.0
 
+    # TIER-1 FINDINGS BLOCK THE MERGE GATE, SO THEY MUST BE CHECKED FIRST.
+    # This sits above the merge-bar early return on purpose. pr_review refuses
+    # to auto-merge while any Tier-1 error or warning is on the record, but the
+    # early return below declines to remediate as soon as the panel score
+    # clears the merge bar — on the premise that the PR "already IS fit to
+    # merge". With findings present that premise is simply false, and the two
+    # gates deadlock: remediation says "just merge it", the merge gate says
+    # "not while findings are open", and the PR is held forever having never
+    # been repaired. That is not the bounded delay the docstring below promises
+    # -- it is a permanent stall, and it is what stranded an Approve/Approve PR
+    # across three consecutive scans. Remediating is the only exit, and it
+    # terminates: once the findings are cleared this branch stops firing and
+    # the merge-bar return takes over.
+    errors = int(rec.get("errors") or 0)
+    warnings = int(rec.get("warnings") or 0)
+    if errors > 0 or warnings > 0:
+        # Findings short-circuit the branches below, so the severity FLOORS those
+        # branches would have applied have to be applied here too — otherwise a
+        # DENY-plus-findings record (or one with no confidence reported at all)
+        # would return the raw, possibly 0.0, deficit and be remediated at the
+        # cheapest model tier, collapsing three distinct severities into one.
+        findings_deficit = deficit
+        if any(str(v).strip().lower() != "approve" for v in verdicts):
+            findings_deficit = max(findings_deficit, target)
+        elif config.get("pr_remediate_address_all_concerns", True):
+            dissents = int(rec.get("panel_dissents") or 0) + int(rec.get("panel2_dissents") or 0)
+            unrated = int(rec.get("panel_unrated") or 0) + int(rec.get("panel2_unrated") or 0)
+            if dissents or unrated:
+                findings_deficit = max(findings_deficit, round(target / 2.0, 4))
+            else:
+                reviewer_confs = [c for c in (rec.get("panel_min_reviewer_confidence"),
+                                              rec.get("panel2_min_reviewer_confidence"))
+                                  if c is not None]
+                if reviewer_confs:
+                    try:
+                        worst = min(float(c) for c in reviewer_confs)
+                    except (TypeError, ValueError):
+                        worst = None
+                    if worst is not None and worst < target:
+                        findings_deficit = max(findings_deficit,
+                                               round(max(0.0, target - worst), 4))
+        return (True, "Tier-1 findings present (%d error(s), %d warning(s))" % (errors, warnings),
+                findings_deficit)
+
     # MERGE-ELIGIBLE PRs ARE DONE. Remediation's purpose is to get a PR fit to
     # merge; once it already IS fit to merge, continuing to "improve" it is not
     # free — every attempt pushes a commit, which moves the head, which
@@ -524,11 +568,8 @@ def should_remediate(rec, config):
                     "confirmed, so the concern is treated as still open" % unrated,
                     max(deficit, round(target / 2.0, 4)))
 
-    errors = int(rec.get("errors") or 0)
-    warnings = int(rec.get("warnings") or 0)
-    if errors > 0 or warnings > 0:
-        return (True, "Tier-1 findings present (%d error(s), %d warning(s))" % (errors, warnings),
-                deficit)
+    # (The Tier-1 findings check that used to live here now runs above the
+    # merge-bar early return — see the comment there for why the order matters.)
 
     if score is None:
         return (False,
