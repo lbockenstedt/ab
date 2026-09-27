@@ -114,12 +114,25 @@ def _release_parked_checks(repo_name, head_sha, token, *, timeout=60.0):
     Deliberately approves ALL parked runs rather than stopping at the first:
     several workflows are triggered per PR and they park at slightly different
     instants, which is exactly the race that stranded ab#338."""
+    class _Outcome(int):
+        """The count, plus WHY it is what it is. A bare 0 conflates four
+        distinct states (no token, the lookup never succeeded, nothing was
+        parked, every approve failed); the caller must tell them apart."""
+        outcome = "released"
+
+    def _result(n, outcome):
+        r = _Outcome(n)
+        r.outcome = outcome
+        return r
+
     if not token:
-        return 0
+        return _result(0, "no-token")
     headers = {"Authorization": "token " + token,
                "Accept": "application/vnd.github+json"}
     approved = set()
     quiet = 0
+    lookup_ok = False   # at least one poll actually got a run list back
+    saw_runs = False    # at least one parked run was actually found
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         runs = []
@@ -130,6 +143,7 @@ def _release_parked_checks(repo_name, head_sha, token, *, timeout=60.0):
                         "per_page": 100},
                 headers=headers, timeout=10)
             if resp.status_code == 200:
+                lookup_ok = True
                 payload = resp.json() or {}
                 found = payload.get("workflow_runs")
                 runs = found if isinstance(found, list) else []
@@ -141,7 +155,10 @@ def _release_parked_checks(repo_name, head_sha, token, *, timeout=60.0):
             if not isinstance(run, dict):
                 continue
             run_id = run.get("id")
-            if not run_id or run_id in approved:
+            if not run_id:
+                continue
+            saw_runs = True
+            if run_id in approved:
                 continue
             try:
                 res = requests.post(
@@ -167,7 +184,13 @@ def _release_parked_checks(repo_name, head_sha, token, *, timeout=60.0):
         else:
             quiet = 0
         time.sleep(5)
-    return len(approved)
+    if approved:
+        return _result(len(approved), "released")
+    if not lookup_ok:
+        return _result(0, "lookup-failed")
+    if saw_runs:
+        return _result(0, "approve-failed")
+    return _result(0, "none-parked")
 
 
 def _conflicted_paths(repo_git):
@@ -363,8 +386,27 @@ def merge_pr(gh, repo_name, number):
                     logger.info("pr_actions: %s #%s — %s", repo_name, number, msg)
                     update_pr_review(repo_name, number, merge_blocked_reason=None)
                     return 409, {"status": "error", "blocked": True,
-                                 "retryable": True, "released_checks": released,
+                                 "retryable": True, "released_checks": int(released),
                                  "message": msg}
+                # Nothing released: say WHICH of the four zero-states this was,
+                # so "no run is parked at all" is not recorded as if it were a
+                # failed approval or an unreachable API.
+                detail = {
+                    "no-token": "no GitHub token is configured, so a parked "
+                                "workflow run could not be released",
+                    "lookup-failed": "the parked-run lookup never succeeded "
+                                     "(network error, or a token without "
+                                     "`actions` access) -- whether a run is "
+                                     "parked is UNKNOWN",
+                    "approve-failed": "a parked workflow run was found but "
+                                      "GitHub refused to approve it",
+                    "none-parked": "no workflow run is parked for this head, so "
+                                   "the required check is missing for some "
+                                   "other reason (e.g. the workflow never "
+                                   "triggered)",
+                }.get(getattr(released, "outcome", ""), "")
+                if detail:
+                    why = "%s -- %s" % (why, detail)
             logger.warning("pr_actions: %s #%s merge refused by GitHub — %s",
                            repo_name, number, why)
             update_pr_review(repo_name, number, merge_blocked_reason=why)

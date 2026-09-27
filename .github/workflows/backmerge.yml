@@ -220,6 +220,7 @@ jobs:
           # after the first approval leaves the later one parked and the PR
           # blocked on a required check that never reports.
           approved=""
+          failed=""
           quiet=0
           for _ in $(seq 1 24); do
             ids=$(gh api "repos/${{ github.repository }}/actions/runs?branch=$BR&status=action_required" \
@@ -228,10 +229,16 @@ jobs:
             for id in $ids; do
               case " $approved " in *" $id "*) continue ;; esac
               echo "approving parked run $id"
-              gh api -X POST "repos/${{ github.repository }}/actions/runs/$id/approve" || \
-                echo "::warning::could not approve run $id -- approve it by hand to unblock this PR"
-              approved="$approved $id"
-              new="$new $id"
+              if gh api -X POST "repos/${{ github.repository }}/actions/runs/$id/approve"; then
+                approved="$approved $id"
+                new="$new $id"
+              else
+                # A failed approval is NOT the same state as a released run:
+                # it is not recorded in $approved, so it is retried on the
+                # next poll and never claimed as released below.
+                failed="$failed $id"
+                echo "::warning::could not approve run $id -- retrying; approve it by hand if this persists"
+              fi
             done
             if [ -n "$approved" ] && [ -z "$new" ]; then
               quiet=$((quiet + 1))
@@ -243,7 +250,11 @@ jobs:
           done
           if [ -n "$approved" ]; then
             echo "::notice::released parked run(s):$approved"
-          else
+          fi
+          if [ -n "$failed" ]; then
+            echo "::warning::could NOT release parked run(s):$failed -- approve them by hand to unblock this PR"
+          fi
+          if [ -z "$approved" ] && [ -z "$failed" ]; then
             echo "::notice::no parked run found for $BR @ $SHA"
           fi
 
