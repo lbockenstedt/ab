@@ -204,3 +204,64 @@ def test_capability_bars_are_never_expressed_as_a_cost_tier():
                  if re.search(r'cost_tier.*==.*["\']frontier', ln)
                  or re.search(r'["\']frontier["\'].*==.*cost_tier', ln)]
     assert not offenders, offenders
+
+
+# ---- exclusion sets legitimately mix strings and ModelKey tuples ----
+def _load_exclusion_fns(candidates):
+    """Extract the two exclusion helpers from fix_engine (not importable)."""
+    src = open("fix_engine.py").read()
+    tree = ast.parse(src)
+    want_fn = {"_model_allowed", "_fix_allowlist", "_fix_model_exclusions",
+               "_last_turn_fix_exclusions"}
+    want_as = {"DEFAULT_PANEL_ALLOWLIST", "DEFAULT_FIX_ALLOWLIST",
+               "DEFAULT_LAST_TURN_FIX_ALLOWLIST"}
+    segs = []
+    for n in tree.body:
+        if isinstance(n, ast.FunctionDef) and n.name in want_fn:
+            segs.append(ast.get_source_segment(src, n))
+        if isinstance(n, ast.Assign) and any(
+                getattr(t, "id", None) in want_as for t in n.targets):
+            segs.append(ast.get_source_segment(src, n))
+
+    class _Llm:
+        def _enumerate_candidates(self, config):
+            return list(candidates)
+
+    ns = {"re": re, "fnmatch": __import__("fnmatch"), "logger": _RecLog(),
+          "llm_client": _Llm()}
+    exec("\n\n".join(segs), ns)
+    return ns
+
+
+def _cands():
+    def c(model):
+        return {"key": ("copilot", "", model), "model": model}
+    return [c("claude-opus-5"), c("claude-sonnet-5"), c("gemini-3.8-flash")]
+
+
+@pytest.mark.parametrize("fn", ["_fix_model_exclusions", "_last_turn_fix_exclusions"])
+def test_exclusions_tolerate_mixed_str_and_tuple(fn):
+    """Review records persist excluded_models as NAME STRINGS while
+    _enumerate_candidates yields ModelKey TUPLES. A bare sorted() over both
+    raises TypeError, which reached production as an unfixable
+    "'<' not supported between instances of 'str' and 'tuple'" on every PR."""
+    ns = _load_exclusion_fns(_cands())
+    out = ns[fn]({}, existing=("gemini-3.8-flash", ("copilot", "", "claude-sonnet-5")))
+    assert "gemini-3.8-flash" in out
+    assert ("copilot", "", "gemini-3.8-flash") in out
+    assert ("copilot", "", "claude-opus-5") not in out
+
+
+@pytest.mark.parametrize("fn", ["_fix_model_exclusions", "_last_turn_fix_exclusions"])
+def test_exclusions_are_deterministic(fn):
+    ns = _load_exclusion_fns(_cands())
+    existing = ("z-name", ("copilot", "", "a-model"))
+    assert ns[fn]({}, existing=existing) == ns[fn]({}, existing=tuple(reversed(existing)))
+
+
+def test_last_turn_exclusions_keep_opus_and_drop_the_rest():
+    ns = _load_exclusion_fns(_cands())
+    out = ns["_last_turn_fix_exclusions"]({})
+    assert ("copilot", "", "claude-sonnet-5") in out, "Sonnet must not write the last fix"
+    assert ("copilot", "", "gemini-3.8-flash") in out
+    assert ("copilot", "", "claude-opus-5") not in out

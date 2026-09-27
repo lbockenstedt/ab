@@ -1888,7 +1888,11 @@ def _fix_model_exclusions(config, existing=()):
     for c in candidates:
         if not _model_allowed(c.get("model"), patterns):
             exclude.add(c["key"])
-    return tuple(sorted(exclude))
+    # sorted(key=str): exclude sets legitimately MIX types -- callers pass model-name
+    # strings (what the review records persist) while _enumerate_candidates yields
+    # ModelKey tuples, and a bare sorted() over both raises TypeError, which surfaced
+    # as an unfixable "'<' not supported between str and tuple" on every PR.
+    return tuple(sorted(exclude, key=str))
 
 
 #: Models trusted to write code at the LAST remediation turn, after cheaper
@@ -1935,7 +1939,11 @@ def _last_turn_fix_exclusions(config, existing=()):
         logger.warning("_last_turn_fix_exclusions: no Opus-class model configured (want one of "
                        "%s); leaving the fix pool unnarrowed", ", ".join(patterns))
         return tuple(existing)
-    return tuple(sorted(exclude))
+    # sorted(key=str): exclude sets legitimately MIX types -- callers pass model-name
+    # strings (what the review records persist) while _enumerate_candidates yields
+    # ModelKey tuples, and a bare sorted() over both raises TypeError, which surfaced
+    # as an unfixable "'<' not supported between str and tuple" on every PR.
+    return tuple(sorted(exclude, key=str))
 
 
 #: Self-hosted Ollama registry providers (model_registry.py's "ollama-local"/"ollama2-local"

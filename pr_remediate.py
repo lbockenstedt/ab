@@ -612,7 +612,7 @@ def next_remediation_requirements(
         try:
             import fix_engine
             exclude = set(fix_engine._last_turn_fix_exclusions(
-                config or {}, existing=tuple(sorted(exclude))))
+                config or {}, existing=tuple(sorted(exclude, key=str))))
             logger.info("remediation turn %d: narrowing the fix pool to Opus-class models "
                         "after %d failed attempt(s)", attempts + 1, attempts)
         except Exception as e:  # noqa: BLE001 -- escalation is best-effort; a broken
@@ -633,7 +633,11 @@ def next_remediation_requirements(
         min_context_tokens=getattr(prev_reqs, "min_context_tokens", 0),
         restrict=getattr(prev_reqs, "restrict", None),
         must_escalate_to_human=getattr(prev_reqs, "must_escalate_to_human", False),
-        exclude_models=tuple(sorted(exclude)),
+        # sorted(key=str): exclude sets legitimately MIX types -- callers pass model-name
+        # strings (what the review records persist) while _enumerate_candidates yields
+        # ModelKey tuples, and a bare sorted() over both raises TypeError, which surfaced
+        # as an unfixable "'<' not supported between str and tuple" on every PR.
+        exclude_models=tuple(sorted(exclude, key=str)),
     )
 
 
