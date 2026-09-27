@@ -88,6 +88,24 @@ def test_findings_clearing_releases_the_pr_to_merge():
     assert should_remediate(repaired, CFG)[0] is False
 
 
+def test_findings_with_non_approve_verdict_keeps_the_full_target_floor():
+    """A DENY that also carries findings is the most severe state there is; the
+    Tier-1 branch must not report it as a cheaper job than the verdict branch
+    would have."""
+    rec = _approved_with_findings(panel_verdict="Reject", panel_confidence=None,
+                                  panel2_confidence=None)
+    should, reason, deficit = should_remediate(rec, CFG)
+    assert should is True, reason
+    assert deficit == CFG["pr_remediate_target_score"]
+
+
+def test_findings_with_dissent_keeps_the_half_target_floor():
+    rec = _approved_with_findings(panel_dissents=1)
+    should, reason, deficit = should_remediate(rec, CFG)
+    assert should is True, reason
+    assert deficit >= round(CFG["pr_remediate_target_score"] / 2.0, 4)
+
+
 def test_no_state_is_both_unmergeable_and_unremediable():
     """The invariant the deadlock violated, checked across the whole grid:
     whenever pr_review would hold the merge for Tier-1 findings, remediation

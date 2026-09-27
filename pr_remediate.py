@@ -474,8 +474,33 @@ def should_remediate(rec, config):
     errors = int(rec.get("errors") or 0)
     warnings = int(rec.get("warnings") or 0)
     if errors > 0 or warnings > 0:
+        # Findings short-circuit the branches below, so the severity FLOORS those
+        # branches would have applied have to be applied here too — otherwise a
+        # DENY-plus-findings record (or one with no confidence reported at all)
+        # would return the raw, possibly 0.0, deficit and be remediated at the
+        # cheapest model tier, collapsing three distinct severities into one.
+        findings_deficit = deficit
+        if any(str(v).strip().lower() != "approve" for v in verdicts):
+            findings_deficit = max(findings_deficit, target)
+        elif config.get("pr_remediate_address_all_concerns", True):
+            dissents = int(rec.get("panel_dissents") or 0) + int(rec.get("panel2_dissents") or 0)
+            unrated = int(rec.get("panel_unrated") or 0) + int(rec.get("panel2_unrated") or 0)
+            if dissents or unrated:
+                findings_deficit = max(findings_deficit, round(target / 2.0, 4))
+            else:
+                reviewer_confs = [c for c in (rec.get("panel_min_reviewer_confidence"),
+                                              rec.get("panel2_min_reviewer_confidence"))
+                                  if c is not None]
+                if reviewer_confs:
+                    try:
+                        worst = min(float(c) for c in reviewer_confs)
+                    except (TypeError, ValueError):
+                        worst = None
+                    if worst is not None and worst < target:
+                        findings_deficit = max(findings_deficit,
+                                               round(max(0.0, target - worst), 4))
         return (True, "Tier-1 findings present (%d error(s), %d warning(s))" % (errors, warnings),
-                deficit)
+                findings_deficit)
 
     # MERGE-ELIGIBLE PRs ARE DONE. Remediation's purpose is to get a PR fit to
     # merge; once it already IS fit to merge, continuing to "improve" it is not
