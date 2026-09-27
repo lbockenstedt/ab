@@ -2073,12 +2073,172 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
                         "on this server, or set 'claude_binary' in Settings.")
 
 
+#: Endpoint support per Copilot model, from the live catalogue. GitHub is moving
+#: its newer OpenAI models to the Responses API and REMOVING /chat/completions
+#: from them -- as of this writing gpt-5.5 and all three gpt-5.6 variants list
+#: only ['/responses', 'ws:/responses']. Calling chat/completions on one of those
+#: returns 400 unsupported_api_for_model, which is indistinguishable at the call
+#: site from "the model is broken", so route on the catalogue instead of guessing
+#: from the model name: the split is a server-side decision that will keep moving.
+_COPILOT_ENDPOINTS: "dict" = {}
+_COPILOT_ENDPOINTS_TS = 0.0
+_COPILOT_ENDPOINTS_TTL_S = 3600
+_COPILOT_ENDPOINTS_LOCK = threading.Lock()
+
+
+def _copilot_model_endpoints(bearer, model):
+    """Endpoints `model` supports, or None when the catalogue can't be read.
+
+    None means "unknown" and callers MUST fall back to chat/completions: refusing
+    to call on a failed lookup would turn a transient catalogue hiccup into a
+    total outage, which is strictly worse than the 400 it is trying to avoid.
+    """
+    global _COPILOT_ENDPOINTS_TS
+    now = time.time()
+    with _COPILOT_ENDPOINTS_LOCK:
+        fresh = _COPILOT_ENDPOINTS and (now - _COPILOT_ENDPOINTS_TS) < _COPILOT_ENDPOINTS_TTL_S
+        if fresh:
+            return _COPILOT_ENDPOINTS.get(model)
+    try:
+        r = requests.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(bearer), timeout=20)
+        r.raise_for_status()
+        table = {}
+        for m in (r.json() or {}).get("data") or []:
+            if isinstance(m, dict) and m.get("id"):
+                table[m["id"]] = m.get("supported_endpoints")
+    except Exception as e:  # noqa: BLE001 — never let a lookup break routing
+        logger.debug("copilot model catalogue lookup failed: %s", e)
+        return None
+    with _COPILOT_ENDPOINTS_LOCK:
+        _COPILOT_ENDPOINTS.clear()
+        _COPILOT_ENDPOINTS.update(table)
+        _COPILOT_ENDPOINTS_TS = now
+    return table.get(model)
+
+
+def _copilot_wants_responses_api(bearer, model):
+    """True only when the catalogue positively says chat/completions is gone and
+    /responses is available. Unknown or ambiguous => False (stay on the old path)."""
+    eps = _copilot_model_endpoints(bearer, model)
+    if not eps:
+        return False
+    return "/chat/completions" not in eps and "/responses" in eps
+
+
+def _to_responses_input(messages):
+    """Adapt internal messages to the Responses API. Returns (instructions, items).
+
+    Two shape differences from chat/completions that the API rejects if you get
+    them wrong: system prompts move out of the message list into a top-level
+    `instructions` string, and each message's text is wrapped in a typed content
+    part whose type depends on the role -- "output_text" for assistant turns,
+    "input_text" for everything else.
+    """
+    systems = []
+    items = []
+    for m in messages or ():
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "system":
+            systems.append(m.get("content") or "")
+            continue
+        if role == "tool":
+            # Tool transcripts have a different representation here and no caller
+            # routes tools down this path yet; dropping is safer than inventing.
+            continue
+        part = "output_text" if role == "assistant" else "input_text"
+        items.append({"role": role or "user",
+                      "content": [{"type": part, "text": m.get("content") or ""}]})
+    instructions = "\n\n".join(s for s in systems if s) or None
+    return instructions, items
+
+
+def _responses_output_text(data):
+    """Assistant text from a Responses API body.
+
+    `output` is a LIST OF ITEMS, not a message: reasoning models emit one or more
+    {"type": "reasoning"} items before the {"type": "message"} one, and the
+    convenience `output_text` field is frequently null, so both have to be
+    handled or the caller silently reads an empty completion as a refusal.
+    """
+    if not isinstance(data, dict):
+        return ""
+    shortcut = data.get("output_text")
+    if isinstance(shortcut, str) and shortcut:
+        return shortcut
+    parts = []
+    for item in data.get("output") or ():
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for c in item.get("content") or ():
+            if isinstance(c, dict) and c.get("type") == "output_text" and c.get("text"):
+                parts.append(c["text"])
+    return "".join(parts)
+
+
+def _usage_from_responses_json(data, usage_out):
+    """Responses spells the usage counters differently from chat/completions
+    (input_tokens/output_tokens, not prompt_tokens/completion_tokens)."""
+    if usage_out is None:
+        return
+    try:
+        usage = data.get("usage") or {}
+        out_tok = usage.get("output_tokens")
+        in_tok = usage.get("input_tokens")
+        if out_tok is not None or in_tok is not None:
+            usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
+    except Exception:  # noqa: BLE001 — telemetry is never fatal
+        pass
+
+
+def _request_copilot_responses(model, bearer, base, messages, config, usage_out=None,
+                               json_schema=None):
+    """Call the Copilot Responses API for models that no longer serve chat/completions.
+
+    Non-streaming by design: this path exists to make otherwise-unreachable models
+    usable at all, and a plain request/response is the smallest thing that does
+    that. Tool calls are deliberately NOT supported here -- see the caller, which
+    keeps tool-using requests on chat/completions rather than silently dropping
+    the tools.
+    """
+    payload = {"model": model, "input": []}
+    instructions, items = _to_responses_input(messages)
+    payload["input"] = items
+    if instructions:
+        payload["instructions"] = instructions
+    try:
+        out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]) or _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"])
+    except Exception:
+        out_tok = _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]
+    if out_tok > 0:
+        payload["max_output_tokens"] = out_tok
+    if json_schema:
+        # Structured output moves under `text.format` and, unlike chat/completions,
+        # carries the schema inline rather than nested under a "json_schema" key.
+        payload["text"] = {"format": {"type": "json_schema", "name": "response",
+                                      "schema": json_schema, "strict": False}}
+    r = _llm_retry_post(f"{base}/responses", payload, _copilot_headers(bearer), config,
+                        stream=False, provider="copilot")
+    data = r.json()
+    _usage_from_responses_json(data, usage_out)
+    return _responses_output_text(data)
+
+
 def _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None, json_schema=None):
     """Call the GitHub Copilot chat API (OpenAI-compatible). api_key is the stored GitHub
     OAuth token; we exchange it for a short-lived Copilot token and add the editor headers
     Copilot requires. Mirrors _request_openai's response handling."""
     bearer = _copilot_api_token(api_key)  # gh_token -> copilot token (cached)
     base = (base_url or COPILOT_API_BASE).rstrip("/")
+    # Models GitHub has moved off chat/completions entirely can only be reached
+    # through the Responses API. Tool-using calls stay on the old path: failing
+    # loudly there lets the caller fall through to another entry, whereas calling
+    # Responses without the tools would return a confident answer that silently
+    # ignored them.
+    if not tools and _copilot_wants_responses_api(bearer, model):
+        return _request_copilot_responses(model, bearer, base, messages, config,
+                                          usage_out=usage_out, json_schema=json_schema)
     endpoint = f"{base}/chat/completions"
     headers = _copilot_headers(bearer)
     msgs = _to_openai_messages(messages)
@@ -2089,7 +2249,23 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
     except Exception:
         out_tok = _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]
     if out_tok > 0:
-        payload["max_tokens"] = out_tok
+        # `max_completion_tokens`, NOT `max_tokens`. OpenAI deprecated max_tokens
+        # for chat completions and the newer Copilot-hosted GPT models reject it
+        # outright: gpt-5.4 answers a payload carrying max_tokens with a bare 400
+        # (empty body, no error code), while the identical payload using
+        # max_completion_tokens returns 200. Because the 400 carries no message,
+        # this read as "the model is broken" rather than "the field is wrong",
+        # and it silently cost us every OpenAI-family model on the panel -- the
+        # allowlist's only non-Anthropic members -- which in turn made the
+        # cross-vendor reviewer rule relax to same-vendor on every single PR.
+        #
+        # Verified against the live Copilot catalogue before changing: every
+        # chat-capable model it serves (claude-*, gemini-*, gpt-3.5 through
+        # gpt-5.4, gpt-5-mini) accepts max_completion_tokens, so this is
+        # strictly wider compatibility, not a trade. Note this is the COPILOT
+        # path only -- _request_openai still sends max_tokens, because it also
+        # serves ollama/LM Studio backends that only understand that spelling.
+        payload["max_completion_tokens"] = out_tok
     if tools:
         payload["tools"] = _tools_to_openai(tools)
     resp = _post_maybe_structured(endpoint, payload, headers, config, use_stream, "copilot", json_schema)
