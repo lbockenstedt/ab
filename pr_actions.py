@@ -17,6 +17,7 @@ import os
 import time
 import tempfile
 
+import requests
 from github import GithubException
 
 from main import logger, state
@@ -83,6 +84,90 @@ def _merge_refusal(exc):
     if exc.status == 405:
         return (409, f"GitHub refused the merge (the PR is not in a mergeable state): {msg}")
     return None
+
+
+def _expects_missing_check(msg):
+    """True when a merge refusal is "a required status check never reported",
+    as opposed to one that genuinely failed.
+
+    GitHub phrases it as ``Required status check "test" is expected.`` inside a
+    rule-violation message. It does NOT mean the check is red -- it means no
+    run ever posted that context, which is what happens when the workflow run
+    is parked (see ``_release_parked_checks``). That distinction matters
+    because a red check is a human's problem while a parked run is ours."""
+    low = str(msg or "").lower()
+    return "required status check" in low and "is expected" in low
+
+
+def _release_parked_checks(repo_name, head_sha, token, *, timeout=60.0):
+    """Approve every workflow run parked as ``action_required`` on *head_sha*,
+    returning how many were released.
+
+    GitHub does not start the checks of a PR opened by a bot token; it parks
+    each run as ``action_required``. A parked run never posts its status, so a
+    branch protection rule that requires that check can never be satisfied and
+    the PR is MERGEABLE/BLOCKED forever -- no failure to remediate, no red
+    check to look at, just silence. promote.yml/backmerge.yml release their own
+    runs, but this is the safety net for every other route to a PR, and for the
+    case where that step raced and missed one.
+
+    Deliberately approves ALL parked runs rather than stopping at the first:
+    several workflows are triggered per PR and they park at slightly different
+    instants, which is exactly the race that stranded ab#338."""
+    if not token:
+        return 0
+    headers = {"Authorization": "token " + token,
+               "Accept": "application/vnd.github+json"}
+    approved = set()
+    quiet = 0
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        runs = []
+        try:
+            resp = requests.get(
+                "https://api.github.com/repos/%s/actions/runs" % repo_name,
+                params={"head_sha": head_sha, "status": "action_required",
+                        "per_page": 100},
+                headers=headers, timeout=10)
+            if resp.status_code == 200:
+                payload = resp.json() or {}
+                found = payload.get("workflow_runs")
+                runs = found if isinstance(found, list) else []
+        except Exception as exc:  # network/JSON — retry on the next poll
+            logger.debug("pr_actions: parked-run lookup for %s @ %s failed: %s",
+                         repo_name, head_sha, exc)
+        new = 0
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            run_id = run.get("id")
+            if not run_id or run_id in approved:
+                continue
+            try:
+                res = requests.post(
+                    "https://api.github.com/repos/%s/actions/runs/%s/approve"
+                    % (repo_name, run_id), headers=headers, timeout=10)
+            except Exception as exc:
+                logger.debug("pr_actions: approving parked run %s of %s failed: %s",
+                             repo_name, run_id, exc)
+                continue
+            if res.status_code < 300:
+                approved.add(run_id)
+                new += 1
+                logger.info("pr_actions: released parked workflow run %s on %s @ %s",
+                            run_id, repo_name, head_sha[:8])
+            else:
+                logger.warning("pr_actions: could not approve parked run %s on %s "
+                               "(HTTP %s): %s", run_id, repo_name,
+                               res.status_code, (res.text or "")[:200])
+        if approved and not new:
+            quiet += 1
+            if quiet >= 3:
+                break
+        else:
+            quiet = 0
+        time.sleep(5)
+    return len(approved)
 
 
 def _conflicted_paths(repo_git):
@@ -264,6 +349,22 @@ def merge_pr(gh, repo_name, number):
             if refusal is None:
                 raise
             status, why = refusal
+            # Before recording this as "only a human can clear it", check
+            # whether it is the one refusal we CAN clear: a required check that
+            # never reported because its workflow run is parked. Releasing the
+            # run lets the check post and the next poll merge normally.
+            if _expects_missing_check(why):
+                released = _release_parked_checks(
+                    repo_name, pr.head.sha, _github_token())
+                if released:
+                    msg = (f"PR #{number}: released {released} parked workflow "
+                           f"run(s); the required check can now report — "
+                           f"retrying the merge on the next poll.")
+                    logger.info("pr_actions: %s #%s — %s", repo_name, number, msg)
+                    update_pr_review(repo_name, number, merge_blocked_reason=None)
+                    return 409, {"status": "error", "blocked": True,
+                                 "retryable": True, "released_checks": released,
+                                 "message": msg}
             logger.warning("pr_actions: %s #%s merge refused by GitHub — %s",
                            repo_name, number, why)
             update_pr_review(repo_name, number, merge_blocked_reason=why)
