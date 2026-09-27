@@ -589,11 +589,41 @@ def next_remediation_requirements(
     failure_kind: Optional[str] = None,
     tried_key: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    attempts: int = 0,
 ) -> Any:
-    """Step up model complexity tier and exclude tried model on remediation failure."""
+    """Step up model complexity tier and exclude tried model on remediation failure.
+
+    After `attempts` failed turns the pool is additionally narrowed to
+    Opus-class models (fix_engine._last_turn_fix_exclusions). Raising the
+    complexity tier alone is a no-op at the top of the ladder -- every
+    allowlisted model already clears "large" -- so without this narrowing the
+    picker just re-seats the same cheapest-capable model that already failed.
+    """
     exclude = set(getattr(prev_reqs, "exclude_models", ()) or ())
     if tried_key:
         exclude.add(tried_key)
+
+    try:
+        threshold = int((config or {}).get("pr_remediate_last_turn_after_attempts", 2))
+    except (TypeError, ValueError):
+        threshold = 2
+
+    if threshold > 0 and attempts >= threshold:
+        try:
+            import fix_engine
+            before = set(exclude)
+            exclude = set(fix_engine._last_turn_fix_exclusions(
+                config or {}, existing=tuple(sorted(exclude, key=str))))
+            if exclude != before:
+                logger.info("remediation turn %d: narrowing the fix pool to Opus-class models "
+                            "after %d failed attempt(s)", attempts + 1, attempts)
+            else:
+                logger.info("remediation turn %d: Opus-class escalation was a no-op (disabled, "
+                            "enumeration failed, or no selectable Opus model) -- ordinary retry",
+                            attempts + 1)
+        except Exception as e:  # noqa: BLE001 -- escalation is best-effort; a broken
+                                # import must not stop the retry from happening at all.
+            logger.debug("next_remediation_requirements: Opus-class escalation skipped: %s", e)
 
     complexity = getattr(prev_reqs, "complexity", "small")
     try:
@@ -609,7 +639,11 @@ def next_remediation_requirements(
         min_context_tokens=getattr(prev_reqs, "min_context_tokens", 0),
         restrict=getattr(prev_reqs, "restrict", None),
         must_escalate_to_human=getattr(prev_reqs, "must_escalate_to_human", False),
-        exclude_models=tuple(sorted(exclude)),
+        # sorted(key=str): exclude sets legitimately MIX types -- callers pass model-name
+        # strings (what the review records persist) while _enumerate_candidates yields
+        # ModelKey tuples, and a bare sorted() over both raises TypeError, which surfaced
+        # as an unfixable "'<' not supported between str and tuple" on every PR.
+        exclude_models=tuple(sorted(exclude, key=str)),
     )
 
 
@@ -786,7 +820,7 @@ def auto_remediate_pr(
             needs_structured_output=True,
             exclude_models=tuple(rec.get("excluded_models") or []),
         )
-        reqs = next_remediation_requirements(prev_reqs, failure_kind="retry", tried_key=last_tried_model, config=config)
+        reqs = next_remediation_requirements(prev_reqs, failure_kind="retry", tried_key=last_tried_model, config=config, attempts=attempts)
     else:
         reqs = _ReqClass(complexity=assessed_complexity, needs_structured_output=True)
 
