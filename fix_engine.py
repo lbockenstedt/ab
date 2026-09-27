@@ -1891,6 +1891,53 @@ def _fix_model_exclusions(config, existing=()):
     return tuple(sorted(exclude))
 
 
+#: Models trusted to write code at the LAST remediation turn, after cheaper
+#: allowlisted models have already failed twice.
+#:
+#: This is deliberately a MODEL-NAME allowlist and NOT the `frontier` cost tier.
+#: Cost tier is a billing signal, not a capability one: Opus and Sonnet are BOTH
+#: cost_tier=frontier/max_complexity=large, and in practice Sonnet could not
+#: resolve review findings that Opus resolved. Anything that re-expresses this
+#: bar as "cost_tier == frontier" silently re-admits Sonnet and regresses the
+#: escalation to a model already shown to be insufficient. Override with config
+#: `pr_remediate_last_turn_model_allowlist`; an explicit empty list disables it.
+DEFAULT_LAST_TURN_FIX_ALLOWLIST = ("claude-opus-5*", "claude-opus-6*")
+
+
+def _last_turn_fix_exclusions(config, existing=()):
+    """Model keys to exclude so only Opus-class models write the final fix.
+
+    Returns `existing` unchanged if the policy is disabled, if candidates can't
+    be enumerated, or if NO candidate is Opus-class -- excluding everything
+    would leave the picker with nothing and turn an escalation into a dead end.
+    """
+    raw = (config or {}).get("pr_remediate_last_turn_model_allowlist")
+    if raw is None:
+        patterns = DEFAULT_LAST_TURN_FIX_ALLOWLIST
+    else:
+        if isinstance(raw, str):
+            raw = re.split(r"[,\s]+", raw)
+        patterns = tuple(p.strip().lower() for p in raw if p and str(p).strip())
+    if not patterns:
+        return tuple(existing)
+    try:
+        candidates = llm_client._enumerate_candidates(config)
+    except Exception as e:  # noqa: BLE001 -- never block fixing because enumeration broke
+        logger.debug("_last_turn_fix_exclusions: could not enumerate candidates: %s", e)
+        return tuple(existing)
+    exclude, allowed = set(existing), 0
+    for c in candidates:
+        if _model_allowed(c.get("model"), patterns):
+            allowed += 1
+        else:
+            exclude.add(c["key"])
+    if not allowed:
+        logger.warning("_last_turn_fix_exclusions: no Opus-class model configured (want one of "
+                       "%s); leaving the fix pool unnarrowed", ", ".join(patterns))
+        return tuple(existing)
+    return tuple(sorted(exclude))
+
+
 #: Self-hosted Ollama registry providers (model_registry.py's "ollama-local"/"ollama2-local"
 #: entries) -- NOT "ollama_cloud", which is a hosted service, not local.
 _LOCAL_PROVIDERS = frozenset({"ollama", "ollama2"})
@@ -1954,13 +2001,21 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     perf = llm_client.get_llm_perf_snapshot()
 
     excluded = set()
+    # The builder's MODEL, not just its key: the cross-vendor rule below needs to
+    # know which vendor authored the fix, and a ModelKey alone does not say.
+    builder_model = None
     if builder_key is not None:
         excluded.add(builder_key)
+        for c in candidates:
+            if c.get("key") == builder_key:
+                builder_model = c.get("model")
+                break
     elif builder_n:
         try:
             b_provider, _b_key, b_model, b_url = _get_provider_config(builder_n, config)
             if b_provider and b_model:
                 excluded.add(llm_client._model_key(b_provider, b_url, b_model))
+                builder_model = b_model
         except Exception as e:  # noqa: BLE001 — best-effort; worst case the builder's
                                  # own model can also be picked as a reviewer.
             logger.debug(f"_select_review_panel: could not resolve builder slot {builder_n}: {e}")
@@ -1981,6 +2036,33 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
             if any(n in m for n in needles):
                 return family
         return "other"
+
+    # A model must never be the sole judge of its own vendor's work: the whole
+    # value of the panel is an independent cross-check, and same-vendor models
+    # share training data, failure modes and blind spots. This is a HARD filter
+    # (unlike the soft diverse_pool preference below), relaxed only when it
+    # would leave no reviewer at all -- a same-vendor review still beats none.
+    builder_family = _vendor_family(builder_model) if builder_model else None
+    if builder_family and builder_family != "other":
+        cross_vendor = [c for c in candidates if _vendor_family(c.get("model")) != builder_family]
+        if cross_vendor:
+            candidates = cross_vendor
+        else:
+            logger.warning(
+                f"_select_review_panel: no cross-vendor reviewer available for builder "
+                f"family {builder_family!r} ({builder_model}); falling back to same-vendor review"
+            )
+
+    # An Opus-class model wrote this fix, so the dual panel has little left to
+    # add: the expensive frontier judgement already went into the code. One
+    # independent (now guaranteed cross-vendor) reviewer is enough to check it.
+    # The confidence bar is unchanged -- this narrows who reviews, not how hard.
+    if builder_model and "opus" in builder_model.lower():
+        max_reviewers = 1
+        logger.info(
+            f"_select_review_panel: Opus-class builder {builder_model} -- "
+            f"seating a single cross-vendor reviewer instead of a dual panel"
+        )
 
     panel = []
     for _ in range(max_reviewers):

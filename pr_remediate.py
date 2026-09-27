@@ -589,11 +589,35 @@ def next_remediation_requirements(
     failure_kind: Optional[str] = None,
     tried_key: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    attempts: int = 0,
 ) -> Any:
-    """Step up model complexity tier and exclude tried model on remediation failure."""
+    """Step up model complexity tier and exclude tried model on remediation failure.
+
+    After `attempts` failed turns the pool is additionally narrowed to
+    Opus-class models (fix_engine._last_turn_fix_exclusions). Raising the
+    complexity tier alone is a no-op at the top of the ladder -- every
+    allowlisted model already clears "large" -- so without this narrowing the
+    picker just re-seats the same cheapest-capable model that already failed.
+    """
     exclude = set(getattr(prev_reqs, "exclude_models", ()) or ())
     if tried_key:
         exclude.add(tried_key)
+
+    try:
+        threshold = int((config or {}).get("pr_remediate_last_turn_after_attempts", 2))
+    except (TypeError, ValueError):
+        threshold = 2
+
+    if threshold > 0 and attempts >= threshold:
+        try:
+            import fix_engine
+            exclude = set(fix_engine._last_turn_fix_exclusions(
+                config or {}, existing=tuple(sorted(exclude))))
+            logger.info("remediation turn %d: narrowing the fix pool to Opus-class models "
+                        "after %d failed attempt(s)", attempts + 1, attempts)
+        except Exception as e:  # noqa: BLE001 -- escalation is best-effort; a broken
+                                # import must not stop the retry from happening at all.
+            logger.debug("next_remediation_requirements: Opus-class escalation skipped: %s", e)
 
     complexity = getattr(prev_reqs, "complexity", "small")
     try:
@@ -786,7 +810,7 @@ def auto_remediate_pr(
             needs_structured_output=True,
             exclude_models=tuple(rec.get("excluded_models") or []),
         )
-        reqs = next_remediation_requirements(prev_reqs, failure_kind="retry", tried_key=last_tried_model, config=config)
+        reqs = next_remediation_requirements(prev_reqs, failure_kind="retry", tried_key=last_tried_model, config=config, attempts=attempts)
     else:
         reqs = _ReqClass(complexity=assessed_complexity, needs_structured_output=True)
 
