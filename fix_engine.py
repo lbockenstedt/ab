@@ -2027,9 +2027,12 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     if builder_key is not None:
         excluded.add(builder_key)
         for c in candidates:
-            if c.get("key") == builder_key:
+            if c.get("key") == builder_key or c.get("model") == builder_key:
                 builder_model = c.get("model")
                 break
+        if builder_model is None:
+            logger.debug(f"_select_review_panel: builder {builder_key!r} not found among "
+                         f"candidates; vendor rules skipped (builder unknown)")
     elif builder_n:
         try:
             b_provider, _b_key, b_model, b_url = _get_provider_config(builder_n, config)
@@ -2063,10 +2066,12 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     # (unlike the soft diverse_pool preference below), relaxed only when it
     # would leave no reviewer at all -- a same-vendor review still beats none.
     builder_family = _vendor_family(builder_model) if builder_model else None
+    cross_vendor_applied = False
     if builder_family and builder_family != "other":
         cross_vendor = [c for c in candidates if _vendor_family(c.get("model")) != builder_family]
         if cross_vendor:
             candidates = cross_vendor
+            cross_vendor_applied = True
         else:
             logger.warning(
                 f"_select_review_panel: no cross-vendor reviewer available for builder "
@@ -2077,7 +2082,12 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     # add: the expensive frontier judgement already went into the code. One
     # independent (now guaranteed cross-vendor) reviewer is enough to check it.
     # The confidence bar is unchanged -- this narrows who reviews, not how hard.
-    if builder_model and "opus" in builder_model.lower():
+    if builder_model and "opus" in builder_model.lower() and not cross_vendor_applied:
+        logger.info(
+            f"_select_review_panel: Opus-class builder {builder_model} but no cross-vendor "
+            f"reviewer available -- keeping the dual panel"
+        )
+    elif builder_model and "opus" in builder_model.lower():
         max_reviewers = 1
         logger.info(
             f"_select_review_panel: Opus-class builder {builder_model} -- "
