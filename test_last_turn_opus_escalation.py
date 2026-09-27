@@ -265,3 +265,44 @@ def test_last_turn_exclusions_keep_opus_and_drop_the_rest():
     assert ("copilot", "", "claude-sonnet-5") in out, "Sonnet must not write the last fix"
     assert ("copilot", "", "gemini-3.8-flash") in out
     assert ("copilot", "", "claude-opus-5") not in out
+
+
+# ---- the guard must count SELECTABLE Opus models, not configured ones ----
+def test_sole_opus_already_excluded_does_not_empty_the_pool():
+    """The escalating caller adds tried_key BEFORE calling us, so on the turn
+    that matters the only Opus candidate is routinely already excluded.
+    Counting it as available would exclude every candidate and hand the picker
+    an empty pool -- the dead end this guard exists to prevent."""
+    ns = _load_exclusion_fns(_cands())
+    existing = (("copilot", "", "claude-opus-5"),)
+    out = ns["_last_turn_fix_exclusions"]({}, existing=existing)
+    assert out == existing, "must leave the pool unnarrowed, not exclude everything"
+
+
+def test_sole_opus_already_excluded_by_NAME_also_short_circuits():
+    """Records persist exclusions as name strings, so eligibility has to be
+    tested in both forms."""
+    ns = _load_exclusion_fns(_cands())
+    existing = ("claude-opus-5",)
+    assert ns["_last_turn_fix_exclusions"]({}, existing=existing) == existing
+
+
+def test_a_second_selectable_opus_still_allows_narrowing():
+    def c(model):
+        return {"key": ("copilot", "", model), "model": model}
+    cands = [c("claude-opus-5"), c("claude-opus-5.5"), c("gemini-3.8-flash")]
+    ns = _load_exclusion_fns(cands)
+    out = ns["_last_turn_fix_exclusions"]({}, existing=(("copilot", "", "claude-opus-5"),))
+    assert ("copilot", "", "gemini-3.8-flash") in out, "narrowing should still happen"
+    assert ("copilot", "", "claude-opus-5.5") not in out, "the selectable Opus must survive"
+
+
+def test_never_returns_a_set_covering_every_candidate():
+    """Whatever the inputs, the result must never exclude the whole pool."""
+    ns = _load_exclusion_fns(_cands())
+    all_keys = {("copilot", "", m)
+                for m in ("claude-opus-5", "claude-sonnet-5", "gemini-3.8-flash")}
+    for existing in ((), ("claude-opus-5",), (("copilot", "", "claude-opus-5"),),
+                     (("copilot", "", "claude-sonnet-5"),)):
+        out = set(ns["_last_turn_fix_exclusions"]({}, existing=existing))
+        assert not all_keys.issubset(out), (existing, out)

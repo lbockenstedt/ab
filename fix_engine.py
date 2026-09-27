@@ -1912,8 +1912,9 @@ def _last_turn_fix_exclusions(config, existing=()):
     """Model keys to exclude so only Opus-class models write the final fix.
 
     Returns `existing` unchanged if the policy is disabled, if candidates can't
-    be enumerated, or if NO candidate is Opus-class -- excluding everything
-    would leave the picker with nothing and turn an escalation into a dead end.
+    be enumerated, or if no Opus-class candidate is still SELECTABLE (one that
+    is already in `existing` does not count) -- excluding everything would
+    leave the picker with nothing and turn an escalation into a dead end.
     """
     raw = (config or {}).get("pr_remediate_last_turn_model_allowlist")
     if raw is None:
@@ -1929,14 +1930,25 @@ def _last_turn_fix_exclusions(config, existing=()):
     except Exception as e:  # noqa: BLE001 -- never block fixing because enumeration broke
         logger.debug("_last_turn_fix_exclusions: could not enumerate candidates: %s", e)
         return tuple(existing)
-    exclude, allowed = set(existing), 0
+    exclude, eligible = set(existing), 0
     for c in candidates:
         if _model_allowed(c.get("model"), patterns):
-            allowed += 1
+            # Count only Opus-class candidates that are still SELECTABLE. An
+            # allowlisted model already sitting in `existing` cannot be picked,
+            # so counting it conflates "an Opus model is configured" with "an
+            # Opus model can still be chosen". The escalating caller adds
+            # tried_key before calling us, so the sole Opus candidate being
+            # already excluded is the ordinary case on the turn that matters --
+            # and treating it as available would let us exclude every candidate
+            # and hand the picker an empty pool, the exact dead end this guard
+            # exists to prevent. Membership is tested in BOTH forms because
+            # exclusion sets legitimately mix name strings and ModelKey tuples.
+            if c["key"] not in exclude and c.get("model") not in exclude:
+                eligible += 1
         else:
             exclude.add(c["key"])
-    if not allowed:
-        logger.warning("_last_turn_fix_exclusions: no Opus-class model configured (want one of "
+    if not eligible:
+        logger.warning("_last_turn_fix_exclusions: no selectable Opus-class model (want one of "
                        "%s); leaving the fix pool unnarrowed", ", ".join(patterns))
         return tuple(existing)
     # sorted(key=str): exclude sets legitimately MIX types -- callers pass model-name
