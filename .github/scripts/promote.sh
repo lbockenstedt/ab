@@ -116,9 +116,14 @@ stage_to() {
   done < <(git diff --cached --name-only --diff-filter=A | grep -E '(^|/)VERSION$' || true)
 
   if git ls-files -u | grep -q .; then
-    echo "::error::merge conflict outside VERSION -- resolve $SRC -> $TGT by hand:"
+    # Diagnose, but do NOT decide. A conflict while EXTENDING a unit is
+    # recoverable -- the caller keeps the original unit -- while a conflict on
+    # the primary selection is fatal. Exiting here denied the caller that
+    # choice, and annotating every conflict as ::error:: marked recoverable
+    # runs as failures, so severity belongs to whoever called us.
+    echo "  merge conflict outside VERSION staging $SRC -> $TGT:"
     git ls-files -u | awk '{print "  " $4}' | sort -u
-    exit 1
+    return 2
   fi
 
   if git diff --cached --quiet && git diff --quiet; then
@@ -130,10 +135,19 @@ stage_to() {
 picked=""
 picked_idx=0
 for i in "${!units[@]}"; do
-  if stage_to "${units[$i]}"; then
+  sel_rc=0
+  stage_to "${units[$i]}" || sel_rc=$?
+  if [ "$sel_rc" -eq 0 ]; then
     picked="${units[$i]}"
     picked_idx="$i"
     break
+  fi
+  if [ "$sel_rc" -eq 2 ]; then
+    # A conflict on the oldest outstanding unit cannot be skipped: promoting a
+    # later unit ahead of it would reorder the branch and ship its changes out
+    # of sequence. This one is fatal, so the error annotation belongs here.
+    echo "::error::merge conflict outside VERSION -- resolve $SRC -> $TGT by hand"
+    exit 1
   fi
   [ "$SPLIT" = "1" ] && echo "  skipping ${units[$i]} -- no content change against $TGT (VERSION-only?)"
 done
