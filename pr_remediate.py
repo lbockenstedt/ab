@@ -611,10 +611,16 @@ def next_remediation_requirements(
     if threshold > 0 and attempts >= threshold:
         try:
             import fix_engine
+            before = set(exclude)
             exclude = set(fix_engine._last_turn_fix_exclusions(
                 config or {}, existing=tuple(sorted(exclude, key=str))))
-            logger.info("remediation turn %d: narrowing the fix pool to Opus-class models "
-                        "after %d failed attempt(s)", attempts + 1, attempts)
+            if exclude != before:
+                logger.info("remediation turn %d: narrowing the fix pool to Opus-class models "
+                            "after %d failed attempt(s)", attempts + 1, attempts)
+            else:
+                logger.info("remediation turn %d: Opus-class escalation was a no-op (disabled, "
+                            "enumeration failed, or no selectable Opus model) -- ordinary retry",
+                            attempts + 1)
         except Exception as e:  # noqa: BLE001 -- escalation is best-effort; a broken
                                 # import must not stop the retry from happening at all.
             logger.debug("next_remediation_requirements: Opus-class escalation skipped: %s", e)
