@@ -181,6 +181,37 @@ def test_a_real_conflict_is_not_reported_as_nothing_to_promote(tmp_path):
     assert "Nothing to promote" not in res.stdout
 
 
+def test_isolated_conflict_then_noop_tip_is_nothing_to_promote(tmp_path):
+    """An early unit conflicts in isolation, but the tip of $SRC is a clean
+    content no-op against $TGT -- there is no divergence, so this must be the
+    quiet no-op, not a red ::error:: run."""
+    r = _repo(tmp_path)
+
+    _git(r, "checkout", "-q", "qa")
+    (r / "workflow.yml").write_text("step: qa-edit\n")
+    _git(r, "commit", "-q", "-am", "unit 1: edit the workflow on qa")
+
+    _git(r, "checkout", "-q", "main")
+    (r / "workflow.yml").write_text("step: appbuilder-repair\n")
+    _git(r, "commit", "-q", "-am", "AppBuilder: fix PR #15 review findings")
+
+    # Back-merge settles on main's copy, and NO later unit follows.
+    _git(r, "checkout", "-q", "qa")
+    subprocess.run(["git", "merge", "--no-commit", "--no-ff", "main"],
+                   cwd=r, capture_output=True, text=True)
+    (r / "workflow.yml").write_text("step: appbuilder-repair\n")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-q", "-m", "ci: back-merge main into qa")
+    _git(r, "fetch", "-q", "origin")
+
+    res = _run(r, "qa", "main", tmp_path / "out")
+    assert res.returncode == 0, (
+        "a no-op tip after an isolated conflict was reported as a conflict:\n%s%s"
+        % (res.stdout, res.stderr))
+    assert "Nothing to promote" in res.stdout
+    assert "::error::" not in res.stdout
+
+
 def test_nothing_to_promote_is_unaffected(tmp_path):
     """No units at all must still be the quiet no-op, not a conflict."""
     r = _repo(tmp_path)
