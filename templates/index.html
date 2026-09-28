@@ -959,6 +959,7 @@
                 <button type="button" class="sub-nav-item active px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
+                <button type="button" title="Model Registry — the capability and cost rules that rank every enabled endpoint. Edit each rule with labelled dropdowns instead of raw JSON." class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-model-registry" onclick="settingsTab('sec-model-registry')">Model Registry</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in (SSO)</button>
@@ -1354,108 +1355,19 @@
                             </div>
                         </div>
 
-                        <!-- Step C: Model Registry (capability & cost rules) -->
-                        <div class="mb-6">
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3 — Model Registry (capability &amp; cost rules)</p>
-                            <p class="text-xs text-slate-400 mb-3">Routing is capability/cost-aware now — the 8 fixed provider slots are gone. Each <b>enabled</b> endpoint above is ranked per call by the rules here: which model can do how hard a job, at what cost tier, with which capabilities. Edit the curated rules as JSON (most-specific <span class="font-mono">match</span> wins). A save from any tab round-trips this unchanged.</p>
+                        <!-- Step C: Model Registry -- now a tab of its own.
+                             The rules carry 14 fields across 4 value vocabularies,
+                             which a raw JSON textarea wedged into this tab forced
+                             the operator to memorise. This is a signpost only; the
+                             textarea itself moved (keeping its `name`, so a Save
+                             from ANY tab still round-trips the registry). -->
+                        <div class="mb-6 p-4 rounded-lg bg-slate-50 border border-slate-200">
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3 &mdash; Model Registry (capability &amp; cost rules)</p>
+                            <p class="text-xs text-slate-500 mb-3">Each <b>enabled</b> endpoint above is ranked per call by the registry: which model can do how hard a job, at what cost tier, with which capabilities. It now has its own tab with a labelled editor &mdash; every field is a dropdown, number or checkbox, so there is no syntax to guess at.</p>
+                            <button type="button" title="Open the Model Registry tab -- edit cost tier, capability rank, speed class and capability flags per rule with labelled controls" onclick="settingsTab('sec-model-registry')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]"><i class="fas fa-sliders-h mr-1"></i>Open Model Registry</button>
                             {% if registry_unclassified %}
-                            <div class="mb-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
-                                <b>{{ registry_unclassified|length }} unclassified model(s)</b> were auto-discovered but match no curated rule (cost tier <span class="font-mono">unknown</span> — admitted only as a last resort). Promote each to a curated rule to control how it is used:
-                                <div class="mt-2 flex flex-wrap gap-2">
-                                    {% for u in registry_unclassified %}
-                                    <button type="button" onclick="promoteRegistryStub('{{ u.provider }}', '{{ u.model }}')" class="px-2 py-1 rounded bg-white border border-amber-300 hover:bg-amber-100 font-mono text-[11px]">+ {{ u.provider }} / {{ u.model }}</button>
-                                    {% endfor %}
-                                </div>
-                            </div>
+                            <span class="ml-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">{{ registry_unclassified|length }} unclassified model(s) need a rule</span>
                             {% endif %}
-                            <textarea id="model_registry_json" name="model_registry_json" rows="10" spellcheck="false" class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">{{ registry_rules_json }}</textarea>
-                            <p class="text-[11px] text-slate-400 mt-1">A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span>, <span class="font-mono">match</span> (a glob). Invalid JSON is rejected on save and the previous value is kept.</p>
-
-                            <!-- Opt-in friendly per-rule editor ("editable if the user chooses") -->
-                            <div class="mt-2">
-                                <a href="javascript:void(0)" onclick="toggleRegistryEditor()" id="registry-editor-toggle" class="text-xs font-bold text-[#01A982] hover:underline">✎ Edit rules visually</a>
-                            </div>
-                            <div id="registry-editor" hidden class="mt-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
-                                <p class="text-xs text-slate-500 mb-3">Set a provider's cost tier without hand-editing JSON. This writes into the JSON above; click <b>Save</b> below to persist. Rules are matched (and updated) by <span class="font-mono">provider</span> + <span class="font-mono">match</span>.</p>
-                                <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
-                                    <div class="space-y-1">
-                                        <label class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Provider</label>
-                                        <select id="registry-form-provider" class="w-full p-2 rounded border border-slate-300 text-xs font-mono outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <option value="google">google</option>
-                                            <option value="anthropic">anthropic</option>
-                                            <option value="openai">openai</option>
-                                            <option value="groq">groq</option>
-                                            <option value="openrouter">openrouter</option>
-                                            <option value="ollama">ollama</option>
-                                            <option value="ollama2">ollama2</option>
-                                            <option value="ollama_cloud">ollama_cloud</option>
-                                            <option value="lmstudio">lmstudio</option>
-                                            <option value="claude_cli">claude_cli</option>
-                                            <option value="copilot">copilot</option>
-                                        </select>
-                                    </div>
-                                    <div class="space-y-1">
-                                        <label class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Match glob</label>
-                                        <input id="registry-form-match" type="text" value="*" spellcheck="false" class="w-full p-2 rounded border border-slate-300 text-xs font-mono outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    </div>
-                                    <div class="space-y-1">
-                                        <label class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Cost tier</label>
-                                        <select id="registry-form-cost" class="w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <option value="free">free</option>
-                                            <option value="cheap">cheap</option>
-                                            <option value="frontier">frontier</option>
-                                        </select>
-                                    </div>
-                                    <div class="space-y-1">
-                                        <label class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Max complexity</label>
-                                        <select id="registry-form-complexity" class="w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <option value="trivial">trivial</option>
-                                            <option value="small">small</option>
-                                            <option value="medium" selected>medium</option>
-                                            <option value="large">large</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div class="flex flex-wrap items-center gap-2 mt-3">
-                                    <button type="button" onclick="registryUpsertRule()" title="Add a new rule (or update the existing rule with this provider + match glob) in the JSON above" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]">Add / update rule</button>
-                                    <button type="button" onclick="registrySetLocalFree()" title="Upsert free-tier rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Set local providers (ollama, ollama2, lmstudio) to free</button>
-                                </div>
-                            </div>
-
-                            <!-- Effective merged registry (read-only) -->
-                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mt-4 mb-2">Effective registry (preview)</p>
-                            <div class="overflow-x-auto border border-slate-200 rounded-lg">
-                                <table class="w-full text-xs">
-                                    <thead class="bg-slate-50 text-slate-500 uppercase"><tr>
-                                        <th class="px-2 py-1 text-left">Provider</th><th class="px-2 py-1 text-left">Match</th>
-                                        <th class="px-2 py-1 text-left">Cost</th><th class="px-2 py-1 text-left">Max</th>
-                                        <th class="px-2 py-1 text-right">Context</th>
-                                        <th class="px-2 py-1 text-left" title="Declared speed class — the cold-start prior for latency-sensitive routing (chat). Measured tok/s still breaks ties inside a class.">Speed</th>
-                                        <th class="px-2 py-1 text-right" title="Relative strength WITHIN a cost tier (0-100). Orders demanding work (complexity=large, prefer_capable) — never filters.">Rank</th>
-                                        <th class="px-2 py-1 text-center">Tools</th>
-                                        <th class="px-2 py-1 text-center">Agentic</th><th class="px-2 py-1 text-center">Struct</th>
-                                        <th class="px-2 py-1 text-center">Batch</th><th class="px-2 py-1 text-left">Source</th>
-                                    </tr></thead>
-                                    <tbody>
-                                        {% for r in registry_preview %}
-                                        <tr class="border-t border-slate-100 {{ 'opacity-40' if r.enabled == False else '' }}">
-                                            <td class="px-2 py-1 text-slate-600">{{ r.provider }}</td>
-                                            <td class="px-2 py-1 font-mono text-slate-500">{{ r.match }}</td>
-                                            <td class="px-2 py-1">{{ r.cost_tier }}</td>
-                                            <td class="px-2 py-1">{{ r.max_complexity }}</td>
-                                            <td class="px-2 py-1 text-right">{{ r.context_window }}</td>
-                                            <td class="px-2 py-1">{{ r.speed_tier }}</td>
-                                            <td class="px-2 py-1 text-right tabular-nums">{{ r.capability_rank }}</td>
-                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_tools else '' }}</td>
-                                            <td class="px-2 py-1 text-center">{{ '✓' if r.native_agentic_tools else '' }}</td>
-                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_structured_output else '' }}</td>
-                                            <td class="px-2 py-1 text-center">{{ '✓' if r.supports_batch else '' }}</td>
-                                            <td class="px-2 py-1"><span class="text-[10px] px-1.5 py-0.5 rounded {{ 'bg-emerald-100 text-emerald-700' if r.source == 'curated' else 'bg-slate-100 text-slate-500' }}">{{ r.source }}</span></td>
-                                        </tr>
-                                        {% endfor %}
-                                    </tbody>
-                                </table>
-                            </div>
                         </div>
 
                         <!-- Timeout -->
@@ -1467,6 +1379,123 @@
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                        </div>
+                    </section>
+
+                    <!-- Model Registry (capability & cost rules) ----------------
+                         Its own tab because the rule schema is wide: 3 identity
+                         fields, 4 ranking fields over 3 closed vocabularies, and
+                         6 capability booleans. Rendered as one card per rule with
+                         a labelled control for every field, so nothing has to be
+                         typed from memory. The JSON textarea is still the form
+                         field that posts (name="model_registry_json") -- the
+                         cards write into it on every change, and it stays
+                         reachable under "Advanced" so an existing JSON workflow
+                         keeps working. -->
+                    <section id="sec-model-registry" data-settings-section hidden>
+                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                            <i class="fas fa-sliders-h text-slate-400"></i>
+                            <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Model Registry &mdash; Capability &amp; Cost Rules</h4>
+                            <span id="registry-rule-count" class="ml-auto text-xs text-slate-400"></span>
+                        </div>
+                        <p class="text-xs text-slate-500 mb-4">
+                            Routing is capability/cost-aware: there are no fixed provider slots. Every <b>enabled</b> endpoint
+                            (Settings &rarr; LLM &rarr; Step 2) is ranked per call by the rules below &mdash; which model can do how hard
+                            a job, at what cost tier, with which capabilities. The <b>most specific</b> <span class="font-mono">match</span>
+                            glob wins, so a rule for <span class="font-mono">claude-opus-*</span> beats a catch-all <span class="font-mono">*</span>
+                            for the same provider. Changes here are not live until you press <b>Save</b>.
+                        </p>
+
+                        {% if registry_unclassified %}
+                        <div class="mb-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+                            <b>{{ registry_unclassified|length }} unclassified model(s)</b> were auto-discovered but match no curated rule
+                            (cost tier <span class="font-mono">unknown</span> &mdash; admitted only as a last resort). Add a rule for each to control how it is used:
+                            <div class="mt-2 flex flex-wrap gap-2">
+                                {% for u in registry_unclassified %}
+                                <button type="button" title="Add a curated rule for {{ u.provider }} / {{ u.model }} prefilled with safe defaults, then tune it below" onclick="promoteRegistryStub('{{ u.provider }}', '{{ u.model }}')" class="px-2 py-1 rounded bg-white border border-amber-300 hover:bg-amber-100 font-mono text-[11px]">+ {{ u.provider }} / {{ u.model }}</button>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <div id="registry-parse-error" hidden class="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs"></div>
+
+                        <!-- Toolbar -->
+                        <div class="flex flex-wrap items-center gap-2 mb-3">
+                            <button type="button" title="Append a new empty rule with safe defaults (cheap / medium / streaming) to the bottom of the list" onclick="abRegAdd()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]"><i class="fas fa-plus mr-1"></i>Add rule</button>
+                            <button type="button" title="Upsert free-tier catch-all rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" onclick="registrySetLocalFree()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Set local providers free</button>
+                            <button type="button" title="Expand every rule card so all fields are visible" onclick="abRegExpandAll(true)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Expand all</button>
+                            <button type="button" title="Collapse every rule card back to its one-line summary" onclick="abRegExpandAll(false)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Collapse all</button>
+                            <input id="registry-filter" type="search" placeholder="Filter by provider, match or label&hellip;" title="Show only rules whose provider, match glob, label or id contains this text. Filtering never changes what is saved." oninput="abRegRender()" class="ml-auto w-64 p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]">
+                        </div>
+
+                        <!-- Suggestions only: `list` on a text input keeps a
+                             custom provider typeable, unlike a closed dropdown. -->
+                        <datalist id="ab-reg-providers">
+                            <option value="anthropic"></option>
+                            <option value="claude_cli"></option>
+                            <option value="copilot"></option>
+                            <option value="google"></option>
+                            <option value="groq"></option>
+                            <option value="lmstudio"></option>
+                            <option value="ollama"></option>
+                            <option value="ollama2"></option>
+                            <option value="ollama_cloud"></option>
+                            <option value="openai"></option>
+                            <option value="openrouter"></option>
+                        </datalist>
+
+                        <!-- One card per rule, rendered by abRegRender() -->
+                        <div id="registry-cards" class="space-y-2"></div>
+
+                        <!-- Advanced: the raw JSON that actually posts. -->
+                        <div class="mt-4">
+                            <a href="javascript:void(0)" onclick="abRegToggleJson()" id="registry-json-toggle" class="text-xs font-bold text-[#01A982] hover:underline">&#9656; Advanced &mdash; raw JSON</a>
+                        </div>
+                        <div id="registry-json-box" hidden class="mt-2">
+                            <p class="text-xs text-slate-500 mb-2">This is the value that posts. The cards above rewrite it on every change; edit it directly and press <b>Apply JSON to editor</b> to pull your changes back into the cards. A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span> and <span class="font-mono">match</span>. Invalid JSON is rejected on save and the previous value is kept.</p>
+                            <textarea id="model_registry_json" name="model_registry_json" rows="14" spellcheck="false" title="The raw model-registry rule list, as JSON. Normally maintained by the cards above." class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">{{ registry_rules_json }}</textarea>
+                            <button type="button" title="Re-parse the JSON above and rebuild the rule cards from it. Use after editing the JSON by hand." onclick="abRegApplyJson()" class="mt-2 px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Apply JSON to editor</button>
+                        </div>
+
+                        <!-- Effective merged registry (read-only) -->
+                        <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mt-6 mb-2">Effective registry (preview &mdash; as last saved)</p>
+                        <p class="text-xs text-slate-400 mb-2">Curated rules merged with auto-discovered models, with <span class="font-mono">speed</span> and <span class="font-mono">rank</span> resolved through their fallbacks. This reflects the <b>saved</b> config, so it updates after you press Save and the page reloads.</p>
+                        <div class="overflow-x-auto border border-slate-200 rounded-lg">
+                            <table class="w-full text-xs">
+                                <thead class="bg-slate-50 text-slate-500 uppercase"><tr>
+                                    <th class="px-2 py-1 text-left">Provider</th><th class="px-2 py-1 text-left">Match</th>
+                                    <th class="px-2 py-1 text-left">Cost</th><th class="px-2 py-1 text-left">Max</th>
+                                    <th class="px-2 py-1 text-right">Context</th>
+                                    <th class="px-2 py-1 text-left" title="Declared speed class — the cold-start prior for latency-sensitive routing (chat). Measured tok/s still breaks ties inside a class.">Speed</th>
+                                    <th class="px-2 py-1 text-right" title="Relative strength WITHIN a cost tier (0-100). Orders demanding work (complexity=large, prefer_capable) — never filters.">Rank</th>
+                                    <th class="px-2 py-1 text-center">Tools</th>
+                                    <th class="px-2 py-1 text-center">Agentic</th><th class="px-2 py-1 text-center">Struct</th>
+                                    <th class="px-2 py-1 text-center">Batch</th><th class="px-2 py-1 text-left">Source</th>
+                                </tr></thead>
+                                <tbody>
+                                    {% for r in registry_preview %}
+                                    <tr class="border-t border-slate-100 {{ 'opacity-40' if r.enabled == False else '' }}">
+                                        <td class="px-2 py-1 text-slate-600">{{ r.provider }}</td>
+                                        <td class="px-2 py-1 font-mono text-slate-500">{{ r.match }}</td>
+                                        <td class="px-2 py-1">{{ r.cost_tier }}</td>
+                                        <td class="px-2 py-1">{{ r.max_complexity }}</td>
+                                        <td class="px-2 py-1 text-right">{{ r.context_window }}</td>
+                                        <td class="px-2 py-1">{{ r.speed_tier }}</td>
+                                        <td class="px-2 py-1 text-right tabular-nums">{{ r.capability_rank }}</td>
+                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_tools else '' }}</td>
+                                        <td class="px-2 py-1 text-center">{{ '✓' if r.native_agentic_tools else '' }}</td>
+                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_structured_output else '' }}</td>
+                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_batch else '' }}</td>
+                                        <td class="px-2 py-1"><span class="text-[10px] px-1.5 py-0.5 rounded {{ 'bg-emerald-100 text-emerald-700' if r.source == 'curated' else 'bg-slate-100 text-slate-500' }}">{{ r.source }}</span></td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" title="Persist the registry (and every other settings tab) to config" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -5563,103 +5592,520 @@
             } catch (e) { showToast('Failed to update endpoint: ' + e, 'error'); }
         }
 
+        // ── Model Registry editor ─────────────────────────────────────────────
+        // The registry rule schema is wide (3 identity fields, 4 ranking fields
+        // over 3 closed vocabularies, 6 capability booleans) and every value is
+        // drawn from a vocabulary defined in model_registry.py. Typing that into
+        // a JSON textarea meant memorising both the field names and the legal
+        // values, so each field is rendered here as a labelled control whose
+        // options ARE the vocabulary.
+        //
+        // #model_registry_json stays the single source of truth and the only
+        // thing that posts: this editor parses it on load and rewrites it on
+        // every edit. That keeps the server contract untouched (save_settings
+        // still reads one JSON field) and leaves the raw textarea usable.
+        //
+        // Every node is built with createElement/textContent rather than
+        // innerHTML -- provider/match/label/notes are operator free text and
+        // AppBuilder has no escapeHtml helper (same rule as the SSO chips).
+        const AB_REG_PROVIDERS = ['anthropic', 'claude_cli', 'copilot', 'google', 'groq',
+                                  'lmstudio', 'ollama', 'ollama2', 'ollama_cloud',
+                                  'openai', 'openrouter'];
+        const AB_REG_COST = [
+            ['free', 'free — self-hosted / no billing'],
+            ['cheap', 'cheap — metered but low cost'],
+            ['frontier', 'frontier — expensive, reserved'],
+            ['unknown', 'unknown — last resort only'],
+        ];
+        const AB_REG_COMPLEXITY = [
+            ['trivial', 'trivial'], ['small', 'small'], ['medium', 'medium'], ['large', 'large'],
+        ];
+        const AB_REG_SPEED = [
+            ['fast', 'fast'], ['standard', 'standard'], ['slow', 'slow'],
+        ];
+        // [key, label, tooltip] -- the capability booleans, in the order a
+        // reader most often needs them.
+        const AB_REG_FLAGS = [
+            ['supports_tools', 'Tool calling', 'The model accepts an OpenAI-style tools/function-calling payload. Reviewers and the fix engine need this to fetch file context.'],
+            ['native_agentic_tools', 'Native agentic tools', 'The provider runs its own agent loop with built-in file tools (claude_cli, copilot) rather than AppBuilder driving the tool calls.'],
+            ['supports_mutating_agent', 'Mutating agent', 'The agent may WRITE files in its workspace — required by feature_build. Leave off unless the provider really edits a checkout.'],
+            ['supports_structured_output', 'Structured output', 'The model can be constrained to a JSON schema natively, instead of AppBuilder repairing free-form JSON afterwards.'],
+            ['supports_batch', 'Batch API', 'The provider offers a cheaper asynchronous batch endpoint (used for bulk PR summaries).'],
+            ['supports_streaming', 'Streaming', 'The endpoint supports token streaming. Almost always on; turn it off only for an endpoint that errors on stream=true.'],
+        ];
+
+        let abRegRules = [];
+        const abRegOpen = new Set();
+
+        function abRegTextarea() { return document.getElementById('model_registry_json'); }
+
+        function abRegParseError(msg) {
+            const box = document.getElementById('registry-parse-error');
+            if (!box) return;
+            if (!msg) { box.hidden = true; box.textContent = ''; return; }
+            box.hidden = false;
+            box.textContent = msg;
+        }
+
+        function abRegLoad() {
+            // Parse the textarea into abRegRules. On invalid JSON the cards are
+            // left EMPTY and an error banner shown rather than silently
+            // discarding the operator's text -- the textarea still holds it, so
+            // fixing the JSON and pressing "Apply JSON to editor" recovers.
+            const ta = abRegTextarea();
+            if (!ta) return false;
+            let parsed;
+            try { parsed = JSON.parse(ta.value || '[]'); }
+            catch (e) {
+                abRegParseError('The registry JSON is not valid (' + e.message + '). Fix it under Advanced, then press "Apply JSON to editor". Nothing is lost — your text is still in the box.');
+                abRegRules = [];
+                return false;
+            }
+            if (!Array.isArray(parsed)) {
+                abRegParseError('The registry must be a JSON list of rule objects.');
+                abRegRules = [];
+                return false;
+            }
+            abRegParseError('');
+            abRegRules = parsed.filter(r => r && typeof r === 'object');
+            return true;
+        }
+
+        function abRegSync() {
+            // Rules -> textarea. The ONLY writer of the posted value.
+            const ta = abRegTextarea();
+            if (ta) ta.value = JSON.stringify(abRegRules, null, 2);
+        }
+
+        function _abRegLabel(text, tip) {
+            const l = document.createElement('label');
+            l.className = 'block text-[11px] font-medium text-slate-500 uppercase tracking-wider mb-1';
+            l.textContent = text;
+            if (tip) l.title = tip;
+            return l;
+        }
+
+        function _abRegField(labelText, tip, control) {
+            const wrap = document.createElement('div');
+            wrap.appendChild(_abRegLabel(labelText, tip));
+            wrap.appendChild(control);
+            return wrap;
+        }
+
+        function _abRegInput(type, value, tip, onchange) {
+            const el = document.createElement('input');
+            el.type = type;
+            el.title = tip;
+            el.className = 'w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]';
+            if (type === 'text') el.className += ' font-mono';
+            el.value = value === undefined || value === null ? '' : String(value);
+            el.addEventListener('change', () => onchange(el));
+            return el;
+        }
+
+        function _abRegSelect(options, value, tip, onchange) {
+            const el = document.createElement('select');
+            el.title = tip;
+            el.className = 'w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]';
+            options.forEach(([v, label]) => {
+                const o = document.createElement('option');
+                o.value = v;
+                o.textContent = label;
+                if (v === value) o.selected = true;
+                el.appendChild(o);
+            });
+            // A value saved by an older build that is no longer in the
+            // vocabulary must stay visible and selected, or simply opening this
+            // tab would silently rewrite it to the first option on save.
+            if (value !== undefined && value !== null && !options.some(([v]) => v === value)) {
+                const o = document.createElement('option');
+                o.value = String(value);
+                o.textContent = String(value) + ' (unrecognised)';
+                o.selected = true;
+                el.insertBefore(o, el.firstChild);
+            }
+            el.addEventListener('change', () => onchange(el));
+            return el;
+        }
+
+        function _abRegCheckbox(labelText, tip, checked, onchange) {
+            const wrap = document.createElement('label');
+            wrap.className = 'flex items-start gap-2 text-xs text-slate-600 p-2 rounded border border-slate-200 bg-white cursor-pointer';
+            wrap.title = tip;
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.title = tip;
+            cb.className = 'mt-0.5';
+            cb.checked = !!checked;
+            cb.addEventListener('change', () => onchange(cb));
+            const span = document.createElement('span');
+            span.textContent = labelText;
+            wrap.appendChild(cb);
+            wrap.appendChild(span);
+            return wrap;
+        }
+
+        function _abRegBadge(text, cls) {
+            const s = document.createElement('span');
+            s.className = 'text-[10px] px-1.5 py-0.5 rounded ' + cls;
+            s.textContent = text;
+            return s;
+        }
+
+        const _AB_REG_COST_CLS = {
+            free: 'bg-emerald-100 text-emerald-700',
+            cheap: 'bg-sky-100 text-sky-700',
+            frontier: 'bg-amber-100 text-amber-800',
+            unknown: 'bg-slate-200 text-slate-600',
+        };
+
+        function _abRegCard(rule, idx) {
+            const card = document.createElement('div');
+            card.className = 'rounded-lg border border-slate-200 bg-white';
+            if (rule.enabled === false) card.className += ' opacity-60';
+
+            // ---- summary row (always visible) ----
+            const head = document.createElement('div');
+            head.className = 'flex flex-wrap items-center gap-2 p-2';
+
+            const twisty = document.createElement('button');
+            twisty.type = 'button';
+            twisty.title = 'Show or hide every field for this rule';
+            twisty.className = 'w-6 h-6 shrink-0 rounded text-slate-400 hover:bg-slate-100';
+            twisty.textContent = abRegOpen.has(idx) ? '\u25be' : '\u25b8';
+            twisty.addEventListener('click', () => {
+                if (abRegOpen.has(idx)) abRegOpen.delete(idx); else abRegOpen.add(idx);
+                abRegRender();
+            });
+            head.appendChild(twisty);
+
+            const title = document.createElement('span');
+            title.className = 'font-mono text-xs text-slate-700';
+            title.textContent = (rule.provider || '?') + ' / ' + (rule.match || '*');
+            head.appendChild(title);
+
+            if (rule.label) {
+                const lab = document.createElement('span');
+                lab.className = 'text-xs text-slate-400';
+                lab.textContent = rule.label;
+                head.appendChild(lab);
+            }
+
+            const badges = document.createElement('div');
+            badges.className = 'flex items-center gap-1 ml-auto';
+            badges.appendChild(_abRegBadge(rule.cost_tier || 'unknown',
+                _AB_REG_COST_CLS[rule.cost_tier] || _AB_REG_COST_CLS.unknown));
+            badges.appendChild(_abRegBadge('max ' + (rule.max_complexity || 'trivial'), 'bg-slate-100 text-slate-600'));
+            badges.appendChild(_abRegBadge('rank ' + (rule.capability_rank === undefined ? '\u2013' : rule.capability_rank), 'bg-slate-100 text-slate-600'));
+            badges.appendChild(_abRegBadge(rule.speed_tier || 'auto', 'bg-slate-100 text-slate-600'));
+            if (rule.enabled === false) badges.appendChild(_abRegBadge('disabled', 'bg-red-100 text-red-700'));
+            head.appendChild(badges);
+
+            const dup = document.createElement('button');
+            dup.type = 'button';
+            dup.title = 'Copy this rule — useful for adding a narrower match glob for the same provider';
+            dup.className = 'px-2 py-1 rounded text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600';
+            dup.textContent = 'Duplicate';
+            dup.addEventListener('click', () => abRegDuplicate(idx));
+            head.appendChild(dup);
+
+            const del = document.createElement('button');
+            del.type = 'button';
+            del.title = 'Delete this rule. Models it matched fall through to the next-most-specific rule, or become unclassified.';
+            del.className = 'px-2 py-1 rounded text-[11px] bg-red-50 hover:bg-red-100 text-red-600 border border-red-200';
+            del.textContent = 'Delete';
+            del.addEventListener('click', () => abRegDelete(idx));
+            head.appendChild(del);
+
+            card.appendChild(head);
+            if (!abRegOpen.has(idx)) return card;
+
+            // ---- expanded body ----
+            const body = document.createElement('div');
+            body.className = 'border-t border-slate-100 p-3 space-y-4 bg-slate-50 rounded-b-lg';
+            const set = (k, v) => { abRegRules[idx][k] = v; abRegSync(); };
+
+            // Identity
+            const id1 = document.createElement('div');
+            id1.className = 'grid grid-cols-1 md:grid-cols-4 gap-3';
+
+            const provInput = _abRegInput('text', rule.provider || '',
+                'Which configured provider this rule applies to. Must match the provider of an endpoint in Settings → LLM → Step 2. Pick from the list or type a custom one.',
+                el => { set('provider', el.value.trim()); abRegRender(); });
+            provInput.setAttribute('list', 'ab-reg-providers');
+            id1.appendChild(_abRegField('Provider', 'The provider key this rule applies to.', provInput));
+
+            const matchInput = _abRegInput('text', rule.match === undefined ? '*' : rule.match,
+                'Glob matched against the model name, e.g. "*" for every model of this provider, "claude-opus-*" for a family, or an exact model id. The MOST SPECIFIC matching rule wins, so a family glob overrides the catch-all.',
+                el => { set('match', el.value.trim() || '*'); abRegRender(); });
+            matchInput.placeholder = '* or claude-opus-*';
+            id1.appendChild(_abRegField('Match glob', 'Glob matched against the model name; most specific wins.', matchInput));
+
+            id1.appendChild(_abRegField('Label (optional)', 'Free-text display name shown in this editor only. Has no effect on routing.',
+                _abRegInput('text', rule.label || '',
+                    'Free-text display name shown in this editor only — it has no effect on routing.',
+                    el => { set('label', el.value); abRegRender(); })));
+
+            id1.appendChild(_abRegField('Rule id', 'Unique key for this rule. Used to update a rule in place across upgrades — change it only if you know why.',
+                _abRegInput('text', rule.id || '',
+                    'Unique key for this rule. Two rules with the same id are ambiguous — keep it unique.',
+                    el => set('id', el.value.trim()))));
+            body.appendChild(id1);
+
+            // Routing
+            const r1 = document.createElement('div');
+            r1.className = 'grid grid-cols-1 md:grid-cols-4 gap-3';
+
+            r1.appendChild(_abRegField('Cost tier', 'WHICH BUDGET this model spends. The picker prefers cheaper tiers first, so frontier models are held back for work that needs them.',
+                _abRegSelect(AB_REG_COST, rule.cost_tier,
+                    'free = self-hosted/no billing (tried first). cheap = metered but low cost. frontier = expensive, reserved for demanding work. unknown = matches no curated rule, admitted only as a last resort.',
+                    el => { set('cost_tier', el.value); abRegRender(); })));
+
+            r1.appendChild(_abRegField('Max complexity', 'HARD FILTER: the hardest job this model is allowed to take. Raise it and the model is excluded from work it could have done.',
+                _abRegSelect(AB_REG_COMPLEXITY, rule.max_complexity,
+                    'A hard capability filter, not a preference. A call classified "large" will not consider a rule capped at "medium".',
+                    el => { set('max_complexity', el.value); abRegRender(); })));
+
+            const rank = _abRegInput('number', rule.capability_rank === undefined ? '' : rule.capability_rank,
+                'Relative strength WITHIN a cost tier (0-100, higher = smarter). Purely an ordering hint — it never filters, so a wrong value costs ordering, never availability. Leave blank to derive it from max complexity (trivial 10 / small 30 / medium 50 / large 70).',
+                el => {
+                    const v = el.value.trim();
+                    if (v === '') { delete abRegRules[idx].capability_rank; abRegSync(); abRegRender(); return; }
+                    let n = parseInt(v, 10);
+                    if (isNaN(n)) n = 0;
+                    set('capability_rank', Math.max(0, Math.min(100, n)));
+                    abRegRender();
+                });
+            rank.min = 0; rank.max = 100; rank.placeholder = 'blank = auto';
+            r1.appendChild(_abRegField('Capability rank (0-100)', 'Orders models that share a cost tier — e.g. Opus above Sonnet, which cost_tier and max_complexity both collapse together.', rank));
+
+            r1.appendChild(_abRegField('Speed class', 'Cold-start prior for latency-sensitive routing (chat). Measured tok/s still breaks ties inside a class.',
+                _abRegSelect([['', 'auto (derive from rank)']].concat(AB_REG_SPEED), rule.speed_tier === undefined ? '' : rule.speed_tier,
+                    'Declared speed class, used before any measurements exist for an endpoint. "auto" derives it from the capability rank (>=85 slow, >=60 standard, else fast).',
+                    el => {
+                        if (el.value === '') { delete abRegRules[idx].speed_tier; abRegSync(); }
+                        else set('speed_tier', el.value);
+                        abRegRender();
+                    })));
+            body.appendChild(r1);
+
+            const r2 = document.createElement('div');
+            r2.className = 'grid grid-cols-1 md:grid-cols-4 gap-3';
+            const ctx = _abRegInput('number', rule.context_window === undefined ? '' : rule.context_window,
+                'Usable context window in TOKENS (not characters). Calls whose prompt would not fit skip this model. Leave blank to fall back to 8192.',
+                el => {
+                    const v = el.value.trim();
+                    if (v === '') { delete abRegRules[idx].context_window; abRegSync(); return; }
+                    const n = parseInt(v, 10);
+                    set('context_window', isNaN(n) || n < 0 ? 0 : n);
+                });
+            ctx.min = 0; ctx.step = 1024; ctx.placeholder = '32768';
+            r2.appendChild(_abRegField('Context window (tokens)', 'Usable context in tokens. Prompts larger than this skip the model.', ctx));
+
+            const enWrap = document.createElement('div');
+            enWrap.appendChild(_abRegLabel('Rule enabled', 'Turn a rule off to stop it matching without deleting it.'));
+            enWrap.appendChild(_abRegCheckbox('Use this rule when routing',
+                'Unchecked, the rule is kept but ignored — models it covered fall through to the next-most-specific rule.',
+                rule.enabled !== false,
+                cb => { set('enabled', cb.checked); abRegRender(); }));
+            r2.appendChild(enWrap);
+
+            const notesWrap = document.createElement('div');
+            notesWrap.className = 'md:col-span-2';
+            notesWrap.appendChild(_abRegLabel('Notes', 'Why this rule exists. Shown only here.'));
+            notesWrap.appendChild(_abRegInput('text', rule.notes || '',
+                'Free-text reminder of why this rule is set the way it is. Has no effect on routing.',
+                el => set('notes', el.value)));
+            r2.appendChild(notesWrap);
+            body.appendChild(r2);
+
+            // Capabilities
+            const capLabel = document.createElement('p');
+            capLabel.className = 'text-[11px] font-medium text-slate-500 uppercase tracking-wider';
+            capLabel.textContent = 'Capabilities';
+            body.appendChild(capLabel);
+
+            const caps = document.createElement('div');
+            caps.className = 'grid grid-cols-1 md:grid-cols-3 gap-2';
+            AB_REG_FLAGS.forEach(([key, text, tip]) => {
+                caps.appendChild(_abRegCheckbox(text, tip, !!rule[key], cb => set(key, cb.checked)));
+            });
+            body.appendChild(caps);
+
+            card.appendChild(body);
+            return card;
+        }
+
+        function abRegRender() {
+            const host = document.getElementById('registry-cards');
+            if (!host) return;
+            while (host.firstChild) host.removeChild(host.firstChild);
+
+            const filterEl = document.getElementById('registry-filter');
+            const q = ((filterEl && filterEl.value) || '').trim().toLowerCase();
+            let shown = 0;
+            abRegRules.forEach((rule, idx) => {
+                if (q) {
+                    const hay = [rule.provider, rule.match, rule.label, rule.id, rule.notes]
+                        .map(v => String(v === undefined || v === null ? '' : v).toLowerCase()).join(' ');
+                    if (hay.indexOf(q) === -1) return;
+                }
+                shown++;
+                host.appendChild(_abRegCard(rule, idx));
+            });
+
+            if (!shown) {
+                const empty = document.createElement('p');
+                empty.className = 'text-xs text-slate-400 p-4 text-center border border-dashed border-slate-200 rounded-lg';
+                empty.textContent = abRegRules.length
+                    ? 'No rule matches that filter.'
+                    : 'No curated rules yet — press "Add rule" to create one.';
+                host.appendChild(empty);
+            }
+
+            const count = document.getElementById('registry-rule-count');
+            if (count) {
+                count.textContent = q
+                    ? shown + ' of ' + abRegRules.length + ' rule(s) shown'
+                    : abRegRules.length + ' rule(s)';
+            }
+        }
+
+        function abRegUniqueId(base) {
+            const safe = String(base || 'rule').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'rule';
+            let id = safe, n = 2;
+            while (abRegRules.some(r => r && r.id === id)) { id = safe + '-' + n; n++; }
+            return id;
+        }
+
+        function abRegAdd() {
+            abRegRules.push({
+                id: abRegUniqueId('new-rule'), provider: '', match: '*', label: '',
+                cost_tier: 'cheap', max_complexity: 'medium', context_window: 32768,
+                supports_tools: false, native_agentic_tools: false, supports_mutating_agent: false,
+                supports_structured_output: false, supports_batch: false, supports_streaming: true,
+                enabled: true, notes: ''
+            });
+            abRegOpen.add(abRegRules.length - 1);
+            abRegSync();
+            abRegRender();
+            const host = document.getElementById('registry-cards');
+            if (host && host.lastChild && host.lastChild.scrollIntoView) {
+                host.lastChild.scrollIntoView({behavior: 'smooth', block: 'center'});
+            }
+        }
+
+        function abRegDuplicate(idx) {
+            const copy = JSON.parse(JSON.stringify(abRegRules[idx] || {}));
+            copy.id = abRegUniqueId((copy.id || 'rule') + '-copy');
+            abRegRules.splice(idx + 1, 0, copy);
+            // Indices after the insertion point shift by one, and abRegOpen is
+            // keyed by index -- rebuild it rather than leaving the wrong cards
+            // expanded.
+            const moved = new Set();
+            abRegOpen.forEach(i => moved.add(i > idx ? i + 1 : i));
+            moved.add(idx + 1);
+            abRegOpen.clear();
+            moved.forEach(i => abRegOpen.add(i));
+            abRegSync();
+            abRegRender();
+        }
+
+        function abRegDelete(idx) {
+            const r = abRegRules[idx] || {};
+            const what = (r.provider || '?') + ' / ' + (r.match || '*');
+            if (!confirm('Delete the rule for ' + what + '?\n\nModels it matched fall through to the next-most-specific rule, or become unclassified. Nothing is persisted until you press Save.')) return;
+            abRegRules.splice(idx, 1);
+            const moved = new Set();
+            abRegOpen.forEach(i => { if (i < idx) moved.add(i); else if (i > idx) moved.add(i - 1); });
+            abRegOpen.clear();
+            moved.forEach(i => abRegOpen.add(i));
+            abRegSync();
+            abRegRender();
+        }
+
+        function abRegExpandAll(open) {
+            abRegOpen.clear();
+            if (open) abRegRules.forEach((_, i) => abRegOpen.add(i));
+            abRegRender();
+        }
+
+        function abRegToggleJson() {
+            const box = document.getElementById('registry-json-box');
+            const link = document.getElementById('registry-json-toggle');
+            if (!box) return;
+            const showing = box.hasAttribute('hidden');
+            if (showing) { box.removeAttribute('hidden'); if (link) link.textContent = '\u25be Advanced \u2014 raw JSON'; }
+            else { box.setAttribute('hidden', ''); if (link) link.textContent = '\u25b8 Advanced \u2014 raw JSON'; }
+        }
+
+        function abRegApplyJson() {
+            if (!abRegLoad()) { abRegRender(); return; }
+            abRegSync();   // normalise formatting so the box matches what posts
+            abRegRender();
+            showToast('Editor rebuilt from the JSON.', 'success');
+        }
+
         function promoteRegistryStub(provider, model) {
-            // Append a prefilled curated rule for an unclassified auto-discovered
-            // model to the Model Registry textarea so the operator can tune its
-            // cost tier / capabilities, then Save. Non-destructive: it edits the
-            // textarea in place and never submits on its own.
-            const ta = document.getElementById('model_registry_json');
-            if (!ta) return;
-            let rules;
-            try { rules = JSON.parse(ta.value || '[]'); }
-            catch (e) { showToast('Registry JSON is invalid — fix it before promoting.', 'error'); return; }
-            if (!Array.isArray(rules)) rules = [];
+            // Add a prefilled curated rule for an unclassified auto-discovered
+            // model, then open it so its cost tier / capabilities can be tuned.
+            if (!abRegLoad()) { abRegRender(); showToast('Registry JSON is invalid — fix it under Advanced first.', 'error'); return; }
             const safeId = (provider + '-' + model).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-            if (rules.some(r => r && r.id === safeId)) { showToast('Already added — edit it below.', 'warn'); return; }
-            rules.push({
+            const at = abRegRules.findIndex(r => r && r.id === safeId);
+            if (at !== -1) {
+                abRegOpen.add(at);
+                abRegRender();
+                showToast('Already added — tune it below.', 'warn');
+                return;
+            }
+            abRegRules.push({
                 id: safeId, provider: provider, match: model, label: model,
                 cost_tier: 'cheap', max_complexity: 'medium', context_window: 32768,
                 supports_tools: false, native_agentic_tools: false, supports_mutating_agent: false,
                 supports_structured_output: false, supports_batch: false, supports_streaming: true,
                 enabled: true, notes: 'promoted from auto-discovery — review cost tier & capabilities'
             });
-            ta.value = JSON.stringify(rules, null, 2);
-            ta.scrollIntoView({behavior: 'smooth', block: 'center'});
-            showToast('Rule added to the editor — review and Save.', 'success');
-        }
-
-        function toggleRegistryEditor() {
-            // Opt-in ("editable if the user chooses") reveal of the friendly
-            // per-rule editor. Does not touch the JSON textarea itself.
-            const box = document.getElementById('registry-editor');
-            const link = document.getElementById('registry-editor-toggle');
-            if (!box) return;
-            const showing = box.hasAttribute('hidden');
-            if (showing) { box.removeAttribute('hidden'); if (link) link.textContent = '✕ Hide visual editor'; }
-            else { box.setAttribute('hidden', ''); if (link) link.textContent = '✎ Edit rules visually'; }
-        }
-
-        function _registryUpsert(rules, provider, match, costTier, maxComplexity) {
-            // Upsert one rule into the parsed `rules` array, matched on
-            // provider+match. Returns 'added' or 'updated'. Reuses the same
-            // capability defaults as promoteRegistryStub so preview columns
-            // aren't blank for a brand-new rule. Pure array mutation — the
-            // caller writes it back to the textarea.
-            provider = (provider || '').trim();
-            match = (match || '*').trim() || '*';
-            const existing = rules.find(r => r && (r.provider || '') === provider && (r.match || '') === match);
-            if (existing) {
-                existing.cost_tier = costTier;
-                existing.max_complexity = maxComplexity;
-                return 'updated';
+            abRegOpen.add(abRegRules.length - 1);
+            abRegSync();
+            abRegRender();
+            const host = document.getElementById('registry-cards');
+            if (host && host.lastChild && host.lastChild.scrollIntoView) {
+                host.lastChild.scrollIntoView({behavior: 'smooth', block: 'center'});
             }
-            const safeId = (provider + '-' + match).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-            let id = safeId || provider;
-            let n = 2;
-            while (rules.some(r => r && r.id === id)) { id = safeId + '-' + n; n++; }
-            rules.push({
-                id: id, provider: provider, match: match, label: provider + ' ' + match,
-                cost_tier: costTier, max_complexity: maxComplexity, context_window: 32768,
-                supports_tools: false, native_agentic_tools: false, supports_mutating_agent: false,
-                supports_structured_output: false, supports_batch: false, supports_streaming: true,
-                enabled: true, notes: 'added via visual editor — review capabilities'
-            });
-            return 'added';
-        }
-
-        function registryUpsertRule() {
-            // Read the visual-editor form, upsert one rule into the JSON
-            // textarea, and let the operator Save. Never submits on its own.
-            const ta = document.getElementById('model_registry_json');
-            if (!ta) return;
-            let rules;
-            try { rules = JSON.parse(ta.value || '[]'); }
-            catch (e) { showToast('Registry JSON is invalid — fix it before editing visually.', 'error'); return; }
-            if (!Array.isArray(rules)) rules = [];
-            const provider = (document.getElementById('registry-form-provider') || {}).value || '';
-            const match = (document.getElementById('registry-form-match') || {}).value || '*';
-            const cost = (document.getElementById('registry-form-cost') || {}).value || 'free';
-            const complexity = (document.getElementById('registry-form-complexity') || {}).value || 'medium';
-            const what = _registryUpsert(rules, provider, match, cost, complexity);
-            ta.value = JSON.stringify(rules, null, 2);
-            showToast('Rule ' + what + ' for ' + provider + ' (' + match + ') — review and Save.', 'success');
+            showToast('Rule added — review the cost tier and capabilities, then Save.', 'success');
         }
 
         function registrySetLocalFree() {
             // One-click convenience: set the self-hosted providers (ollama =
             // typical CPU box, ollama2 = 2nd/GPU box, lmstudio) to cost tier
             // free with a "*" match. Directly answers "set my CPU and GPU to
-            // free". Upserts into the JSON textarea; operator clicks Save.
-            const ta = document.getElementById('model_registry_json');
-            if (!ta) return;
-            let rules;
-            try { rules = JSON.parse(ta.value || '[]'); }
-            catch (e) { showToast('Registry JSON is invalid — fix it before editing visually.', 'error'); return; }
-            if (!Array.isArray(rules)) rules = [];
-            ['ollama', 'ollama2', 'lmstudio'].forEach(p => _registryUpsert(rules, p, '*', 'free', 'medium'));
-            ta.value = JSON.stringify(rules, null, 2);
+            // free". Upserts into the rule list; operator clicks Save.
+            if (!abRegLoad()) { abRegRender(); showToast('Registry JSON is invalid — fix it under Advanced first.', 'error'); return; }
+            ['ollama', 'ollama2', 'lmstudio'].forEach(p => {
+                const existing = abRegRules.find(r => r && (r.provider || '') === p && (r.match || '') === '*');
+                if (existing) { existing.cost_tier = 'free'; existing.max_complexity = existing.max_complexity || 'medium'; return; }
+                abRegRules.push({
+                    id: abRegUniqueId(p + '-all'), provider: p, match: '*', label: p + ' (all models)',
+                    cost_tier: 'free', max_complexity: 'medium', context_window: 32768,
+                    supports_tools: false, native_agentic_tools: false, supports_mutating_agent: false,
+                    supports_structured_output: false, supports_batch: false, supports_streaming: true,
+                    enabled: true, notes: 'self-hosted — no billing'
+                });
+            });
+            abRegSync();
+            abRegRender();
             showToast('Local providers (ollama, ollama2, lmstudio) set to free — review and Save.', 'success');
         }
+
+        // Build the cards from the server-rendered JSON on first paint. Guarded
+        // because this <script> is shared with the non-settings views, where the
+        // textarea does not exist.
+        (function () {
+            if (!abRegTextarea()) return;
+            abRegLoad();
+            abRegRender();
+        })();
+        // ── End Model Registry editor ─────────────────────────────────────────
         // ── End LLM Vault UI ──────────────────────────────────────────────────
 
         // ── Hub Agent status panel ──────────────────────────────────────────
