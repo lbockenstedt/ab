@@ -1171,6 +1171,15 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
             f["detail"] = ("No open PR in `%s` touches `%s`. Update the twin in lockstep "
                            "(dual-copy INVARIANT), or open the matching PR.\n\n"
                            % (twin.get("repo", "?"), twin.get("path", "?"))) + f.get("detail", "")
+            # EXTERNAL: the obligation lives in ANOTHER repo, so no edit to this
+            # PR can discharge it. The remediation engine only rewrites files in
+            # the PR's own checkout, so without this flag it spends every attempt
+            # failing at something structurally impossible and then stamps
+            # "manual intervention required" -- pointing the operator at this PR
+            # when the action is actually to open one in `twin.repo`. The finding
+            # still BLOCKS the merge (it is real); it just must not be treated as
+            # in-repo remediable work. See should_remediate.
+            f["external"] = True
         # verdict is None → unreachable: keep the original advisory unchanged.
         out.append(f)
     return out

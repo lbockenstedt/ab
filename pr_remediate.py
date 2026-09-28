@@ -473,6 +473,29 @@ def should_remediate(rec, config):
     # the merge-bar return takes over.
     errors = int(rec.get("errors") or 0)
     warnings = int(rec.get("warnings") or 0)
+    # EXTERNAL TIER-1 FINDINGS ARE NOT REMEDIABLE HERE, AT ALL.
+    # A cross-repo twin finding says "the copy of this file in the OTHER repo is
+    # out of lockstep". The fix engine only rewrites files in this PR's own
+    # checkout, so no diff it can produce will ever clear one. Left in the count
+    # above, they read as ordinary repairable work: lm#1058 sat on five of them,
+    # burned all three attempts generating diffs the panel then correctly
+    # rejected for "not addressing the actual blocking findings", and ended
+    # stamped "Automated Remediation Limit Reached — manual operator
+    # intervention required" — which points the operator at the wrong PR
+    # entirely. The real action is to open one in the twin repo.
+    #
+    # This does NOT unblock the merge: pr_review still holds the PR while any
+    # Tier-1 finding stands, which is correct because the drift is real. It only
+    # stops spending the (expensive, model-backed) attempt budget on something
+    # structurally impossible, so the budget is still intact for the in-repo
+    # findings of a LATER head. Mixed records therefore still remediate: the
+    # skip applies only when EVERY Tier-1 finding is external.
+    external = int(rec.get("tier1_external") or 0)
+    if errors == 0 and 0 < warnings <= external:
+        return (False,
+                "%d Tier-1 finding(s) are cross-repo twin obligations — no edit to this PR "
+                "can clear them; open the matching PR in the twin repo" % warnings,
+                0.0)
     if errors > 0 or warnings > 0:
         # Findings short-circuit the branches below, so the severity FLOORS those
         # branches would have applied have to be applied here too — otherwise a

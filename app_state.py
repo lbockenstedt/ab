@@ -184,12 +184,20 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     without re-reading the comment."""
     global state
     levels = {"error": 0, "warning": 0, "advisory": 0}
+    # Tier-1 findings whose fix lives in ANOTHER repo (cross-repo twins). Counted
+    # separately so should_remediate can tell "blocked by work this PR can do"
+    # from "blocked by work no edit to this PR could ever do". Recomputed from
+    # `findings` on every scan exactly like the level counts, so -- unlike the
+    # per-PR attempt counters below -- it must NOT be carried over from `prev`.
+    tier1_external = 0
     items = []
     for f in (findings or []):
         f = f or {}
         lvl = f.get("level")
         if lvl in levels:
             levels[lvl] += 1
+        if lvl in ("error", "warning") and f.get("external"):
+            tier1_external += 1
         items.append({"level": lvl or "advisory",
                       "title": (f.get("title") or "")[:140],
                       "detail": (f.get("detail") or "")[:300]})
@@ -285,6 +293,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "errors": levels["error"],
                 "warnings": levels["warning"],
                 "advisories": levels["advisory"],
+                "tier1_external": tier1_external,
                 "items": items[:20],
                 # Advisory skeptical-panel result (see the docstring). Rebuilt on
                 # every re-scan alongside findings, so it always describes the head
