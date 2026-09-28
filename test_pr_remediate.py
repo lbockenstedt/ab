@@ -184,6 +184,9 @@ def test_auto_remediate_respects_max_attempt_ceiling():
     pr_remediate.state["pr_reviews"] = {
         "lbockenstedt/nw#99": {
             "remediation_attempts": 3,
+            # The ordinary ceiling alone no longer means exhausted: a PR still
+            # gets one premium escalation turn past it. Both must be spent.
+            "premium_attempts": 1,
             "panel_critique": "Issue persists",
         }
     }

@@ -365,6 +365,9 @@ def test_auto_remediate_exhausted_attempts_posts_concierge_guidance():
     pr_remediate.state["pr_reviews"] = {
         "lbockenstedt/nw#88": {
             "remediation_attempts": 3,
+            # Exhausted now means the ordinary budget AND the single premium
+            # escalation attempt are both spent (pr_remediate.premium_turn_available).
+            "premium_attempts": 1,
             "panel_critique": "Persistent state-logic defect",
         }
     }
