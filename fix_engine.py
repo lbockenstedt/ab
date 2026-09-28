@@ -1848,6 +1848,12 @@ def _model_allowed(model, patterns):
     return any(fnmatch.fnmatchcase(m, p) for p in patterns or ())
 
 
+#: Defaults only -- the operator sets this from Settings -> "Premium escalation
+#: models" (routes.save_settings writes pr_remediate_premium_model_allowlist),
+#: because which models are top-tier changes faster than AppBuilder ships.
+DEFAULT_PREMIUM_FIX_ALLOWLIST = ("claude-fable-*", "gpt-6*")
+
+
 #: Models allowed to WRITE code, as opposed to merely judging it. Deliberately the
 #: same bar as the review panel: a model trusted to author a fix that lands in the
 #: fleet should be at least as strong as one trusted to reject it. Without this the
@@ -1856,17 +1862,38 @@ def _model_allowed(model, patterns):
 #: flash-class model that answered with reasoning prose instead of JSON, burning the
 #: remediation budget on every PR in the fleet. Override with config
 #: `pr_fix_model_allowlist`; an explicit empty list DISABLES the policy.
-DEFAULT_FIX_ALLOWLIST = DEFAULT_PANEL_ALLOWLIST
+#:
+#: The premium tier is unioned in because it sits ABOVE the panel bar, not
+#: below it: every premium model outranks Opus in model_registry. Without the
+#: union the two policies intersect to nothing on the escalation turn --
+#: _premium_fix_exclusions keeps everything non-premium out while this floor
+#: keeps everything non-Opus out -- so the pool is empty and the tier is
+#: silently inert. Widening the PANEL bar instead would have been wrong: the
+#: panel runs on every PR, so it would seat the most expensive models on the
+#: roster for routine reviews, which is the cost blow-up this tier avoids.
+DEFAULT_FIX_ALLOWLIST = DEFAULT_PANEL_ALLOWLIST + DEFAULT_PREMIUM_FIX_ALLOWLIST
 
 
 def _fix_allowlist(config):
-    """Active fix-model allowlist patterns; () means policy disabled."""
+    """Active fix-model allowlist patterns; () means policy disabled.
+
+    Whatever the operator marks premium is always admitted here. Settings lets
+    them name any model as premium, and a premium model the fix floor rejects
+    could never write the escalation fix it was chosen for -- the UI would
+    appear to work and change nothing. Admitting it is safe because
+    _premium_fix_exclusions still bars premium models from every ORDINARY
+    turn, so this widens exactly one turn, not the general write bar.
+    """
     raw = (config or {}).get("pr_fix_model_allowlist")
     if raw is None:
-        return DEFAULT_FIX_ALLOWLIST
-    if isinstance(raw, str):
-        raw = re.split(r"[,\s]+", raw)
-    return tuple(p.strip().lower() for p in raw if p and str(p).strip())
+        base = DEFAULT_FIX_ALLOWLIST
+    elif isinstance(raw, str):
+        base = tuple(p.strip().lower() for p in re.split(r"[,\s]+", raw) if p and p.strip())
+    else:
+        base = tuple(p.strip().lower() for p in raw if p and str(p).strip())
+    if not base:
+        return ()  # explicit empty list DISABLES the policy -- preserved exactly
+    return tuple(dict.fromkeys(base + _premium_allowlist(config)))
 
 
 def _fix_model_exclusions(config, existing=()):
@@ -1906,6 +1933,87 @@ def _fix_model_exclusions(config, existing=()):
 #: escalation to a model already shown to be insufficient. Override with config
 #: `pr_remediate_last_turn_model_allowlist`; an explicit empty list disables it.
 DEFAULT_LAST_TURN_FIX_ALLOWLIST = ("claude-opus-5*", "claude-opus-6*")
+
+
+#: The PREMIUM escalation tier: the models kept in reserve for a PR that the
+#: ordinary ladder (including the Opus-class last turn) has already failed to
+#: repair. They are the most expensive models on the roster, so unlike every
+#: other tier this one is capped by a COUNT, not just by position:
+#: `pr_remediate_premium_attempts` (default 1) is the total number of
+#: remediation attempts a single PR may spend on them, ever.
+#:
+#: Two separate mechanisms are needed and BOTH matter:
+#:   * `_premium_fix_exclusions(want_premium=False)` keeps them OUT of every
+#:     ordinary turn -- without it the cost-first picker reaches for them
+#:     first, because Copilot's generic registry fallback rates unmatched
+#:     models "cheap" (see model_registry copilot-claude-fable/-gpt6-astra).
+#:   * `_premium_fix_exclusions(want_premium=True)` narrows the pool TO them
+#:     for the single escalation turn that is allowed to use them.
+#:
+#: A name allowlist, never a cost-tier bar: Opus and Sonnet share the frontier
+#: tier, so such a bar would both re-admit Sonnet and swallow the
+#: Opus rung this tier is meant to sit above. Override with config
+#: `pr_remediate_premium_model_allowlist`; an explicit empty list disables it.
+
+
+
+def _premium_allowlist(config):
+    raw = (config or {}).get("pr_remediate_premium_model_allowlist")
+    if raw is None:
+        return DEFAULT_PREMIUM_FIX_ALLOWLIST
+    if isinstance(raw, str):
+        raw = re.split(r"[,\s]+", raw)
+    return tuple(p.strip().lower() for p in raw if p and str(p).strip())
+
+
+def is_premium_fix_model(model, config=None):
+    """Is *model* one of the premium escalation models?
+
+    Used to decide whether a completed attempt should be charged to the
+    premium budget. Charging is by MODEL ACTUALLY USED rather than by which
+    turn we thought we were on, so a premium call always costs a premium
+    attempt even if the picker reached it by some other route."""
+    patterns = _premium_allowlist(config or {})
+    return bool(patterns) and _model_allowed(model, patterns)
+
+
+def _premium_fix_exclusions(config, existing=(), *, want_premium=False):
+    """Model keys to exclude so the fix pool contains ONLY the premium
+    escalation models (``want_premium=True``) or NONE of them
+    (``want_premium=False``, the default for every ordinary turn).
+
+    Returns `existing` unchanged if the policy is disabled, if candidates
+    cannot be enumerated, or if the requested side of the split has no
+    SELECTABLE candidate left -- excluding everything would hand the picker an
+    empty pool and turn a cost guard into a dead end. That last case is the
+    normal one when no premium model is configured at all: every candidate is
+    non-premium, so `want_premium=False` narrows nothing and
+    `want_premium=True` correctly declines to fire."""
+    patterns = _premium_allowlist(config or {})
+    if not patterns:
+        return tuple(existing)
+    try:
+        candidates = llm_client._enumerate_candidates(config)
+    except Exception as e:  # noqa: BLE001 -- never block fixing because enumeration broke
+        logger.debug("_premium_fix_exclusions: could not enumerate candidates: %s", e)
+        return tuple(existing)
+    exclude, eligible = set(existing), 0
+    for c in candidates:
+        if bool(_model_allowed(c.get("model"), patterns)) == bool(want_premium):
+            # Membership is tested in BOTH forms because exclusion sets
+            # legitimately mix name strings and ModelKey tuples.
+            if c["key"] not in exclude and c.get("model") not in exclude:
+                eligible += 1
+        else:
+            exclude.add(c["key"])
+    if not eligible:
+        if want_premium:
+            logger.warning("_premium_fix_exclusions: no selectable premium model (want one of "
+                           "%s); leaving the fix pool unnarrowed", ", ".join(patterns))
+        return tuple(existing)
+    # sorted(key=str): exclude sets legitimately MIX types -- see
+    # _last_turn_fix_exclusions for the TypeError this prevents.
+    return tuple(sorted(exclude, key=str))
 
 
 def _last_turn_fix_exclusions(config, existing=()):
