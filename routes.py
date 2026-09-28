@@ -1,5 +1,5 @@
 """FastAPI HTTP routes exposed via an APIRouter, included by main.app (extracted from main.py)."""
-import asyncio, git, json, os, re, shutil, subprocess, threading, time, traceback, uuid
+import asyncio, fnmatch, git, json, os, re, shutil, subprocess, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
@@ -2258,6 +2258,11 @@ def ensure_config_defaults(config):
     from pr_remediate import DEFAULT_TARGET_SCORE as PR_REMEDIATE_DEFAULT_TARGET
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
+    # Premium escalation: one extra remediation turn, past the ordinary
+    # ceiling above, restricted to the top-tier models. Capped by a COUNT
+    # because cost -- not capability -- is the binding constraint here.
+    # 0 disables the extra turn entirely. See pr_remediate.premium_turn_available.
+    config.setdefault("pr_remediate_premium_attempts", 1)
     # AppBuilder's remediation OBJECTIVE, in one number: keep repairing a PR
     # until BOTH panels Approve at or above this confidence. See
     # pr_remediate.should_remediate — the single choke point that reads it.
@@ -2324,6 +2329,7 @@ async def settings_page(request: Request):
     config.setdefault("pr_review_state_logic_enabled", False)
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
+    config.setdefault("pr_remediate_premium_attempts", 1)
     config.setdefault("pr_remediate_target_score", PR_REMEDIATE_DEFAULT_TARGET)
     config.setdefault("pr_remediate_address_all_concerns", True)
     config.setdefault("feature_automerge_docs_bypass_panel", True)
@@ -2503,6 +2509,37 @@ async def settings_page(request: Request):
             feature_automerge_branch_options.append(_am_b)
     feature_automerge_target_branches_set = set(feature_automerge_target_branches)
 
+    # ── Premium escalation models ────────────────────────────────────────
+    # Which models count as "top tier" changes faster than AppBuilder ships
+    # (fable and gpt-6 arrived mid-cycle), so this is operator-editable rather
+    # than a constant only a code change can move. Options come from the
+    # configured llm_entries -- no API call, same spirit as the branch
+    # selector -- and the effective allowlist (config value, else
+    # fix_engine.DEFAULT_PREMIUM_FIX_ALLOWLIST) decides what renders ticked.
+    #
+    # Pre-ticking the defaults is load-bearing, not cosmetic: an unticked
+    # checkbox submits nothing, so a form rendered with everything clear would
+    # save an EMPTY allowlist on the next unrelated Settings save. Empty means
+    # "no model is premium", which silently removes the reservation and lets
+    # the cost-first picker spend the most expensive models on routine work --
+    # exactly the failure this tier exists to prevent.
+    from fix_engine import _premium_allowlist as _prem_patterns  # local: heavy import chain
+    _premium_patterns = list(_prem_patterns(config))
+    premium_model_options = sorted({
+        (e.get("model") or "").strip()
+        for e in (config.get("llm_entries") or [])
+        if isinstance(e, dict) and (e.get("model") or "").strip()
+    })
+    premium_models_set = {
+        m for m in premium_model_options
+        if any(fnmatch.fnmatchcase(m.lower().split("/")[-1], p) for p in _premium_patterns)
+    }
+    # Any pattern that is a glob (or names a model not currently configured)
+    # has no checkbox to live in. Surface it in the free-text field so opening
+    # Settings cannot silently drop a value the operator set.
+    premium_models_extra = ", ".join(
+        p for p in _premium_patterns if p not in {m.lower() for m in premium_models_set})
+
     # SECURITY: llm_credentials/llm_entries carry plaintext api_key values.
     # They used to flow into the template raw via the **config merge below,
     # which embedded every configured key directly in the served HTML
@@ -2620,6 +2657,9 @@ async def settings_page(request: Request):
         "feature_automerge_branch_options": feature_automerge_branch_options,
         "feature_automerge_target_branches_set": feature_automerge_target_branches_set,
         "feature_automerge_repos_set": feature_automerge_repos_set,
+        "premium_model_options": premium_model_options,
+        "premium_models_set": premium_models_set,
+        "premium_models_extra": premium_models_extra,
         "log_module_options": log_module_options,
         "state": state,
     })
@@ -3135,6 +3175,38 @@ async def save_settings(request: Request):
         _am_release_save = {"main", "master", (config_data.get("default_branch") or "main")}
         _am_branches = [b for b in _am_branches if b not in _am_release_save]
     config_data["feature_automerge_target_branches"] = list(dict.fromkeys(_am_branches))
+
+    # ── Premium escalation tier ──────────────────────────────────────────
+    # Budget first. Clamped 0..3 rather than trusted: this is the number of
+    # calls AppBuilder may make to the most expensive models on the roster,
+    # so a typo here is a bill, not a bug. 0 disables the extra turn.
+    _prem_n = str(data.get("pr_remediate_premium_attempts") or "").strip()
+    try:
+        config_data["pr_remediate_premium_attempts"] = (
+            max(0, min(3, int(float(_prem_n)))) if _prem_n else 1)
+    except (TypeError, ValueError):
+        config_data["pr_remediate_premium_attempts"] = 1
+    # Allowlist: checkbox selector over the configured models plus a free-text
+    # field for globs (claude-fable-*, gpt-6*) and models not configured yet.
+    # Same shape as the branch selector above.
+    if hasattr(form_data, "getlist"):
+        _prem_checked = form_data.getlist("premium_models")
+    else:
+        _v4 = data.get("premium_models")
+        _v4 = [_v4] if isinstance(_v4, str) else (_v4 or [])
+        _prem_checked = list(_v4)
+    _prem_extra_raw = data.get("premium_models_extra", "") or ""
+    _prem = [str(m).strip().lower() for m in _prem_checked if m and str(m).strip()]
+    for _p4 in _prem_extra_raw.replace("\n", ",").split(","):
+        _p4 = _p4.strip().lower()
+        if _p4 and _p4 not in _prem:
+            _prem.append(_p4)
+    # An empty result is saved as-is and genuinely disables the reservation --
+    # that is the documented meaning of an empty allowlist, and the operator
+    # can reach it deliberately by clearing every box. It is safe to persist
+    # only because the GET renders the effective defaults ALREADY TICKED, so
+    # saving an unrelated setting cannot empty this by omission.
+    config_data["pr_remediate_premium_model_allowlist"] = list(dict.fromkeys(_prem))
 
     # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical
     # always fix). Stops the fixer churning on log-scraped issues.

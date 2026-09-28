@@ -51,6 +51,17 @@ def fake_fix_engine(monkeypatch):
         return tuple(sorted(set(existing) | {("copilot", "", "cheap-model")}))
 
     mod._last_turn_fix_exclusions = _excl
+
+    # The premium split runs BEFORE the Opus narrowing on every turn (see
+    # pr_remediate.next_remediation_requirements). Stub it as a pass-through so
+    # these tests exercise the real code path rather than the degraded one the
+    # caller's except-clause would take on AttributeError.
+    def _premium(config, existing=(), *, want_premium=False):
+        mod.premium_calls.append({"existing": tuple(existing), "want_premium": want_premium})
+        return tuple(existing)
+
+    mod.premium_calls = []
+    mod._premium_fix_exclusions = _premium
     monkeypatch.setitem(sys.modules, "fix_engine", mod)
     return mod
 
@@ -212,9 +223,9 @@ def _load_exclusion_fns(candidates):
     src = open("fix_engine.py").read()
     tree = ast.parse(src)
     want_fn = {"_model_allowed", "_fix_allowlist", "_fix_model_exclusions",
-               "_last_turn_fix_exclusions"}
+               "_last_turn_fix_exclusions", "_premium_allowlist"}
     want_as = {"DEFAULT_PANEL_ALLOWLIST", "DEFAULT_FIX_ALLOWLIST",
-               "DEFAULT_LAST_TURN_FIX_ALLOWLIST"}
+               "DEFAULT_LAST_TURN_FIX_ALLOWLIST", "DEFAULT_PREMIUM_FIX_ALLOWLIST"}
     segs = []
     for n in tree.body:
         if isinstance(n, ast.FunctionDef) and n.name in want_fn:

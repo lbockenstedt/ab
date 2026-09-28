@@ -587,6 +587,47 @@ def _tools_to_anthropic(tools):
     ]
 
 
+def _tools_to_responses(tools):
+    """Convert either tool-schema shape (see _tool_spec) to Responses API format.
+
+    The Responses API takes FLAT entries -- name/description/parameters sit
+    directly on the tool object rather than nested under a "function" key as
+    chat/completions requires. Sending the nested shape is rejected outright.
+    """
+    return [
+        {"type": "function", "name": (fn := _tool_spec(t)).get("name", ""),
+         "description": fn.get("description", ""),
+         "parameters": fn.get("parameters", {})}
+        for t in (tools or [])
+    ]
+
+
+def _responses_tool_calls(data):
+    """Tool calls from a Responses API body, in this codebase's internal shape.
+
+    `output` is a LIST OF ITEMS (see _responses_output_text): the function calls
+    are {"type": "function_call"} entries sitting alongside reasoning/message
+    items, and they carry `call_id`/`name`/`arguments` flat rather than nested.
+    Returns None rather than [] when there are none, because the caller uses
+    "no tool calls" to decide the turn is final.
+    """
+    if not isinstance(data, dict):
+        return None
+    out = data.get("output")
+    if not isinstance(out, list):
+        return None
+    calls = []
+    for i, item in enumerate(out):
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        calls.append({
+            "id": item.get("call_id") or item.get("id") or "call_%d" % i,
+            "function": {"name": item.get("name") or "",
+                         "arguments": item.get("arguments") or "{}"},
+        })
+    return calls or None
+
+
 def _to_openai_messages(messages):
     """Adapt internal messages for the OpenAI API (normalises tool roles and tool_calls)."""
     result = []
@@ -2128,11 +2169,19 @@ def _copilot_wants_responses_api(bearer, model):
 def _to_responses_input(messages):
     """Adapt internal messages to the Responses API. Returns (instructions, items).
 
-    Two shape differences from chat/completions that the API rejects if you get
+    Three shape differences from chat/completions that the API rejects if you get
     them wrong: system prompts move out of the message list into a top-level
-    `instructions` string, and each message's text is wrapped in a typed content
-    part whose type depends on the role -- "output_text" for assistant turns,
-    "input_text" for everything else.
+    `instructions` string; each message's text is wrapped in a typed content part
+    whose type depends on the role -- "output_text" for assistant turns,
+    "input_text" for everything else; and a tool exchange is NOT two annotated
+    messages but two standalone items in the same flat list, `function_call` and
+    `function_call_output`, correlated by `call_id`.
+
+    That last point is why tool transcripts cannot simply be dropped here. The
+    caller's tool loop replays the whole conversation on every turn, so a dropped
+    call/result pair leaves the model looking at its own unanswered request --
+    it then either repeats the call until the iteration budget runs out or
+    answers without the file it asked for.
     """
     systems = []
     items = []
@@ -2140,16 +2189,41 @@ def _to_responses_input(messages):
         if not isinstance(m, dict):
             continue
         role = m.get("role")
+        content = m.get("content") or ""
         if role == "system":
-            systems.append(m.get("content") or "")
+            systems.append(content)
             continue
         if role == "tool":
-            # Tool transcripts have a different representation here and no caller
-            # routes tools down this path yet; dropping is safer than inventing.
+            items.append({"type": "function_call_output",
+                          # Must match the call_id emitted below; the API rejects
+                          # an output that correlates to nothing.
+                          "call_id": m.get("tool_call_id") or m.get("name") or "call_0",
+                          "output": content})
+            continue
+        tool_calls = m.get("tool_calls") if role == "assistant" else None
+        if not isinstance(tool_calls, (list, tuple)):
+            tool_calls = None
+        if role == "assistant" and tool_calls:
+            # Any narration accompanying the calls stays a message item, but only
+            # when non-empty: an empty output_text part is rejected.
+            if content:
+                items.append({"role": "assistant",
+                              "content": [{"type": "output_text", "text": content}]})
+            for i, tc in enumerate(tool_calls):
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                args = fn.get("arguments") if fn else tc.get("arguments")
+                if not isinstance(args, str):
+                    args = json.dumps(args) if args is not None else "{}"
+                items.append({"type": "function_call",
+                              "call_id": tc.get("id") or "call_%d" % i,
+                              "name": (fn.get("name") if fn else None) or tc.get("name") or "",
+                              "arguments": args})
             continue
         part = "output_text" if role == "assistant" else "input_text"
         items.append({"role": role or "user",
-                      "content": [{"type": part, "text": m.get("content") or ""}]})
+                      "content": [{"type": part, "text": content}]})
     instructions = "\n\n".join(s for s in systems if s) or None
     return instructions, items
 
@@ -2193,14 +2267,19 @@ def _usage_from_responses_json(data, usage_out):
 
 
 def _request_copilot_responses(model, bearer, base, messages, config, usage_out=None,
-                               json_schema=None):
+                               json_schema=None, tools=None):
     """Call the Copilot Responses API for models that no longer serve chat/completions.
 
     Non-streaming by design: this path exists to make otherwise-unreachable models
     usable at all, and a plain request/response is the smallest thing that does
-    that. Tool calls are deliberately NOT supported here -- see the caller, which
-    keeps tool-using requests on chat/completions rather than silently dropping
-    the tools.
+    that.
+
+    Tool calls ARE supported. They have to be: the reviewer always passes
+    fetch_repo_file, so while this path could not carry tools, every model GitHub
+    had moved off chat/completions was unreachable for reviews -- it 400ed on
+    each attempt and was benched, which is what silently reduced the panel to
+    same-vendor. The return contract matches _request_copilot's: a bare string
+    when no tools were offered, else {"text", "tool_calls"}.
     """
     payload = {"model": model, "input": []}
     instructions, items = _to_responses_input(messages)
@@ -2218,11 +2297,16 @@ def _request_copilot_responses(model, bearer, base, messages, config, usage_out=
         # carries the schema inline rather than nested under a "json_schema" key.
         payload["text"] = {"format": {"type": "json_schema", "name": "response",
                                       "schema": json_schema, "strict": False}}
+    if tools:
+        payload["tools"] = _tools_to_responses(tools)
     r = _llm_retry_post(f"{base}/responses", payload, _copilot_headers(bearer), config,
                         stream=False, provider="copilot")
     data = r.json()
     _usage_from_responses_json(data, usage_out)
-    return _responses_output_text(data)
+    text = _responses_output_text(data)
+    if not tools:
+        return text
+    return {"text": text, "tool_calls": _responses_tool_calls(data)}
 
 
 def _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None, json_schema=None):
@@ -2232,13 +2316,17 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
     bearer = _copilot_api_token(api_key)  # gh_token -> copilot token (cached)
     base = (base_url or COPILOT_API_BASE).rstrip("/")
     # Models GitHub has moved off chat/completions entirely can only be reached
-    # through the Responses API. Tool-using calls stay on the old path: failing
-    # loudly there lets the caller fall through to another entry, whereas calling
-    # Responses without the tools would return a confident answer that silently
-    # ignored them.
-    if not tools and _copilot_wants_responses_api(bearer, model):
+    # through the Responses API, tools included. Tool-using calls used to be held
+    # back here on the grounds that a tools-less Responses call would silently
+    # ignore them -- but the reviewer ALWAYS passes fetch_repo_file, so the
+    # practical effect was that every such model 400ed on every review and got
+    # benched for 24h. Routing tools through instead (see the callee) keeps the
+    # guarantee that a tool is never silently dropped, while making the models
+    # reachable.
+    if _copilot_wants_responses_api(bearer, model):
         return _request_copilot_responses(model, bearer, base, messages, config,
-                                          usage_out=usage_out, json_schema=json_schema)
+                                          usage_out=usage_out, json_schema=json_schema,
+                                          tools=tools)
     endpoint = f"{base}/chat/completions"
     headers = _copilot_headers(bearer)
     msgs = _to_openai_messages(messages)
