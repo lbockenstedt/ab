@@ -1951,6 +1951,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
     """
     import git
     import tempfile
+    import pr_remediate   # lazy: circular import via pr_remediate -> pr_review
     from github import Github
     from fix_engine import (
         _claim_issue, _release_issue, _authenticated_remote,
@@ -1999,6 +2000,34 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
         head_sha = pr.head.sha
         branch = pr.head.ref
+
+        # A promotion/backmerge branch must carry EXACTLY what its source
+        # branch has. pr_remediate.auto_remediate_pr already refuses these
+        # (_PROMOTION_HEAD_RE) for that reason — but this path, the UI "Fix"
+        # button, had no such guard, so the automated engine's own invariant
+        # was one click away from being broken by hand.
+        #
+        # That click is also the one an operator is most likely to make: when
+        # promotions stack up, the stuck PRs ARE the promotion PRs. Each fix
+        # commits code onto e.g. promote/qa-to-main, which merges into main and
+        # nowhere else. qa never receives it, so qa and main drift in exactly
+        # the files AppBuilder keeps repairing (promote.yml, promote.sh), and
+        # the NEXT promotion dies on a content conflict there. Observed live in
+        # tsa: e8cc55a "AppBuilder: fix PR #15 review findings" landed on main
+        # via promote/qa-to-main, and every qa->main promotion afterwards
+        # failed with "CONFLICT (content): Merge conflict in promote.yml".
+        # Intervening made the jam worse, which is why it never stayed fixed.
+        #
+        # Fix forward instead: land the change on dev and let it promote.
+        if (config.get("pr_auto_remediate_skip_promotion", True)
+                and pr_remediate._PROMOTION_HEAD_RE.match(branch or "")):
+            return False, (
+                "PR #%s is a promotion/back-merge PR (head '%s'). It must carry exactly "
+                "what its source branch has, so AppBuilder will not commit a fix onto it "
+                "— that would put code on the target branch that was never on the source, "
+                "and the resulting drift breaks the next promotion. Fix the problem on "
+                "'dev' and let it promote forward." % (number, branch))
+
         files = list(pr.get_files())
         changed = [f.filename for f in files]
 
