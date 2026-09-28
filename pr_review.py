@@ -587,6 +587,53 @@ def _pr_diff_text(files):
     return _truncate_diff("\n\n".join(parts), _PANEL_DIFF_CHARS)
 
 
+def _merge_only_context(pr):
+    """Context block for a PR whose commits are ALL merge commits — i.e. the PR
+    authors no change of its own; its diff is content that already exists on the
+    branch being merged in.
+
+    kvm#33 is why this exists. It was a `backmerge/main-to-qa` PR opened to clear
+    a real `promote.yml` conflict that had frozen kvm's qa->main promotion. Both
+    reviewers rejected it three times for "intent vs diff mismatch": the title
+    says back-merge, but "the diff contains no merge, no conflict resolution",
+    only what looked like a coalescing-engine change to promote.sh/promote.yml.
+
+    That critique is unsatisfiable by construction. GitHub renders a merge PR's
+    diff as base...head — the content the source branch carries that the base
+    lacks. A back-merge of main into qa therefore shows exactly main's unique
+    content, and can never show "a merge". The reviewers were reading inherited
+    content as authored change and asking for a diff shape no merge commit has,
+    so every remediation attempt was spent re-editing files the PR never meant
+    to author, deepening the very drift it was opened to close.
+
+    Returns "" for anything that authors real commits — notably promotion PRs
+    (promote/dev-to-qa carries the feature commits themselves), which must keep
+    the full intent-vs-diff critique.
+    """
+    try:
+        commits = list(pr.get_commits()[:30])
+    except Exception as e:  # noqa: BLE001 — context only; never block a review over it
+        logger.info("pr_review: merge-commit context skipped (%s)", e)
+        return ""
+    if not commits:
+        return ""
+    for c in commits:
+        if len(getattr(c, "parents", []) or []) < 2:
+            return ""
+    return (
+        "\nMERGE-ONLY PR: every one of this PR's %d commit(s) is a MERGE commit. "
+        "This PR authors no change of its own. The diff you are shown is "
+        "base...head — by construction it is the content the merged-in branch "
+        "ALREADY carries and that the base lacks, not new work written here.\n"
+        "Therefore do NOT treat \"the diff contains no merge / no conflict "
+        "resolution / it just looks like a feature change\" as a defect, and do "
+        "NOT ask for the PR to be re-scoped or renamed on that basis: no merge "
+        "commit can produce such a diff, so that critique can never be "
+        "satisfied. Judge instead the only question this PR actually poses: is "
+        "it safe and correct to bring this content into the base branch?\n\n"
+        % len(commits))
+
+
 def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
                       undefined_verified=None):
     """Run the cross-provider skeptical reviewer panel on the PR diff — the SAME
@@ -645,7 +692,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
     issue_body = (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
         % (pr.title or "", (pr.body or "").strip()[:4000])
-    ) + _intent_block + (
+    ) + _intent_block + _merge_only_context(pr) + (
         "NOTE: This is a HUMAN-authored pull request under pre-review — not a bot "
         "fix. Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
         "correctness/regressions, weight these merge-safety defects heavily (they "
@@ -1171,6 +1218,15 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
             f["detail"] = ("No open PR in `%s` touches `%s`. Update the twin in lockstep "
                            "(dual-copy INVARIANT), or open the matching PR.\n\n"
                            % (twin.get("repo", "?"), twin.get("path", "?"))) + f.get("detail", "")
+            # EXTERNAL: the obligation lives in ANOTHER repo, so no edit to this
+            # PR can discharge it. The remediation engine only rewrites files in
+            # the PR's own checkout, so without this flag it spends every attempt
+            # failing at something structurally impossible and then stamps
+            # "manual intervention required" -- pointing the operator at this PR
+            # when the action is actually to open one in `twin.repo`. The finding
+            # still BLOCKS the merge (it is real); it just must not be treated as
+            # in-repo remediable work. See should_remediate.
+            f["external"] = True
         # verdict is None → unreachable: keep the original advisory unchanged.
         out.append(f)
     return out
@@ -1895,6 +1951,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
     """
     import git
     import tempfile
+    import pr_remediate   # lazy: circular import via pr_remediate -> pr_review
     from github import Github
     from fix_engine import (
         _claim_issue, _release_issue, _authenticated_remote,
@@ -1943,6 +2000,34 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
         head_sha = pr.head.sha
         branch = pr.head.ref
+
+        # A promotion/backmerge branch must carry EXACTLY what its source
+        # branch has. pr_remediate.auto_remediate_pr already refuses these
+        # (_PROMOTION_HEAD_RE) for that reason — but this path, the UI "Fix"
+        # button, had no such guard, so the automated engine's own invariant
+        # was one click away from being broken by hand.
+        #
+        # That click is also the one an operator is most likely to make: when
+        # promotions stack up, the stuck PRs ARE the promotion PRs. Each fix
+        # commits code onto e.g. promote/qa-to-main, which merges into main and
+        # nowhere else. qa never receives it, so qa and main drift in exactly
+        # the files AppBuilder keeps repairing (promote.yml, promote.sh), and
+        # the NEXT promotion dies on a content conflict there. Observed live in
+        # tsa: e8cc55a "AppBuilder: fix PR #15 review findings" landed on main
+        # via promote/qa-to-main, and every qa->main promotion afterwards
+        # failed with "CONFLICT (content): Merge conflict in promote.yml".
+        # Intervening made the jam worse, which is why it never stayed fixed.
+        #
+        # Fix forward instead: land the change on dev and let it promote.
+        if (config.get("pr_auto_remediate_skip_promotion", True)
+                and pr_remediate._PROMOTION_HEAD_RE.match(branch or "")):
+            return False, (
+                "PR #%s is a promotion/back-merge PR (head '%s'). It must carry exactly "
+                "what its source branch has, so AppBuilder will not commit a fix onto it "
+                "— that would put code on the target branch that was never on the source, "
+                "and the resulting drift breaks the next promotion. Fix the problem on "
+                "'dev' and let it promote forward." % (number, branch))
+
         files = list(pr.get_files())
         changed = [f.filename for f in files]
 

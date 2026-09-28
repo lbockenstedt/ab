@@ -2361,6 +2361,36 @@
                         </div>
 
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Premium Escalation <span class="text-slate-400 font-normal">(the top-tier models AppBuilder keeps in reserve)</span></label>
+                            <p class="text-xs text-slate-500">When the ordinary remediation ladder has spent its attempts — including the Opus-class last turn — AppBuilder may take <strong>one more</strong> turn using only the models ticked below. Those models are excluded from every other turn, so routine work never reaches for them.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                                <div class="space-y-2">
+                                    <label class="text-sm font-medium text-slate-600">Premium attempts per PR</label>
+                                    <input type="number" name="pr_remediate_premium_attempts" value="{{ settings.get('pr_remediate_premium_attempts', 1) }}" min="0" max="3" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <span class="text-xs text-slate-500">Defaults to 1, capped at 3. This is a <strong>count of billable calls</strong>, not a ladder position: it is charged whenever a premium model answers, including a failed or empty reply. Set to <strong>0</strong> to switch the extra turn off entirely.</span>
+                                </div>
+                                <div class="flex items-start gap-3 pt-6">
+                                    <p class="text-xs text-slate-600">These models are also priced <strong>frontier</strong> and ranked above Opus in the model registry, so the cost-first picker treats them as expensive rather than cheap. Without that, an unrecognised new model falls through to the generic Copilot rule and looks like the <em>cheapest</em> option available.</p>
+                                </div>
+                            </div>
+                            <div class="space-y-2 mt-2">
+                                <label class="text-sm font-medium text-slate-600">Premium escalation models <span class="text-slate-400 font-normal">(ticked = reserved for the escalation turn)</span></label>
+                                {% if premium_model_options %}
+                                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-40 overflow-y-auto">
+                                    {% for m in premium_model_options %}
+                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982] truncate" title="{{ m }}">
+                                        <input type="checkbox" name="premium_models" value="{{ m }}" {% if m in premium_models_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                        <span class="truncate">{{ m }}</span>
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                                {% endif %}
+                                <input type="text" name="premium_models_extra" value="{{ premium_models_extra }}" placeholder="Patterns or unconfigured models, comma-separated (e.g. claude-fable-*, gpt-6*)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                                <p class="text-xs text-amber-700">Wildcards are matched against the model name, so <code>gpt-6*</code> keeps covering new GPT-6 variants as they appear — preferable to ticking today's names and silently missing tomorrow's. <strong>Clearing every box and this field disables the reservation:</strong> these models then compete for ordinary work at their frontier rank.</p>
+                            </div>
+                        </div>
+
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
                             <label class="text-sm font-semibold text-slate-700">Scheduled Promotion <span class="text-slate-400 font-normal">(opens dev→qa / qa→main PRs on a cadence — never merges)</span></label>
                             <div class="flex items-center gap-3">
                                 <input type="checkbox" name="promote_schedule_enabled" id="promote_schedule_enabled" {{ 'checked' if settings.get('promote_schedule_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">

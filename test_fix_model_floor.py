@@ -26,8 +26,9 @@ import types
 import pytest
 
 _FIX_NAMES = {"_model_allowed", "_panel_allowlist", "_fix_allowlist",
-              "_fix_model_exclusions"}
-_FIX_ASSIGNS = {"DEFAULT_PANEL_ALLOWLIST", "DEFAULT_FIX_ALLOWLIST"}
+              "_fix_model_exclusions", "_premium_allowlist"}
+_FIX_ASSIGNS = {"DEFAULT_PANEL_ALLOWLIST", "DEFAULT_FIX_ALLOWLIST",
+                "DEFAULT_PREMIUM_FIX_ALLOWLIST"}
 
 
 class _NoLog:
@@ -64,7 +65,21 @@ def _cand(model, key=None):
 # -- the bar itself --------------------------------------------------------
 
 def test_writing_code_is_held_to_the_same_bar_as_judging_it():
-    assert fix_engine["DEFAULT_FIX_ALLOWLIST"] == fix_engine["DEFAULT_PANEL_ALLOWLIST"]
+    """The write bar is the panel bar plus the premium escalation tier, and
+    nothing else. Premium sits ABOVE the panel bar (every premium model
+    outranks Opus in model_registry), so this widens the bar upward, never
+    downward. The union is required, not cosmetic: without it the premium
+    narrowing and this floor intersect to an empty pool on the escalation
+    turn and the tier is silently inert."""
+    fix = fix_engine["DEFAULT_FIX_ALLOWLIST"]
+    panel = fix_engine["DEFAULT_PANEL_ALLOWLIST"]
+    premium = fix_engine["DEFAULT_PREMIUM_FIX_ALLOWLIST"]
+    assert set(panel) <= set(fix)
+    assert set(fix) - set(panel) == set(premium) - set(panel)
+    # The panel bar itself is untouched: the panel runs on EVERY PR, so
+    # admitting premium there would seat the most expensive models on the
+    # roster for routine reviews.
+    assert not (set(premium) & set(panel))
 
 
 def test_the_default_bar_is_opus_class_or_better():
@@ -95,10 +110,20 @@ def test_absent_config_uses_the_default():
 
 
 def test_config_can_override_with_a_list_or_a_string():
+    # The operator's override replaces the DEFAULT bar; the premium tier is
+    # still unioned on, because a premium model the fix floor rejects could
+    # never write the escalation fix it was picked for.
+    premium = fix_engine["DEFAULT_PREMIUM_FIX_ALLOWLIST"]
     assert fix_engine["_fix_allowlist"](
-        {"pr_fix_model_allowlist": ["Claude-Opus-9*"]}) == ("claude-opus-9*",)
+        {"pr_fix_model_allowlist": ["Claude-Opus-9*"]}) == ("claude-opus-9*",) + premium
     assert fix_engine["_fix_allowlist"](
-        {"pr_fix_model_allowlist": "a*, b*"}) == ("a*", "b*")
+        {"pr_fix_model_allowlist": "a*, b*"}) == ("a*", "b*") + premium
+    # An operator-named premium list overrides the default one too.
+    assert fix_engine["_fix_allowlist"]({
+        "pr_fix_model_allowlist": ["opus*"],
+        "pr_remediate_premium_model_allowlist": ["zeta*"]}) == ("opus*", "zeta*")
+    # An explicit empty fix list still DISABLES the policy outright.
+    assert fix_engine["_fix_allowlist"]({"pr_fix_model_allowlist": []}) == ()
 
 
 def test_an_explicit_empty_list_disables_the_policy():

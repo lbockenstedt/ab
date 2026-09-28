@@ -112,7 +112,7 @@ def test_ceiling_binds_once_attempts_persist(pr_env):
     """What the wiped counter prevented: the gate releasing the merge once attempts persist."""
     record, update, state = pr_env
     record("o/r", 1, "t", "u", [], "sha1")
-    update("o/r", 1, remediation_attempts=3)
+    update("o/r", 1, remediation_attempts=3, premium_attempts=1)
     # Record rebuild across a push (head moves sha1 -> sha2) carries the attempt count forward
     review = {"verdict": "Approve", "confidence": 0.90, "critique": "ok"}
     record("o/r", 1, "t", "u", [], "sha2", review=review, review2=review)

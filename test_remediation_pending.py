@@ -79,7 +79,9 @@ def test_not_pending_when_status_exhausted():
     assert isinstance(result[1], str) and len(result[1]) > 0
 
 def test_not_pending_when_attempts_reached_max():
-    rec = _rec(panel_verdict="Deny", remediation_attempts=3)
+    # Exhausted means BOTH budgets are spent: reaching the ordinary ceiling
+    # still buys one premium escalation turn (premium_turn_available).
+    rec = _rec(panel_verdict="Deny", remediation_attempts=3, premium_attempts=1)
     result = remediation_pending(rec, CONFIG)
     assert result[0] == False
     assert isinstance(result[1], str) and len(result[1]) > 0
@@ -93,10 +95,30 @@ def test_attempt_ceiling_bounds_the_delay():
         assert isinstance(result[1], str) and len(result[1]) > 0
 
     for attempts in [3, 4, 9]:
-        rec = _rec(panel_verdict="Deny", remediation_attempts=attempts)
+        rec = _rec(panel_verdict="Deny", remediation_attempts=attempts,
+                   premium_attempts=1)
         result = remediation_pending(rec, CONFIG)
         assert result[0] == False
         assert isinstance(result[1], str) and len(result[1]) > 0
+
+
+def test_premium_turn_extends_the_ceiling_exactly_once():
+    """The premium tier adds one rung past the ordinary ceiling -- and the
+    ladder must still terminate, at max_attempts + the premium budget."""
+    for attempts in [3, 4, 9]:
+        rec = _rec(panel_verdict="Deny", remediation_attempts=attempts,
+                   premium_attempts=0)
+        assert remediation_pending(rec, CONFIG)[0] is True, attempts
+        spent = _rec(panel_verdict="Deny", remediation_attempts=attempts,
+                     premium_attempts=1)
+        pending, why = remediation_pending(spent, CONFIG)
+        assert pending is False and "exhausted" in why
+
+
+def test_premium_turn_can_be_switched_off():
+    cfg = dict(CONFIG, pr_remediate_premium_attempts=0)
+    rec = _rec(panel_verdict="Deny", remediation_attempts=3, premium_attempts=0)
+    assert remediation_pending(rec, cfg)[0] is False
 
 def test_garbage_attempt_values_do_not_raise():
     rec = _rec(panel_verdict="Deny", remediation_attempts="abc")
