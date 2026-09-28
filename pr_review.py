@@ -2019,8 +2019,14 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         # Intervening made the jam worse, which is why it never stayed fixed.
         #
         # Fix forward instead: land the change on dev and let it promote.
-        if (config.get("pr_auto_remediate_skip_promotion", True)
-                and pr_remediate._PROMOTION_HEAD_RE.match(branch or "")):
+        #
+        # With the flag OFF — the supported unattended-chain configuration — the
+        # guard narrows rather than disappearing: a promotion PR is still
+        # repairable, but only when the panel actually named a defect. See
+        # pr_remediate._promotion_evidence_is_actionable.
+        if (pr_remediate._PROMOTION_HEAD_RE.match(branch or "")
+                and (config.get("pr_auto_remediate_skip_promotion", True)
+                     or not pr_remediate._promotion_evidence_is_actionable(_rec))):
             return False, (
                 "PR #%s is a promotion/back-merge PR (head '%s'). It must carry exactly "
                 "what its source branch has, so AppBuilder will not commit a fix onto it "
