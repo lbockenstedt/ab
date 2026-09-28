@@ -59,6 +59,41 @@ _LEVEL_COUNT_FIELD = {
 # so the PR never stabilises long enough to auto-merge.
 _PROMOTION_HEAD_RE = re.compile(r"^(promote|backmerge)/", re.IGNORECASE)
 
+
+def _promotion_evidence_is_actionable(rec) -> bool:
+    """Is there something on the review record that editing a promotion branch could fix?
+
+    Consulted only when pr_auto_remediate_skip_promotion is off, i.e. when the
+    operator has deliberately allowed promotion PRs to be repaired in place so a
+    denied promotion cannot stall the unattended chain. It answers the narrower
+    question that permission was actually granted for: did the panel name a
+    defect, or is it merely unsure?
+
+    Actionable means a stated objection:
+      * any seat returning a verdict other than Approve, or
+      * an in-repo Tier-1 finding.
+
+    Cross-repo twin findings are excluded on the same reasoning should_remediate
+    uses — the fix engine only rewrites files in this PR's own checkout, so no
+    diff it can produce will ever clear one.
+
+    A bare confidence deficit is deliberately NOT actionable. It describes the
+    reviewers, not the diff, and the diff on a promotion branch is by definition
+    code that was already reviewed and merged on the source branch.
+    """
+    if not rec:
+        return False
+    for verdict in (rec.get("panel_verdict"), rec.get("panel2_verdict")):
+        if verdict is not None and str(verdict).strip().lower() != "approve":
+            return True
+    try:
+        errors = int(rec.get("errors") or 0)
+        warnings = int(rec.get("warnings") or 0)
+        external = int(rec.get("tier1_external") or 0)
+    except (TypeError, ValueError):
+        return False
+    return errors > 0 or warnings > external
+
 TARGET_GUARDRAIL_BOUNDARIES = {
     "psk-hardcode",
     "transport-scheme",
@@ -812,17 +847,48 @@ def auto_remediate_pr(
 
     # Never rewrite a promotion/backmerge PR — see _PROMOTION_HEAD_RE.
     head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
-    if config.get("pr_auto_remediate_skip_promotion", True) and _PROMOTION_HEAD_RE.match(head_ref):
-        reason = (
-            "promotion PR (head '%s') — remediation skipped so the branch keeps "
-            "exactly what the source branch has" % head_ref
-        )
-        logger.info("auto_remediate_pr: %s: %s", key, reason)
-        update_pr_review(repo_full_name, pr.number, auto_remediate_blocked=True,
-                         auto_remediate_blocked_head=head_sha,
-                         auto_remediate_reason=reason,
-                         auto_remediate_failure=reason)
-        return False, reason
+    if _PROMOTION_HEAD_RE.match(head_ref):
+        reason = ""
+        if config.get("pr_auto_remediate_skip_promotion", True):
+            reason = (
+                "promotion PR (head '%s') — remediation skipped so the branch keeps "
+                "exactly what the source branch has" % head_ref
+            )
+        elif not _promotion_evidence_is_actionable(rec):
+            # FLAG-OFF IS NOT A LICENCE TO EDIT A PROMOTION BRANCH FOR NO STATED
+            # REASON. Turning pr_auto_remediate_skip_promotion off is a supported
+            # configuration (docs/ab.md) whose entire purpose is narrow: a panel
+            # that DENIES a promotion, or files a Tier-1 finding against it, must
+            # be repairable in place rather than stalling the unattended chain.
+            # backmerge.yml then returns that repair to the source branch, which
+            # is what keeps the edit from being orphaned.
+            #
+            # A soft confidence number is not such a reason. lm#1063 was reviewed
+            # "0 findings", every seat Approve, and scored 0.69 against the 0.95
+            # target — so the score branch of should_remediate fired and the fix
+            # engine, handed a promotion diff and no finding to address, invented
+            # edits across dhcp/src/*: files this qa->main promotion had no
+            # business touching and whose new content existed on neither dev nor
+            # qa. That cannot converge, either. Every attempt moves the head,
+            # which re-runs the panel, which scores about the same, which
+            # remediates again — the PR churns until the attempt ceiling stops
+            # it, having drifted further from the source branch each pass.
+            #
+            # Reviewer uncertainty is not a defect an edit can clear. With no
+            # finding and no dissent there is nothing to repair, so leave the
+            # branch identical to its source and let the merge gate decide.
+            reason = (
+                "promotion PR (head '%s') — panel filed no finding and no dissent; a "
+                "confidence deficit alone is not something an edit to this branch can "
+                "address, so it keeps exactly what the source branch has" % head_ref
+            )
+        if reason:
+            logger.info("auto_remediate_pr: %s: %s", key, reason)
+            update_pr_review(repo_full_name, pr.number, auto_remediate_blocked=True,
+                             auto_remediate_blocked_head=head_sha,
+                             auto_remediate_reason=reason,
+                             auto_remediate_failure=reason)
+            return False, reason
 
     # Guardrails check
     passed, violation = check_pr_guardrails(pr, files, changed_paths, config)

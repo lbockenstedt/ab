@@ -255,14 +255,43 @@ def test_auto_remediate_skips_backmerge_branch():
 
 
 def test_auto_remediate_promotion_skip_is_config_overridable():
+    """Flag off + a stated objection = the promotion PR is repaired in place.
+
+    That is the whole point of the override: a panel that DENIES a promotion
+    must not stall the unattended chain. backmerge.yml carries the repair back.
+    """
     repo = MockRepo("lbockenstedt/nw")
     pr = MockPR(number=114, files=[MockFile("a.py", "+x")])
     pr.head = MockHead("promote/dev-to-qa")
-    pr_remediate.state["pr_reviews"] = {}
+    pr_remediate.state["pr_reviews"] = {
+        "lbockenstedt/nw#114": {"panel_verdict": "Deny", "errors": 0, "warnings": 0},
+    }
     success, _ = auto_remediate_pr(
         None, repo, pr, {"pr_auto_remediate_skip_promotion": False},
         fix_fn=lambda *a, **k: (True, "fixed"))
     assert success is True
+
+
+def test_auto_remediate_promotion_override_still_needs_a_stated_defect():
+    """Flag off is a narrow permission, not a blanket one (lm#1063).
+
+    With no finding and no dissent there is nothing an edit to a promotion
+    branch could address, so it must keep exactly what its source branch has.
+    """
+    repo = MockRepo("lbockenstedt/nw")
+    pr = MockPR(number=115, files=[MockFile("a.py", "+x")])
+    pr.head = MockHead("promote/qa-to-main")
+    pr_remediate.state["pr_reviews"] = {
+        "lbockenstedt/nw#115": {"panel_verdict": "Approve", "panel2_verdict": "Approve",
+                                "panel_confidence": 0.69, "errors": 0, "warnings": 0},
+    }
+    called = []
+    success, reason = auto_remediate_pr(
+        None, repo, pr, {"pr_auto_remediate_skip_promotion": False},
+        fix_fn=lambda *a, **k: (called.append(1), (True, "fixed"))[1])
+    assert success is False
+    assert not called, "no fix may be generated for a promotion PR with no finding"
+    assert "no finding and no dissent" in reason
 
 
 def test_audit_warnings_do_not_crash_on_int_findings_count(monkeypatch):
