@@ -134,6 +134,7 @@ stage_to() {
 
 picked=""
 picked_idx=0
+conflicted=0
 for i in "${!units[@]}"; do
   sel_rc=0
   stage_to "${units[$i]}" || sel_rc=$?
@@ -143,14 +144,37 @@ for i in "${!units[@]}"; do
     break
   fi
   if [ "$sel_rc" -eq 2 ]; then
-    # A conflict on the oldest outstanding unit cannot be skipped: promoting a
-    # later unit ahead of it would reorder the branch and ship its changes out
-    # of sequence. This one is fatal, so the error annotation belongs here.
-    echo "::error::merge conflict outside VERSION -- resolve $SRC -> $TGT by hand"
-    exit 1
+    # A conflicting unit is SKIPPED, not fatal. This used to exit 1 on the
+    # reasoning that "promoting a later unit ahead of it would reorder the
+    # branch" -- but units come from `rev-list --reverse --first-parent
+    # $TGT..$SRC` and stage_to builds "$TGT plus everything UP TO <endpoint>",
+    # so they are cumulative prefixes. units[i+1] is a strict SUPERSET of
+    # units[i]: advancing batches the two together, it cannot reorder or drop
+    # anything. The last endpoint is the tip of $SRC -- the batched merge --
+    # so the loop still makes progress whenever $SRC as a whole is mergeable.
+    #
+    # Aborting here froze promotion for exactly the repos that needed it most.
+    # After AppBuilder committed a repair onto a promotion branch, $TGT gained
+    # a change that the OLD units predate, so the oldest outstanding unit
+    # conflicted against it forever -- even once a back-merge had made the full
+    # $SRC -> $TGT merge clean. tsa failed this way every run
+    # ("CONFLICT (content): Merge conflict in .github/workflows/promote.yml")
+    # while `git merge origin/qa` into main succeeded by hand.
+    conflicted=1
+    echo "::warning::unit ${units[$i]} conflicts against $TGT in isolation --" \
+         "batching it with the next unit"
+    continue
   fi
   [ "$SPLIT" = "1" ] && echo "  skipping ${units[$i]} -- no content change against $TGT (VERSION-only?)"
 done
+
+# Every endpoint conflicted, including the tip of $SRC. That is a real
+# divergence a human has to reconcile -- distinct from "nothing to promote",
+# which must not be reported for it.
+if [ -z "$picked" ] && [ "$conflicted" -eq 1 ]; then
+  echo "::error::merge conflict outside VERSION -- resolve $SRC -> $TGT by hand"
+  exit 1
+fi
 
 if [ -z "$picked" ]; then
   # Phrase the no-op with $LABEL: "Nothing to promote" is the string every
