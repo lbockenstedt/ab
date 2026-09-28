@@ -135,9 +135,15 @@ stage_to() {
 picked=""
 picked_idx=0
 conflicted=0
+# The code returned by the LAST endpoint tried (the tip of $SRC when nothing
+# is picked). Only that one decides whether an unpicked run is a real
+# divergence: an early unit may conflict in isolation while the full merge is
+# a clean no-op, and that is "nothing to promote", not a conflict.
+last_rc=0
 for i in "${!units[@]}"; do
   sel_rc=0
   stage_to "${units[$i]}" || sel_rc=$?
+  last_rc="$sel_rc"
   if [ "$sel_rc" -eq 0 ]; then
     picked="${units[$i]}"
     picked_idx="$i"
@@ -162,21 +168,25 @@ for i in "${!units[@]}"; do
     # while `git merge origin/qa` into main succeeded by hand.
     conflicted=1
     echo "::warning::unit ${units[$i]} conflicts against $TGT in isolation --" \
-         "batching it with the next unit"
+         "batching it forward with the following unit(s)"
     continue
   fi
   [ "$SPLIT" = "1" ] && echo "  skipping ${units[$i]} -- no content change against $TGT (VERSION-only?)"
 done
 
-# Every endpoint conflicted, including the tip of $SRC. That is a real
-# divergence a human has to reconcile -- distinct from "nothing to promote",
-# which must not be reported for it.
-if [ -z "$picked" ] && [ "$conflicted" -eq 1 ]; then
+# The LAST endpoint -- the tip of $SRC -- conflicted. That is a real divergence
+# a human has to reconcile, distinct from "nothing to promote", which must not
+# be reported for it. Keying off the last code rather than the sticky
+# `conflicted` flag matters: an early unit can conflict in isolation while the
+# tip turns out to be a clean content no-op (rc 1) against $TGT, and that state
+# proves there is no divergence at all.
+if [ -z "$picked" ] && [ "$last_rc" -eq 2 ]; then
   echo "::error::merge conflict outside VERSION -- resolve $SRC -> $TGT by hand"
   exit 1
 fi
 
 if [ -z "$picked" ]; then
+  [ "$conflicted" -eq 1 ] && echo "  an earlier unit conflicted in isolation, but $SRC as a whole is a content no-op against $TGT"
   # Phrase the no-op with $LABEL: "Nothing to promote" is the string every
   # repo's promotion_selftest.sh matches on, so the forward direction must keep
   # saying exactly that, while the reverse direction still reads correctly
