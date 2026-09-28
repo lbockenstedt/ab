@@ -978,20 +978,36 @@ def auto_remediate_pr(
     used_model = used_model_out.get("model") or used_model_out.get("key")
     new_attempts = attempts + 1
 
-    # Charge the premium budget by the model ACTUALLY used, not by which turn
-    # we believed we were on -- the cost is incurred the moment the call is
-    # made, so a barren or failed premium reply still spends the attempt. Any
-    # other accounting would let a PR call the most expensive models on the
-    # roster repeatedly and never record it.
+    # Charge the premium budget when the premium TURN IS TAKEN, whatever model
+    # ended up answering. "turn granted" and "premium call made" used to be
+    # computed from two different sources and could silently diverge: when
+    # fix_engine._premium_fix_exclusions(want_premium=True) finds no selectable
+    # premium model it leaves the pool UNNARROWED (an ordinary model writes the
+    # fix), and a fix_fn that fails before a model is recorded leaves
+    # used_model None. In both of those states the model-based charge never
+    # fired, premium_turn_available() stayed True forever, and the
+    # `attempts >= max_attempts and not premium_turn` exhausted/human-review
+    # hand-off became unreachable -- an unbounded remediation loop. Charging the
+    # turn makes the escalation budget bind in every state. The model-based
+    # charge is kept as an additional accounting path, for the case where a
+    # premium model answers on an ordinary (non-escalation) turn.
     try:
         import fix_engine as _fe
         _premium_used = int(rec.get("premium_attempts") or 0)
-        if used_model and _fe.is_premium_fix_model(used_model, config):
+        _premium_charged = False
+        if premium_turn:
             _premium_used += 1
+            _premium_charged = True
+        elif used_model and _fe.is_premium_fix_model(used_model, config):
+            _premium_used += 1
+            _premium_charged = True
+        if _premium_charged:
             logger.info("auto_remediate_pr: %s — premium escalation attempt %d/%d used (%s)",
-                        key, _premium_used, _premium_budget(config), used_model)
+                        key, _premium_used, _premium_budget(config), used_model or "no model recorded")
     except Exception:  # noqa: BLE001 -- accounting must never break the fix path
-        _premium_used = int(rec.get("premium_attempts") or 0)
+        # Fail SAFE for the budget: a bookkeeping error must not hand out an
+        # unlimited supply of premium turns.
+        _premium_used = int(rec.get("premium_attempts") or 0) + (1 if premium_turn else 0)
 
     if success:
         update_pr_review(
