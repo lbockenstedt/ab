@@ -85,6 +85,16 @@ HEALTH_URL = os.environ.get(
     "AB_HEALTH_URL", f"{_HEALTH_SCHEME}://127.0.0.1:{_HEALTH_PORT}/api/health")
 CHECK_INTERVAL = 5 # seconds
 HEALTH_TIMEOUT = 60 # seconds
+# updater_worker (in workers.py) checks for self-updates every 5 minutes and
+# stamps last_update_check_ts on every cycle, success or failure. 3x that
+# interval is generous slack for a slow GitHub fetch/pull, so anything beyond
+# it means the thread died or wedged silently (an uncaught exception outside
+# its own try/except, a deadlock, etc.) with no other visible symptom — the
+# rest of the process stays healthy and keeps serving requests.
+STALE_UPDATE_CHECK_SECONDS = 900
+# Give a freshly (re)started process time to complete its first check before
+# judging it stale, so a normal restart never triggers an immediate loop.
+STARTUP_GRACE_SECONDS = 300
 
 try:
     from logging_setup import configure_logging
@@ -134,6 +144,47 @@ def read_startup_stamp():
             return json.load(f).get("commit")
     except Exception:
         return None
+
+def read_startup_time():
+    """Return the datetime this process booted, or None."""
+    try:
+        with open(STARTUP_STAMP_FILE, "r") as f:
+            started_at = json.load(f).get("started_at")
+        return datetime.fromisoformat(started_at) if started_at else None
+    except Exception:
+        return None
+
+def check_updater_staleness():
+    """Force a restart if updater_worker has gone silent.
+
+    Returns True if a restart was spawned. Safe to call every idle tick: it
+    only acts when the service is active, past its startup grace period, AND
+    last_update_check_ts is older than STALE_UPDATE_CHECK_SECONDS — otherwise
+    a normal boot (no check run yet) or a slow-but-alive worker would trip it.
+    """
+    if not is_service_active():
+        return False
+    started_at = read_startup_time()
+    if started_at is None or (datetime.now() - started_at).total_seconds() < STARTUP_GRACE_SECONDS:
+        return False
+    state = load_update_state()
+    last_check = state.get("last_update_check_ts")
+    if not last_check:
+        # No stamp yet this deep past startup — the thread never ran a first cycle.
+        age = None
+    else:
+        try:
+            age = (datetime.now() - datetime.fromisoformat(last_check)).total_seconds()
+        except Exception:
+            age = None
+    if age is None or age >= STALE_UPDATE_CHECK_SECONDS:
+        logger.error(
+            "WATCHDOG: updater_worker stale (last check %s ago, limit %ss). "
+            "Forcing restart to recover the update-check thread.",
+            "unknown" if age is None else f"{int(age)}s", STALE_UPDATE_CHECK_SECONDS)
+        spawn_restart()
+        return True
+    return False
 
 def spawn_restart():
     """Detached `systemctl restart ab` that survives this process dying. The
@@ -387,6 +438,11 @@ def main():
         try: handle_restart_request()
         except Exception as e:  # noqa: BLE001
             logger.error(f"restart-request handler error: {e}")
+        try:
+            if check_updater_staleness():
+                time.sleep(12)  # let systemd stop+start (RestartSec=10)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"updater staleness check failed: {e}")
         if os.path.exists(UPDATE_PENDING_FILE):
             pending_commit = ""
             try:
