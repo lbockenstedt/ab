@@ -16,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TARGETS = {
     "_sandbox_backend",
     "_bwrap_argv",
-    "_sandbox_unavailable",
+    "_sandbox_infra_failure",
     "_exclude_sandbox_venv",
     "_python_requirement_files",
     "_worktree_state",
@@ -38,8 +38,9 @@ def _load():
         info=lambda *a, **k: None, error=lambda *a, **k: None,
         warning=lambda *a, **k: None, debug=lambda *a, **k: None)
     ns = {"os": os, "logger": logger, "SANDBOX_VENV_DIRNAME": ".ab-venv",
-          "SANDBOX_UNAVAILABLE_RC": 127,
-          "SANDBOX_TEST_TIMEOUT": 900, "SANDBOX_INSTALL_TIMEOUT": 1800,
+          "SANDBOX_UNAVAILABLE_RC": 127, "SANDBOX_TIMEOUT_RC": 124,
+          "_SANDBOX_TIMEOUT_MARKER": "Sandbox timed out",
+          "SANDBOX_TEST_TIMEOUT": 1800, "SANDBOX_INSTALL_TIMEOUT": 1800,
           "SANDBOX_TMP_BYTES": 4 * 1024 * 1024 * 1024,
           "_SANDBOX_UNAVAILABLE_MARKER": "No sandbox backend available"}
     exec(compile(ast.Module(body=wanted, type_ignores=[]), "<fix_engine>", "exec"), ns)
@@ -61,6 +62,7 @@ def fake_subprocess(monkeypatch):
 
     def make(available, runner=None):
         mod = types.ModuleType("subprocess")
+        mod.TimeoutExpired = __import__("subprocess").TimeoutExpired
 
         def run(argv, **kwargs):
             calls.append((argv, kwargs))
@@ -199,7 +201,7 @@ def test_bwrap_backend_invokes_bwrap(fake_subprocess, tmp_path):
 def test_bwrap_run_has_a_timeout(fake_subprocess, tmp_path):
     calls = fake_subprocess({"bwrap"})
     MOD["run_sandboxed_command"]("pytest", str(tmp_path))
-    assert calls[-1][1].get("timeout") == 900
+    assert calls[-1][1].get("timeout") == 1800
 
 
 def test_install_gets_a_longer_timeout_than_tests(tmp_path):
@@ -250,17 +252,39 @@ def test_docker_fallback_can_sever_network(fake_subprocess, tmp_path, monkeypatc
 
 def test_infra_failure_is_distinguished_from_test_failure():
     infra = FakeCompleted("", "No sandbox backend available (looked for ...)", 127)
-    assert MOD["_sandbox_unavailable"](infra) is True
+    assert MOD["_sandbox_infra_failure"](infra) is True
 
 
 def test_real_test_failure_is_not_infra():
     """A test suite exiting 127 on its own must not be excused as infra."""
     real = FakeCompleted("", "sh: pytest: command not found", 127)
-    assert MOD["_sandbox_unavailable"](real) is False
+    assert MOD["_sandbox_infra_failure"](real) is False
 
 
 def test_passing_result_is_not_infra():
-    assert MOD["_sandbox_unavailable"](FakeCompleted("ok", "", 0)) is False
+    assert MOD["_sandbox_infra_failure"](FakeCompleted("ok", "", 0)) is False
+
+
+def test_sandbox_timeout_is_infra_not_a_test_failure():
+    """A blown wall-clock budget is capacity, not a defect the model can fix."""
+    t = FakeCompleted("", "Sandbox timed out after 1800s", 124)
+    assert MOD["_sandbox_infra_failure"](t) is True
+
+
+def test_a_suite_exiting_124_on_its_own_is_not_infra():
+    assert MOD["_sandbox_infra_failure"](
+        FakeCompleted("", "some test exited 124", 124)) is False
+
+
+def test_timeout_is_reported_with_the_timeout_rc(fake_subprocess, tmp_path):
+    import subprocess as real_sp
+
+    def slow(argv, kwargs):
+        raise real_sp.TimeoutExpired(argv, kwargs.get("timeout"))
+    fake_subprocess({"bwrap"}, runner=slow)
+    res = MOD["run_sandboxed_command"]("pytest", str(tmp_path))
+    assert res.returncode == 124
+    assert MOD["_sandbox_infra_failure"](res) is True
 
 
 # ── _exclude_sandbox_venv ───────────────────────────────────────────────────

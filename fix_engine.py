@@ -865,7 +865,11 @@ SANDBOX_VENV_DIRNAME = ".ab-venv"
 # downloads far more than a test run executes, so the two phases get separate
 # budgets. The old single 300s ceiling was a Docker-image-era default and is not
 # enough for either phase on a real fleet repo.
-SANDBOX_TEST_TIMEOUT = 900
+# Measured on LM-AB (1 vCPU): a GREEN lm run is ~196s across its six
+# components, but a run with failures ballooned to 863s -- pytest formatting a
+# traceback is itself slow enough there to trip pytest-timeout. Verification
+# exists to catch failures, so the FAILING path is what the budget must fit.
+SANDBOX_TEST_TIMEOUT = 1800
 SANDBOX_INSTALL_TIMEOUT = 1800
 # The sandbox /tmp is a tmpfs, which defaults to half of RAM. LM-AB has 1 GB,
 # giving a 512 MB /tmp — small enough that repos with a free-space guard (lm's
@@ -985,6 +989,10 @@ def run_sandboxed_command(command, cwd, network=True, timeout=SANDBOX_TEST_TIMEO
         try:
             result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
             return MockResult(result.stdout, result.stderr, result.returncode)
+        except subprocess.TimeoutExpired:
+            msg = f"{_SANDBOX_TIMEOUT_MARKER} after {timeout}s"
+            logger.error(msg)
+            return MockResult("", msg, SANDBOX_TIMEOUT_RC)
         except Exception as e:
             logger.error(f"Sandbox execution error: {e}")
             return MockResult("", f"Sandbox execution error: {e}", 1)
@@ -1407,17 +1415,23 @@ def identify_files_to_fix(repo_path, issue_body, error_context=None, retarget=Fa
 
 
 SANDBOX_UNAVAILABLE_RC = 127
+SANDBOX_TIMEOUT_RC = 124
 _SANDBOX_UNAVAILABLE_MARKER = "No sandbox backend available"
+_SANDBOX_TIMEOUT_MARKER = "Sandbox timed out"
 
 
-def _sandbox_unavailable(result):
-    """True when a command never ran because no sandbox backend was present.
+def _sandbox_infra_failure(result):
+    """True when the sandbox itself failed, rather than the repository's tests.
 
-    This must not be reported to the fixer as a failing test: there is no code
-    change that would make it pass, and feeding it back as an error context
-    sends the model chasing a phantom defect."""
-    return (getattr(result, "returncode", None) == SANDBOX_UNAVAILABLE_RC
-            and _SANDBOX_UNAVAILABLE_MARKER in (getattr(result, "stderr", "") or ""))
+    Two cases: no backend was present (the command never ran), or the run blew
+    its wall-clock budget. Neither must be reported to the fixer as a failing
+    test -- no code change would make either pass, so feeding it back as an
+    error context just sends the model chasing a phantom defect and burns the
+    remediation budget."""
+    rc = getattr(result, "returncode", None)
+    err = getattr(result, "stderr", "") or ""
+    return ((rc == SANDBOX_UNAVAILABLE_RC and _SANDBOX_UNAVAILABLE_MARKER in err)
+            or (rc == SANDBOX_TIMEOUT_RC and _SANDBOX_TIMEOUT_MARKER in err))
 
 
 def _exclude_sandbox_venv(repo_path):
@@ -4169,8 +4183,8 @@ def verify_fix(repo_path, repo_name, config):
                 return True, "No tests found, assuming success"
             logger.info(f"Executing test command: {test_cmd}")
             result = run_sandboxed_command(test_cmd, repo_path)
-            if _sandbox_unavailable(result):
-                logger.error("Cannot verify: no sandbox backend available.")
+            if _sandbox_infra_failure(result):
+                logger.error(f"Cannot verify (sandbox failure): {result.stderr}")
                 return False, f"Verification infrastructure unavailable: {result.stderr}"
             if result.returncode == 0:
                 logger.info("Tests passed successfully!")
@@ -4180,8 +4194,8 @@ def verify_fix(repo_path, repo_name, config):
                 logger.error(f"Tests failed:\n{error_msg}")
                 return False, error_msg
     result = run_sandboxed_command(test_cmd, repo_path)
-    if _sandbox_unavailable(result):
-        logger.error("Cannot verify: no sandbox backend available.")
+    if _sandbox_infra_failure(result):
+        logger.error(f"Cannot verify (sandbox failure): {result.stderr}")
         return False, f"Verification infrastructure unavailable: {result.stderr}"
     if result.returncode == 0:
         logger.info(f"Per-repo tests for {repo_name} passed!")
