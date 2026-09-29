@@ -3506,6 +3506,16 @@ def parse_and_apply(content, repo_path):
     # conflating them made the model keep repeating a well-formed but
     # non-matching edit while being told its JSON was malformed.
     parse_and_apply.last_reason = "unknown"
+    # What the model ACTUALLY said, for the caller's barren log line. A barren
+    # reply (empty / no_json / invalid_json) is the one failure mode that
+    # carries no structured signal, so the raw prefix is the only evidence of
+    # why it happened -- and it used to exist solely on a logger.debug() line,
+    # which production never emits. lm#1071 retried barren every scan for hours
+    # with "No JSON object was found in the response" as the only record, making
+    # a model that was replying in prose indistinguishable from one that was not
+    # being called at all. Bounded hard: this is untrusted model output on its
+    # way into the log.
+    parse_and_apply.last_raw_prefix = (content or "")[:240]
     # --- Locate a JSON / Python-dict object in the LLM response ---
     if not content or not content.strip():
         logger.debug("parse_and_apply: empty content — expected retry case.")
