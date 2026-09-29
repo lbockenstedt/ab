@@ -184,6 +184,11 @@ class Harness:
         fix_engine.review_fix = self.review_fix
         fix_engine.verify_fix = self.verify_fix
         fix_engine.prepare_environment = lambda p: None
+        # Verification runs the repo's tests, which write into the repo; the
+        # real pair snapshots the worktree and reverts only what the test run
+        # touched, so the fix is never clobbered.
+        fix_engine._worktree_state = lambda p: {}
+        fix_engine.discard_verification_artifacts = lambda p, before: None
 
         git_mod = types.ModuleType("git")
         git_mod.Repo = types.SimpleNamespace(

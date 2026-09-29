@@ -860,9 +860,98 @@ def _authenticated_remote(remote, plain_url, token):
         remote.set_url(plain_url)
 
 
-def run_sandboxed_command(command, cwd):
-    """Executes a command in a Docker sandbox. Fails closed (returns an error result)
-    if Docker is unavailable — NEVER runs untrusted repository code on the host as root."""
+SANDBOX_VENV_DIRNAME = ".ab-venv"
+# A cold venv for a multi-component repo (lm installs eleven requirements files)
+# downloads far more than a test run executes, so the two phases get separate
+# budgets. The old single 300s ceiling was a Docker-image-era default and is not
+# enough for either phase on a real fleet repo.
+SANDBOX_TEST_TIMEOUT = 900
+SANDBOX_INSTALL_TIMEOUT = 1800
+# The sandbox /tmp is a tmpfs, which defaults to half of RAM. LM-AB has 1 GB,
+# giving a 512 MB /tmp — small enough that repos with a free-space guard (lm's
+# template upload keeps 1 GiB of headroom) fail on the sandbox rather than on
+# the change under test. Size it explicitly; tmpfs allocates lazily.
+SANDBOX_TMP_BYTES = 4 * 1024 * 1024 * 1024
+
+
+def _sandbox_backend():
+    """Returns the name of the first available sandbox backend, or None.
+
+    bubblewrap is preferred over Docker: it needs no daemon and no root (it
+    isolates via unprivileged user namespaces), so AB can verify its own fixes
+    as the unprivileged service user without a sudo helper."""
+    import subprocess
+    for name in ("bwrap", "docker"):
+        try:
+            subprocess.run([name, "--version"], capture_output=True, check=True, timeout=15)
+            return name
+        except Exception:
+            continue
+    return None
+
+
+def _bwrap_argv(cwd, command, network=True, venv_bin=None):
+    """Builds the bubblewrap argv for running `command` in `cwd`.
+
+    The root filesystem is read-only; only `cwd` (bound read-write) and a
+    private /tmp are writable, so repository code cannot modify the host, and
+    every namespace is unshared — that filesystem/process isolation is the
+    security boundary here.
+
+    Network is ON by default because the sandbox exists to REPRODUCE CI, and
+    CI has network. Severing it made lm's mDNS test fail on the sandbox (it
+    asserts a non-loopback address exists, and `--unshare-net` leaves only
+    `lo`) — a verifier that disagrees with CI about a green commit is worse
+    than no verifier, because AB spends its remediation budget chasing the
+    phantom. Callers may still pass network=False."""
+    path = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if venv_bin:
+        path = f"{venv_bin}:{path}"
+
+    argv = ["bwrap", "--die-with-parent",
+            "--unshare-user", "--unshare-pid", "--unshare-ipc",
+            "--unshare-uts", "--unshare-cgroup"]
+    if not network:
+        argv.append("--unshare-net")
+
+
+    # This host (and every Debian host in the fleet) is usr-merged: /bin, /sbin,
+    # /lib and /lib64 are symlinks into /usr, so they must be recreated as
+    # symlinks rather than bound — binding a symlink source would not resolve.
+    argv += ["--ro-bind", "/usr", "/usr",
+             "--symlink", "usr/bin", "/bin",
+             "--symlink", "usr/sbin", "/sbin",
+             "--symlink", "usr/lib", "/lib",
+             "--symlink", "usr/lib64", "/lib64",
+             "--ro-bind", "/etc", "/etc",
+             "--proc", "/proc", "--dev", "/dev",
+             "--size", str(SANDBOX_TMP_BYTES), "--tmpfs", "/tmp"]
+
+    if network:
+        # /etc/resolv.conf is a symlink into systemd-resolved's runtime dir; without
+        # this bind it dangles inside the sandbox and every name lookup fails.
+        argv += ["--ro-bind-try", "/run/systemd/resolve", "/run/systemd/resolve"]
+
+    argv += ["--bind", cwd, cwd, "--chdir", cwd,
+             "--setenv", "HOME", "/tmp",
+             "--setenv", "PATH", path,
+             "--setenv", "LANG", "C.UTF-8",
+             "--new-session",
+             "/bin/sh", "-c", command]
+    return argv
+
+
+def run_sandboxed_command(command, cwd, network=True, timeout=SANDBOX_TEST_TIMEOUT):
+    """Executes a command in a sandbox. Fails closed (returns an error result)
+    if no sandbox backend is available — NEVER runs untrusted repository code on
+    the host.
+
+    Network is available by default so that a run reproduces CI; pass
+    network=False to sever it.
+
+    The timeout defaults to a full test run; dependency installation passes a
+    longer one, since a cold venv for a multi-component repo downloads far more
+    than a test run executes."""
     import subprocess
     from dataclasses import dataclass
 
@@ -872,25 +961,35 @@ def run_sandboxed_command(command, cwd):
         stderr: str
         returncode: int
 
-    docker_available = False
-    try:
-        subprocess.run(["docker", "--version"], capture_output=True, check=True, timeout=15)
-        docker_available = True
-    except Exception:
-        pass
+    backend = _sandbox_backend()
 
-    if not docker_available:
-        msg = ("Docker is not available; refusing to run untrusted repository commands on the host "
-               "(fail-closed). Install Docker and retry.")
+    if backend is None:
+        msg = ("No sandbox backend available (looked for bubblewrap and Docker); refusing to run "
+               "untrusted repository commands on the host (fail-closed). "
+               "Install bubblewrap (apt-get install -y bubblewrap) and retry.")
         logger.error("⚠️ " + msg)
         return MockResult("", msg, 127)
 
-    image = "ubuntu:latest"
     try:
         files = os.listdir(cwd)
     except Exception as e:
         logger.error(f"Cannot read sandbox working directory {cwd}: {e}")
         return MockResult("", str(e), 1)
+
+    if backend == "bwrap":
+        venv_bin = os.path.join(cwd, SANDBOX_VENV_DIRNAME, "bin")
+        argv = _bwrap_argv(cwd, command, network=network,
+                           venv_bin=venv_bin if os.path.isdir(venv_bin) else None)
+        logger.info("Running sandboxed command via bubblewrap "
+                    f"(network {'on' if network else 'off'})...")
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            return MockResult(result.stdout, result.stderr, result.returncode)
+        except Exception as e:
+            logger.error(f"Sandbox execution error: {e}")
+            return MockResult("", f"Sandbox execution error: {e}", 1)
+
+    image = "ubuntu:latest"
     if "package.json" in files: image = "node:18-slim"
     elif "requirements.txt" in files or "pyproject.toml" in files: image = "python:3.9-slim"
     elif "go.mod" in files: image = "golang:1.21-slim"
@@ -906,17 +1005,18 @@ def run_sandboxed_command(command, cwd):
             # the image from repo files) and is passed as a single argv.
             result = subprocess.run(
                 ["sudo", "-n", "/usr/local/bin/ab-sandbox", image, cwd, command],
-                capture_output=True, text=True, timeout=300,
+                capture_output=True, text=True, timeout=timeout,
             )
         else:
             docker_cmd = [
                 "docker", "run", "--rm",
+                *([] if network else ["--network", "none"]),
                 "-v", f"{cwd}:/app",
                 "-w", "/app",
                 image,
                 "sh", "-c", command
             ]
-            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout)
         return MockResult(result.stdout, result.stderr, result.returncode)
     except Exception as e:
         logger.error(f"Docker execution error: {e}")
@@ -1306,24 +1406,156 @@ def identify_files_to_fix(repo_path, issue_body, error_context=None, retarget=Fa
     return merged
 
 
+SANDBOX_UNAVAILABLE_RC = 127
+_SANDBOX_UNAVAILABLE_MARKER = "No sandbox backend available"
+
+
+def _sandbox_unavailable(result):
+    """True when a command never ran because no sandbox backend was present.
+
+    This must not be reported to the fixer as a failing test: there is no code
+    change that would make it pass, and feeding it back as an error context
+    sends the model chasing a phantom defect."""
+    return (getattr(result, "returncode", None) == SANDBOX_UNAVAILABLE_RC
+            and _SANDBOX_UNAVAILABLE_MARKER in (getattr(result, "stderr", "") or ""))
+
+
+def _exclude_sandbox_venv(repo_path):
+    """Keeps the sandbox venv out of commits.
+
+    The fixer stages with `git add -A`, so a venv created inside the repo would
+    be committed wholesale. Writing to .git/info/exclude (rather than
+    .gitignore) keeps the working tree clean — it never shows up in a diff."""
+    try:
+        exclude = os.path.join(repo_path, ".git", "info", "exclude")
+        entry = f"/{SANDBOX_VENV_DIRNAME}/"
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        existing = ""
+        if os.path.exists(exclude):
+            with open(exclude, "r") as f:
+                existing = f.read()
+        if entry not in existing.split():
+            with open(exclude, "a") as f:
+                f.write(f"\n{entry}\n")
+    except Exception as e:
+        logger.warning(f"Could not exclude {SANDBOX_VENV_DIRNAME} from git: {e}")
+
+
+def _worktree_state(repo_path):
+    """Porcelain status as a {path: code} map, or None if it cannot be read."""
+    import subprocess
+    try:
+        out = subprocess.run(["git", "-C", repo_path, "status", "--porcelain"],
+                             capture_output=True, text=True, timeout=120)
+        if out.returncode != 0:
+            return None
+        return {line[3:].strip(): line[:2] for line in out.stdout.splitlines()
+                if len(line) > 3}
+    except Exception as e:
+        logger.warning(f"Could not read worktree state for {repo_path}: {e}")
+        return None
+
+
+def discard_verification_artifacts(repo_path, before):
+    """Reverts files that the TEST RUN touched, leaving the fix itself intact.
+
+    Repository suites write into their own tree (lm's agent tests rewrite
+    pxmx_agent_cache.json, and pytest leaves __pycache__ behind). The fixer
+    stages with `git add -A` AFTER verification, so without this those
+    artifacts get committed into the PR as though they were part of the fix —
+    turning a one-line change into a noisy diff the review panel then rejects.
+
+    Only paths that were clean before verification are reverted, so the fix's
+    own modifications are never touched."""
+    import shutil
+    import subprocess
+    if before is None:
+        return
+    after = _worktree_state(repo_path)
+    if after is None:
+        return
+    root = os.path.realpath(repo_path)
+    for path, code in sorted(after.items()):
+        if path in before:
+            continue
+        full = os.path.realpath(os.path.join(repo_path, path))
+        # Never step outside the repo, and never delete the repo itself.
+        if full == root or not full.startswith(root + os.sep):
+            continue
+        try:
+            if code.strip() == "??":
+                if os.path.isdir(full):
+                    shutil.rmtree(full)
+                elif os.path.exists(full):
+                    os.remove(full)
+            else:
+                subprocess.run(["git", "-C", repo_path, "checkout", "--", path],
+                               capture_output=True, text=True, timeout=60)
+            logger.info(f"Discarded verification artifact: {path}")
+        except Exception as e:
+            logger.warning(f"Could not discard verification artifact {path}: {e}")
+
+
+def _python_requirement_files(repo_path):
+    """Every requirements*.txt in the repo, repo-relative and sorted.
+
+    Requirements are NOT always at the repo root: several fleet repos (lm most
+    of all) declare them per component and have no root file at all. Looking
+    only at the root would classify such a repo as "not Python" and install
+    nothing, so every test module would fail to import and verification would
+    fail for reasons unrelated to the fix."""
+    found = []
+    skip = {".git", "node_modules", "venv", ".venv", "_lm", "__pycache__",
+            SANDBOX_VENV_DIRNAME}
+    try:
+        for root, dirs, names in os.walk(repo_path):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for n in names:
+                if n.startswith("requirements") and n.endswith(".txt"):
+                    found.append(os.path.relpath(os.path.join(root, n), repo_path))
+    except Exception as e:
+        logger.warning(f"Could not scan {repo_path} for requirements files: {e}")
+    return sorted(found)
+
+
 def prepare_environment(repo_path):
+    import shlex
     logger.info("Preparing environment (installing dependencies)...")
     files = os.listdir(repo_path)
+    venv = SANDBOX_VENV_DIRNAME
+    _exclude_sandbox_venv(repo_path)
+    reqs = _python_requirement_files(repo_path)
     if "package.json" in files:
         logger.info("Detected Node.js project. Running npm install...")
-        run_sandboxed_command("npm install", repo_path)
-    elif "requirements.txt" in files:
-        logger.info("Detected Python project with requirements.txt. Running pip install...")
-        run_sandboxed_command("pip install -r requirements.txt", repo_path)
-    elif "pyproject.toml" in files:
-        logger.info("Detected Python project with pyproject.toml. Running pip install .")
-        run_sandboxed_command("pip install .", repo_path)
+        run_sandboxed_command("npm install", repo_path, network=True,
+                              timeout=SANDBOX_INSTALL_TIMEOUT)
+    elif reqs or "pyproject.toml" in files:
+        # The sandbox rootfs is read-only, so dependencies cannot be installed
+        # into the system interpreter; they go into a venv inside the repo,
+        # which is the one writable location and is also put on PATH for the
+        # later test run.
+        logger.info(f"Detected Python project ({len(reqs)} requirements file(s)). "
+                    "Building sandbox venv...")
+        steps = [f"python3 -m venv {venv}", f"{venv}/bin/pip install --upgrade pip"]
+        for req in reqs:
+            # Non-fatal, as in CI: a transient index failure must not gate the
+            # merge, while a genuinely missing import still fails the tests.
+            steps.append(f"{venv}/bin/pip install -r {shlex.quote(req)} || true")
+        if "pyproject.toml" in files:
+            steps.append(f"{venv}/bin/pip install . || true")
+        # verify_fix runs pytest; install it explicitly so verification cannot
+        # fail merely because the repo does not pin its own test runner.
+        steps.append(f"{venv}/bin/pip install pytest pytest-timeout")
+        run_sandboxed_command(" && ".join(steps), repo_path, network=True,
+                              timeout=SANDBOX_INSTALL_TIMEOUT)
     elif "go.mod" in files:
         logger.info("Detected Go project. Running go mod download...")
-        run_sandboxed_command("go mod download", repo_path)
+        run_sandboxed_command("go mod download", repo_path, network=True,
+                              timeout=SANDBOX_INSTALL_TIMEOUT)
     elif "Makefile" in files:
         logger.info("Detected Makefile. Attempting 'make install'...")
-        run_sandboxed_command("make install", repo_path)
+        run_sandboxed_command("make install", repo_path, network=True,
+                              timeout=SANDBOX_INSTALL_TIMEOUT)
     else:
         logger.info("No known dependency file detected. Skipping installation.")
 
@@ -3937,6 +4169,9 @@ def verify_fix(repo_path, repo_name, config):
                 return True, "No tests found, assuming success"
             logger.info(f"Executing test command: {test_cmd}")
             result = run_sandboxed_command(test_cmd, repo_path)
+            if _sandbox_unavailable(result):
+                logger.error("Cannot verify: no sandbox backend available.")
+                return False, f"Verification infrastructure unavailable: {result.stderr}"
             if result.returncode == 0:
                 logger.info("Tests passed successfully!")
                 return True, None
@@ -3945,6 +4180,9 @@ def verify_fix(repo_path, repo_name, config):
                 logger.error(f"Tests failed:\n{error_msg}")
                 return False, error_msg
     result = run_sandboxed_command(test_cmd, repo_path)
+    if _sandbox_unavailable(result):
+        logger.error("Cannot verify: no sandbox backend available.")
+        return False, f"Verification infrastructure unavailable: {result.stderr}"
     if result.returncode == 0:
         logger.info(f"Per-repo tests for {repo_name} passed!")
         return True, None
@@ -4365,9 +4603,16 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 continue
 
                         if config.get("qa_enabled", True):
-                            prepare_environment(path)
-                            update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start")
-                            verified, failure_msg = verify_fix(path, repo_name, config)
+                            before_verify = _worktree_state(path)
+                            try:
+                                prepare_environment(path)
+                                update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start")
+                                verified, failure_msg = verify_fix(path, repo_name, config)
+                            finally:
+                                # Tests write into their own tree; the commit
+                                # below stages with `git add -A`, so those
+                                # artifacts must not survive verification.
+                                discard_verification_artifacts(path, before_verify)
                         else:
                             logger.info("QA Testing disabled. Assuming verified.")
                             verified, failure_msg = True, "QA disabled"
