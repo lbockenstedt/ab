@@ -1613,6 +1613,32 @@ def _maybe_auto_merge(gh, repo, pr, config):
         # throws that improvement away. Bounded by the remediation attempt
         # ceiling, so this can only defer a merge, never block it forever.
         if should_merge:
+            # Ground truth beats opinion. The panels review the DIFF; they never
+            # see whether the suite still passes, and AppBuilder cannot run it
+            # itself (verify_fix needs Docker, which the host lacks, so
+            # qa_enabled is off and fixes are pushed unverified). GitHub Actions
+            # is the only evidence that a fix works, so refuse to merge a head
+            # whose checks actually failed.
+            #
+            # Blocks on "failure" ONLY. "pending" and "unknown" are explicitly
+            # allowed through: holding on them would gate every merge on checks
+            # that may never post (a parked or check-less repo), which is the
+            # deadlock class this file has already been bitten by twice. A real
+            # failure cannot deadlock either — it feeds the fixer (see
+            # fix_one_pr) and, if remediation cannot clear it, the attempt
+            # ceiling escalates the PR to a human instead of holding silently.
+            try:
+                from pr_actions import head_ci_conclusion
+                _ci_state, _ci_details = head_ci_conclusion(
+                    repo.full_name, pr_meta.get("head_sha"),
+                    config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", ""))
+            except Exception as e:  # noqa: BLE001 — never let this break a merge
+                logger.warning("pr_review: CI check skipped for %s: %s", key, e)
+                _ci_state, _ci_details = "unknown", ""
+            if _ci_state == "failure":
+                should_merge = False
+                reason = "CI is failing on this head (%s)" % (_ci_details or "see checks")
+        if should_merge:
             try:
                 import pr_remediate
                 pending, why = pr_remediate.remediation_pending(rec, config)
@@ -2213,6 +2239,35 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             max_barren = max(0, min(max_barren, 3))
 
             error_context = None
+            # Seed the FIRST attempt with the CI verdict for this head.
+            #
+            # The panel critique is the only feedback the fixer has ever had,
+            # and it is an opinion about the DIFF — it cannot mention a failing
+            # test because the panel never runs one. AppBuilder cannot run them
+            # either (verify_fix needs Docker, which the host lacks, so
+            # qa_enabled is off and every fix below is pushed unverified). So a
+            # fix that broke the suite produced no signal anywhere: the next
+            # scan re-reviewed the same diff, the panel named the same logic,
+            # and the budget drained re-fixing that while the actual breakage
+            # went unmentioned. Handing the fixer the failing check names makes
+            # the one piece of ground truth we do have reach the model that can
+            # act on it.
+            try:
+                from pr_actions import head_ci_conclusion
+                _ci_state, _ci_details = head_ci_conclusion(
+                    repo_full_name, getattr(getattr(pr, "head", None), "sha", None), token)
+                if _ci_state == "failure":
+                    error_context = (
+                        "CI is currently FAILING on this branch (%s). Your fix must also "
+                        "repair this — a change that leaves the build red cannot be merged. "
+                        "If a test contradicts the change, decide which is correct and fix "
+                        "that one; do not delete or weaken a test to make it pass."
+                        % _ci_details)
+                    logger.info("fix_one_pr: %s#%s — seeding fix with failing CI: %s",
+                                repo_full_name, number, _ci_details)
+            except Exception as e:  # noqa: BLE001 — diagnostics must never break the fix
+                logger.debug("fix_one_pr: CI lookup skipped for %s#%s: %s",
+                             repo_full_name, number, e)
             last_failure = "Fix generation failed."
             fixes, confidence, review_conf = None, 0.0, 0.0
             attempt_succeeded = False
