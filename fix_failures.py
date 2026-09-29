@@ -28,6 +28,29 @@ BARREN_INVALID_JSON = ("The response was not valid JSON. Return ONLY a single "
 
 BARREN_FAILURES = frozenset({BARREN_EMPTY, BARREN_NO_JSON, BARREN_INVALID_JSON})
 
+# fix_one_pr refuses outright when another task already holds the per-PR fix
+# lock. Unlike every other failure it can return, this one happens BEFORE a
+# model is chosen or a checkout is touched: nothing was attempted, so there is
+# nothing to learn and nobody to blame. Charging it to the remediation budget
+# (and, on an escalation turn, to the premium budget) spent real attempts on a
+# scan that did no work -- lm#1071 reached exhausted_human_review with this as
+# its recorded failure. The contended scan must simply come back next cycle.
+CONTENDED_LOCK = "A fix is already in progress for this PR."
+
+
+def is_contended_failure(message):
+    """True when `message` reports that another task already holds the fix lock.
+
+    Substring, for the same reason is_barren_failure is. Deliberately NOT part
+    of BARREN_FAILURES: a barren reply is a model that spoke and said nothing,
+    and is capped by its own allowance so a persistently mute model cannot loop
+    forever. Contention is not a model event at all and needs no such cap --
+    the lock is released when the in-flight fix finishes.
+    """
+    if not isinstance(message, str):
+        return False
+    return CONTENDED_LOCK in message
+
 
 def is_barren_failure(message):
     """True when `message` reports a model reply with nothing evaluable in it.
