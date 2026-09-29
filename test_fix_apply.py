@@ -148,6 +148,31 @@ def main():
     esc_ok, esc_applied, _ = ns["parse_and_apply"](esc, d)
     ok &= _check("path traversal in an edit is rejected", esc_ok is False and not esc_applied)
 
+    # lm#1071: a barren reply is the only failure that carries no structured
+    # signal, so the raw text is the sole evidence of why it happened. It used
+    # to live exclusively on a logger.debug() line, which production never
+    # emits — lm#1071 retried barren every scan for hours with nothing in the
+    # log but the canned "No JSON object was found in the response", which made
+    # a model replying in prose look identical to a model never being called.
+    # parse_and_apply must record the prefix for the caller's WARNING line.
+    prose = ("I've reviewed the findings and I don't believe any code change "
+             "is warranted here, so I am not proposing edits.")
+    prose_ok, _pa, _pc = ns["parse_and_apply"](prose, d)
+    ok &= _check("a prose reply does NOT report success", prose_ok is False)
+    ok &= _check("... and is classified no_json",
+                 ns["parse_and_apply"].last_reason == "no_json")
+    ok &= _check("... and the raw reply prefix is captured for the log",
+                 prose[:60] in (getattr(ns["parse_and_apply"], "last_raw_prefix", "") or ""))
+    ok &= _check("... bounded so untrusted model output cannot flood the log",
+                 len(getattr(ns["parse_and_apply"], "last_raw_prefix", "") or "") <= 240)
+    ns["parse_and_apply"]("x" * 5000, d)
+    ok &= _check("a huge barren reply is truncated to the cap",
+                 len(getattr(ns["parse_and_apply"], "last_raw_prefix", "") or "") == 240)
+    ns["parse_and_apply"]("", d)
+    ok &= _check("an EMPTY reply records an empty prefix, not a stale one",
+                 (getattr(ns["parse_and_apply"], "last_raw_prefix", None) or "") == ""
+                 and ns["parse_and_apply"].last_reason == "empty")
+
     # Regression guard for GitHub issue #760 ("No fixes could be applied
     # (core/src/simulations/routes.py: search snippet not found (starts with:
     # 'await r.json().catch(() => ({}))')))" — non-actionable): the search
@@ -274,6 +299,14 @@ def main():
         return 0
     print("ONE OR MORE CASES FAILED")
     return 1
+
+
+def test_fix_apply():
+    """pytest entry point. CI runs `pytest -q .`, which collects nothing from a
+    script whose only entry point is main() under __main__ -- so every case in
+    this file was written but never actually executed by CI. Expose the run so
+    the apply/windowing/barren guards genuinely gate."""
+    assert main() == 0
 
 
 if __name__ == "__main__":
