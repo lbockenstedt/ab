@@ -750,8 +750,18 @@ def _sync_dependencies(timeout=600):
     return True, "ok"
 
 
+UPDATER_INTERVAL_SECONDS = 300  # 5 minutes — was 3600 (hourly), which let the
+                                 # fleet drift stale on `main` for up to an hour
+                                 # after a merge before anyone noticed.
+
 def updater_worker():
-    """Dedicated worker to check for updates every hour."""
+    """Dedicated worker to check for updates every 5 minutes.
+
+    Stamps ``last_update_check_ts`` in update_state.json on every cycle
+    (success or failure) so watchdog.py can detect a wedged/dead thread —
+    an uncaught exception here would otherwise silently stop checks forever
+    with no external signal.
+    """
     while True:
         try:
             logger.info("Checking for self-updates...")
@@ -759,7 +769,14 @@ def updater_worker():
             _log_restart_event("auto_update", msg, ok=bool(updated))
         except Exception as e:
             logger.error(f"Updater worker error: {e}")
-        time.sleep(3600)
+        finally:
+            try:
+                update_state = load_update_state()
+                update_state["last_update_check_ts"] = datetime.now().isoformat()
+                save_update_state(update_state)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Updater worker: could not stamp last_update_check_ts: {e}")
+        time.sleep(UPDATER_INTERVAL_SECONDS)
 
 def _log_restart_event(kind, message, ok=True):
     """Append a bounded entry to state["restart_log"] for the Diagnostics panel."""
