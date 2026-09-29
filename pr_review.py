@@ -2289,7 +2289,9 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         attempt -= 1
                         logger.warning(
                             "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
-                            "budget: %s", repo_full_name, number, barren, max_barren, last_failure)
+                            "budget: %s | model said: %r", repo_full_name, number, barren,
+                            max_barren, last_failure,
+                            getattr(parse_and_apply, "last_raw_prefix", "") or "<nothing>")
                         continue
                     if is_last:
                         return False, last_failure
