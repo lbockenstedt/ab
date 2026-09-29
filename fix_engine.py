@@ -878,19 +878,70 @@ SANDBOX_INSTALL_TIMEOUT = 1800
 SANDBOX_TMP_BYTES = 4 * 1024 * 1024 * 1024
 
 
+# Only these /etc entries are exposed to sandboxed repository code. Binding all
+# of /etc would hand untrusted tests /etc/ab/config.json -- which holds
+# GITHUB_TOKEN and the hub secrets -- along with /etc/shadow, /etc/ssh and
+# /etc/sudoers.d. A read-only bind stops writes, NOT reads, and the sandbox has
+# network, so a wholesale /etc bind is a direct credential-exfiltration path.
+# Everything here is needed to resolve users, hosts and TLS trust, or to let
+# pip/python find their system configuration.
+SANDBOX_ETC_ALLOWLIST = (
+    "ca-certificates", "ca-certificates.conf", "alternatives",
+    "ssl", "pki", "crypto-policies",
+    "passwd", "group", "nsswitch.conf", "hosts", "hostname", "host.conf",
+    "resolv.conf", "gai.conf", "services", "protocols", "networks",
+    "localtime", "timezone", "mime.types", "debian_version", "os-release",
+    "ld.so.cache", "ld.so.conf", "ld.so.conf.d",
+    "pip.conf", "python3", "python3.11", "python3.12", "python3.13",
+    "terminfo", "login.defs",
+)
+
+# Environment variables that may cross into the sandbox. Everything else is
+# dropped by --clearenv: the AppBuilder service environment carries GITHUB_TOKEN
+# and the LLM provider keys, and sandboxed code is untrusted.
+SANDBOX_ENV_PASSTHROUGH = ("TZ", "TERM")
+
+
+def _bwrap_usable():
+    """True when bwrap can actually create the namespaces it needs.
+
+    `bwrap --version` succeeding proves only that the binary exists. On a host
+    with unprivileged user namespaces disabled (kernel.unprivileged_userns_clone=0,
+    or an AppArmor/seccomp restriction) bwrap is installed but every invocation
+    fails at setup. Selecting it on that evidence alone would turn a host-level
+    misconfiguration into a stream of "failing tests" fed back to the model, so
+    the probe runs a real trivial jail."""
+    import subprocess
+    try:
+        probe = subprocess.run(
+            ["bwrap", "--unshare-user", "--unshare-pid", "--ro-bind", "/usr", "/usr",
+             "--symlink", "usr/bin", "/bin", "/bin/true"],
+            capture_output=True, text=True, timeout=30)
+        return probe.returncode == 0
+    except Exception:
+        return False
+
+
 def _sandbox_backend():
-    """Returns the name of the first available sandbox backend, or None.
+    """Returns the name of the first usable sandbox backend, or None.
 
     bubblewrap is preferred over Docker: it needs no daemon and no root (it
     isolates via unprivileged user namespaces), so AB can verify its own fixes
-    as the unprivileged service user without a sudo helper."""
+    as the unprivileged service user without a sudo helper. It is only selected
+    when it can genuinely start a jail -- see _bwrap_usable -- so a host that
+    has the binary but not the kernel support falls through to Docker instead
+    of failing every verification."""
     import subprocess
     for name in ("bwrap", "docker"):
         try:
             subprocess.run([name, "--version"], capture_output=True, check=True, timeout=15)
-            return name
         except Exception:
             continue
+        if name == "bwrap" and not _bwrap_usable():
+            logger.warning("bubblewrap is installed but cannot create a user namespace; "
+                           "falling back to the next sandbox backend.")
+            continue
+        return name
     return None
 
 
@@ -899,8 +950,9 @@ def _bwrap_argv(cwd, command, network=True, venv_bin=None):
 
     The root filesystem is read-only; only `cwd` (bound read-write) and a
     private /tmp are writable, so repository code cannot modify the host, and
-    every namespace is unshared — that filesystem/process isolation is the
-    security boundary here.
+    every namespace is unshared. The environment is cleared and /etc is
+    allowlisted, so the jail carries neither the service's credentials nor the
+    host's secret configuration.
 
     Network is ON by default because the sandbox exists to REPRODUCE CI, and
     CI has network. Severing it made lm's mDNS test fail on the sandbox (it
@@ -912,7 +964,10 @@ def _bwrap_argv(cwd, command, network=True, venv_bin=None):
     if venv_bin:
         path = f"{venv_bin}:{path}"
 
-    argv = ["bwrap", "--die-with-parent",
+    # --clearenv drops the inherited AppBuilder environment (GITHUB_TOKEN, LLM
+    # provider keys). It must precede every --setenv, since bwrap applies these
+    # in argv order and would otherwise clear the values set before it.
+    argv = ["bwrap", "--die-with-parent", "--clearenv",
             "--unshare-user", "--unshare-pid", "--unshare-ipc",
             "--unshare-uts", "--unshare-cgroup"]
     if not network:
@@ -926,9 +981,13 @@ def _bwrap_argv(cwd, command, network=True, venv_bin=None):
              "--symlink", "usr/bin", "/bin",
              "--symlink", "usr/sbin", "/sbin",
              "--symlink", "usr/lib", "/lib",
-             "--symlink", "usr/lib64", "/lib64",
-             "--ro-bind", "/etc", "/etc",
-             "--proc", "/proc", "--dev", "/dev",
+             "--symlink", "usr/lib64", "/lib64"]
+
+    # --ro-bind-try, so an entry absent on this host does not abort the jail.
+    for entry in SANDBOX_ETC_ALLOWLIST:
+        argv += ["--ro-bind-try", f"/etc/{entry}", f"/etc/{entry}"]
+
+    argv += ["--proc", "/proc", "--dev", "/dev",
              "--size", str(SANDBOX_TMP_BYTES), "--tmpfs", "/tmp"]
 
     if network:
@@ -939,9 +998,13 @@ def _bwrap_argv(cwd, command, network=True, venv_bin=None):
     argv += ["--bind", cwd, cwd, "--chdir", cwd,
              "--setenv", "HOME", "/tmp",
              "--setenv", "PATH", path,
-             "--setenv", "LANG", "C.UTF-8",
-             "--new-session",
-             "/bin/sh", "-c", command]
+             "--setenv", "LANG", "C.UTF-8"]
+    for name in SANDBOX_ENV_PASSTHROUGH:
+        value = os.environ.get(name)
+        if value:
+            argv += ["--setenv", name, value]
+
+    argv += ["--new-session", "/bin/sh", "-c", command]
     return argv
 
 
@@ -988,6 +1051,15 @@ def run_sandboxed_command(command, cwd, network=True, timeout=SANDBOX_TEST_TIMEO
                     f"(network {'on' if network else 'off'})...")
         try:
             result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            if (result.returncode != 0 and not (result.stdout or "").strip()
+                    and (result.stderr or "").lstrip().startswith("bwrap:")):
+                # bubblewrap failed to build the jail, so the command never ran.
+                # Reported as a plain non-zero rc this is indistinguishable from
+                # a failing test suite, and would be fed to the model as a code
+                # defect it can never fix.
+                msg = f"{_SANDBOX_UNAVAILABLE_MARKER}: bubblewrap could not start: {result.stderr.strip()}"
+                logger.error(msg)
+                return MockResult("", msg, SANDBOX_UNAVAILABLE_RC)
             return MockResult(result.stdout, result.stderr, result.returncode)
         except subprocess.TimeoutExpired:
             msg = f"{_SANDBOX_TIMEOUT_MARKER} after {timeout}s"
@@ -1026,6 +1098,14 @@ def run_sandboxed_command(command, cwd, network=True, timeout=SANDBOX_TEST_TIMEO
             ]
             result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout)
         return MockResult(result.stdout, result.stderr, result.returncode)
+    except subprocess.TimeoutExpired:
+        # Same classification as the bubblewrap path: a timeout is an
+        # infrastructure failure, not a failing test. Without this the Docker
+        # fallback returned rc 1 and verify_fix fed the timeout back to the
+        # model as a code defect.
+        msg = f"{_SANDBOX_TIMEOUT_MARKER} after {timeout}s"
+        logger.error(msg)
+        return MockResult("", msg, SANDBOX_TIMEOUT_RC)
     except Exception as e:
         logger.error(f"Docker execution error: {e}")
         return MockResult("", f"Docker execution error: {e}", 1)
@@ -1434,6 +1514,23 @@ def _sandbox_infra_failure(result):
             or (rc == SANDBOX_TIMEOUT_RC and _SANDBOX_TIMEOUT_MARKER in err))
 
 
+# verify_fix and prepare_environment report an unusable sandbox by prefixing
+# their message with this marker, rather than by raising. Raising would be the
+# obvious design, but every caller of these two functions runs them inside a
+# broad `except Exception` that records the attempt as a generic code error --
+# and "error" is a REPLAYABLE failure kind, so a sandbox outage would come back
+# on a later run as "a verified finding about the CODE". A sentinel in the
+# return value keeps the existing (bool, str) contract and cannot crash a
+# caller that has not been taught about it.
+VERIFICATION_INFRA_PREFIX = "Verification infrastructure unavailable:"
+
+
+def is_verification_infra_failure(message):
+    """True when a verify_fix/prepare_environment message reports a broken
+    sandbox rather than a broken repository."""
+    return bool(message) and str(message).startswith(VERIFICATION_INFRA_PREFIX)
+
+
 def _exclude_sandbox_venv(repo_path):
     """Keeps the sandbox venv out of commits.
 
@@ -1456,15 +1553,33 @@ def _exclude_sandbox_venv(repo_path):
 
 
 def _worktree_state(repo_path):
-    """Porcelain status as a {path: code} map, or None if it cannot be read."""
+    """Porcelain status as a {path: code} map, or None if it cannot be read.
+
+    Uses -z: the default porcelain output quotes and escapes paths containing
+    spaces or non-ASCII, and renders a rename as `old -> new`, so naive
+    `line[3:]` slicing yields a path that does not exist on disk. With -z each
+    record is NUL-terminated and never quoted; a rename/copy record carries a
+    second NUL-terminated field (the source), which is consumed and ignored."""
     import subprocess
     try:
-        out = subprocess.run(["git", "-C", repo_path, "status", "--porcelain"],
+        out = subprocess.run(["git", "-C", repo_path, "status", "--porcelain", "-z"],
                              capture_output=True, text=True, timeout=120)
         if out.returncode != 0:
             return None
-        return {line[3:].strip(): line[:2] for line in out.stdout.splitlines()
-                if len(line) > 3}
+        records = out.stdout.split("\0")
+        state = {}
+        i = 0
+        while i < len(records):
+            record = records[i]
+            i += 1
+            if len(record) < 4:
+                continue
+            code, path = record[:2], record[3:]
+            if code[0] in ("R", "C") or code[1] in ("R", "C"):
+                i += 1  # the following record is the rename/copy source
+            if path:
+                state[path] = code
+        return state
     except Exception as e:
         logger.warning(f"Could not read worktree state for {repo_path}: {e}")
         return None
@@ -1533,16 +1648,33 @@ def _python_requirement_files(repo_path):
 
 
 def prepare_environment(repo_path):
+    """Installs dependencies in the sandbox.
+
+    Returns None on success, or a VERIFICATION_INFRA_PREFIX message when the
+    sandbox itself is unusable or the MANDATORY Python test-runner install
+    failed. Optional bootstrap steps (npm/go/make, and each individual
+    requirements file) stay best-effort: many fleet repos have a Makefile with
+    no `install` target, and treating that as fatal would abort fix attempts
+    that previously succeeded."""
     import shlex
     logger.info("Preparing environment (installing dependencies)...")
     files = os.listdir(repo_path)
     venv = SANDBOX_VENV_DIRNAME
     _exclude_sandbox_venv(repo_path)
     reqs = _python_requirement_files(repo_path)
+
+    def _optional(command, label):
+        result = run_sandboxed_command(command, repo_path, network=True,
+                                       timeout=SANDBOX_INSTALL_TIMEOUT)
+        if _sandbox_infra_failure(result):
+            return f"{VERIFICATION_INFRA_PREFIX} {result.stderr}"
+        if result.returncode != 0:
+            logger.warning(f"{label} exited {result.returncode}; continuing (best-effort).")
+        return None
+
     if "package.json" in files:
         logger.info("Detected Node.js project. Running npm install...")
-        run_sandboxed_command("npm install", repo_path, network=True,
-                              timeout=SANDBOX_INSTALL_TIMEOUT)
+        return _optional("npm install", "npm install")
     elif reqs or "pyproject.toml" in files:
         # The sandbox rootfs is read-only, so dependencies cannot be installed
         # into the system interpreter; they go into a venv inside the repo,
@@ -1560,18 +1692,29 @@ def prepare_environment(repo_path):
         # verify_fix runs pytest; install it explicitly so verification cannot
         # fail merely because the repo does not pin its own test runner.
         steps.append(f"{venv}/bin/pip install pytest pytest-timeout")
-        run_sandboxed_command(" && ".join(steps), repo_path, network=True,
-                              timeout=SANDBOX_INSTALL_TIMEOUT)
+        result = run_sandboxed_command(" && ".join(steps), repo_path, network=True,
+                                       timeout=SANDBOX_INSTALL_TIMEOUT)
+        if _sandbox_infra_failure(result):
+            return f"{VERIFICATION_INFRA_PREFIX} {result.stderr}"
+        if result.returncode != 0:
+            # This chain is `&&`-joined and ends with the pytest install, so a
+            # non-zero rc means the venv or the test runner is missing. Letting
+            # that through produces a "pytest: not found" test failure that gets
+            # reported to the model as a code defect -- the exact phantom this
+            # classification exists to prevent.
+            detail = (result.stderr or result.stdout or "").strip()[-2000:]
+            return (f"{VERIFICATION_INFRA_PREFIX} could not build the sandbox venv or install "
+                    f"the test runner (rc {result.returncode}): {detail}")
+        return None
     elif "go.mod" in files:
         logger.info("Detected Go project. Running go mod download...")
-        run_sandboxed_command("go mod download", repo_path, network=True,
-                              timeout=SANDBOX_INSTALL_TIMEOUT)
+        return _optional("go mod download", "go mod download")
     elif "Makefile" in files:
         logger.info("Detected Makefile. Attempting 'make install'...")
-        run_sandboxed_command("make install", repo_path, network=True,
-                              timeout=SANDBOX_INSTALL_TIMEOUT)
+        return _optional("make install", "make install")
     else:
         logger.info("No known dependency file detected. Skipping installation.")
+    return None
 
 
 
@@ -4164,6 +4307,9 @@ def verify_fix(repo_path, repo_name, config):
             logger.info(f"Executing QA command: {test_cmd}")
             full_cmd = f"{test_cmd} {repo_path}" if " " not in test_cmd else test_cmd
             result = run_sandboxed_command(full_cmd, qa_path)
+            if _sandbox_infra_failure(result):
+                logger.error(f"Cannot verify (sandbox failure): {result.stderr}")
+                return False, f"{VERIFICATION_INFRA_PREFIX} {result.stderr}"
             if result.returncode == 0:
                 logger.info("External QA tests passed!")
                 return True, None
@@ -4185,7 +4331,7 @@ def verify_fix(repo_path, repo_name, config):
             result = run_sandboxed_command(test_cmd, repo_path)
             if _sandbox_infra_failure(result):
                 logger.error(f"Cannot verify (sandbox failure): {result.stderr}")
-                return False, f"Verification infrastructure unavailable: {result.stderr}"
+                return False, f"{VERIFICATION_INFRA_PREFIX} {result.stderr}"
             if result.returncode == 0:
                 logger.info("Tests passed successfully!")
                 return True, None
@@ -4196,7 +4342,7 @@ def verify_fix(repo_path, repo_name, config):
     result = run_sandboxed_command(test_cmd, repo_path)
     if _sandbox_infra_failure(result):
         logger.error(f"Cannot verify (sandbox failure): {result.stderr}")
-        return False, f"Verification infrastructure unavailable: {result.stderr}"
+        return False, f"{VERIFICATION_INFRA_PREFIX} {result.stderr}"
     if result.returncode == 0:
         logger.info(f"Per-repo tests for {repo_name} passed!")
         return True, None
@@ -4619,9 +4765,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         if config.get("qa_enabled", True):
                             before_verify = _worktree_state(path)
                             try:
-                                prepare_environment(path)
-                                update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start")
-                                verified, failure_msg = verify_fix(path, repo_name, config)
+                                failure_msg = prepare_environment(path)
+                                if failure_msg:
+                                    verified = False
+                                else:
+                                    update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start")
+                                    verified, failure_msg = verify_fix(path, repo_name, config)
                             finally:
                                 # Tests write into their own tree; the commit
                                 # below stages with `git add -A`, so those
@@ -4630,6 +4779,22 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         else:
                             logger.info("QA Testing disabled. Assuming verified.")
                             verified, failure_msg = True, "QA disabled"
+
+                        if not verified and is_verification_infra_failure(failure_msg):
+                            # The sandbox is broken, not the code. Stop the
+                            # attempt loop: no retry can fix a missing sandbox,
+                            # and recording this as "qa_failed"/"error" would be
+                            # replayed on a later run as a verified finding
+                            # about the CODE (see _REPLAYABLE_FAILURE_KINDS).
+                            logger.error(f"process_single_issue: cannot verify {issue_id}: {failure_msg}")
+                            last_failure = {"kind": "sandbox_unavailable",
+                                            "detail": str(failure_msg or "").strip()}
+                            try:
+                                repo_git.git.reset("--hard", "HEAD")
+                                repo_git.git.clean("-fd")
+                            except Exception:  # noqa: BLE001
+                                pass
+                            break
 
                         if verified:
                             final_confidence = (confidence + review_conf) / 2

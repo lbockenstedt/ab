@@ -2063,6 +2063,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         _claim_issue, _release_issue, _authenticated_remote,
         apply_ai_fix, parse_and_apply, review_fix, verify_fix, prepare_environment,
         _worktree_state, discard_verification_artifacts,
+        is_verification_infra_failure,
     )
 
     config = config or load_config()
@@ -2396,14 +2397,25 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 if config.get("qa_enabled", True):
                     before_verify = _worktree_state(path)
                     try:
-                        prepare_environment(path)
-                        verified, failure_msg = verify_fix(path, repo_full_name, config)
+                        infra_msg = prepare_environment(path)
+                        if infra_msg:
+                            verified, failure_msg = False, infra_msg
+                        else:
+                            verified, failure_msg = verify_fix(path, repo_full_name, config)
                     except Exception as e:  # noqa: BLE001
                         verified, failure_msg = False, str(e)
                     finally:
                         # Tests write into their own tree; the commit below uses
                         # `git add -A`, so those artifacts must not survive.
                         discard_verification_artifacts(path, before_verify)
+                    if not verified and is_verification_infra_failure(failure_msg):
+                        # The sandbox is broken, not the fix. Retrying cannot
+                        # help and the message must never reach the model as an
+                        # error context, or it spends the remediation budget
+                        # chasing a defect that does not exist in the code.
+                        logger.error("fix_one_pr: %s#%s — cannot verify: %s",
+                                     repo_full_name, pr.number, failure_msg)
+                        return False, "Fix not pushed: %s" % failure_msg
                     if not verified:
                         last_failure = "Fix failed verification: %s" % failure_msg
                         error_context = ("Your previous fix was approved by review but FAILED "

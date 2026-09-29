@@ -189,6 +189,12 @@ class Harness:
         # touched, so the fix is never clobbered.
         fix_engine._worktree_state = lambda p: {}
         fix_engine.discard_verification_artifacts = lambda p, before: None
+        # A broken sandbox is reported by a message sentinel rather than an
+        # exception, so fix_one_pr can tell "cannot verify" apart from "the fix
+        # is wrong" without any caller risking an unhandled raise.
+        fix_engine.VERIFICATION_INFRA_PREFIX = "Verification infrastructure unavailable:"
+        fix_engine.is_verification_infra_failure = (
+            lambda m: bool(m) and str(m).startswith("Verification infrastructure unavailable:"))
 
         git_mod = types.ModuleType("git")
         git_mod.Repo = types.SimpleNamespace(
