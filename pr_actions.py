@@ -149,19 +149,26 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
     if not runs:
         return "unknown", ""
 
-    failing, pending = [], False
+    # cancelled / stale / startup_failure / action_required never produced a
+    # test verdict: absent evidence, so pending (non-blocking, never a pass).
+    # A completed run with a missing/unrecognised conclusion is unknown.
+    failing, pending, unrecognised = [], False, False
     for run in runs:
         conclusion = run.get("conclusion")
         if run.get("status") != "completed":
             pending = True
-        elif conclusion in ("failure", "timed_out", "cancelled"):
+        elif conclusion in ("failure", "timed_out"):
             failing.append("%s: %s" % (run.get("name") or "check", conclusion))
-        elif conclusion == "action_required":
+        elif conclusion in ("action_required", "cancelled", "stale", "startup_failure"):
             pending = True
+        elif conclusion not in ("success", "neutral", "skipped"):
+            unrecognised = True
     if failing:
         return "failure", ", ".join(failing)
     if pending:
         return "pending", ""
+    if unrecognised:
+        return "unknown", ""
     return "success", ""
 
 

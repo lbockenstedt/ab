@@ -1624,9 +1624,11 @@ def _maybe_auto_merge(gh, repo, pr, config):
             # allowed through: holding on them would gate every merge on checks
             # that may never post (a parked or check-less repo), which is the
             # deadlock class this file has already been bitten by twice. A real
-            # failure cannot deadlock either — it feeds the fixer (see
-            # fix_one_pr) and, if remediation cannot clear it, the attempt
-            # ceiling escalates the PR to a human instead of holding silently.
+            # failure is NOT auto-remediated from here (remediation is
+            # panel-driven and refuses promotion heads); instead the hold is
+            # escalated VISIBLY: the reason names the head and asks for a human,
+            # and is posted to the PR comment once per head. The UI Fix button
+            # (fix_one_pr) reads the same verdict and feeds it to the model.
             try:
                 from pr_actions import head_ci_conclusion
                 _ci_state, _ci_details = head_ci_conclusion(
@@ -1637,7 +1639,10 @@ def _maybe_auto_merge(gh, repo, pr, config):
                 _ci_state, _ci_details = "unknown", ""
             if _ci_state == "failure":
                 should_merge = False
-                reason = "CI is failing on this head (%s)" % (_ci_details or "see checks")
+                reason = ("CI is failing on head %s (%s) — needs human review: fix the "
+                          "build (or click Fix); the merge resumes once checks pass"
+                          % ((pr_meta.get("head_sha") or "?")[:8],
+                             _ci_details or "see checks"))
         if should_merge:
             try:
                 import pr_remediate
@@ -2166,7 +2171,18 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         except Exception as e:  # noqa: BLE001
             logger.debug("fix_one_pr: pre-review score read skipped: %s", e)
 
-        if not findings and not panel_critique and not panel2_critique and not score_feedback:
+        # Read CI BEFORE the clean-review bail-out: an Approve/Approve PR with a
+        # red build has no panel findings, and CI is then the only defect.
+        _ci_state, _ci_details = "unknown", ""
+        try:
+            from pr_actions import head_ci_conclusion
+            _ci_state, _ci_details = head_ci_conclusion(repo_full_name, head_sha, token)
+        except Exception as e:  # noqa: BLE001 — diagnostics must never break the fix
+            logger.debug("fix_one_pr: CI lookup skipped for %s#%s: %s",
+                         repo_full_name, number, e)
+
+        if (not findings and not panel_critique and not panel2_critique and not score_feedback
+                and _ci_state != "failure"):
             return False, "No findings to fix — this PR has a clean pre-review."
 
         lines = ["PR #%s: %s" % (pr.number, pr.title or "")]
@@ -2253,9 +2269,6 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             # the one piece of ground truth we do have reach the model that can
             # act on it.
             try:
-                from pr_actions import head_ci_conclusion
-                _ci_state, _ci_details = head_ci_conclusion(
-                    repo_full_name, getattr(getattr(pr, "head", None), "sha", None), token)
                 if _ci_state == "failure":
                     error_context = (
                         "CI is currently FAILING on this branch (%s). Your fix must also "
