@@ -99,6 +99,79 @@ def _expects_missing_check(msg):
     return "required status check" in low and "is expected" in low
 
 
+def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
+    """The CI verdict for *head_sha* as ``(state, details)``, where state is one
+    of ``success``/``failure``/``pending``/``unknown``.
+
+    AppBuilder cannot run a repo's tests itself: ``fix_engine.verify_fix``
+    executes them through ``run_sandboxed_command``, which needs Docker, and the
+    host has none — so ``qa_enabled`` is off and every generated fix is pushed
+    unverified. GitHub Actions is therefore the ONLY ground truth available for
+    whether a fix actually works, and nothing was reading it: the sole Actions
+    call in this module releases PARKED runs and never looks at a conclusion.
+    The result was a fixer flying blind — it would push a fix that broke the
+    suite, get told nothing, and spend its remediation budget re-fixing the
+    logic the panel named while the real breakage went unmentioned.
+
+    ``unknown`` is deliberately distinct from ``success`` and is returned when
+    there is no token, the lookup fails, or the commit has NO check runs at all.
+    Callers must treat it as "no evidence", never as a pass — reporting a commit
+    with no checks as green is exactly the false all-clear this exists to stop.
+    A parked (``action_required``) run counts as pending, not failure, because
+    ``_release_parked_checks`` is what clears those.
+    """
+    if not token:
+        return "unknown", ""
+    try:
+        resp = requests.get(
+            "https://api.github.com/repos/%s/commits/%s/check-runs" % (repo_name, head_sha),
+            params={"per_page": 100},
+            headers={"Authorization": "token " + token,
+                     "Accept": "application/vnd.github+json"},
+            timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — network: no evidence, not a verdict
+        logger.debug("pr_actions: CI lookup for %s @ %s failed: %s", repo_name, head_sha, exc)
+        return "unknown", ""
+    if resp.status_code != 200:
+        logger.debug("pr_actions: CI lookup for %s @ %s returned HTTP %s",
+                     repo_name, head_sha, resp.status_code)
+        return "unknown", ""
+    try:
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pr_actions: CI lookup for %s @ %s gave bad JSON: %s",
+                     repo_name, head_sha, exc)
+        return "unknown", ""
+    if not isinstance(payload, dict):
+        return "unknown", ""
+    runs = payload.get("check_runs")
+    runs = [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else []
+    if not runs:
+        return "unknown", ""
+
+    # cancelled / stale / startup_failure / action_required never produced a
+    # test verdict: absent evidence, so pending (non-blocking, never a pass).
+    # A completed run with a missing/unrecognised conclusion is unknown.
+    failing, pending, unrecognised = [], False, False
+    for run in runs:
+        conclusion = run.get("conclusion")
+        if run.get("status") != "completed":
+            pending = True
+        elif conclusion in ("failure", "timed_out"):
+            failing.append("%s: %s" % (run.get("name") or "check", conclusion))
+        elif conclusion in ("action_required", "cancelled", "stale", "startup_failure"):
+            pending = True
+        elif conclusion not in ("success", "neutral", "skipped"):
+            unrecognised = True
+    if failing:
+        return "failure", ", ".join(failing)
+    if pending:
+        return "pending", ""
+    if unrecognised:
+        return "unknown", ""
+    return "success", ""
+
+
 def _release_parked_checks(repo_name, head_sha, token, *, timeout=60.0):
     """Approve every workflow run parked as ``action_required`` on *head_sha*,
     returning how many were released.
