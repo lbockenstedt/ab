@@ -19,7 +19,7 @@ applied twice, so the PR polled silently forever (the cached review path logs
 nothing, and the merge hold logs only when its reason CHANGES).
 
 The bypass skips THE CONFIDENCE THRESHOLD AND NOTHING ELSE, only for a
-promotion/back-merge head that both panels Approve with no dissent and no
+promotion/back-merge head that both panels Approve with no filed
 finding. The threshold itself is never lowered -- every case below proves some
 way the full 0.90 bar is still enforced.
 
@@ -147,14 +147,51 @@ def main():
     ok &= _check("promotion head but panel 2 could not RUN -> blocked", should is False)
 
     print("\n-- any stated defect at all revokes the bypass --")
-    for field in ("panel_dissents", "panel2_dissents", "findings", "errors", "warnings"):
+    for field in ("findings", "errors", "warnings"):
         should, _r = decide(_rec(**{field: 1}), paths, _config(), _meta())
         ok &= _check("%s=1 -> bypass revoked, held at the threshold" % field, should is False)
-    # ...and with the defect present the hold must be the CONFIDENCE hold for
-    # dissents (which no other gate reads), proving the bypass is what lapsed.
-    should, reason = decide(_rec(panel_dissents=1), paths, _config(), _meta())
-    ok &= _check("a dissent alone falls back to the confidence gate",
-                 should is False and "below the threshold" in (reason or ""))
+
+    print("\n-- a dissent is NOT a stated defect (lm#1070, second deadlock) --")
+    # This is the complement invariant, and it is the whole reason this file
+    # exists. pr_remediate._promotion_evidence_is_actionable reads verdicts and
+    # filed findings ONLY -- it does not read dissents -- so a promotion PR that
+    # comes back Approve/Approve with zero findings and a dissent is one that
+    # remediation is FORBIDDEN to edit. If the merge gate also refuses it, the
+    # PR has no path to any terminal state and polls silently forever, which is
+    # exactly what lm#1070 did at 0.8633 with one dissent per panel. Any
+    # condition this gate applies that the guardrail does not also treat as
+    # actionable re-opens that deadlock.
+    for kw in ({"panel_dissents": 1}, {"panel2_dissents": 1},
+               {"panel_dissents": 2, "panel2_dissents": 3}):
+        should, reason = decide(_rec(**kw), paths, _config(), _meta())
+        ok &= _check("%r -> still merges (remediation may not act on a dissent)" % (kw,),
+                     should is True and "promotion PR" in (reason or ""))
+    # The live lm#1070 record, verbatim from /etc/ab/pr_reviews.json.
+    should, reason = decide(
+        _rec(panel_confidence=0.8633333333333333, panel2_confidence=0.88,
+             panel_dissents=1, panel2_dissents=1, panel_rated=3, panel2_rated=3,
+             findings=0, errors=0, warnings=0, tier1_external=0),
+        paths, _config(), _meta())
+    ok &= _check("the exact lm#1070 deadlock record merges", should is True)
+
+    print("\n-- the bypass and the remediation guardrail must be COMPLEMENTS --")
+    # Enumerate the shapes a promotion PR can hold below the bar and assert that
+    # for every one of them exactly one side is willing to move it: either
+    # remediation may edit it, or the merge gate clears it. Never neither.
+    import pr_remediate
+    for verdict1 in ("Approve", "Reject"):
+        for verdict2 in ("Approve", "Reject"):
+            for dis in (0, 1):
+                for err in (0, 1):
+                    rec = _rec(panel_verdict=verdict1, panel2_verdict=verdict2,
+                               panel_dissents=dis, panel2_dissents=dis,
+                               errors=err, warnings=err, findings=err)
+                    actionable = pr_remediate._promotion_evidence_is_actionable(rec)
+                    merges, _r = decide(rec, paths, _config(), _meta())
+                    ok &= _check(
+                        "v=%s/%s dissent=%d defect=%d -> remediable=%s merges=%s (not both stuck)"
+                        % (verdict1, verdict2, dis, err, actionable, merges),
+                        bool(actionable) or bool(merges))
 
     print("\n-- both promotion head shapes, and a clean one still merges normally --")
     should, _r = decide(_rec(head_ref="backmerge/qa-to-dev"), paths, _config(), _meta())
