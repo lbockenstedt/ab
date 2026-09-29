@@ -1042,6 +1042,26 @@ def auto_remediate_pr(
         msg = f"Fix invocation failed: {e}"
 
     used_model = used_model_out.get("model") or used_model_out.get("key")
+
+    # Contention is not an attempt. fix_one_pr bailed on the per-PR lock before
+    # selecting a model or touching a checkout, so there is no work to charge
+    # and no model to blame -- and charging it anyway burned both the
+    # remediation budget and (on an escalation turn) the premium budget on a
+    # scan that did nothing. Returned before new_attempts is computed so no
+    # counter can be incremented on this path by accident.
+    if not success and fix_failures.is_contended_failure(msg):
+        update_pr_review(
+            repo_full_name,
+            pr.number,
+            remediation_attempts=attempts,
+            auto_remediate_status="contended",
+            auto_remediate_failure=msg,
+        )
+        logger.info(
+            "auto_remediate_pr: %s — another fix is already in flight for this PR; "
+            "not charged to the remediation budget, retrying next scan", key)
+        return False, msg
+
     new_attempts = attempts + 1
 
     # Charge the premium budget when the premium TURN IS TAKEN, whatever model

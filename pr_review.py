@@ -2063,7 +2063,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
     lock_id = "pr-fix:%s#%s" % (repo_full_name, number)
     if not _claim_issue(lock_id):
-        return False, "A fix is already in progress for this PR."
+        return False, fix_failures.CONTENDED_LOCK
     try:
         gh = Github(token)
         repo = gh.get_repo(repo_full_name)
