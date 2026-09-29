@@ -914,8 +914,19 @@ def _bwrap_usable():
     import subprocess
     try:
         probe = subprocess.run(
-            ["bwrap", "--unshare-user", "--unshare-pid", "--ro-bind", "/usr", "/usr",
-             "--symlink", "usr/bin", "/bin", "/bin/true"],
+            ["bwrap", "--unshare-user", "--unshare-pid",
+             "--ro-bind", "/usr", "/usr",
+             # The same usr-merge symlinks the real jail builds. /lib and
+             # /lib64 are not optional decoration: without them the dynamic
+             # loader is missing, every binary fails with
+             # "execvp: No such file or directory", and a perfectly healthy
+             # host is misread as having no user namespaces.
+             "--symlink", "usr/bin", "/bin",
+             "--symlink", "usr/sbin", "/sbin",
+             "--symlink", "usr/lib", "/lib",
+             "--symlink", "usr/lib64", "/lib64",
+             "--proc", "/proc",
+             "/bin/true"],
             capture_output=True, text=True, timeout=30)
         return probe.returncode == 0
     except Exception:

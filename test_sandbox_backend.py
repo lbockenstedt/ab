@@ -605,6 +605,34 @@ def test_bwrap_usable_probe_actually_starts_a_jail(fake_subprocess):
     assert argv[0] == "bwrap" and "--unshare-user" in argv
 
 
+def _symlinks(argv):
+    return {(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == "--symlink"}
+
+
+def test_probe_builds_the_same_rootfs_as_the_real_jail(fake_subprocess, tmp_path):
+    """The probe must not be able to fail for a reason the real jail would not.
+
+    Omitting the /lib and /lib64 usr-merge symlinks leaves no dynamic loader,
+    so /bin/true dies with "execvp: No such file or directory" -- bwrap exits
+    non-zero even though the namespaces were created perfectly. That reads as
+    "this host has no user namespaces", disables the sandbox, and fails every
+    verification closed on a host where the sandbox actually works."""
+    calls = fake_subprocess({"bwrap"})
+    MOD["_bwrap_usable"]()
+    probe = calls[-1][0]
+    real = MOD["_bwrap_argv"](str(tmp_path), "pytest")
+    missing = _symlinks(real) - _symlinks(probe)
+    assert not missing, f"probe omits rootfs symlinks the real jail has: {missing}"
+
+
+def test_probe_provides_a_dynamic_loader(fake_subprocess):
+    calls = fake_subprocess({"bwrap"})
+    MOD["_bwrap_usable"]()
+    probe = calls[-1][0]
+    assert ("usr/lib", "/lib") in _symlinks(probe)
+    assert ("usr/lib64", "/lib64") in _symlinks(probe)
+
+
 def test_bwrap_startup_failure_is_infra_not_a_test_failure(fake_subprocess, tmp_path):
     """bwrap exits non-zero with a `bwrap:` diagnostic when it cannot build the
     jail; as a plain rc that is indistinguishable from a failing suite and
