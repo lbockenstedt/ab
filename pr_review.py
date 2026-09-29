@@ -1389,6 +1389,56 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         docs_bypass = (_docs_verdict.get("category") == feature_allowlist.DOCS_ONLY
                        and _docs_verdict.get("auto_approvable") is True)
 
+    # THE SECOND RELAXATION (feature_automerge_promotion_confidence_bypass,
+    # default on): a promotion/back-merge PR that BOTH panels Approve, with no
+    # dissent and no finding of any kind, skips the confidence threshold — and
+    # only that.
+    #
+    # This closes a genuine DEADLOCK, not a safety gate. The promotion guard in
+    # pr_remediate (_promotion_evidence_is_actionable) deliberately refuses to
+    # edit a promotion branch that carries no stated defect — that guard is what
+    # stopped the 206-push-a-day livelock where AppBuilder invented edits purely
+    # to chase a score. But refusing to edit and refusing to merge are the same
+    # refusal applied twice: lm#1070 sat with panel 1 at 0.92, panel 2 at 0.8833,
+    # zero findings, zero dissents, composite Approve, and a remediation path
+    # that (correctly) declined to touch it. Nothing in the system could ever
+    # move it, and it polled silently forever.
+    #
+    # A confidence number below the bar describes the REVIEWERS' certainty. On a
+    # promotion PR there is nothing to act on: the diff is code the source branch
+    # already reviewed and merged, the panels both Approve it, and AppBuilder is
+    # structurally forbidden from changing it. Holding buys no safety — it only
+    # withholds code that is already on dev from reaching qa.
+    #
+    # This does NOT lower feature_automerge_min_confidence for anything else. A
+    # feature/bug PR, or a promotion PR with a single dissent, finding, error or
+    # warning, keeps the full threshold. Both panels must still have RUN and
+    # returned Approve (the verdict block below is untouched), and every
+    # containment gate above and below still applies: release-branch refusal,
+    # release locks, repo/target-branch opt-in, draft/open/mergeable, paused/
+    # blackout, Tier-1 clean, the boundary deny-list and the allowlist.
+    #
+    # Inlined deliberately: test_feature_automerge_gate execs this function
+    # standalone via ast, so it cannot reference module constants (that is why
+    # the branch prefixes are literals here and not pr_remediate._PROMOTION_HEAD_RE).
+    # test_promotion_confidence_bypass.py pins the two in agreement.
+    promotion_bypass = False
+    if config.get("feature_automerge_promotion_confidence_bypass", True) and not docs_bypass:
+        try:
+            _promo_head = str(rec.get("head_ref") or "")
+            promotion_bypass = (
+                (_promo_head.startswith("promote/") or _promo_head.startswith("backmerge/"))
+                and not rec.get("panel_status") and not rec.get("panel2_status")
+                and rec.get("panel_verdict") == "Approve"
+                and rec.get("panel2_verdict") == "Approve"
+                and int(rec.get("panel_dissents") or 0) == 0
+                and int(rec.get("panel2_dissents") or 0) == 0
+                and int(rec.get("findings") or 0) == 0
+                and int(rec.get("errors") or 0) == 0
+                and int(rec.get("warnings") or 0) == 0)
+        except Exception:  # noqa: BLE001 — must fail CLOSED, like every gate here
+            promotion_bypass = False
+
     if not docs_bypass:
         if rec.get("panel_status"):
             return False, "panel 1 (skeptical review) could not run"
@@ -1408,7 +1458,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
 
     conf1 = rec.get("panel_confidence")
     conf2 = rec.get("panel2_confidence")
-    if not docs_bypass:
+    if not docs_bypass and not promotion_bypass:
         if conf1 is None or conf1 < threshold:
             return False, f"panel 1 confidence {conf1} is below the threshold {threshold:.2f}"
         if conf2 is None or conf2 < threshold:
@@ -1450,6 +1500,18 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         return True, ("cleared: documentation-only diff — %s "
                       "(panel verdict/confidence not required for docs), no boundary touched"
                       % _panel_note)
+
+    if promotion_bypass:
+        # Deliberately NOT `min(conf1, conf2)` unguarded: the bypass does not
+        # require a confidence to be present, and min(None, 0.88) is a TypeError
+        # that would raise straight out of this "must never raise" gate.
+        _c = [c for c in (conf1, conf2) if isinstance(c, (int, float))]
+        _score = ("%.2f" % min(_c)) if _c else "n/a"
+        return True, ("cleared: promotion PR — both panels Approve with no dissent and no "
+                      "finding; min confidence %s is below the %.2f threshold, but the diff "
+                      "is code the source branch already merged and remediation is barred "
+                      "from editing it, so the deficit is unresolvable by any action "
+                      "AppBuilder can take" % (_score, threshold))
 
     score = min(conf1, conf2)
     return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
