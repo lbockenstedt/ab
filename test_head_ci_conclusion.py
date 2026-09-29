@@ -112,11 +112,25 @@ def test_failure_reports_each_failing_check_by_name():
     assert "lint" not in details
 
 
-@pytest.mark.parametrize("conclusion", ["failure", "timed_out", "cancelled"])
+@pytest.mark.parametrize("conclusion", ["failure", "timed_out"])
 def test_all_bad_conclusions_count_as_failure(conclusion):
     fn = _load()
     _FakeRequests.next_response = _runs(("test", "completed", conclusion))
     assert fn("o/r", "sha", "tok")[0] == "failure"
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "stale", "startup_failure"])
+def test_no_verdict_conclusions_are_pending(conclusion):
+    fn = _load()
+    _FakeRequests.next_response = _runs(("test", "completed", conclusion))
+    assert fn("o/r", "sha", "tok") == ("pending", "")
+
+
+@pytest.mark.parametrize("conclusion", [None, "weird"])
+def test_unrecognised_conclusion_is_unknown(conclusion):
+    fn = _load()
+    _FakeRequests.next_response = _runs(("test", "completed", conclusion))
+    assert fn("o/r", "sha", "tok") == ("unknown", "")
 
 
 def test_failure_wins_over_pending():
