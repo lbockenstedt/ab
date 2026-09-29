@@ -1411,12 +1411,27 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     # withholds code that is already on dev from reaching qa.
     #
     # This does NOT lower feature_automerge_min_confidence for anything else. A
-    # feature/bug PR, or a promotion PR with a single dissent, finding, error or
-    # warning, keeps the full threshold. Both panels must still have RUN and
+    # feature/bug PR, or a promotion PR carrying any finding, error or warning,
+    # keeps the full threshold. Both panels must still have RUN and
     # returned Approve (the verdict block below is untouched), and every
     # containment gate above and below still applies: release-branch refusal,
     # release locks, repo/target-branch opt-in, draft/open/mergeable, paused/
     # blackout, Tier-1 clean, the boundary deny-list and the allowlist.
+    #
+    # A dissent is deliberately NOT disqualifying, and that is the whole point:
+    # this predicate must be the exact COMPLEMENT of
+    # _promotion_evidence_is_actionable, which decides whether remediation is
+    # allowed to edit the branch. That guard looks only at verdicts and filed
+    # findings — it ignores dissents entirely. The first cut of this bypass also
+    # required zero dissents, which opened a second deadlock in the narrow gap
+    # between the two: lm#1070 came back Approve/Approve, zero findings, one
+    # dissent per panel, 0.8633 confidence. Remediation refused to touch it (no
+    # stated defect) and the merge gate refused to clear it (a dissent), so it
+    # was stuck exactly as before. A dissent with an Approve verdict and no filed
+    # finding is an unrecorded minority opinion: it names nothing for an edit to
+    # address, so holding on it can only ever produce a stall. Any condition
+    # added here that the guardrail does not also treat as actionable re-opens
+    # this same deadlock — test_promotion_confidence_bypass.py pins the pair.
     #
     # Inlined deliberately: test_feature_automerge_gate execs this function
     # standalone via ast, so it cannot reference module constants (that is why
@@ -1431,8 +1446,6 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
                 and not rec.get("panel_status") and not rec.get("panel2_status")
                 and rec.get("panel_verdict") == "Approve"
                 and rec.get("panel2_verdict") == "Approve"
-                and int(rec.get("panel_dissents") or 0) == 0
-                and int(rec.get("panel2_dissents") or 0) == 0
                 and int(rec.get("findings") or 0) == 0
                 and int(rec.get("errors") or 0) == 0
                 and int(rec.get("warnings") or 0) == 0)
@@ -1507,7 +1520,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         # that would raise straight out of this "must never raise" gate.
         _c = [c for c in (conf1, conf2) if isinstance(c, (int, float))]
         _score = ("%.2f" % min(_c)) if _c else "n/a"
-        return True, ("cleared: promotion PR — both panels Approve with no dissent and no "
+        return True, ("cleared: promotion PR — both panels Approve with no filed "
                       "finding; min confidence %s is below the %.2f threshold, but the diff "
                       "is code the source branch already merged and remediation is barred "
                       "from editing it, so the deficit is unresolvable by any action "
