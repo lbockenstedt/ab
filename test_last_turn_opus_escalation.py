@@ -225,6 +225,7 @@ def _load_exclusion_fns(candidates):
     want_fn = {"_model_allowed", "_fix_allowlist", "_fix_model_exclusions",
                "_last_turn_fix_exclusions", "_premium_allowlist"}
     want_as = {"DEFAULT_PANEL_ALLOWLIST", "DEFAULT_FIX_ALLOWLIST",
+               "DEFAULT_FIX_EXTRA_ALLOWLIST",
                "DEFAULT_LAST_TURN_FIX_ALLOWLIST", "DEFAULT_PREMIUM_FIX_ALLOWLIST"}
     segs = []
     for n in tree.body:

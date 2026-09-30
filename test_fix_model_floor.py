@@ -28,7 +28,7 @@ import pytest
 _FIX_NAMES = {"_model_allowed", "_panel_allowlist", "_fix_allowlist",
               "_fix_model_exclusions", "_premium_allowlist"}
 _FIX_ASSIGNS = {"DEFAULT_PANEL_ALLOWLIST", "DEFAULT_FIX_ALLOWLIST",
-                "DEFAULT_PREMIUM_FIX_ALLOWLIST"}
+                "DEFAULT_FIX_EXTRA_ALLOWLIST", "DEFAULT_PREMIUM_FIX_ALLOWLIST"}
 
 
 class _NoLog:
@@ -65,21 +65,71 @@ def _cand(model, key=None):
 # -- the bar itself --------------------------------------------------------
 
 def test_writing_code_is_held_to_the_same_bar_as_judging_it():
-    """The write bar is the panel bar plus the premium escalation tier, and
-    nothing else. Premium sits ABOVE the panel bar (every premium model
-    outranks Opus in model_registry), so this widens the bar upward, never
-    downward. The union is required, not cosmetic: without it the premium
-    narrowing and this floor intersect to an empty pool on the escalation
-    turn and the tier is silently inert."""
+    """The write bar is the panel bar, plus the premium escalation tier, plus the
+    explicit write-only additions -- and nothing else.
+
+    Premium sits ABOVE the panel bar (every premium model outranks Opus in
+    model_registry), so that union widens the bar upward, never downward. It is
+    required, not cosmetic: without it the premium narrowing and this floor
+    intersect to an empty pool on the escalation turn and the tier is silently
+    inert.
+
+    DEFAULT_FIX_EXTRA_ALLOWLIST is the deliberate exception to "the write bar IS
+    the judge bar": a model can be better at WRITING code than at judging it
+    (Sonnet 5.5 outranks Opus 5 in model_registry for code work at a third of the
+    multiplier). Admitting it by widening the PANEL instead would change who
+    reviews every PR in the fleet, which is a different and much larger policy
+    change -- so it is enumerated here and asserted below to stay out of the panel.
+    """
     fix = fix_engine["DEFAULT_FIX_ALLOWLIST"]
     panel = fix_engine["DEFAULT_PANEL_ALLOWLIST"]
     premium = fix_engine["DEFAULT_PREMIUM_FIX_ALLOWLIST"]
+    extra = fix_engine["DEFAULT_FIX_EXTRA_ALLOWLIST"]
     assert set(panel) <= set(fix)
-    assert set(fix) - set(panel) == set(premium) - set(panel)
+    assert set(fix) - set(panel) == (set(premium) | set(extra)) - set(panel)
     # The panel bar itself is untouched: the panel runs on EVERY PR, so
     # admitting premium there would seat the most expensive models on the
     # roster for routine reviews.
     assert not (set(premium) & set(panel))
+    # ...and the write-only additions must never leak into the panel either.
+    assert not (set(extra) & set(panel))
+    # A write-only addition is an ordinary-turn model, so it must NOT be
+    # reserved premium as well -- that would make the premium turn re-seat a
+    # model the ordinary turns already tried and burn the reserved attempt.
+    assert not (set(extra) & set(premium))
+
+
+def test_the_write_only_additions_are_version_pinned():
+    """DEFAULT_FIX_EXTRA_ALLOWLIST widens the bar DOWNWARD in family terms (Sonnet
+    sits below Opus for the generic "*sonnet*" registry rule), so each pattern must
+    name an exact version. "claude-sonnet-5*" would silently re-admit plain Sonnet
+    5 -- the model DEFAULT_LAST_TURN_FIX_ALLOWLIST documents as unable to resolve
+    findings Opus resolved."""
+    extra = fix_engine["DEFAULT_FIX_EXTRA_ALLOWLIST"]
+    assert extra, "the write-only additions must not be empty"
+    for pat in extra:
+        stem = pat.rstrip("*")
+        assert re.search(r"\d+\.\d+$", stem), (
+            "%r must be pinned to a major.minor version, not a whole family" % pat)
+
+
+def test_sonnet_5_5_may_write_but_older_sonnets_may_not():
+    """The point of the whole change: Sonnet 5.5 is admitted to write code, and
+    every earlier Sonnet stays out."""
+    patterns = fix_engine["DEFAULT_FIX_ALLOWLIST"]
+    assert fix_engine["_model_allowed"]("claude-sonnet-5.5", patterns) is True
+    assert fix_engine["_model_allowed"]("claude-sonnet-5.5-20260101", patterns) is True
+    assert fix_engine["_model_allowed"]("anthropic/claude-sonnet-5.5", patterns) is True
+    for old in ("claude-sonnet-5", "claude-sonnet-4.5", "claude-sonnet-5.1"):
+        assert fix_engine["_model_allowed"](old, patterns) is False, (
+            "%s must still be barred from writing code" % old)
+
+
+def test_sonnet_5_5_is_not_admitted_to_the_review_panel():
+    """Widening the write bar must not change who REVIEWS the fleet's PRs."""
+    panel = fix_engine["_panel_allowlist"]({})
+    assert fix_engine["_model_allowed"]("claude-sonnet-5.5", panel) is False
+    assert fix_engine["_model_allowed"]("claude-opus-5", panel) is True
 
 
 def test_the_default_bar_is_opus_class_or_better():
