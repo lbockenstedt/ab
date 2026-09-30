@@ -901,6 +901,65 @@ SANDBOX_ETC_ALLOWLIST = (
 # and the LLM provider keys, and sandboxed code is untrusted.
 SANDBOX_ENV_PASSTHROUGH = ("TZ", "TERM")
 
+# Ten of the sixteen fleet repos are LM spokes that inherit BaseSpoke from the
+# lm repo and import it as `base_spoke` / `core.src.base_spoke`. In a developer
+# checkout that resolves via the sibling lm clone; a standalone clone fails at
+# COLLECTION with "ModuleNotFoundError: No module named 'core'". Every spoke's
+# CI therefore checks lm out into _lm and puts it on PYTHONPATH, and the
+# sandbox has to do the same -- otherwise verification fails for a reason that
+# is not in the diff, and AppBuilder rejects fixes that CI would have passed.
+# Mirrored per-repo config would drift from CI; this is derived from the actual
+# imports instead. lm is a public repo, so the clone needs no credential (and
+# the sandbox deliberately has none).
+SPOKE_CORE_URL = "https://github.com/lbockenstedt/lm.git"
+SPOKE_CORE_DIRNAME = "_lm"
+_SPOKE_CORE_IMPORT_RE = re.compile(
+    r"^\s*(?:from|import)\s+(?:core\.src\.base_spoke|core\.src|base_spoke)\b", re.M)
+
+
+def _needs_spoke_core(repo_path):
+    """True when this repo imports BaseSpoke but does not contain it."""
+    if os.path.isdir(os.path.join(repo_path, SPOKE_CORE_DIRNAME)):
+        return False
+    if os.path.exists(os.path.join(repo_path, "core", "src", "base_spoke.py")):
+        return False
+    skip = {".git", "node_modules", "venv", ".venv", "__pycache__",
+            SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME}
+    try:
+        for root, dirs, names in os.walk(repo_path):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for n in names:
+                if not n.endswith(".py"):
+                    continue
+                try:
+                    with open(os.path.join(root, n), "r", errors="ignore") as f:
+                        if _SPOKE_CORE_IMPORT_RE.search(f.read()):
+                            return True
+                except Exception:  # noqa: BLE001
+                    continue
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not scan {repo_path} for BaseSpoke imports: {e}")
+    return False
+
+
+def _spoke_core_pythonpath(cwd):
+    """PYTHONPATH entries for a provisioned _lm checkout, or None."""
+    base = os.path.join(cwd, SPOKE_CORE_DIRNAME)
+    if not os.path.isdir(base):
+        return None
+    return f"{base}:{os.path.join(base, 'core', 'src')}"
+
+
+# Set once bubblewrap has been PROVEN to work. A host does not gain or lose
+# user-namespace support while AppBuilder is running, so the probe is a
+# one-off; a success is cached forever. A failure is deliberately NOT cached.
+# The probe runs a real jail with a timeout, and LM-AB is a 1 vCPU box: under
+# load that timeout can expire, and treating one slow probe as "this host has
+# no user namespaces" would silently disable verification fleet-wide until the
+# service was restarted. Observed live at 2026-09-30 00:19:34, where a single
+# transient probe failure downgraded the backend to None mid-run.
+_BWRAP_USABLE = False
+
 
 def _bwrap_usable():
     """True when bwrap can actually create the namespaces it needs.
@@ -912,6 +971,9 @@ def _bwrap_usable():
     misconfiguration into a stream of "failing tests" fed back to the model, so
     the probe runs a real trivial jail."""
     import subprocess
+    global _BWRAP_USABLE
+    if _BWRAP_USABLE:
+        return True
     try:
         probe = subprocess.run(
             ["bwrap", "--unshare-user", "--unshare-pid",
@@ -927,9 +989,15 @@ def _bwrap_usable():
              "--symlink", "usr/lib64", "/lib64",
              "--proc", "/proc",
              "/bin/true"],
-            capture_output=True, text=True, timeout=30)
-        return probe.returncode == 0
-    except Exception:
+            capture_output=True, text=True, timeout=120)
+        if probe.returncode == 0:
+            _BWRAP_USABLE = True
+            return True
+        logger.warning("bubblewrap probe failed (rc %s): %s",
+                       probe.returncode, (probe.stderr or "").strip()[:300])
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"bubblewrap probe could not complete: {e}")
         return False
 
 
@@ -956,7 +1024,7 @@ def _sandbox_backend():
     return None
 
 
-def _bwrap_argv(cwd, command, network=True, venv_bin=None):
+def _bwrap_argv(cwd, command, network=True, venv_bin=None, pythonpath=None):
     """Builds the bubblewrap argv for running `command` in `cwd`.
 
     The root filesystem is read-only; only `cwd` (bound read-write) and a
@@ -1010,6 +1078,8 @@ def _bwrap_argv(cwd, command, network=True, venv_bin=None):
              "--setenv", "HOME", "/tmp",
              "--setenv", "PATH", path,
              "--setenv", "LANG", "C.UTF-8"]
+    if pythonpath:
+        argv += ["--setenv", "PYTHONPATH", pythonpath]
     for name in SANDBOX_ENV_PASSTHROUGH:
         value = os.environ.get(name)
         if value:
@@ -1057,7 +1127,8 @@ def run_sandboxed_command(command, cwd, network=True, timeout=SANDBOX_TEST_TIMEO
     if backend == "bwrap":
         venv_bin = os.path.join(cwd, SANDBOX_VENV_DIRNAME, "bin")
         argv = _bwrap_argv(cwd, command, network=network,
-                           venv_bin=venv_bin if os.path.isdir(venv_bin) else None)
+                           venv_bin=venv_bin if os.path.isdir(venv_bin) else None,
+                           pythonpath=_spoke_core_pythonpath(cwd))
         logger.info("Running sandboxed command via bubblewrap "
                     f"(network {'on' if network else 'off'})...")
         try:
@@ -1099,11 +1170,16 @@ def run_sandboxed_command(command, cwd, network=True, timeout=SANDBOX_TEST_TIMEO
                 capture_output=True, text=True, timeout=timeout,
             )
         else:
+            core_path = _spoke_core_pythonpath(cwd)
             docker_cmd = [
                 "docker", "run", "--rm",
                 *([] if network else ["--network", "none"]),
                 "-v", f"{cwd}:/app",
                 "-w", "/app",
+                # Same BaseSpoke layout as the bubblewrap path; the bind lands
+                # the repo at /app, so the host-side paths are rewritten.
+                *(["-e", "PYTHONPATH=" + core_path.replace(cwd, "/app")]
+                  if core_path else []),
                 image,
                 "sh", "-c", command
             ]
@@ -1543,22 +1619,28 @@ def is_verification_infra_failure(message):
 
 
 def _exclude_sandbox_venv(repo_path):
-    """Keeps the sandbox venv out of commits.
+    """Keeps sandbox scaffolding out of commits.
 
-    The fixer stages with `git add -A`, so a venv created inside the repo would
-    be committed wholesale. Writing to .git/info/exclude (rather than
-    .gitignore) keeps the working tree clean — it never shows up in a diff."""
+    The fixer stages with `git add -A`, so a venv or an lm core checkout
+    created inside the repo would be committed wholesale. Writing to
+    .git/info/exclude (rather than .gitignore) keeps the working tree clean —
+    it never shows up in a diff, and it also keeps both directories out of
+    `git status`, so discard_verification_artifacts does not try to remove
+    them between the install and the test run."""
     try:
         exclude = os.path.join(repo_path, ".git", "info", "exclude")
-        entry = f"/{SANDBOX_VENV_DIRNAME}/"
         os.makedirs(os.path.dirname(exclude), exist_ok=True)
         existing = ""
         if os.path.exists(exclude):
             with open(exclude, "r") as f:
                 existing = f.read()
-        if entry not in existing.split():
-            with open(exclude, "a") as f:
-                f.write(f"\n{entry}\n")
+        present = existing.split()
+        for name in (SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME):
+            entry = f"/{name}/"
+            if entry not in present:
+                with open(exclude, "a") as f:
+                    f.write(f"\n{entry}\n")
+                present.append(entry)
     except Exception as e:
         logger.warning(f"Could not exclude {SANDBOX_VENV_DIRNAME} from git: {e}")
 
@@ -1645,8 +1727,8 @@ def _python_requirement_files(repo_path):
     nothing, so every test module would fail to import and verification would
     fail for reasons unrelated to the fix."""
     found = []
-    skip = {".git", "node_modules", "venv", ".venv", "_lm", "__pycache__",
-            SANDBOX_VENV_DIRNAME}
+    skip = {".git", "node_modules", "venv", ".venv", "__pycache__",
+            SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME}
     try:
         for root, dirs, names in os.walk(repo_path):
             dirs[:] = [d for d in dirs if d not in skip]
@@ -1672,6 +1754,25 @@ def prepare_environment(repo_path):
     files = os.listdir(repo_path)
     venv = SANDBOX_VENV_DIRNAME
     _exclude_sandbox_venv(repo_path)
+
+    if _needs_spoke_core(repo_path):
+        logger.info("Repo imports BaseSpoke but does not contain it; "
+                    "checking out lm core into %s (as its CI does)..." % SPOKE_CORE_DIRNAME)
+        clone = (f"git clone --depth 1 --filter=blob:none --sparse {SPOKE_CORE_URL} "
+                 f"{SPOKE_CORE_DIRNAME} && "
+                 f"git -C {SPOKE_CORE_DIRNAME} sparse-checkout set core")
+        result = run_sandboxed_command(clone, repo_path, network=True,
+                                       timeout=SANDBOX_INSTALL_TIMEOUT)
+        if _sandbox_infra_failure(result):
+            return f"{VERIFICATION_INFRA_PREFIX} {result.stderr}"
+        if result.returncode != 0:
+            # Without BaseSpoke every test module fails to import, so the whole
+            # suite errors at collection -- reported to the model as a code
+            # defect that is not in the diff.
+            detail = (result.stderr or result.stdout or "").strip()[-2000:]
+            return (f"{VERIFICATION_INFRA_PREFIX} could not check out the lm core dependency "
+                    f"(rc {result.returncode}): {detail}")
+
     reqs = _python_requirement_files(repo_path)
 
     def _optional(command, label):

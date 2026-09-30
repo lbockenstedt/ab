@@ -25,6 +25,8 @@ TARGETS = {
     "discard_verification_artifacts",
     "run_sandboxed_command",
     "prepare_environment",
+    "_needs_spoke_core",
+    "_spoke_core_pythonpath",
 }
 
 # Pulled from the source rather than restated here: a test that hard-codes the
@@ -36,6 +38,7 @@ CONSTANTS = {
     "SANDBOX_UNAVAILABLE_RC", "SANDBOX_TIMEOUT_RC",
     "_SANDBOX_UNAVAILABLE_MARKER", "_SANDBOX_TIMEOUT_MARKER",
     "VERIFICATION_INFRA_PREFIX",
+    "SPOKE_CORE_URL", "SPOKE_CORE_DIRNAME", "_SPOKE_CORE_IMPORT_RE",
 }
 
 
@@ -58,7 +61,7 @@ def _load():
     logger = types.SimpleNamespace(
         info=lambda *a, **k: None, error=lambda *a, **k: None,
         warning=lambda *a, **k: None, debug=lambda *a, **k: None)
-    ns = {"os": os, "logger": logger}
+    ns = {"os": os, "re": __import__("re"), "logger": logger}
     exec(compile(ast.Module(body=wanted, type_ignores=[]), "<fix_engine>", "exec"), ns)
     return ns
 
@@ -76,7 +79,7 @@ def fake_subprocess(monkeypatch):
     """Replaces the `subprocess` module that the functions import locally."""
     calls = []
 
-    def make(available, runner=None, bwrap_usable=True):
+    def make(available, runner=None, bwrap_usable=True, probe_via_runner=False):
         mod = types.ModuleType("subprocess")
         mod.TimeoutExpired = __import__("subprocess").TimeoutExpired
 
@@ -87,8 +90,12 @@ def fake_subprocess(monkeypatch):
                 if name in available:
                     return FakeCompleted()
                 raise FileNotFoundError(name)
-            if argv[0] == "bwrap" and argv[-1] == "/bin/true":
-                # _bwrap_usable's namespace probe; usable unless a test says so.
+            if (argv[0] == "bwrap" and argv[-1] == "/bin/true"
+                    and not probe_via_runner):
+                # _bwrap_usable's namespace probe. Answered here so that a test
+                # supplying a `runner` for the real command does not have to
+                # care about it; tests that exercise probe behaviour itself opt
+                # in with probe_via_runner=True.
                 return FakeCompleted(returncode=0 if bwrap_usable else 1)
             if runner:
                 return runner(argv, kwargs)
@@ -768,3 +775,165 @@ def test_worktree_state_uses_z(tmp_path, monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "subprocess", mod)
     MOD["_worktree_state"](str(tmp_path))
     assert "-z" in seen["argv"]
+
+
+# ── LM spoke BaseSpoke dependency ───────────────────────────────────────────
+# Ten of the sixteen fleet repos import BaseSpoke from the lm repo. A
+# standalone clone fails at COLLECTION with "No module named 'core'", which is
+# not a defect in the diff -- so verification would reject fixes CI would pass.
+
+def _spoke(tmp_path, body="from core.src.base_spoke import BaseSpoke\n"):
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "dns_spoke.py").write_text(body)
+    return str(tmp_path)
+
+
+def test_spoke_importing_base_spoke_needs_core(tmp_path):
+    assert MOD["_needs_spoke_core"](_spoke(tmp_path)) is True
+
+
+def test_bare_base_spoke_import_is_detected(tmp_path):
+    assert MOD["_needs_spoke_core"](_spoke(tmp_path, "from base_spoke import BaseSpoke\n"))
+
+
+def test_repo_that_owns_base_spoke_does_not_need_a_checkout(tmp_path):
+    """lm itself contains core/src/base_spoke.py; cloning lm into lm would be
+    both wrong and recursive."""
+    p = _spoke(tmp_path)
+    (tmp_path / "core" / "src").mkdir(parents=True)
+    (tmp_path / "core" / "src" / "base_spoke.py").write_text("class BaseSpoke: pass\n")
+    assert MOD["_needs_spoke_core"](p) is False
+
+
+def test_already_provisioned_repo_is_not_recloned(tmp_path):
+    p = _spoke(tmp_path)
+    (tmp_path / MOD["SPOKE_CORE_DIRNAME"]).mkdir()
+    assert MOD["_needs_spoke_core"](p) is False
+
+
+def test_standalone_repo_does_not_need_core(tmp_path):
+    (tmp_path / "app.py").write_text("import os\n")
+    assert MOD["_needs_spoke_core"](str(tmp_path)) is False
+
+
+def test_prepare_checks_out_lm_core_for_a_spoke(tmp_path):
+    _spoke(tmp_path)
+    seen, out = _invoke_prepare(tmp_path, ["requirements.txt"])
+    assert out is None
+    assert MOD["SPOKE_CORE_URL"] in seen[0][0]
+    assert "sparse-checkout set core" in seen[0][0]
+    assert seen[0][1] is True, "the checkout needs network"
+
+
+def test_failed_core_checkout_is_infra_not_a_code_defect(tmp_path):
+    _spoke(tmp_path)
+    _, out = _invoke_prepare(tmp_path, ["requirements.txt"],
+                             results=[FakeCompleted("", "could not resolve host", 128)])
+    assert MOD["is_verification_infra_failure"](out)
+
+
+def test_non_spoke_repo_skips_the_checkout(tmp_path):
+    seen, out = _invoke_prepare(tmp_path, ["requirements.txt"])
+    assert out is None
+    assert not any(MOD["SPOKE_CORE_URL"] in c for c, _ in seen)
+
+
+def test_core_checkout_is_on_pythonpath(tmp_path):
+    """Checking lm out is useless unless the test run can import it; its CI
+    sets PYTHONPATH to _lm and _lm/core/src."""
+    (tmp_path / MOD["SPOKE_CORE_DIRNAME"]).mkdir()
+    pp = MOD["_spoke_core_pythonpath"](str(tmp_path))
+    argv = MOD["_bwrap_argv"](str(tmp_path), "pytest", pythonpath=pp)
+    i = argv.index("PYTHONPATH")
+    assert argv[i - 1] == "--setenv"
+    assert argv[i + 1] == pp
+    assert pp.split(":") == [str(tmp_path / "_lm"),
+                             str(tmp_path / "_lm" / "core" / "src")]
+
+
+def test_pythonpath_is_wired_through_the_real_entry_point(fake_subprocess, tmp_path):
+    os.makedirs(tmp_path / MOD["SPOKE_CORE_DIRNAME"])
+    calls = fake_subprocess({"bwrap"})
+    MOD["run_sandboxed_command"]("pytest", str(tmp_path))
+    argv = calls[-1][0]
+    assert "PYTHONPATH" in argv, "run_sandboxed_command must pass the core path on"
+
+
+def test_no_pythonpath_when_there_is_no_core_checkout(fake_subprocess, tmp_path):
+    calls = fake_subprocess({"bwrap"})
+    MOD["run_sandboxed_command"]("pytest", str(tmp_path))
+    assert "PYTHONPATH" not in calls[-1][0]
+
+
+def test_core_checkout_is_excluded_from_commits(tmp_path):
+    """The fixer stages with `git add -A`; a whole lm checkout riding into the
+    PR would bury the fix."""
+    os.makedirs(tmp_path / ".git" / "info")
+    MOD["_exclude_sandbox_venv"](str(tmp_path))
+    body = (tmp_path / ".git" / "info" / "exclude").read_text().split()
+    assert "/%s/" % MOD["SPOKE_CORE_DIRNAME"] in body
+    assert "/%s/" % MOD["SANDBOX_VENV_DIRNAME"] in body
+
+
+def test_core_checkout_requirements_are_not_installed(tmp_path):
+    """_lm is a dependency checkout, not part of the repo under test."""
+    (tmp_path / MOD["SPOKE_CORE_DIRNAME"]).mkdir()
+    (tmp_path / MOD["SPOKE_CORE_DIRNAME"] / "requirements.txt").write_text("")
+    (tmp_path / "requirements.txt").write_text("")
+    assert MOD["_python_requirement_files"](str(tmp_path)) == ["requirements.txt"]
+
+
+# ── Probe caching ───────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _reset_bwrap_cache():
+    """The proven-usable flag is module state; isolate it between tests."""
+    MOD["_BWRAP_USABLE"] = False
+    yield
+    MOD["_BWRAP_USABLE"] = False
+
+
+def _probe_calls(calls):
+    return [c for c, _ in calls if c and c[0] == "bwrap" and c[-1] == "/bin/true"]
+
+
+def test_probe_runs_once_not_on_every_sandbox_call(fake_subprocess, tmp_path):
+    """run_sandboxed_command selects a backend every time; re-probing on each
+    call is wasted work and a fresh chance to fail transiently."""
+    calls = fake_subprocess({"bwrap"})
+    for _ in range(4):
+        MOD["run_sandboxed_command"]("pytest", str(tmp_path))
+    assert len(_probe_calls(calls)) == 1
+
+
+def test_a_transient_probe_failure_does_not_stick(fake_subprocess, tmp_path):
+    """A timeout on a loaded 1 vCPU host must not permanently disable the
+    sandbox: the next call has to be able to recover."""
+    state = {"usable": False}
+
+    def runner(argv, kwargs):
+        if argv[0] == "bwrap" and argv[-1] == "/bin/true":
+            return FakeCompleted(returncode=0 if state["usable"] else 1)
+        return FakeCompleted("out", "", 0)
+
+    fake_subprocess({"bwrap"}, runner=runner, probe_via_runner=True)
+    assert MOD["_sandbox_backend"]() is None
+    state["usable"] = True
+    assert MOD["_sandbox_backend"]() == "bwrap"
+
+
+def test_probe_timeout_is_not_a_permanent_verdict(fake_subprocess, tmp_path):
+    real_timeout = __import__("subprocess").TimeoutExpired
+    state = {"slow": True}
+
+    def runner(argv, kwargs):
+        if argv[0] == "bwrap" and argv[-1] == "/bin/true":
+            if state["slow"]:
+                raise real_timeout(cmd=argv, timeout=120)
+            return FakeCompleted(returncode=0)
+        return FakeCompleted("out", "", 0)
+
+    fake_subprocess({"bwrap"}, runner=runner, probe_via_runner=True)
+    assert MOD["_sandbox_backend"]() is None
+    state["slow"] = False
+    assert MOD["_sandbox_backend"]() == "bwrap"
