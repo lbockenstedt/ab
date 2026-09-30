@@ -1,5 +1,5 @@
 """AI fix pipeline: issue analysis, sandboxed fix generation/application, verification, and per-issue orchestration (extracted from main.py)."""
-import base64, contextlib, fnmatch, git, json, os, re, requests, tempfile, threading, time, traceback
+import base64, contextlib, fnmatch, git, json, os, re, requests, shutil, tempfile, threading, time, traceback
 from datetime import datetime
 from github import Github, GithubException
 
@@ -950,6 +950,62 @@ def _spoke_core_pythonpath(cwd):
     return f"{base}:{os.path.join(base, 'core', 'src')}"
 
 
+#: Launcher that strips ambient capabilities before exec'ing bwrap.
+#:
+#: bwrap is NOT installed setuid on Debian; it isolates via unprivileged user
+#: namespaces instead. A non-setuid bwrap REFUSES to start when the calling
+#: process holds any capabilities, aborting with
+#: "bwrap: Unexpected capabilities but not setuid, old file caps config?".
+#:
+#: AppBuilder's unit grants `AmbientCapabilities=CAP_NET_BIND_SERVICE` so the
+#: service can bind :443 as an unprivileged user, and ambient capabilities are
+#: inherited across exec -- so every bwrap the SERVICE launched failed, while
+#: the identical command run by hand (`sudo -u svc_bg ...`, no ambient set)
+#: worked. That discrepancy is why this was first misdiagnosed as missing user
+#: namespaces and then as load-induced probe timeouts.
+#:
+#: Clearing the ambient set is enough on its own: for a file carrying no
+#: capabilities, the permitted set after exec is derived from the ambient set,
+#: so bwrap starts with none. Dropping the bounding set is NOT used -- that
+#: needs CAP_SETPCAP, which this process does not have.
+_CAP_CLEAR_ARGV = ("setpriv", "--ambient-caps=-all")
+
+
+def _process_has_ambient_caps():
+    """True when THIS process holds ambient capabilities.
+
+    Read from /proc/self/status rather than assumed from the unit file, so the
+    prefix is applied exactly when it is needed: a host that does not grant the
+    service any ambient capability pays nothing, and one that does is fixed
+    without an operator having to notice. Never raises -- on any parse problem
+    we report False and let the bwrap probe produce the real diagnostic."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("CapAmb:"):
+                    return int(line.split()[1], 16) != 0
+    except Exception:  # noqa: BLE001 -- a probe helper must never break sandboxing
+        return False
+    return False
+
+
+def _bwrap_launch_prefix():
+    """argv prefix that lets bwrap start under ambient capabilities, or [].
+
+    MUST be applied to the probe (`_bwrap_usable`) and the real jail
+    (`_bwrap_argv`) identically: a probe that runs under different capabilities
+    than the jail it is vouching for proves nothing."""
+    if not _process_has_ambient_caps():
+        return []
+    if shutil.which("setpriv"):
+        return list(_CAP_CLEAR_ARGV)
+    logger.warning(
+        "this process holds ambient capabilities and setpriv is not installed, so "
+        "bubblewrap will refuse to start ('Unexpected capabilities but not setuid'); "
+        "install util-linux (apt-get install -y util-linux)")
+    return []
+
+
 # Set once bubblewrap has been PROVEN to work. A host does not gain or lose
 # user-namespace support while AppBuilder is running, so the probe is a
 # one-off; a success is cached forever. A failure is deliberately NOT cached.
@@ -976,6 +1032,7 @@ def _bwrap_usable():
         return True
     try:
         probe = subprocess.run(
+            _bwrap_launch_prefix() +
             ["bwrap", "--unshare-user", "--unshare-pid",
              "--ro-bind", "/usr", "/usr",
              # The same usr-merge symlinks the real jail builds. /lib and
@@ -1046,7 +1103,8 @@ def _bwrap_argv(cwd, command, network=True, venv_bin=None, pythonpath=None):
     # --clearenv drops the inherited AppBuilder environment (GITHUB_TOKEN, LLM
     # provider keys). It must precede every --setenv, since bwrap applies these
     # in argv order and would otherwise clear the values set before it.
-    argv = ["bwrap", "--die-with-parent", "--clearenv",
+    argv = _bwrap_launch_prefix() + [
+            "bwrap", "--die-with-parent", "--clearenv",
             "--unshare-user", "--unshare-pid", "--unshare-ipc",
             "--unshare-uts", "--unshare-cgroup"]
     if not network:
