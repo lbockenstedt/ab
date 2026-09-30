@@ -15,6 +15,8 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 TARGETS = {
     "_sandbox_backend",
+    "_process_has_ambient_caps",
+    "_bwrap_launch_prefix",
     "_bwrap_usable",
     "_bwrap_argv",
     "_sandbox_infra_failure",
@@ -39,6 +41,7 @@ CONSTANTS = {
     "_SANDBOX_UNAVAILABLE_MARKER", "_SANDBOX_TIMEOUT_MARKER",
     "VERIFICATION_INFRA_PREFIX",
     "SPOKE_CORE_URL", "SPOKE_CORE_DIRNAME", "_SPOKE_CORE_IMPORT_RE",
+    "_CAP_CLEAR_ARGV",
 }
 
 
@@ -61,7 +64,8 @@ def _load():
     logger = types.SimpleNamespace(
         info=lambda *a, **k: None, error=lambda *a, **k: None,
         warning=lambda *a, **k: None, debug=lambda *a, **k: None)
-    ns = {"os": os, "re": __import__("re"), "logger": logger}
+    ns = {"os": os, "re": __import__("re"), "shutil": __import__("shutil"),
+          "logger": logger}
     exec(compile(ast.Module(body=wanted, type_ignores=[]), "<fix_engine>", "exec"), ns)
     return ns
 
@@ -937,3 +941,124 @@ def test_probe_timeout_is_not_a_permanent_verdict(fake_subprocess, tmp_path):
     assert MOD["_sandbox_backend"]() is None
     state["slow"] = False
     assert MOD["_sandbox_backend"]() == "bwrap"
+
+
+# ---------------------------------------------------------------- ambient caps
+#
+# bwrap is not setuid, and a non-setuid bwrap refuses to start when the calling
+# process holds ANY capability ("Unexpected capabilities but not setuid").
+# AppBuilder's unit grants AmbientCapabilities=CAP_NET_BIND_SERVICE so it can
+# bind :443 as an unprivileged user, so every bwrap the SERVICE launched failed
+# while the same command run by hand succeeded -- the discrepancy that made this
+# look first like missing user namespaces and then like probe timeouts.
+
+_STATUS_WITH_CAP = "Name:\tpython3\nUid:\t999\t999\t999\t999\nCapAmb:\t0000000000000400\n"
+_STATUS_NO_CAP = "Name:\tpython3\nUid:\t999\t999\t999\t999\nCapAmb:\t0000000000000000\n"
+
+
+@pytest.fixture
+def fake_proc_status(monkeypatch):
+    """Serve a chosen /proc/self/status; other opens are untouched."""
+    import builtins
+    real_open = builtins.open
+
+    def _install(text):
+        def fake_open(path, *a, **k):
+            if path == "/proc/self/status":
+                if text is None:
+                    raise FileNotFoundError(path)
+                import io
+                return io.StringIO(text)
+            return real_open(path, *a, **k)
+        monkeypatch.setattr(builtins, "open", fake_open)
+    return _install
+
+
+def test_ambient_caps_are_detected(fake_proc_status):
+    fake_proc_status(_STATUS_WITH_CAP)
+    assert MOD["_process_has_ambient_caps"]() is True
+
+
+def test_no_ambient_caps_is_detected(fake_proc_status):
+    fake_proc_status(_STATUS_NO_CAP)
+    assert MOD["_process_has_ambient_caps"]() is False
+
+
+def test_missing_proc_status_is_not_an_error(fake_proc_status):
+    """A non-Linux dev box has no /proc/self/status. That must read as "no
+    ambient capabilities", never raise -- this runs on the sandbox hot path."""
+    fake_proc_status(None)
+    assert MOD["_process_has_ambient_caps"]() is False
+
+
+def test_unparseable_cap_line_is_not_an_error(fake_proc_status):
+    fake_proc_status("CapAmb:\tnot-a-number\n")
+    assert MOD["_process_has_ambient_caps"]() is False
+
+
+def test_no_prefix_when_the_process_holds_no_capabilities(fake_proc_status):
+    """A host that grants no ambient capability must pay nothing: no extra
+    process in the chain, no dependency on setpriv."""
+    fake_proc_status(_STATUS_NO_CAP)
+    assert MOD["_bwrap_launch_prefix"]() == []
+
+
+def test_prefix_clears_ambient_caps_when_they_are_held(fake_proc_status, monkeypatch):
+    fake_proc_status(_STATUS_WITH_CAP)
+    monkeypatch.setattr(MOD["shutil"], "which", lambda n: "/usr/bin/" + n)
+    assert MOD["_bwrap_launch_prefix"]() == ["setpriv", "--ambient-caps=-all"]
+
+
+def test_missing_setpriv_does_not_crash_the_sandbox(fake_proc_status, monkeypatch):
+    """Without setpriv the jail cannot start, but that must surface as bwrap's
+    own diagnostic plus an actionable warning -- not a NoneType/TypeError from
+    argv construction."""
+    fake_proc_status(_STATUS_WITH_CAP)
+    monkeypatch.setattr(MOD["shutil"], "which", lambda n: None)
+    assert MOD["_bwrap_launch_prefix"]() == []
+
+
+def test_the_real_jail_drops_ambient_caps(fake_proc_status, monkeypatch, tmp_path):
+    fake_proc_status(_STATUS_WITH_CAP)
+    monkeypatch.setattr(MOD["shutil"], "which", lambda n: "/usr/bin/" + n)
+    argv = MOD["_bwrap_argv"](str(tmp_path), "pytest")
+    assert argv[:2] == ["setpriv", "--ambient-caps=-all"]
+    assert argv[2] == "bwrap", "bwrap must still be the command setpriv execs"
+
+
+def test_the_probe_drops_ambient_caps_too(fake_proc_status, monkeypatch, fake_subprocess):
+    """A probe that runs under different capabilities than the real jail proves
+    nothing: it would pass while every real run failed, or vice versa."""
+    fake_proc_status(_STATUS_WITH_CAP)
+    monkeypatch.setattr(MOD["shutil"], "which", lambda n: "/usr/bin/" + n)
+    calls = fake_subprocess({"bwrap", "setpriv"})
+    MOD["_bwrap_usable"]()
+    probe = calls[-1][0]
+    assert probe[:2] == ["setpriv", "--ambient-caps=-all"]
+    assert "bwrap" in probe
+
+
+def test_probe_and_jail_use_the_identical_prefix(fake_proc_status, monkeypatch,
+                                                 fake_subprocess, tmp_path):
+    """Pinned structurally rather than by restating the prefix, so the two can
+    never drift apart."""
+    fake_proc_status(_STATUS_WITH_CAP)
+    monkeypatch.setattr(MOD["shutil"], "which", lambda n: "/usr/bin/" + n)
+    calls = fake_subprocess({"bwrap", "setpriv"})
+    MOD["_bwrap_usable"]()
+    probe = calls[-1][0]
+    real = MOD["_bwrap_argv"](str(tmp_path), "pytest")
+    n = len(MOD["_CAP_CLEAR_ARGV"])
+    assert probe[:n] == real[:n] == list(MOD["_CAP_CLEAR_ARGV"])
+
+
+def test_clearenv_still_applies_under_the_cap_prefix(fake_proc_status, monkeypatch, tmp_path):
+    """The secret-containment guarantees must survive the argv change: --clearenv
+    still has to precede every --setenv, and it is now no longer argv[1]."""
+    fake_proc_status(_STATUS_WITH_CAP)
+    monkeypatch.setattr(MOD["shutil"], "which", lambda n: "/usr/bin/" + n)
+    argv = MOD["_bwrap_argv"](str(tmp_path), "pytest")
+    assert "--clearenv" in argv
+    assert argv.index("--clearenv") < min(
+        i for i, a in enumerate(argv) if a == "--setenv")
+    assert not any(a.startswith("/etc/ab") for a in argv)
