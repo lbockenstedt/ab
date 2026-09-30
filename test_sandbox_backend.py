@@ -79,7 +79,7 @@ def fake_subprocess(monkeypatch):
     """Replaces the `subprocess` module that the functions import locally."""
     calls = []
 
-    def make(available, runner=None, bwrap_usable=True):
+    def make(available, runner=None, bwrap_usable=True, probe_via_runner=False):
         mod = types.ModuleType("subprocess")
         mod.TimeoutExpired = __import__("subprocess").TimeoutExpired
 
@@ -90,8 +90,12 @@ def fake_subprocess(monkeypatch):
                 if name in available:
                     return FakeCompleted()
                 raise FileNotFoundError(name)
-            if argv[0] == "bwrap" and argv[-1] == "/bin/true":
-                # _bwrap_usable's namespace probe; usable unless a test says so.
+            if (argv[0] == "bwrap" and argv[-1] == "/bin/true"
+                    and not probe_via_runner):
+                # _bwrap_usable's namespace probe. Answered here so that a test
+                # supplying a `runner` for the real command does not have to
+                # care about it; tests that exercise probe behaviour itself opt
+                # in with probe_via_runner=True.
                 return FakeCompleted(returncode=0 if bwrap_usable else 1)
             if runner:
                 return runner(argv, kwargs)
@@ -877,3 +881,59 @@ def test_core_checkout_requirements_are_not_installed(tmp_path):
     (tmp_path / MOD["SPOKE_CORE_DIRNAME"] / "requirements.txt").write_text("")
     (tmp_path / "requirements.txt").write_text("")
     assert MOD["_python_requirement_files"](str(tmp_path)) == ["requirements.txt"]
+
+
+# ── Probe caching ───────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _reset_bwrap_cache():
+    """The proven-usable flag is module state; isolate it between tests."""
+    MOD["_BWRAP_USABLE"] = False
+    yield
+    MOD["_BWRAP_USABLE"] = False
+
+
+def _probe_calls(calls):
+    return [c for c, _ in calls if c and c[0] == "bwrap" and c[-1] == "/bin/true"]
+
+
+def test_probe_runs_once_not_on_every_sandbox_call(fake_subprocess, tmp_path):
+    """run_sandboxed_command selects a backend every time; re-probing on each
+    call is wasted work and a fresh chance to fail transiently."""
+    calls = fake_subprocess({"bwrap"})
+    for _ in range(4):
+        MOD["run_sandboxed_command"]("pytest", str(tmp_path))
+    assert len(_probe_calls(calls)) == 1
+
+
+def test_a_transient_probe_failure_does_not_stick(fake_subprocess, tmp_path):
+    """A timeout on a loaded 1 vCPU host must not permanently disable the
+    sandbox: the next call has to be able to recover."""
+    state = {"usable": False}
+
+    def runner(argv, kwargs):
+        if argv[0] == "bwrap" and argv[-1] == "/bin/true":
+            return FakeCompleted(returncode=0 if state["usable"] else 1)
+        return FakeCompleted("out", "", 0)
+
+    fake_subprocess({"bwrap"}, runner=runner, probe_via_runner=True)
+    assert MOD["_sandbox_backend"]() is None
+    state["usable"] = True
+    assert MOD["_sandbox_backend"]() == "bwrap"
+
+
+def test_probe_timeout_is_not_a_permanent_verdict(fake_subprocess, tmp_path):
+    real_timeout = __import__("subprocess").TimeoutExpired
+    state = {"slow": True}
+
+    def runner(argv, kwargs):
+        if argv[0] == "bwrap" and argv[-1] == "/bin/true":
+            if state["slow"]:
+                raise real_timeout(cmd=argv, timeout=120)
+            return FakeCompleted(returncode=0)
+        return FakeCompleted("out", "", 0)
+
+    fake_subprocess({"bwrap"}, runner=runner, probe_via_runner=True)
+    assert MOD["_sandbox_backend"]() is None
+    state["slow"] = False
+    assert MOD["_sandbox_backend"]() == "bwrap"
