@@ -244,6 +244,34 @@ def main():
                          "is below" not in reason)
             ok &= _check("...and is reported as meeting the threshold",
                          "%s >= threshold 0.90" % score in reason)
+    # ab#379: 0.8966... IS below 0.90, but %.2f rendered it as "0.90", so the
+    # sentence read "0.90 is below the 0.90 threshold". A below-threshold score
+    # must never render equal to the threshold it is below.
+    for c in (0.8966666666666666, 0.8999999, 0.895):
+        _s, reason = decide(_rec(panel_confidence=0.99, panel2_confidence=c),
+                            paths, _config(), _meta())
+        reason = reason or ""
+        ok &= _check("conf %r -> merges and is reported as below" % c,
+                     _s is True and "below" in reason)
+        import re as _re
+        m = _re.search(r"min confidence ([0-9.]+) is below the ([0-9.]+) threshold", reason)
+        ok &= _check("...%r renders a score distinct from the threshold" % c,
+                     m is not None and m.group(1) != m.group(2))
+        ok &= _check("...%r renders a score numerically below the threshold" % c,
+                     m is not None and float(m.group(1)) < float(m.group(2)))
+
+    # A score too close to render distinctly at any sane precision must fall
+    # back to words rather than print "X is below the X threshold".
+    import math as _math
+    _hair = _math.nextafter(0.90, 0.0)
+    _s, reason = decide(_rec(panel_confidence=0.99, panel2_confidence=_hair),
+                        paths, _config(), _meta())
+    reason = reason or ""
+    ok &= _check("an unrenderably-close score still merges",
+                 _s is True)
+    ok &= _check("...and is described in words, not a self-contradicting numeral",
+                 "fractionally below the 0.90 threshold" in reason)
+
     # Whatever the branch, the clearing rationale itself must be unchanged.
     for c1, c2 in ((0.92, 0.92), (0.10, 0.10), (None, None)):
         _s, reason = decide(_rec(panel_confidence=c1, panel2_confidence=c2),
