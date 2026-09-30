@@ -496,19 +496,41 @@ def main():
     # Opus was the ceiling until the premium escalation tier (fable / astra)
     # was added deliberately ABOVE it -- that tier exists precisely to be
     # reached for after an Opus-class fix has already failed, so it has to
-    # outrank Opus for prefer_capable to ever seat it. The invariant that
-    # still matters is that the ceiling is one of those reserved models and
-    # that Opus sits directly beneath them.
+    # outrank Opus for prefer_capable to ever seat it.
+    #
+    # Sonnet 5.5 was then slotted BETWEEN Opus and the premium tier: it beats
+    # Opus 5 on code generation and repair at a third of the multiplier, so the
+    # fix ladder seats it first and keeps Opus for the turn after it fails. The
+    # invariant is therefore a three-band ordering, premium > sonnet-5.5 > Opus
+    # > everything else, with the ceiling still a reserved premium model.
+    _EXCEPTIONS = ("copilot-claude-fable", "copilot-gpt6", "copilot-gpt6-astra",
+                   "copilot-sonnet-5.5")
     ok &= _check("the premium tier is the ceiling — nothing outranks astra",
                 max(reg.capability_rank(r) for r in reg.DEFAULT_MODEL_RULES)
                     == _rank("copilot", "gpt-6-astra"))
-    ok &= _check("the premium tier outranks Opus, which outranks everything else",
+    ok &= _check("the premium tier outranks Opus, which outranks everything else "
+                "except the explicitly slotted-in Sonnet 5.5",
                 _rank("copilot", "gpt-6-astra") > _rank("copilot", "claude-opus-5")
                 and _rank("copilot", "claude-fable-5.1") > _rank("copilot", "claude-opus-5")
                 and max(reg.capability_rank(r) for r in reg.DEFAULT_MODEL_RULES
-                        if r.get("id") not in ("copilot-claude-fable", "copilot-gpt6",
-                                               "copilot-gpt6-astra"))
+                        if r.get("id") not in _EXCEPTIONS)
                     == _rank("copilot", "claude-opus-5"))
+    ok &= _check("Sonnet 5.5 outranks Opus (so the fix ladder seats it FIRST) and never "
+                "outranks the premium tier. It ties the premium FLOOR (gpt-6, 96) rather "
+                "than sitting strictly between — there is no integer left between Opus 95 "
+                "and premium 96, and renumbering the reserved tier would change which "
+                "premium model the escalation turn seats fleet-wide. The tie is harmless "
+                "because the pools are disjoint on every turn: premium is excluded from "
+                "ordinary turns and everything non-premium is excluded from the premium turn.",
+                _rank("copilot", "claude-opus-5") < _rank("copilot", "claude-sonnet-5.5")
+                and _rank("copilot", "claude-sonnet-5.5")
+                    <= min(_rank("copilot", m)
+                           for m in ("claude-fable-5.1", "gpt-6-sol", "gpt-6-astra"))
+                and _rank("copilot", "claude-sonnet-5.5") < _rank("copilot", "gpt-6-astra"))
+    ok &= _check("the Sonnet 5.5 pin does NOT promote older Sonnets: they keep the "
+                "generic *sonnet* rating, below Opus",
+                _rank("copilot", "claude-sonnet-5") < _rank("copilot", "claude-opus-5")
+                and _rank("copilot", "claude-sonnet-5") < _rank("copilot", "claude-sonnet-5.5"))
     ok &= _check("every premium-tier model outranks Opus",
                 min(_rank("copilot", m) for m in ("claude-fable-5.1", "gpt-6-sol", "gpt-6-astra"))
                     > _rank("copilot", "claude-opus-5"))

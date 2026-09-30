@@ -292,6 +292,7 @@ def _fix_engine_ns():
         elif isinstance(node, ast.Assign) and any(
                 getattr(t, "id", "") in ("DEFAULT_PREMIUM_FIX_ALLOWLIST",
                                          "DEFAULT_PANEL_ALLOWLIST",
+                                         "DEFAULT_FIX_EXTRA_ALLOWLIST",
                                          "DEFAULT_FIX_ALLOWLIST")
                 for t in node.targets):
             exec(compile(ast.Module([node], []), "fix_engine.py", "exec"), ns)
