@@ -950,6 +950,17 @@ def _spoke_core_pythonpath(cwd):
     return f"{base}:{os.path.join(base, 'core', 'src')}"
 
 
+# Set once bubblewrap has been PROVEN to work. A host does not gain or lose
+# user-namespace support while AppBuilder is running, so the probe is a
+# one-off; a success is cached forever. A failure is deliberately NOT cached.
+# The probe runs a real jail with a timeout, and LM-AB is a 1 vCPU box: under
+# load that timeout can expire, and treating one slow probe as "this host has
+# no user namespaces" would silently disable verification fleet-wide until the
+# service was restarted. Observed live at 2026-09-30 00:19:34, where a single
+# transient probe failure downgraded the backend to None mid-run.
+_BWRAP_USABLE = False
+
+
 def _bwrap_usable():
     """True when bwrap can actually create the namespaces it needs.
 
@@ -960,6 +971,9 @@ def _bwrap_usable():
     misconfiguration into a stream of "failing tests" fed back to the model, so
     the probe runs a real trivial jail."""
     import subprocess
+    global _BWRAP_USABLE
+    if _BWRAP_USABLE:
+        return True
     try:
         probe = subprocess.run(
             ["bwrap", "--unshare-user", "--unshare-pid",
@@ -975,9 +989,15 @@ def _bwrap_usable():
              "--symlink", "usr/lib64", "/lib64",
              "--proc", "/proc",
              "/bin/true"],
-            capture_output=True, text=True, timeout=30)
-        return probe.returncode == 0
-    except Exception:
+            capture_output=True, text=True, timeout=120)
+        if probe.returncode == 0:
+            _BWRAP_USABLE = True
+            return True
+        logger.warning("bubblewrap probe failed (rc %s): %s",
+                       probe.returncode, (probe.stderr or "").strip()[:300])
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"bubblewrap probe could not complete: {e}")
         return False
 
 
