@@ -217,8 +217,40 @@ def main():
                      raised is False and should is True)
     should, reason = decide(_rec(panel_confidence=None, panel2_confidence=None),
                             paths, _config(), _meta())
-    ok &= _check("...and the reason degrades to 'n/a' rather than a crash",
-                 "n/a" in (reason or ""))
+    ok &= _check("...and the reason says no confidence was reported, rather than crashing",
+                 "no panel confidence was reported" in (reason or ""))
+    ok &= _check("...and it does not invent a confidence deficit",
+                 "is below" not in (reason or ""))
+
+    print("\n-- the merge reason must describe the confidence TRUTHFULLY --")
+    # Live production logged "min confidence 0.92 is below the 0.90 threshold",
+    # which is false. The reason is persisted and posted on the PR, so a PR that
+    # actually clears the bar must not be reported as a confidence deficit.
+    for c1, c2, below in ((0.92, 0.93, False), (0.90, 0.90, False),
+                          (0.88, 0.95, True), (0.50, 0.50, True)):
+        should, reason = decide(_rec(panel_confidence=c1, panel2_confidence=c2),
+                                paths, _config(), _meta())
+        reason = reason or ""
+        score = "%.2f" % min(c1, c2)
+        ok &= _check("conf (%s, %s) -> merges and names min confidence %s"
+                     % (c1, c2, score), should is True and score in reason)
+        if below:
+            ok &= _check("...%s < 0.90 -> reported as below the threshold" % score,
+                         "is below the 0.90 threshold" in reason)
+            ok &= _check("...and still explains why the deficit is unresolvable",
+                         "unresolvable by any action" in reason)
+        else:
+            ok &= _check("...%s >= 0.90 -> NOT reported as below the threshold" % score,
+                         "is below" not in reason)
+            ok &= _check("...and is reported as meeting the threshold",
+                         "%s >= threshold 0.90" % score in reason)
+    # Whatever the branch, the clearing rationale itself must be unchanged.
+    for c1, c2 in ((0.92, 0.92), (0.10, 0.10), (None, None)):
+        _s, reason = decide(_rec(panel_confidence=c1, panel2_confidence=c2),
+                            paths, _config(), _meta())
+        ok &= _check("conf (%r, %r) -> keeps the promotion-bypass prefix" % (c1, c2),
+                     (reason or "").startswith("cleared: promotion PR — both panels "
+                                               "Approve with no filed finding; "))
 
     print("\n-- EVERY containment gate still applies to a bypassed PR --")
     cases = [
