@@ -1519,12 +1519,22 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         # require a confidence to be present, and min(None, 0.88) is a TypeError
         # that would raise straight out of this "must never raise" gate.
         _c = [c for c in (conf1, conf2) if isinstance(c, (int, float))]
-        _score = ("%.2f" % min(_c)) if _c else "n/a"
+        # The reason string is persisted and posted on the PR, so it must not
+        # assert a confidence deficit that does not exist: the bypass clears
+        # promotion PRs regardless of score, and most of them actually meet the
+        # threshold (live log showed "0.92 is below the 0.90 threshold").
+        if not _c:
+            return True, ("cleared: promotion PR — both panels Approve with no filed "
+                          "finding; no panel confidence was reported")
+        _score = "%.2f" % min(_c)
+        if min(_c) < threshold:
+            return True, ("cleared: promotion PR — both panels Approve with no filed "
+                          "finding; min confidence %s is below the %.2f threshold, but the diff "
+                          "is code the source branch already merged and remediation is barred "
+                          "from editing it, so the deficit is unresolvable by any action "
+                          "AppBuilder can take" % (_score, threshold))
         return True, ("cleared: promotion PR — both panels Approve with no filed "
-                      "finding; min confidence %s is below the %.2f threshold, but the diff "
-                      "is code the source branch already merged and remediation is barred "
-                      "from editing it, so the deficit is unresolvable by any action "
-                      "AppBuilder can take" % (_score, threshold))
+                      "finding; min confidence %s >= threshold %.2f" % (_score, threshold))
 
     score = min(conf1, conf2)
     return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
