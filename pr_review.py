@@ -1526,15 +1526,29 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         if not _c:
             return True, ("cleared: promotion PR — both panels Approve with no filed "
                           "finding; no panel confidence was reported")
-        _score = "%.2f" % min(_c)
-        if min(_c) < threshold:
+        _min = min(_c)
+        if _min < threshold:
+            # %.2f can round a genuinely-below score up to the threshold's own
+            # rendering ("0.8967 is below the 0.90 threshold" printed as
+            # "0.90 is below the 0.90 threshold" -- observed on ab#379).
+            # Widen both to the first precision that actually distinguishes
+            # them, so the sentence can never contradict itself.
+            _dp = 2
+            while _dp < 12 and ("%.*f" % (_dp, _min)) == ("%.*f" % (_dp, threshold)):
+                _dp += 1
+            if ("%.*f" % (_dp, _min)) == ("%.*f" % (_dp, threshold)):
+                # Closer than any sane rendering can show. Say so in words
+                # rather than print "X is below the X threshold".
+                _gap = "fractionally below the %.2f threshold" % threshold
+            else:
+                _gap = "%.*f is below the %.*f threshold" % (_dp, _min, _dp, threshold)
             return True, ("cleared: promotion PR — both panels Approve with no filed "
-                          "finding; min confidence %s is below the %.2f threshold, but the diff "
+                          "finding; min confidence %s, but the diff "
                           "is code the source branch already merged and remediation is barred "
                           "from editing it, so the deficit is unresolvable by any action "
-                          "AppBuilder can take" % (_score, threshold))
+                          "AppBuilder can take" % _gap)
         return True, ("cleared: promotion PR — both panels Approve with no filed "
-                      "finding; min confidence %s >= threshold %.2f" % (_score, threshold))
+                      "finding; min confidence %.2f >= threshold %.2f" % (_min, threshold))
 
     score = min(conf1, conf2)
     return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
