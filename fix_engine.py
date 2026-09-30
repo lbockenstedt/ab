@@ -2355,13 +2355,31 @@ def _model_allowed(model, patterns):
 DEFAULT_PREMIUM_FIX_ALLOWLIST = ("claude-fable-*", "gpt-6*")
 
 
-#: Models allowed to WRITE code, as opposed to merely judging it. Deliberately the
-#: same bar as the review panel: a model trusted to author a fix that lands in the
-#: fleet should be at least as strong as one trusted to reject it. Without this the
-#: fix path built LlmRequirements(complexity="large") and let the cost-first picker
-#: choose, so the CHEAPEST model clearing "large" wrote our code -- in practice a
-#: flash-class model that answered with reasoning prose instead of JSON, burning the
-#: remediation budget on every PR in the fleet. Override with config
+#: Models admitted to the fix path ON TOP of the panel bar, because they are
+#: demonstrably stronger at WRITING code than at judging it. Sonnet 5.5 beats
+#: Opus 5 on code generation and repair at roughly a third of the request
+#: multiplier, so it is the model the ordinary ladder should seat FIRST.
+#:
+#: Kept separate from DEFAULT_PANEL_ALLOWLIST on purpose. The fix bar was
+#: previously *derived* from the panel bar ("a model trusted to author a fix
+#: should be at least as strong as one trusted to reject it"), and widening the
+#: panel to admit Sonnet would change who REVIEWS every PR in the fleet -- a far
+#: bigger and unrelated policy change. This constant widens exactly the write
+#: bar.
+#:
+#: Pinned to 5.5 rather than "claude-sonnet-5*": plain Sonnet 5 is the model
+#: DEFAULT_LAST_TURN_FIX_ALLOWLIST documents as unable to resolve findings Opus
+#: resolved, and "claude-sonnet-5*" would silently re-admit it.
+DEFAULT_FIX_EXTRA_ALLOWLIST = ("claude-sonnet-5.5*",)
+
+
+#: Models allowed to WRITE code, as opposed to merely judging it. The floor is the
+#: review panel's bar -- a model trusted to author a fix that lands in the fleet
+#: should be at least as strong as one trusted to reject it -- plus the write-only
+#: additions above. Without this the fix path built LlmRequirements(complexity="large")
+#: and let the cost-first picker choose, so the CHEAPEST model clearing "large" wrote our
+#: code -- in practice a flash-class model that answered with reasoning prose instead of
+#: JSON, burning the remediation budget on every PR in the fleet. Override with config
 #: `pr_fix_model_allowlist`; an explicit empty list DISABLES the policy.
 #:
 #: The premium tier is unioned in because it sits ABOVE the panel bar, not
@@ -2372,7 +2390,8 @@ DEFAULT_PREMIUM_FIX_ALLOWLIST = ("claude-fable-*", "gpt-6*")
 #: silently inert. Widening the PANEL bar instead would have been wrong: the
 #: panel runs on every PR, so it would seat the most expensive models on the
 #: roster for routine reviews, which is the cost blow-up this tier avoids.
-DEFAULT_FIX_ALLOWLIST = DEFAULT_PANEL_ALLOWLIST + DEFAULT_PREMIUM_FIX_ALLOWLIST
+DEFAULT_FIX_ALLOWLIST = (DEFAULT_PANEL_ALLOWLIST + DEFAULT_FIX_EXTRA_ALLOWLIST
+                         + DEFAULT_PREMIUM_FIX_ALLOWLIST)
 
 
 def _fix_allowlist(config):
