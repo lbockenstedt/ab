@@ -291,6 +291,19 @@ DEFAULT_MODEL_RULES = [
      "notes": "27x premium-request multiplier — the most expensive model Copilot serves. "
               "frontier/large matches anthropic-opus and claude-cli-opus so the picker "
               "RESERVES it for the hardest work instead of spending it on triage."},
+    # MUST stay ahead of the generic "*sonnet*" rule below in intent, though order
+    # does not decide it: _specificity("claude-sonnet-5.5*") is 17 vs 6 for "*sonnet*",
+    # so the pinned rule wins resolution regardless of list position.
+    {"id": "copilot-sonnet-5.5", "provider": "copilot", "match": "claude-sonnet-5.5*",
+     "label": "Claude Sonnet 5.5 (via Copilot)",
+     "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
+     "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
+     "supports_structured_output": False, "supports_batch": False, "supports_streaming": True,
+     "capability_rank": 96, "speed_tier": "standard", "enabled": True,
+     "notes": "Sonnet 5.5 outperforms Opus 5 on code generation and repair at a third of "
+              "the multiplier, so it ranks ABOVE copilot-opus (95) and is the first model "
+              "the fix ladder seats. Deliberately pinned to 5.5: the generic *sonnet* rule "
+              "(rank 78) must keep rating older Sonnets below Opus."},
     {"id": "copilot-sonnet", "provider": "copilot", "match": "*sonnet*", "label": "Claude Sonnet (via Copilot)",
      "cost_tier": "frontier", "max_complexity": "large", "context_window": 64000,
      "supports_tools": True, "native_agentic_tools": False, "supports_mutating_agent": False,
@@ -640,6 +653,12 @@ def upgrade_claude_cli_model_rules(rules):
 _COPILOT_MODEL_RULE_IDS = frozenset({
     "copilot-opus", "copilot-sonnet", "copilot-haiku", "copilot-gemini-pro",
     "copilot-gpt5-mini", "copilot-gpt5", "copilot-gpt4",
+    # Pinned Sonnet 5.5. Seeded for the same reason as the premium tier below:
+    # an install that already persisted a "model_registry" never reads the
+    # defaults, so without this Sonnet 5.5 keeps matching the generic
+    # "*sonnet*" rule at capability_rank 78 -- below Opus -- and the fix ladder
+    # would never seat it first no matter what the fix allowlist says.
+    "copilot-sonnet-5.5",
     # The premium tier. These MUST be seeded into an already-persisted
     # registry, not merely added to DEFAULT_MODEL_RULES: a config that already
     # has a "model_registry" key never reads the defaults, so without this the
@@ -744,7 +763,8 @@ def enable_copilot_tools(rules):
 
     Scoped narrowly like the ollama_cloud repair: only ids AppBuilder ships,
     only where the flag is still False. Idempotent; never reorders or adds."""
-    shipped = {"copilot", "copilot-opus", "copilot-sonnet", "copilot-haiku",
+    shipped = {"copilot", "copilot-opus", "copilot-sonnet", "copilot-sonnet-5.5",
+               "copilot-haiku",
                "copilot-gemini-pro", "copilot-gpt5-mini", "copilot-gpt5", "copilot-gpt4",
                "copilot-claude-fable", "copilot-gpt6", "copilot-gpt6-astra"}
     out = []
