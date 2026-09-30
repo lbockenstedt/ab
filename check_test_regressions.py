@@ -50,12 +50,28 @@ _FAILED_LINE_RE = re.compile(r"^FAILED\s+(\S+)", re.MULTILINE)
 _base_cache = {}
 
 
-def _detect_test_cmd(path):
-    """Same heuristic verify_fix uses (Priority 3 local-detection path) —
-    kept as an isolated copy here rather than importing/refactoring
-    verify_fix, so this module has no import-time dependency on fix_engine's
-    full LLM/GitHub stack (this needs to be safely importable from a
-    lightweight scan context)."""
+def _detect_test_cmd(path, repo_name=None, config=None):
+    """Mirrors verify_fix's command choice: Priority 2 is the explicit
+    per-repo command in config["repo_tests"], Priority 3 is the filesystem
+    heuristic below. Kept as an isolated copy here rather than
+    importing/refactoring verify_fix, so this module has no import-time
+    dependency on fix_engine's full LLM/GitHub stack (this needs to be safely
+    importable from a lightweight scan context).
+
+    Priority 2 must be honoured here too: a repo can have an operator-configured
+    command and none of the manifest files below (lm, cs and kvm all do). Without
+    it this returned None and regression checking was silently skipped on exactly
+    the repos someone had bothered to configure."""
+    if repo_name:
+        repo_tests = (config or {}).get("repo_tests")
+        # Never trust the shape of persisted config: a non-dict here must
+        # degrade to the heuristic, not raise out of a best-effort check.
+        if isinstance(repo_tests, dict):
+            cmd = repo_tests.get(repo_name)
+            if not cmd and "/" in repo_name:
+                cmd = repo_tests.get(repo_name.split("/")[-1])
+            if cmd:
+                return cmd
     try:
         files = os.listdir(path)
     except OSError:
@@ -81,14 +97,14 @@ def _clone_and_checkout(clone_url, token, ref, dest):
     return repo_git
 
 
-def _run_suite(path):
+def _run_suite(path, repo_name=None, config=None):
     """Returns (ok, failure_set, note). ok=False + failure_set=None means the
     run itself couldn't be attempted/completed (no test framework detected,
     Docker unavailable, timeout, ...) — the caller must treat that as
     'skip', never as 'zero failures'."""
     from fix_engine import run_sandboxed_command  # local import — see module docstring
 
-    cmd = _detect_test_cmd(path)
+    cmd = _detect_test_cmd(path, repo_name, config)
     if not cmd:
         return False, None, "no recognized test framework in this repo"
     result = run_sandboxed_command(cmd, path)
@@ -98,7 +114,7 @@ def _run_suite(path):
     return True, failures, None
 
 
-def _base_failures(repo_full_name, clone_url, token, base_sha):
+def _base_failures(repo_full_name, clone_url, token, base_sha, config=None):
     cached = _base_cache.get((repo_full_name, base_sha))
     if cached and (time.time() - cached[0]) < _BASE_CACHE_TTL_S:
         return cached[1]
@@ -110,7 +126,7 @@ def _base_failures(repo_full_name, clone_url, token, base_sha):
             logger.info("check_test_regressions: base clone failed for %s@%s: %s",
                        repo_full_name, base_sha, e)
             return None
-        ok, failures, note = _run_suite(dest)
+        ok, failures, note = _run_suite(dest, repo_full_name, config)
     if not ok:
         logger.info("check_test_regressions: base run skipped for %s@%s: %s",
                    repo_full_name, base_sha, note)
@@ -134,7 +150,7 @@ def check_test_regressions(repo, pr, config, token):
         return []
     try:
         base_sha = pr.base.sha
-        base_failures = _base_failures(repo.full_name, repo.clone_url, token, base_sha)
+        base_failures = _base_failures(repo.full_name, repo.clone_url, token, base_sha, config)
         if base_failures is None:
             return []  # couldn't establish a baseline — never flag without one
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,7 +161,7 @@ def check_test_regressions(repo, pr, config, token):
                 logger.info("check_test_regressions: head clone failed for %s#%s: %s",
                            repo.full_name, pr.number, e)
                 return []
-            ok, head_failures, note = _run_suite(dest)
+            ok, head_failures, note = _run_suite(dest, repo.full_name, config)
         if not ok:
             logger.info("check_test_regressions: head run skipped for %s#%s: %s",
                        repo.full_name, pr.number, note)

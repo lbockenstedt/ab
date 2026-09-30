@@ -64,6 +64,43 @@ def main():
         ok &= _check("no marker file -> None (skip, not a guess)",
                     _detect_test_cmd(d) is None)
 
+    # (2b) config["repo_tests"] is Priority 2 and must beat the heuristic, the
+    # same order verify_fix uses. lm/cs/kvm have an operator-configured command
+    # and NO root manifest, so without this they were silently skipped.
+    _cfg = {"repo_tests": {"lbockenstedt/lm": "run-lm-suite",
+                           "cs": "run-cs-suite"}}
+    with tempfile.TemporaryDirectory() as d:
+        ok &= _check("configured command is used when no marker file exists",
+                    _detect_test_cmd(d, "lbockenstedt/lm", _cfg) == "run-lm-suite")
+        ok &= _check("...and is matched on the bare repo name too",
+                    _detect_test_cmd(d, "lbockenstedt/cs", _cfg) == "run-cs-suite")
+        ok &= _check("an unconfigured repo with no marker still -> None",
+                    _detect_test_cmd(d, "lbockenstedt/kvm", _cfg) is None)
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "pyproject.toml"), "w").close()
+        ok &= _check("configured command OVERRIDES the marker-file heuristic",
+                    _detect_test_cmd(d, "lbockenstedt/lm", _cfg) == "run-lm-suite")
+        ok &= _check("...but the heuristic still applies without a repo_name",
+                    _detect_test_cmd(d, None, _cfg) == "python3 -m pytest -q")
+        ok &= _check("...and for a repo that has no configured command",
+                    _detect_test_cmd(d, "lbockenstedt/nw", _cfg) == "python3 -m pytest -q")
+
+    # A configured command must survive a path that cannot even be listed, and
+    # a malformed persisted config must degrade to the heuristic, never raise:
+    # this is a best-effort check that must never break PR review.
+    ok &= _check("configured command works even when the path is unlistable",
+                _detect_test_cmd("/nonexistent/path/xyz", "lbockenstedt/lm", _cfg)
+                == "run-lm-suite")
+    for bad in ({"repo_tests": "not-a-dict"}, {"repo_tests": None}, {}, None):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "pyproject.toml"), "w").close()
+            try:
+                got, raised = _detect_test_cmd(d, "lbockenstedt/lm", bad), False
+            except Exception as e:  # noqa: BLE001
+                got, raised = str(e), True
+            ok &= _check("malformed repo_tests %r -> heuristic, no raise" % (bad,),
+                        raised is False and got == "python3 -m pytest -q")
+
     # (3) default-OFF gating: check_test_regressions must return [] immediately
     # (no clone attempt, no exception) when the opt-in flag is unset — this is
     # the actual safety property ("doesn't run unless explicitly enabled"),
