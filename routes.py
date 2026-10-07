@@ -31,6 +31,7 @@ from main import (
     _get_provider_rpm,
     _log_restart_event,
     _persist_config_key,
+    _probe_client_ip,
     _provider_configured,
     _provider_credit_cb_snapshot,
     _reset_llm_semaphore,
@@ -146,6 +147,15 @@ async def login_submit(request: Request):
     src = (request.client.host if request.client else "?")
     if not _a.verify_credentials(username, password):
         logger.warning("auth: failed login for %r from %s", username, src)
+        # Relay to the hub's threat monitor so repeat attempts against THIS
+        # box count toward the same brute-force threshold/NSG block as the
+        # hub's own /login (best-effort telemetry; never gates the response).
+        try:
+            client = _get_hub_agent_client()
+            if client is not None:
+                client.report_login_failure(_probe_client_ip(request), username)
+        except Exception:  # noqa: BLE001 — telemetry must never break login
+            logger.debug("login failure report failed", exc_info=True)
         return templates.TemplateResponse(
             request=request, name="login.html", status_code=401,
             context={"setup_mode": False, "error": "Invalid username or password.",
