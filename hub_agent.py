@@ -471,6 +471,37 @@ class HubAgentClient:
         except Exception:  # noqa: BLE001 — never break the request path over telemetry
             pass
 
+    def report_login_failure(self, source_ip: str, username: str) -> None:
+        """Fire-and-forget: relay a failed AppBuilder WebUI login up to the hub
+        (``APP_LOGIN_FAILURE``) so repeated attempts from one source are counted
+        toward the SAME brute-force threshold as the hub's own ``/login`` — a
+        single NSG deny protects every edge, not just the hub's. Thread-safe:
+        called from the FastAPI request thread, schedules the signed send on the
+        agent's own loop. A no-op when not connected/approved — ab's own login
+        still works (local ``auth.py`` check already happened; this is telemetry
+        only). The hub rate-caps this reporter, so a report can never be abused
+        to block an arbitrary victim."""
+        loop = self.loop
+        if loop is None or self._ws is None or self.signer is None or not self._approved:
+            return
+        data = {"source_ip": source_ip or "", "username": (username or "")[:128],
+                "node": self.spoke_id or "appbuilder"}
+
+        async def _send():
+            try:
+                msg = {"header": {"message_id": str(uuid.uuid4()),
+                                  "timestamp": round(time.time(), 6),
+                                  "sender_id": self.spoke_id, "destination_id": "hub"},
+                       "payload": {"type": "APP_LOGIN_FAILURE", "data": data}}
+                await self._ws.send(encode_frame(self.signer, msg))
+            except Exception as e:  # noqa: BLE001
+                logger.debug("APP_LOGIN_FAILURE send failed: %s", e)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_send(), loop)
+        except Exception:  # noqa: BLE001 — never break the request path over telemetry
+            pass
+
     async def _handle_analyze_logs(self, msg, data):
         """The LM hub has no LLM of its own, so it delegates Log Analysis to us (we
         own the models + already read hub logs). Run analyze_logs off the event-loop
