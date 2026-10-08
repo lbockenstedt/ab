@@ -506,6 +506,11 @@ def _hub_agent_on_hub_secret(hub_secret):
     _persist_config_key("HUB_SECRET", hub_secret or "")
 
 
+def _hub_agent_on_recovery_psk(psk):
+    """Callback: the Hub pushed its durable recovery PSK (survives secret rotations)."""
+    _persist_config_key("HUB_RECOVERY_PSK", psk or "")
+
+
 def _get_hub_agent_client():
     """Return the running Hub agent singleton, or None if not started."""
     try:
@@ -543,6 +548,7 @@ def _start_hub_agent():
             on_secret=_hub_agent_on_secret,
             on_hub_secret=_hub_agent_on_hub_secret,
             on_connection=_hub_agent_on_connection,
+            on_recovery_psk=_hub_agent_on_recovery_psk,
         )
     except Exception as e:
         logger.warning(f"Could not start Hub agent: {e}")
