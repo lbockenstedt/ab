@@ -238,6 +238,8 @@ class HubAgentClient:
         on_secret: Optional[Callable[[str], None]] = None,
         on_hub_secret: Optional[Callable[[str], None]] = None,
         on_connection: Optional[Callable[[bool], None]] = None,
+        recovery_psk: str = "",
+        on_recovery_psk: Optional[Callable[[str], None]] = None,
     ):
         self.hub_ws_url = _normalize_hub_ws_url(hub_ws_url)
         self.spoke_id = spoke_id
@@ -251,6 +253,8 @@ class HubAgentClient:
         # registration state (approved/pending) that persists across brief drops.
         self.on_connection = on_connection or (lambda _c: None)
         self.on_hub_secret = on_hub_secret or (lambda _s: None)
+        self.recovery_psk = (recovery_psk or "").strip()
+        self.on_recovery_psk = on_recovery_psk or (lambda _s: None)
 
         # wss:// TLS to the unified :443 hub. Default: encrypt WITHOUT authenticating
         # the self-signed hub cert (matches BaseControlPlane._client_ssl_ctx); set
@@ -1131,6 +1135,41 @@ class HubAgentClient:
                 except Exception:  # noqa: BLE001
                     pass
 
+    def _verify_hub_challenge(self, challenge: str, signature, signatures_field):
+        """Check the hub's challenge signature against every retained
+        ``hub_secrets`` entry: the single ``signature`` first, then the hub's
+        rotation-window ``signatures`` list. Returns ``(verified, matched_index)``;
+        index 0 is the hub's current root secret, >0 an older retained one."""
+        challenge = challenge or ""
+        sigs = []
+        if isinstance(signature, str) and signature:
+            sigs.append((0, signature))
+        if isinstance(signatures_field, list):
+            sigs.extend((i, sg) for i, sg in enumerate(signatures_field) if isinstance(sg, str) and sg)
+        for hs in self.hub_secrets:
+            expected = hmac.new(hs.encode(), challenge.encode(), hashlib.sha256).hexdigest()
+            for idx, sg in sigs:
+                if hmac.compare_digest(expected, sg):
+                    return True, idx
+        return False, None
+
+    def _recovery_psk_verifies(self, challenge: str, recovery_signature) -> bool:
+        """Fails closed on any missing piece (no stored PSK, no signature)."""
+        if not self.recovery_psk or not challenge:
+            return False
+        if not isinstance(recovery_signature, str) or not recovery_signature:
+            return False
+        expected = hmac.new(self.recovery_psk.encode(), challenge.encode(),
+                            hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, recovery_signature)
+
+    def _drop_stale_hub_secrets(self) -> None:
+        self.hub_secrets = []
+        try:
+            self.on_hub_secret("")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not clear stale hub secret: %s", e)
+
     async def _connect_and_serve(self):
         # max_size: the hub's GET_LOGS response aggregates every spoke's logs
         # and can exceed the default 1 MiB frame ceiling, which closed us with
@@ -1188,19 +1227,40 @@ class HubAgentClient:
 
             challenge = hub_proof.get("challenge", "")
             signature = hub_proof.get("signature", "")
+            hub_ok = {"status": "HUB_OK"}
             if self.hub_secrets:
-                verified = False
-                for hs in self.hub_secrets:
-                    expected = hmac.new(hs.encode(), challenge.encode(), hashlib.sha256).hexdigest()
-                    if hmac.compare_digest(expected, signature):
-                        verified = True
-                        break
-                if not verified:
-                    await websocket.close(1008, "Hub verification failed")
-                    raise RuntimeError("hub identity verification failed")
+                verified, matched_index = self._verify_hub_challenge(
+                    challenge, signature, hub_proof.get("signatures"))
+                if verified:
+                    # index > 0: an older retained secret matched, so the hub
+                    # re-provisions us onto its current root secret.
+                    if matched_index is not None:
+                        hub_ok["hub_secret_index"] = matched_index
+                elif self._recovery_psk_verifies(challenge, hub_proof.get("recovery_signature")):
+                    # The recovery PSK derives from a hub root that never
+                    # rotates, so it authenticates the hub independently of the
+                    # stale secret and of TLS.
+                    logger.warning(
+                        "Hub identity verified via durable recovery PSK — stored "
+                        "hub_secret is stale. Dropping it so the hub can re-provision.")
+                    self._drop_stale_hub_secrets()
+                elif self._tls_verify:
+                    logger.warning(
+                        "Hub identity verification failed for all known secrets — TLS "
+                        "verifies the hub, so treating as a stale rotation: dropping "
+                        "hub_secret so the hub can re-provision.")
+                    self._drop_stale_hub_secrets()
+                else:
+                    # TLS is unverified, so the hub proof is the only
+                    # authenticator: refuse rather than hand a possible MITM
+                    # the chance to re-provision us.
+                    await websocket.close(1008, "Hub identity unverified (TLS verify off)")
+                    raise RuntimeError(
+                        "hub identity verification failed (stale hub secret, TLS verify off "
+                        "and no recovery PSK) — set LM_HUB_TLS_VERIFY=1 or re-provision HUB_SECRET")
             else:
                 logger.warning("No hub secret configured — skipping Hub identity verification (insecure).")
-            await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(",", ":")))
+            await websocket.send(json.dumps(hub_ok, separators=(",", ":")))
 
             # We presented a stored secret and the hub sent HUB_VERIFIED without
             # closing 1008 "Authentication" — so it ACCEPTED our secret: we are an
@@ -1434,6 +1494,18 @@ class HubAgentClient:
                 self.hub_secrets = self.hub_secrets[:3]
                 self.on_hub_secret(new_hub_secret)
                 logger.info("Hub secret stored for %s", self.spoke_id)
+            return
+
+        if cmd_type == "SPOKE_SET_RECOVERY_PSK":
+            new_psk = data.get("recovery_psk")
+            if new_psk:
+                if new_psk != self.recovery_psk:
+                    self.recovery_psk = new_psk
+                    self.on_recovery_psk(new_psk)
+                    logger.info("Recovery PSK provisioned for %s", self.spoke_id)
+                await self._ack(msg, "SUCCESS", "Recovery PSK stored")
+            else:
+                await self._ack(msg, "ERROR", "missing recovery_psk")
             return
 
         if cmd_type == "ANALYZE_LOGS":
@@ -1689,7 +1761,8 @@ class HubAgentClient:
 hub_agent_client: Optional[HubAgentClient] = None
 
 
-def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub_secret=None, on_connection=None) -> Optional[HubAgentClient]:
+def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub_secret=None, on_connection=None,
+                            on_recovery_psk=None) -> Optional[HubAgentClient]:
     """Build and start the Hub agent from a AppBuilder config dict.
 
     Returns the client (also stored as the module singleton), or None if
@@ -1711,6 +1784,8 @@ def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub
         on_secret=on_secret,
         on_hub_secret=on_hub_secret,
         on_connection=on_connection,
+        recovery_psk=(config.get("HUB_RECOVERY_PSK") or "").strip(),
+        on_recovery_psk=on_recovery_psk,
     )
     hub_agent_client = client
     client.start()
