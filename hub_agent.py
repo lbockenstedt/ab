@@ -1163,6 +1163,26 @@ class HubAgentClient:
                             hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, recovery_signature)
 
+    @staticmethod
+    def _hub_secret_proof_present(signature, signatures_field) -> bool:
+        if isinstance(signature, str) and signature:
+            return True
+        if isinstance(signatures_field, list):
+            return any(isinstance(sg, str) and sg for sg in signatures_field)
+        return False
+
+    def _connection_has_verified_tls(self, websocket) -> bool:
+        """True only for an active websocket on a TLS transport with verify-on."""
+        if not self._tls_verify:
+            return False
+        transport = getattr(websocket, "transport", None)
+        if transport is None:
+            return False
+        try:
+            return transport.get_extra_info("ssl_object") is not None
+        except Exception:  # noqa: BLE001
+            return False
+
     def _drop_stale_hub_secrets(self) -> None:
         self.hub_secrets = []
         try:
@@ -1228,15 +1248,21 @@ class HubAgentClient:
             challenge = hub_proof.get("challenge", "")
             signature = hub_proof.get("signature", "")
             hub_ok = {"status": "HUB_OK"}
+            proof_present = self._hub_secret_proof_present(
+                signature, hub_proof.get("signatures"))
+            recovery_psk_configured = bool(self.recovery_psk)
+            recovery_verified = self._recovery_psk_verifies(
+                challenge, hub_proof.get("recovery_signature"))
+            verified_tls = self._connection_has_verified_tls(websocket)
             if self.hub_secrets:
                 verified, matched_index = self._verify_hub_challenge(
                     challenge, signature, hub_proof.get("signatures"))
                 if verified:
                     # index > 0: an older retained secret matched, so the hub
                     # re-provisions us onto its current root secret.
-                    if matched_index is not None:
+                    if matched_index is not None and matched_index > 0:
                         hub_ok["hub_secret_index"] = matched_index
-                elif self._recovery_psk_verifies(challenge, hub_proof.get("recovery_signature")):
+                elif recovery_verified:
                     # The recovery PSK derives from a hub root that never
                     # rotates, so it authenticates the hub independently of the
                     # stale secret and of TLS.
@@ -1244,11 +1270,17 @@ class HubAgentClient:
                         "Hub identity verified via durable recovery PSK — stored "
                         "hub_secret is stale. Dropping it so the hub can re-provision.")
                     self._drop_stale_hub_secrets()
-                elif self._tls_verify:
-                    logger.warning(
-                        "Hub identity verification failed for all known secrets — TLS "
-                        "verifies the hub, so treating as a stale rotation: dropping "
-                        "hub_secret so the hub can re-provision.")
+                elif verified_tls:
+                    if proof_present:
+                        logger.warning(
+                            "Hub identity verification failed for all known secrets — TLS "
+                            "verifies the hub, so treating as a stale rotation: dropping "
+                            "hub_secret so the hub can re-provision.")
+                    else:
+                        logger.warning(
+                            "Hub identity proof was absent or malformed, but verified TLS "
+                            "still authenticated the hub. Dropping stale hub_secret so the "
+                            "hub can re-provision; investigate the hub proof payload.")
                     self._drop_stale_hub_secrets()
                 else:
                     # TLS is unverified, so the hub proof is the only
@@ -1258,8 +1290,16 @@ class HubAgentClient:
                     raise RuntimeError(
                         "hub identity verification failed (stale hub secret, TLS verify off "
                         "and no recovery PSK) — set LM_HUB_TLS_VERIFY=1 or re-provision HUB_SECRET")
+            elif recovery_psk_configured:
+                if not recovery_verified:
+                    await websocket.close(1008, "Hub identity unverified (recovery PSK failed)")
+                    raise RuntimeError(
+                        "hub identity verification failed (no hub secret and recovery PSK "
+                        "did not verify)")
             else:
-                logger.warning("No hub secret configured — skipping Hub identity verification (insecure).")
+                logger.warning(
+                    "No hub secret or recovery PSK configured — skipping Hub identity "
+                    "verification (insecure).")
             await websocket.send(json.dumps(hub_ok, separators=(",", ":")))
 
             # We presented a stored secret and the hub sent HUB_VERIFIED without
