@@ -97,7 +97,12 @@ _HUB_DOWN_ERRNOS = {errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH,
 # CONSUMER, so it does not help; the dispatch itself has to be concurrent.
 # Everything not listed here stays inline, because ordering matters for the
 # onboarding/approval frames (APPROVED, SPOKE_UPDATE_SESSION_KEY, ...).
-_SLOW_CMDS = frozenset({"ANALYZE_LOGS", "ESCALATE_LOG_ISSUE", "HELP_ASK", "help_ask"})
+_SLOW_CMDS = frozenset({"ANALYZE_LOGS", "ESCALATE_LOG_ISSUE", "HELP_ASK", "help_ask",
+                        # Simulation Build Assistant sessions (sim_session.py). Most
+                        # are fast, but START/SUBMIT touch disk + GitHub, and a
+                        # browser polls every ~1.5s, so none run inline.
+                        "SIM_SESSION_PING", "SIM_SESSION_START", "SIM_SESSION_REPLY",
+                        "SIM_SESSION_POLL", "SIM_SESSION_CANCEL", "SIM_SESSION_SUBMIT"})
 # Backstop against a flood of slow commands spawning unbounded tasks. Real
 # traffic runs 1-2 concurrently; at the cap we drop and let the hub's durable
 # mailbox redeliver, rather than stall the reader (the bug we're fixing).
@@ -1684,6 +1689,34 @@ class HubAgentClient:
                 await self._ws.send(encode_frame(self.signer, reply))
             except Exception as e:  # noqa: BLE001
                 logger.warning("Failed to send HELP_ASK reply: %s", e)
+            return
+
+        if cmd_type in ("SIM_SESSION_PING", "SIM_SESSION_START", "SIM_SESSION_REPLY",
+                        "SIM_SESSION_POLL", "SIM_SESSION_CANCEL", "SIM_SESSION_SUBMIT"):
+            # Interactive Simulation Build Assistant (LM Simulations → Assistant).
+            # The hub only relays; AppBuilder owns the Copilot CLI session, the
+            # rules/skills it reads, and the hand-off into feature_drive. Every
+            # command answers immediately — a turn runs on its own thread and
+            # the browser polls SIM_SESSION_POLL for progress. Same
+            # COMMAND_RESULT reply shape as HELP_ASK.
+            if self._ws is None:
+                return
+            import sim_session  # lazy: imports main
+            rdata = await asyncio.to_thread(sim_session.handle_command, cmd_type, data)
+            reply = {
+                "correlation_id": msg.get("header", {}).get("message_id"),
+                "header": {
+                    "message_id": str(uuid.uuid4()),
+                    "timestamp": round(time.time(), 6),
+                    "sender_id": self.spoke_id,
+                    "destination_id": "hub",
+                },
+                "payload": {"type": "COMMAND_RESULT", "data": rdata},
+            }
+            try:
+                await self._ws.send(encode_frame(self.signer, reply))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to send %s reply: %s", cmd_type, e)
             return
 
         if cmd_type in ("get_version", "GET_VERSION"):
