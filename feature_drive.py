@@ -46,7 +46,7 @@ from main import (
     call_llm,
     state,
 )
-from fix_engine import _robust_json_loads, _norm_confidence
+from fix_engine import _loads_llm_json_object, _norm_confidence
 from workers import _schedule_check
 import feature_boundary
 import skills_loader
@@ -58,6 +58,15 @@ from github_ops import _ensure_label
 # clarify outcome must be re-evaluated on the next cycle in case someone
 # replied, whereas flag/built/failed are done until a human acts.
 _TERMINAL_STATUSES = {"feature_flagged", "feature_built", "feature_failed"}
+
+# A classifier ERROR (unparseable/empty LLM output, provider failure) is not a
+# decision about the request — it says nothing about boundaries. It still
+# fails closed (never builds), but is recorded as this NON-terminal status and
+# re-classified next cycle, up to feature_classify_max_attempts, before being
+# parked for a human with flag_kind="classifier_error".
+_CLASSIFY_RETRY_STATUS = "feature_classify_retry"
+_CLASSIFIER_ERROR_PREFIX = "Classifier error"
+_CLASSIFIER_ERROR_MARKER = "<!-- ab-classifier-error: v1 -->"
 
 _FEATURE_MARKER_RE = re.compile(r"<!--\s*report-type:\s*feature\s*-->")
 _BOUNDARY_FLAG_MARKER = "<!-- ab-boundary-flag: v1 -->"
@@ -156,6 +165,8 @@ def classify(issue_title, issue_body, config):
             "confidence": 1.0,
         }
 
+    used_model = {}
+    raw = None
     try:
         skills = skills_loader.get_loaded()
         skills_block = "\n".join(
@@ -173,8 +184,10 @@ def classify(issue_title, issue_body, config):
         reqs = LlmRequirements(complexity="small", needs_structured_output=True,
                                min_context_tokens=len(prompt) // 4)
         raw = call_llm(prompt, system_prompt=_CLASSIFY_SYSTEM, requirements=reqs,
-                       json_schema=_CLASSIFY_JSON_SCHEMA)
-        data = _robust_json_loads(raw)
+                       json_schema=_CLASSIFY_JSON_SCHEMA, used_model_out=used_model)
+        if not (raw or "").strip():
+            raise ValueError("classifier LLM returned an empty response")
+        data = _loads_llm_json_object(raw)
         if not isinstance(data, dict):
             raise ValueError(f"classifier response was not a JSON object: {raw[:200]!r}")
 
@@ -197,11 +210,66 @@ def classify(issue_title, issue_body, config):
             raise ValueError("verdict='clarify' but no questions were provided")
 
         return {"verdict": verdict, "boundary_ids": boundary_ids, "skill": skill,
-                "questions": questions, "reason": reason, "confidence": confidence}
+                "questions": questions, "reason": reason, "confidence": confidence,
+                "model": _model_label(used_model)}
     except Exception as e:
-        logger.warning(f"feature_drive: classifier failed, failing closed to 'flag': {e}")
+        model = _model_label(used_model)
+        raw_excerpt = str(raw)[:500] if raw is not None else ""
+        logger.warning(f"feature_drive: classifier failed (model={model or 'n/a'}, "
+                       f"response {len(raw or '')} chars), failing closed to 'flag': "
+                       f"{type(e).__name__}: {e}")
         return {"verdict": "flag", "boundary_ids": [], "skill": None, "questions": [],
-                "reason": f"Classifier error (failed closed): {e}", "confidence": 0.0}
+                "reason": f"{_CLASSIFIER_ERROR_PREFIX} (failed closed): {type(e).__name__}: {e}",
+                "confidence": 0.0, "classifier_error": f"{type(e).__name__}: {e}",
+                "model": model, "raw_excerpt": raw_excerpt}
+
+
+def _model_label(used_model):
+    if not used_model or not used_model.get("model"):
+        return ""
+    return f"{used_model.get('provider') or '?'}/{used_model['model']}"
+
+
+def _is_classifier_error_record(rec):
+    """True for a record parked only because the CLASSIFIER failed — the
+    retry status, or a pre-retry legacy feature_flagged record whose reason
+    is a classifier error with no boundary ids (those were written as
+    terminal and would otherwise stay stuck forever). Records that already
+    exhausted their retries (flag_kind="classifier_error") are NOT retryable."""
+    if not rec:
+        return False
+    if rec.get("status") == _CLASSIFY_RETRY_STATUS:
+        return True
+    return (rec.get("status") == "feature_flagged" and not rec.get("flag_kind")
+            and not rec.get("boundary_ids")
+            and str(rec.get("reason") or "").startswith(_CLASSIFIER_ERROR_PREFIX))
+
+
+def _flag_classifier_exhausted(gh_repo, issue, rec):
+    """Park an issue whose classification failed on every attempt. Unlike
+    _flag_issue, the comment says plainly that NO boundary was evaluated —
+    the request was never judged, so a human shouldn't read it as risky."""
+    _ensure_label(gh_repo, "ab-needs-human")
+    try:
+        issue.add_to_labels("ab-needs-human")
+    except Exception as e:
+        logger.warning(f"feature_drive: could not label {issue.number} needs-human: {e}")
+    if _already_commented(issue, _CLASSIFIER_ERROR_MARKER):
+        return
+    body = (
+        "🤖 **AppBuilder — Feature Auto-Drive**\n\n"
+        f"AppBuilder could not classify this request after {rec.get('attempts')} attempt(s), so "
+        "**no code has been touched**. This is a classifier failure, **not** a boundary "
+        "decision. The request has not been judged risky. Use **Re-evaluate** in AppBuilder "
+        "once the cause is fixed.\n\n"
+        f"**Last error:** `{(rec.get('last_error') or '')[:300]}`\n"
+        f"**Model:** {rec.get('model') or 'n/a'}\n\n"
+        f"{_CLASSIFIER_ERROR_MARKER}"
+    )
+    try:
+        issue.create_comment(body)
+    except Exception as e:
+        logger.warning(f"feature_drive: could not comment on {issue.number}: {e}")
 
 
 def _already_commented(issue, marker_prefix):
@@ -217,11 +285,13 @@ def _already_commented(issue, marker_prefix):
     return False
 
 
-def _flag_issue(gh_repo, issue, result):
+def _flag_issue(gh_repo, issue, result, force_comment=False):
     """Labels + comments a boundary-crossing request. No code touched, issue
-    stays open. Idempotent via _BOUNDARY_FLAG_MARKER."""
+    stays open. Idempotent via _BOUNDARY_FLAG_MARKER — except force_comment,
+    used when re-classifying an issue whose earlier marker comment only
+    reported a classifier error, so the real boundary is still explained."""
     _ensure_label(gh_repo, "ab-needs-human")
-    if _already_commented(issue, _BOUNDARY_FLAG_MARKER):
+    if not force_comment and _already_commented(issue, _BOUNDARY_FLAG_MARKER):
         return
     boundaries = {b.get("id"): b for b in (load_config().get("feature_boundaries") or [])}
     matched = [boundaries[i] for i in result["boundary_ids"] if i in boundaries]
@@ -331,7 +401,9 @@ def scan_feature_requests(gh, config):
                 if require_marker and not _is_feature_request(body):
                     continue
                 issue_id = f"{repo_name}:{issue.number}"
-                if processed.get(issue_id, {}).get("status") in _TERMINAL_STATUSES:
+                prior = processed.get(issue_id) or {}
+                retrying = _is_classifier_error_record(prior)
+                if prior.get("status") in _TERMINAL_STATUSES and not retrying:
                     continue
 
                 handled += 1
@@ -342,12 +414,53 @@ def scan_feature_requests(gh, config):
                                 f"classify() itself — this is a bug): {e}")
                     continue
 
+                if result.get("classifier_error"):
+                    max_attempts = max(1, int(config.get("feature_classify_max_attempts") or 3))
+                    attempts = int(prior.get("attempts") or 0) + 1 if retrying else 1
+                    rec = {
+                        "status": _CLASSIFY_RETRY_STATUS,
+                        "reason": result["reason"],
+                        "last_error": result["classifier_error"],
+                        "model": result.get("model") or "",
+                        "raw_excerpt": result.get("raw_excerpt") or "",
+                        "attempts": attempts,
+                        "max_attempts": max_attempts,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    if attempts >= max_attempts:
+                        rec["status"] = "feature_flagged"
+                        rec["flag_kind"] = "classifier_error"
+                        rec["boundary_ids"] = []
+                        _flag_classifier_exhausted(repo_obj, issue, rec)
+                        logger.warning(f"feature_drive: {issue_id} classifier failed {attempts}x — "
+                                       f"parked for a human (not a boundary decision)")
+                    else:
+                        logger.info(f"feature_drive: {issue_id} classifier error, attempt "
+                                    f"{attempts}/{max_attempts} — will retry next cycle")
+                    processed[issue_id] = rec
+                    save_processed(processed)
+                    recompute_issue_counters(processed)
+                    continue
+
+                if retrying and result["verdict"] != "flag":
+                    # The earlier failure (legacy records) labelled this
+                    # needs-human as if a boundary was crossed — undo that now
+                    # that a real verdict says otherwise.
+                    try:
+                        if any(lbl.name == "ab-needs-human" for lbl in issue.labels):
+                            issue.remove_from_labels("ab-needs-human")
+                    except Exception as e:
+                        logger.debug(f"feature_drive: could not clear needs-human on {issue_id}: {e}")
+
                 if result["verdict"] == "flag":
-                    _flag_issue(repo_obj, issue, result)
+                    _flag_issue(repo_obj, issue, result, force_comment=retrying)
                     processed[issue_id] = {
                         "status": "feature_flagged",
+                        "flag_kind": "boundary",
                         "boundary_ids": result["boundary_ids"],
                         "reason": result["reason"],
+                        "model": result.get("model") or "",
+                        "confidence": result.get("confidence"),
                         "timestamp": datetime.now().isoformat(),
                     }
                     save_processed(processed)

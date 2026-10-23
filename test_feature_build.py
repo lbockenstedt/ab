@@ -159,11 +159,11 @@ def _load_ns():
     fe_src = open("fix_engine.py").read()
     fe_tree = ast.parse(fe_src)
     for node in fe_tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "_robust_json_loads":
+        if isinstance(node, ast.FunctionDef) and node.name in ("_robust_json_loads", "_loads_llm_json_object"):
             segs.insert(0, ast.get_source_segment(fe_src, node))
         if isinstance(node, ast.Assign):
             for t in node.targets:
-                if getattr(t, "id", "") == "_JSON_BAD_ESCAPE_RE":
+                if getattr(t, "id", "") in ("_JSON_BAD_ESCAPE_RE", "_JSON_FENCE_RE"):
                     segs.insert(0, ast.get_source_segment(fe_src, node))
     ns["json"] = __import__("json")
     ns["re"] = __import__("re")
