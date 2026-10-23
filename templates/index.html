@@ -578,15 +578,19 @@
                     <tr class="hover:bg-slate-50 transition-colors" data-status="{{ info.status }}">
                         <td class="px-4 py-3 font-mono text-[#01A982] align-middle truncate" title="{{ issue_id }}">{{ issue_id }}</td>
                         <td class="px-4 py-3 align-middle">
-                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% elif info.status == 'feature_flagged' %}text-purple-700 bg-purple-100{% elif info.status == 'feature_needs_info' %}text-sky-700 bg-sky-100{% elif info.status == 'feature_built' %}text-teal-700 bg-teal-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
+                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% elif info.status == 'feature_flagged' %}text-purple-700 bg-purple-100{% elif info.status == 'feature_classify_retry' %}text-amber-700 bg-amber-100{% elif info.status == 'feature_needs_info' %}text-sky-700 bg-sky-100{% elif info.status == 'feature_built' %}text-teal-700 bg-teal-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
                         <td class="px-4 py-3 align-middle">
                             <div class="flex flex-wrap gap-1.5 justify-start items-center">
-                                {% if info.status in ('feature_flagged', 'feature_needs_info') %}
+                                {% if info.status in ('feature_flagged', 'feature_needs_info', 'feature_classify_retry') %}
                                 <!-- No Retry/Claude/Reopen here — those trigger a code fix attempt,
                                      but a boundary-flag or a clarify request has no code to fix; the
                                      next automatic classify pass (on a reply or a re-run) is what
-                                     re-evaluates it, not a manual retry. -->
+                                     re-evaluates it, not a manual retry. Re-evaluate re-queues it for
+                                     that classify pass now (e.g. after a classifier error). -->
+                                {% if info.status in ('feature_flagged', 'feature_classify_retry') %}
+                                <button onclick="reevaluateFeature('{{ issue_id }}')" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 transition-colors" title="Re-queue for classification on the next feature-drive cycle (same boundary checks, build gates and PR review as before — nothing is built immediately)">Re-evaluate</button>
+                                {% endif %}
                                 <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                                 <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                                 {% elif info.status == 'feature_built' %}
@@ -621,7 +625,10 @@
                                     {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
                                     {% elif info.status == 'non-actionable' %}Non-actionable: {{ (info.reason or '')[:80] }}
                                     {% elif info.status == 'failed' %}Failed: {{ (info.error or '')[:80] }}
-                                    {% elif info.status == 'feature_flagged' %}🚧 Flagged for a human — crosses boundary: {{ (info.boundary_ids or [])|join(', ') or (info.reason or '')[:80] }}
+                                    {% elif info.status == 'feature_flagged' and (info.flag_kind == 'classifier_error' or (not info.flag_kind and not info.boundary_ids and (info.reason or '').startswith('Classifier error'))) %}⚠️ Stuck — the classifier failed{% if info.attempts %} {{ info.attempts }}×{% endif %}, so this request was <b>never judged</b> (no boundary was evaluated). Fix the cause, then Re-evaluate.
+                                    {% elif info.status == 'feature_flagged' and info.flag_kind == 'build_incomplete' %}🚧 Build attempted but not completed — no PR opened: {{ (info.reason or '')[:160] }}
+                                    {% elif info.status == 'feature_flagged' %}🚧 Flagged for a human — crosses boundary: {{ (info.boundary_ids or [])|join(', ') or (info.reason or '')[:160] }}
+                                    {% elif info.status == 'feature_classify_retry' %}🔁 Classifier error — will re-classify next cycle{% if info.attempts %} (attempt {{ info.attempts }}/{{ info.max_attempts or '?' }}){% endif %}. Nothing is built until a real verdict comes back.
                                     {% elif info.status == 'feature_needs_info' %}❓ Needs more detail — {{ (info.questions or [])|length }} question(s) posted on the issue, awaiting a reply
                                     {% elif info.status == 'feature_built' %}✅ Auto-built — PR {{ info.pr_url or 'open' }}, awaiting review
                                     {% else %}{{ info.status }}{% endif %}
@@ -654,12 +661,28 @@
                                         {% endif %}
                                         <span class="mx-2 text-slate-300">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
+                                    {% elif info.status in ('feature_flagged', 'feature_classify_retry', 'feature_failed') %}
+                                        {% if info.flag_kind %}<span class="font-semibold">Kind:</span> {{ info.flag_kind }}<span class="mx-2 text-slate-300">|</span>{% endif %}
+                                        {% if info.boundary_ids %}<span class="font-semibold text-purple-600">Boundaries:</span> {{ info.boundary_ids|join(', ') }}<span class="mx-2 text-slate-300">|</span>{% endif %}
+                                        <span class="font-semibold text-purple-600">Why:</span> <span class="not-italic">{{ info.last_error or info.reason or 'No reason recorded (written before AppBuilder stored one).' }}</span>
+                                        {% if info.model %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Model:</span> {{ info.model }}{% endif %}
+                                        {% if info.attempts %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Attempts:</span> {{ info.attempts }}{% if info.max_attempts %}/{{ info.max_attempts }}{% endif %}{% endif %}
+                                        {% if info.get('confidence') is not none %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Confidence:</span> {{ '%.0f%%' % (info.confidence * 100) }}{% endif %}
+                                        {% if info.previous_reason %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Previously:</span> {{ info.previous_status }} — {{ info.previous_reason[:200] }}{% endif %}
+                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% else %}
                                         <span class="font-semibold">Status:</span> {{ info.status }}
                                         <span class="mx-2 text-slate-300">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% endif %}
                                 </div>
+                                {% if info.raw_excerpt %}
+                                <details class="bg-white border border-slate-200 p-2 rounded-md shadow-sm text-xs">
+                                    <summary class="cursor-pointer font-bold text-slate-500">Classifier's raw response (first 500 chars)</summary>
+                                    <pre class="text-slate-700 font-mono whitespace-pre-wrap mt-1">{{ info.raw_excerpt }}</pre>
+                                </details>
+                                {% endif %}
                                 {% if info.original_body %}
                                 <div class="bg-white border border-slate-200 p-2 rounded-md shadow-sm">
                                     <div class="text-slate-700 font-mono not-italic text-xs whitespace-pre-line leading-relaxed">
@@ -4173,6 +4196,7 @@
                 else if (isPrFilter)             show = false;                             // hide issue rows under any PR filter
                 else if (status === 'all')       show = s !== 'closed' && s !== 'resolved';  // active: closed + resolved hidden
                 else if (status === 'closed')    show = s === 'closed';
+                else if (status === 'feature_flagged') show = s === 'feature_flagged' || s === 'feature_classify_retry';  // retries are parked too, just not for good
                 else                             show = s === status;
                 row.style.display = show ? '' : 'none';
                 const detail = row.nextElementSibling;
@@ -6380,6 +6404,24 @@
                     showToast(data.message || 'Error reopening issue.', 'error');
                 }
             } catch (e) { showToast('Request failed: ' + e, 'error'); }
+        }
+
+        async function reevaluateFeature(issueId) {
+            try {
+                const resp = await fetch('/reevaluate_feature', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ issue_id: issueId })
+                });
+                const data = await resp.json();
+                if (data.status === 'success') {
+                    reloadWithToast(data.message || 'Re-queued for classification.', 'success');
+                } else {
+                    showToast(data.message || 'Re-evaluate failed.', 'error');
+                }
+            } catch (e) {
+                showToast('Re-evaluate failed: ' + e, 'error');
+            }
         }
 
         async function resolveIssue(issueId) {

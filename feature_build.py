@@ -30,7 +30,7 @@ from main import (
     recompute_issue_counters,
     call_llm,
 )
-from fix_engine import _authenticated_remote, find_existing_pull_request, _robust_json_loads
+from fix_engine import _authenticated_remote, find_existing_pull_request, _loads_llm_json_object
 import llm_client
 from model_selection import LlmRequirements, select_model
 import skills_loader
@@ -181,8 +181,8 @@ def _flag_incomplete(gh_repo, issue, reason):
         logger.warning(f"feature_build: could not comment on {issue.number}: {e}")
     processed = load_processed()
     issue_id = f"{gh_repo.full_name}:{issue.number}"
-    processed[issue_id] = {"status": "feature_flagged", "reason": reason,
-                           "timestamp": datetime.now().isoformat()}
+    processed[issue_id] = {"status": "feature_flagged", "flag_kind": "build_incomplete",
+                           "reason": reason, "timestamp": datetime.now().isoformat()}
     save_processed(processed)
     recompute_issue_counters(processed)
 
@@ -275,7 +275,7 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
                 return False, f"build agent failed: {e}"
 
             try:
-                agent_summary = _robust_json_loads(raw) or {}
+                agent_summary = _loads_llm_json_object(raw) or {}
                 if not isinstance(agent_summary, dict):
                     agent_summary = {}
             except Exception:
@@ -298,7 +298,7 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
                 try:
                     raw2 = _run_build_agent(prompt + "\n\n" + nudge, config, checkout_path,
                                             extra_add_dirs, timeout_s)
-                    agent_summary2 = _robust_json_loads(raw2) or {}
+                    agent_summary2 = _loads_llm_json_object(raw2) or {}
                     if isinstance(agent_summary2, dict):
                         agent_summary = agent_summary2
                 except Exception as e:
