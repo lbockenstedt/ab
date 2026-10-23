@@ -30,7 +30,7 @@ from main import (
     recompute_issue_counters,
     call_llm,
 )
-from fix_engine import _authenticated_remote, find_existing_pull_request, _loads_llm_json_object
+from fix_engine import _authenticated_remote, find_existing_pull_request, _loads_llm_json_object, process_single_issue
 import llm_client
 from model_selection import LlmRequirements, select_model
 import skills_loader
@@ -187,6 +187,37 @@ def _flag_incomplete(gh_repo, issue, reason):
     recompute_issue_counters(processed)
 
 
+def _handoff_to_fix_pipeline(repo_obj, issue, classify_result, why):
+    """Run a classified-buildable request through the SAME pipeline a normal
+    GitHub issue takes (fix_engine.process_single_issue: triage, fix
+    generation, cross-provider reviewer panel, syntax/boundary/secrets gates,
+    PR to the integration branch). Used when no mutating-agent model exists,
+    instead of parking a request the classifier already cleared. The
+    classifier's verdict is stamped on the record first so the Status table
+    shows why it went this way; process_single_issue keeps those fields
+    until it writes its own terminal status."""
+    issue_id = f"{repo_obj.full_name}:{issue.number}"
+    processed = load_processed()
+    processed[issue_id] = {
+        **(processed.get(issue_id) or {}),
+        "status": "processing",
+        "pipeline": "fix_engine",
+        "handoff_reason": why,
+        "feature_skill": classify_result.get("skill"),
+        "classifier_reason": classify_result.get("reason", ""),
+        "timestamp": datetime.now().isoformat(),
+    }
+    save_processed(processed)
+    recompute_issue_counters(processed)
+    logger.info(f"feature_build: {issue_id} — {why}; handing off to the standard fix pipeline")
+    try:
+        return process_single_issue(repo_obj.full_name, issue.number)
+    except Exception as e:
+        logger.exception(f"feature_build: fix-pipeline hand-off raised for {issue_id}: {e}")
+        _mark_failed(issue_id, f"Fix-pipeline hand-off failed: {e}")
+        return False, f"fix pipeline hand-off failed: {e}"
+
+
 def build_feature(gh, repo_obj, issue, classify_result, config):
     """The Phase 2 orchestrator. Returns (ok: bool, message: str). Never
     raises — the caller (feature_drive.scan_feature_requests) treats a build
@@ -212,6 +243,10 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
     _candidates = llm_client._enumerate_candidates(config)
     _perf = llm_client.get_llm_perf_snapshot()
     if select_model(_availability_reqs, _candidates, _perf) is None:
+        if config.get("feature_build_fix_pipeline_fallback", True):
+            return _handoff_to_fix_pipeline(
+                repo_obj, issue, classify_result,
+                "no mutating-agent (claude_cli) model is configured for the agentic build")
         _flag_incomplete(repo_obj, issue, "Feature building requires a claude_cli provider slot "
                                           "configured in the LLM Vault, and none is set up.")
         return False, "no claude_cli slot configured"

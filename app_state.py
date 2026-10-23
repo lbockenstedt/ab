@@ -629,6 +629,11 @@ def recompute_issue_counters(processed=None):
     base buckets — recurrence is tracked via the pending-verification workflow."""
     if processed is None:
         processed = load_processed()
+    # The Activity Feed renders state["processed"]; refresh it from the same
+    # snapshot so the sidebar counts and the feed rows can never disagree
+    # (background writers like feature_drive only call this, not the routes'
+    # explicit state["processed"] = ... assignment).
+    state["processed"] = processed
     vals = list(processed.values())
     state["success_count"] = sum(1 for i in vals if i.get("status") in _RESOLVED_STATUSES)
     state["closed_count"] = sum(1 for i in vals if i.get("status") == "closed")

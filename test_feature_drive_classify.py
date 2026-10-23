@@ -38,6 +38,7 @@ def _load_ns():
         "_TERMINAL_STATUSES", "_FEATURE_MARKER_RE", "_BOUNDARY_FLAG_MARKER",
         "_CLASSIFY_SYSTEM", "_CLASSIFY_PROMPT_TMPL", "_CLASSIFY_JSON_SCHEMA",
         "_CLASSIFY_RETRY_STATUS", "_CLASSIFIER_ERROR_PREFIX", "_CLASSIFIER_ERROR_MARKER",
+        "_RECLASSIFY_STATUSES",
     }
     for node in fd_tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want_funcs:
@@ -373,6 +374,16 @@ def main():
     ns["_llm_holder"]["fn"] = lambda *a, **k: called.__setitem__("n", called["n"] + 1) or "{}"
     ns["scan_feature_requests"](gh, cfg)
     ok &= _check("a real boundary flag is still terminal (no re-classify)", called["n"] == 0)
+
+    # ── scan: an issue handed off to the fix pipeline is owned by it ───────
+    for st in ("processing", "fixed", "failed", "non-actionable"):
+        owned = {"owner/repo:7": {"status": st, "pipeline": "fix_engine"}}
+        issue = ns["_FakeIssue"](7, title="x", body="y", labels=["enhancement"])
+        gh, cfg = _scan_env(issue, owned)
+        called["n"] = 0
+        ns["scan_feature_requests"](gh, cfg)
+        ok &= _check(f"fix-pipeline-owned status {st!r} is not re-classified",
+                    called["n"] == 0 and ns["_store"]["owner/repo:7"]["status"] == st)
 
     print()
     if ok:
