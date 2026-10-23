@@ -3897,6 +3897,44 @@ async def delete_issue(request: Request):
     }
 
 
+_REEVALUATE_FEATURE_STATUSES = {"feature_flagged", "feature_failed", "feature_classify_retry"}
+
+
+@router.post("/reevaluate_feature")
+async def reevaluate_feature(request: Request):
+    """Re-queue a parked feature request for classification on the next
+    feature-drive cycle. Writes it back as feature_classify_retry (attempts=0)
+    rather than dropping the record, so feature_drive treats it as a retry:
+    it clears a stale ab-needs-human label if the new verdict isn't a flag and
+    re-posts the boundary comment if it is. Nothing is built here — the
+    request goes back through the same classify -> build -> PR review path."""
+    global state
+    data = await request.json()
+    issue_id = (data.get("issue_id") or "").strip()
+    if not issue_id or ":" not in issue_id:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
+    processed = load_processed()
+    rec = processed.get(issue_id)
+    if not rec or rec.get("status") not in _REEVALUATE_FEATURE_STATUSES:
+        return JSONResponse(status_code=409, content={
+            "status": "error",
+            "message": f"{issue_id} is not a parked feature request (status: {(rec or {}).get('status') or 'none'})."})
+    processed[issue_id] = {
+        "status": "feature_classify_retry",
+        "reason": "Re-evaluation requested from the AppBuilder UI.",
+        "previous_status": rec.get("status"),
+        "previous_reason": str(rec.get("reason") or "")[:1000],
+        "attempts": 0,
+        "timestamp": datetime.now().isoformat(),
+    }
+    state["processed"] = processed
+    save_processed(processed)
+    recompute_issue_counters(processed)
+    logger.info(f"Feature request {issue_id} re-queued for classification (was {rec.get('status')})")
+    return {"status": "success", "issue_id": issue_id,
+            "message": "Re-queued — it will be re-classified on the next feature-drive cycle."}
+
+
 @router.get("/dismiss_status")
 async def dismiss_status(issue_id: str):
     """Polled by the WebUI after a Dismiss click to learn when the background
