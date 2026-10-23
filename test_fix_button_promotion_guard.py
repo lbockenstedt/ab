@@ -86,7 +86,7 @@ def test_pr_remediate_is_imported_in_the_function():
 def test_guard_precedes_the_push():
     """Refusing after a fix was generated would still burn a model budget, and
     refusing after the push would not refuse at all."""
-    assert FIX_ONE_PR.index("_PROMOTION_HEAD_RE") < FIX_ONE_PR.index("origin.push")
+    assert FIX_ONE_PR.index("_PROMOTION_HEAD_RE") < FIX_ONE_PR.index("push_or_raise(repo_git.remotes.origin")
 
 
 def test_guard_precedes_fix_generation():
