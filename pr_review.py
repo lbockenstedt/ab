@@ -2084,7 +2084,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
     import pr_remediate   # lazy: circular import via pr_remediate -> pr_review
     from github import Github
     from fix_engine import (
-        _claim_issue, _release_issue, _authenticated_remote,
+        _claim_issue, _release_issue, _authenticated_remote, push_or_raise,
         apply_ai_fix, parse_and_apply, review_fix, verify_fix, prepare_environment,
         _worktree_state, discard_verification_artifacts,
         is_verification_infra_failure,
@@ -2467,7 +2467,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             repo_git.git.add(A=True)
             repo_git.index.commit(commit_msg)
             with _authenticated_remote(repo_git.remotes.origin, repo.clone_url, token):
-                repo_git.remotes.origin.push("HEAD:%s" % branch)
+                push_or_raise(repo_git.remotes.origin, "HEAD:%s" % branch)
 
             try:
                 pr.create_issue_comment(

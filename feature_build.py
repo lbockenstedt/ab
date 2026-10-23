@@ -33,7 +33,7 @@ from main import (
     recompute_issue_counters,
     call_llm,
 )
-from fix_engine import (_authenticated_remote, find_existing_pull_request, _loads_llm_json_object,
+from fix_engine import (_authenticated_remote, push_or_raise, find_existing_pull_request, _loads_llm_json_object,
                         process_single_issue, review_fix, prepare_environment, verify_fix,
                         is_verification_infra_failure, _worktree_state, discard_verification_artifacts)
 import repo_tools
@@ -521,7 +521,7 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
                 if not _force_ok:
                     logger.info(f"feature_build: pushing {branch_name} without --force — {_force_why}")
                 with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
-                    repo_git.remotes.origin.push(branch_name, force=_force_ok)
+                    push_or_raise(repo_git.remotes.origin, branch_name, force=_force_ok)
             except Exception as e:
                 logger.error(f"feature_build: push failed for {issue_id}: {e}")
                 _mark_failed(issue_id, f"Push failed: {e}")
