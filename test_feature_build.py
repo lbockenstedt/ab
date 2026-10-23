@@ -42,8 +42,10 @@ def _load_ns():
         "_build_prompt", "_materialize_skill", "_changed_files", "_docs_touched",
         "_non_doc_files", "_run_build_agent", "_mark_failed", "_mark_built",
         "_flag_incomplete", "build_feature", "_handoff_to_fix_pipeline",
+        "_build_mode", "_syntax_errors", "_run_guardrails",
     }
-    want_assigns = {"_FEATURE_DRIVE_MARKER", "_BUILD_JSON_SCHEMA", "_BUILD_SYSTEM", "_DOCS_NUDGE_TMPL"}
+    want_assigns = {"_FEATURE_DRIVE_MARKER", "_BUILD_JSON_SCHEMA", "_BUILD_SYSTEM", "_DOCS_NUDGE_TMPL",
+                    "_BUILD_SYSTEM_TOOLS", "_GUARDRAIL_FEEDBACK_TMPL", "_GATE_LABELS"}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want_funcs:
             segs.append(ast.get_source_segment(src, node))
@@ -122,6 +124,29 @@ def _load_ns():
 
     import git as real_git
 
+    # Pre-PR guardrail stubs. Each holder is a list consumed in order (last
+    # value repeats); the defaults pass every gate.
+    _guard = {"review": [{"verdict": "Approve", "confidence": 0.9, "critique": ""}],
+              "verify": [(True, None)], "prepare": [None], "syntax": [{"ok": True}],
+              "review_calls": [], "verify_calls": []}
+
+    def _next(key):
+        vals = _guard[key]
+        return vals.pop(0) if len(vals) > 1 else vals[0]
+
+    def review_fix(repo_path, issue_body, proposed_fixes, **kw):
+        _guard["review_calls"].append({"issue_body": issue_body, **kw})
+        return _next("review")
+
+    def verify_fix(repo_path, repo_name, config):
+        _guard["verify_calls"].append(repo_name)
+        return _next("verify")
+
+    class _FakeRepoTools:
+        @staticmethod
+        def check_file_syntax(path):
+            return _next("syntax")
+
     ns = {
         "logger": _NoLog(),
         "load_processed": load_processed, "save_processed": save_processed,
@@ -153,6 +178,12 @@ def _load_ns():
         "os": __import__("os"), "tempfile": __import__("tempfile"),
         "datetime": __import__("datetime").datetime,
         "_BUILD_LOCK": __import__("threading").Lock(),
+        "review_fix": review_fix, "verify_fix": verify_fix,
+        "prepare_environment": lambda path: _next("prepare"),
+        "is_verification_infra_failure": lambda m: bool(m) and str(m).startswith("[infra]"),
+        "_worktree_state": lambda path: {},
+        "discard_verification_artifacts": lambda path, before: None,
+        "repo_tools": _FakeRepoTools(),
     }
 
     # _robust_json_loads: the real one (fix_engine.py) needs `json` + a regex
@@ -176,6 +207,7 @@ def _load_ns():
     ns["_candidates_holder"] = _candidates_holder
     ns["_pr_holder"] = _pr_holder
     ns["_llm_holder"] = _llm_holder
+    ns["_guard"] = _guard
     return ns
 
 
@@ -282,7 +314,15 @@ def main():
 
     def _patch_clone(monkey_repo_git):
         import git as real_git
-        real_git.Repo.clone_from = staticmethod(lambda url, path: monkey_repo_git)
+        def _clone(url, path):
+            # Materialize the "changed" files so the syntax gate has real paths to check.
+            import os as _os
+            for rel in monkey_repo_git._changed:
+                full = _os.path.join(path, rel)
+                _os.makedirs(_os.path.dirname(full), exist_ok=True)
+                open(full, "w").close()
+            return monkey_repo_git
+        real_git.Repo.clone_from = staticmethod(_clone)
 
     config = {"GITHUB_TOKEN": "tok", "feature_require_docs": True, "default_branch": "main"}
     classify_build = {"verdict": "build", "skill": "add-webui-control", "reason": "safe bolt-on", "confidence": 0.9}
@@ -435,6 +475,113 @@ def main():
     ok &= _check("malformed agent JSON doesn't crash the build", ok_result is True)
     ok &= _check("malformed agent JSON still produces a PR using the real diff",
                 len(repo.created_prs) == 1 and "docs/x.md" in repo.created_prs[0]["body"])
+
+    # ── Copilot-only deployment (no claude_cli): tool-calling build agent ───
+    _copilot = {
+        "key": ("copilot", "https://api.githubcopilot.com", "gpt-6-astra"), "provider": "copilot",
+        "model": "gpt-6-astra", "base_url": "https://api.githubcopilot.com", "api_key": "k", "rpm": 0,
+        "available": True, "unavailable_reason": None,
+        "caps": {"supports_tools": True, "supports_structured_output": False, "cost_tier": "cheap",
+                 "max_complexity": "large", "context_window": 64000, "capability_rank": 98},
+    }
+    saved_candidates = ns["_candidates_holder"]["candidates"]
+    ns["_candidates_holder"]["candidates"] = [_copilot]
+    g = ns["_guard"]
+
+    def _reset_guard(review=None, verify=None, prepare=None, syntax=None):
+        g["review"] = review or [{"verdict": "Approve", "confidence": 0.9, "critique": ""}]
+        g["verify"] = verify or [(True, None)]
+        g["prepare"] = prepare or [None]
+        g["syntax"] = syntax or [{"ok": True}]
+        g["review_calls"].clear()
+        g["verify_calls"].clear()
+
+    def _run(number, changed=("webui/sim-views.js", "docs/cs.md"), cfg=None):
+        ns["_store"].clear()
+        ns["_handoffs"].clear()
+        issue = _FakeGhIssue(number=number)
+        repo = _FakeGhRepo()
+        frg = _FakeRepoGit(changed=list(changed))
+        _patch_clone(frg)
+        ns["_llm_holder"]["calls"] = []
+        ns["_llm_holder"]["responses"] = ['{"pr_body": "built"}']
+        res = ns["build_feature"](None, repo, issue, classify_build, cfg or config)
+        return res, issue, repo, frg, ns["_store"].get(f"owner/repo:{number}") or {}
+
+    _reset_guard()
+    (ok_result, pr_url), issue, repo, frg, rec = _run(20)
+    ok &= _check("copilot-only: builds instead of handing off to the fix pipeline",
+                ok_result is True and ns["_handoffs"] == [] and len(repo.created_prs) == 1)
+    kw = ns["_llm_holder"]["calls"][0]["kwargs"]
+    reqs = kw.get("requirements")
+    ok &= _check("copilot-only: requirements need tools, NOT a mutating (claude_cli) agent",
+                reqs.needs_tools is True and reqs.needs_mutating_agent is False)
+    ok &= _check("copilot-only: profile='build' on the checkout (llm_client runs the mutating tool loop)",
+                kw.get("profile") == "build" and kw.get("enable_native_tools") is True
+                and bool(kw.get("repo_checkout_path")))
+    ok &= _check("copilot-only: tool-agent system prompt is used",
+                kw.get("system_prompt") == ns["_BUILD_SYSTEM_TOOLS"])
+    ok &= _check("guardrails ran before the PR: reviewer panel + repository tests",
+                len(g["review_calls"]) == 1 and g["verify_calls"] == ["owner/repo"])
+    ok &= _check("record carries build mode and guardrail trail",
+                rec.get("status") == "feature_built" and rec.get("build_mode") == "tool_agent"
+                and [r["gate"] for r in rec.get("guardrail_rounds")] == ["passed"])
+    ok &= _check("PR body states the pre-PR checks that passed",
+                "skeptical reviewer panel approved" in repo.created_prs[0]["body"])
+
+    # reviewer rejects once -> critique fed back to the agent -> approved -> PR
+    _reset_guard(review=[{"verdict": "Reject", "confidence": 0.3, "critique": "select pasted into csUOField"},
+                         {"verdict": "Approve", "confidence": 0.85, "critique": ""}])
+    (ok_result, _), issue, repo, frg, rec = _run(21)
+    calls = ns["_llm_holder"]["calls"]
+    ok &= _check("review reject -> agent gets a correction turn with the critique",
+                len(calls) == 2 and "select pasted into csUOField" in calls[1]["args"][0]
+                and "skeptical reviewer panel" in calls[1]["args"][0])
+    ok &= _check("review reject then approve -> PR opened, two guardrail rounds recorded",
+                ok_result is True and len(repo.created_prs) == 1
+                and [r["gate"] for r in rec["guardrail_rounds"]] == ["review_rejected", "passed"])
+
+    # reviewer keeps rejecting -> flagged guardrails_failed, NO PR
+    _reset_guard(review=[{"verdict": "Reject", "confidence": 0.2, "critique": "still wrong"}])
+    (ok_result, _), issue, repo, frg, rec = _run(22, cfg={**config, "feature_build_correction_rounds": 2})
+    ok &= _check("persistent rejection -> no PR, flagged guardrails_failed",
+                ok_result is False and repo.created_prs == [] and rec.get("status") == "feature_flagged"
+                and rec.get("flag_kind") == "guardrails_failed" and rec.get("failure_gate") == "review_rejected")
+    ok &= _check("persistent rejection -> exactly N correction turns (1 build + 2 corrections)",
+                len(ns["_llm_holder"]["calls"]) == 3 and len(rec.get("guardrail_rounds")) == 3)
+    ok &= _check("persistent rejection -> reason quotes the last critique",
+                "still wrong" in rec.get("reason", ""))
+    ok &= _check("persistent rejection -> nothing committed or pushed",
+                frg.commits == [] and frg.remotes.origin.pushed == [])
+
+    # tests fail -> test output fed back
+    _reset_guard(verify=[(False, "FAILED tests/test_x.py::test_y - AssertionError"), (True, None)])
+    (ok_result, _), issue, repo, frg, rec = _run(23)
+    ok &= _check("test failure -> agent gets the failing test output",
+                ok_result is True and "FAILED tests/test_x.py::test_y" in ns["_llm_holder"]["calls"][1]["args"][0])
+
+    # syntax error -> fed back BEFORE the panel sees it
+    _reset_guard(syntax=[{"ok": False, "checker": "node --check", "output": "SyntaxError: Unexpected token"},
+                         {"ok": True}])
+    (ok_result, _), issue, repo, frg, rec = _run(24)
+    ok &= _check("syntax error -> corrected before review (panel only sees the fixed build)",
+                ok_result is True and "Unexpected token" in ns["_llm_holder"]["calls"][1]["args"][0]
+                and rec["guardrail_rounds"][0]["gate"] == "syntax")
+
+    # reviewers unavailable -> flagged (not the code's fault), no correction turns
+    _reset_guard(review=[{"status": "queue_for_retry", "reason": "all_reviewers_failed: x"}])
+    (ok_result, _), issue, repo, frg, rec = _run(25)
+    ok &= _check("reviewers unavailable -> flagged review_unavailable, no PR, no correction turn",
+                ok_result is False and repo.created_prs == [] and rec.get("flag_kind") == "review_unavailable"
+                and len(ns["_llm_holder"]["calls"]) == 1)
+
+    # tool agent disabled by config -> back to the fix-pipeline hand-off
+    _reset_guard()
+    (ok_result, _), issue, repo, frg, rec = _run(26, cfg={**config, "feature_build_tool_agent": False})
+    ok &= _check("feature_build_tool_agent=False -> hands off to the fix pipeline",
+                ns["_handoffs"] == [("owner/repo", 26)])
+    ns["_candidates_holder"]["candidates"] = saved_candidates
+    _reset_guard()
 
     print()
     if ok:
