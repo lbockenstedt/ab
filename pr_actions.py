@@ -342,9 +342,9 @@ def _auto_resolve_pr_conflicts(repo, pr, token):
         ok, detail = _resolve_tree_conflicts(repo_git, "origin/%s" % base_ref)
         if not ok:
             return False, detail
-        from fix_engine import _authenticated_remote
+        from fix_engine import _authenticated_remote, push_or_raise
         with _authenticated_remote(repo_git.remotes.origin, repo.clone_url, token):
-            repo_git.remotes.origin.push("HEAD:%s" % head_ref)
+            push_or_raise(repo_git.remotes.origin, "HEAD:%s" % head_ref)
     return True, detail
 
 
