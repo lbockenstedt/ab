@@ -77,6 +77,37 @@ def test_agentic_fix_loop_executes_tool_call_round_trip():
     assert "read-only repository tools" in calls[1][0][0]["content"]
 
 
+def test_agentic_fix_loop_nudges_prose_only_reply_for_json():
+    # cs#184: the model narrated ("Now let me check the serializer…") with no
+    # tool call and no JSON; that prose was returned as the final answer.
+    root = _scratch("prose")
+    final = {"confidence": 0.9, "edits": []}
+    replies = [{"text": "Good. Now let me check the serializer.", "tool_calls": None},
+               {"text": json.dumps(final), "tool_calls": None}]
+    calls = []
+
+    def fake_llm(messages, tools):
+        calls.append(messages)
+        return replies[len(calls) - 1]
+
+    out = repo_tools.run_agentic_fix(fake_llm, [{"role": "user", "content": "Fix."}], str(root))
+    assert json.loads(out) == final
+    assert calls[1][-1]["content"] == repo_tools._PROSE_NUDGE
+
+
+def test_agentic_fix_loop_prose_nudge_is_bounded():
+    root = _scratch("prose_bounded")
+    calls = []
+
+    def fake_llm(messages, tools):
+        calls.append(messages)
+        return {"text": "still thinking", "tool_calls": None}
+
+    out = repo_tools.run_agentic_fix(fake_llm, [{"role": "user", "content": "Fix."}], str(root))
+    assert out == "still thinking"
+    assert len(calls) == 3
+
+
 def _load_llm_ns():
     src = Path("llm_client.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
