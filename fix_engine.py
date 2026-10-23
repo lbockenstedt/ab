@@ -890,6 +890,32 @@ def _authenticated_remote(remote, plain_url, token):
         remote.set_url(plain_url)
 
 
+def push_or_raise(remote, refspec, force=False):
+    """remote.push() that FAILS when the push did not land.
+
+    GitPython's Remote.push() does not raise when the server rejects a ref
+    (non-fast-forward, protected branch, hook decline): it returns PushInfo
+    entries carrying REJECTED/REMOTE_REJECTED/ERROR flags. Callers treating
+    "no exception" as success told lm#1247 its fix was "pushed directly to
+    dev" and closed the issue, while the commit never reached GitHub — and
+    the rebase-and-retry fallback (which only runs on an exception) never ran."""
+    infos = remote.push(refspec, force=force)
+    try:
+        infos.raise_if_error()
+    except AttributeError:
+        pass
+    if not infos:
+        raise git.GitCommandError(["git", "push", str(refspec)], 1,
+                                  stderr="push reported no updated refs")
+    bad = (git.PushInfo.ERROR | git.PushInfo.REJECTED
+           | git.PushInfo.REMOTE_REJECTED | git.PushInfo.REMOTE_FAILURE)
+    for info in infos:
+        if info.flags & bad:
+            raise git.GitCommandError(["git", "push", str(refspec)], 1,
+                                      stderr=f"push rejected: {(info.summary or '').strip() or info.flags}")
+    return infos
+
+
 SANDBOX_VENV_DIRNAME = ".ab-venv"
 # A cold venv for a multi-component repo (lm installs eleven requirements files)
 # downloads far more than a test run executes, so the two phases get separate
@@ -5333,7 +5359,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             if can_direct_push and final_verdict == "Approve":
                 try:
                     with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
-                        repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                        push_or_raise(repo_git.remotes.origin, f"HEAD:{base_branch}")
                     can_actually_direct_push = True
                     decision_reason = "Trusted repo & approved"
                 except Exception as pe:
@@ -5341,7 +5367,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     try:
                         with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
                             repo_git.remotes.origin.pull(base_branch, rebase=True)
-                            repo_git.remotes.origin.push(f"HEAD:{base_branch}")
+                            push_or_raise(repo_git.remotes.origin, f"HEAD:{base_branch}")
                         can_actually_direct_push = True
                         decision_reason = "Trusted repo & approved (after rebase)"
                         logger.info(f"Push successful after rebase for {repo_name}")
@@ -5381,7 +5407,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 if not force_ok:
                     logger.info(f"fix_engine: pushing {target_branch} without --force — {force_why}")
                 with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
-                    repo_git.remotes.origin.push(target_branch, force=force_ok)
+                    push_or_raise(repo_git.remotes.origin, target_branch, force=force_ok)
                 base_branch, _ = integration_branch(config, repo_obj)
 
                 existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)

@@ -179,6 +179,7 @@ class Harness:
         fix_engine._claim_issue = lambda i: True
         fix_engine._release_issue = lambda i: None
         fix_engine._authenticated_remote = lambda *a, **kw: contextlib.nullcontext()
+        fix_engine.push_or_raise = lambda remote, refspec, force=False: remote.push(refspec)
         fix_engine.apply_ai_fix = self.apply_ai_fix
         fix_engine.parse_and_apply = self._make_parse_and_apply()
         fix_engine.review_fix = self.review_fix
