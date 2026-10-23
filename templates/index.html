@@ -621,7 +621,7 @@
                                     {% elif info.status == 'resolved' %}Resolved (human-confirmed)
                                     {% elif info.status == 'closed' %}Closed on GitHub (resolved)
                                     {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
-                                    {% elif info.status == 'processing' %}⏳ Processing — building & cross-checking the fix (see Active Tasks for live progress)
+                                    {% elif info.status == 'processing' %}⏳ Processing — building & cross-checking the fix (see Active Tasks for live progress){% if info.pipeline == 'fix_engine' %} · feature request handed to the standard fix pipeline ({{ info.handoff_reason }}){% endif %}
                                     {% elif info.status == 'awaiting_review' %}Queued — waiting for reviewers
                                     {% elif info.status == 'non-actionable' %}Non-actionable: {{ (info.reason or '')[:80] }}
                                     {% elif info.status == 'failed' %}Failed: {{ (info.error or '')[:80] }}
