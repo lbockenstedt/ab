@@ -3915,7 +3915,12 @@ async def reevaluate_feature(request: Request):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
     processed = load_processed()
     rec = processed.get(issue_id)
-    if not rec or rec.get("status") not in _REEVALUATE_FEATURE_STATUSES:
+    # A feature request handed off to the fix pipeline (feature_build's
+    # no-build-agent fallback) can also come back to the feature drive once
+    # that pipeline is done with it.
+    handed_off = bool(rec) and rec.get("pipeline") == "fix_engine" and rec.get("status") not in (
+        "processing", "awaiting_review")
+    if not rec or (rec.get("status") not in _REEVALUATE_FEATURE_STATUSES and not handed_off):
         return JSONResponse(status_code=409, content={
             "status": "error",
             "message": f"{issue_id} is not a parked feature request (status: {(rec or {}).get('status') or 'none'})."})

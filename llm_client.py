@@ -3180,20 +3180,43 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
 
             if (agentic_repo_requested and provider != "claude_cli"
                     and (candidate.get("caps") or {}).get("supports_tools")):
-                def _agent_call(agent_messages, agent_tools):
-                    result, err = _try_candidate(candidate, agent_messages, agent_tools, False,
-                                                 task_id, config, **kwargs)
+                # The build loop drops response_format: forcing a JSON schema on
+                # every turn steers models into answering with the summary
+                # instead of calling the edit tools.
+                agent_kwargs = dict(kwargs, json_schema=None) if profile == "build" else kwargs
+
+                def _agent_call(agent_messages, agent_tools, _cand=candidate, _kw=agent_kwargs):
+                    result, err = _try_candidate(_cand, agent_messages, agent_tools, False,
+                                                 task_id, config, **_kw)
                     if err is not None:
                         raise Exception(err)
                     return result
 
                 try:
-                    result = repo_tools.run_agentic_fix(
-                        _agent_call, messages, repo_checkout_path,
-                        max_iterations=agentic_repo_max_iter,
-                        max_result_chars=agentic_repo_max_chars,
-                        logger=logger,
-                    )
+                    if profile == "build":
+                        # Feature build on a function-calling API model (e.g.
+                        # Copilot): the model edits the checkout through
+                        # repo_tools.BUILD_TOOLS instead of claude_cli's
+                        # native Edit/Write.
+                        try:
+                            build_max_iter = int(config.get("FEATURE_BUILD_MAX_ITERATIONS", 40) or 40)
+                        except Exception:
+                            build_max_iter = 40
+                        logger.info("call_llm: build agent via %s/%s (tool loop, max %d steps)",
+                                    candidate.get("provider"), candidate.get("model"), build_max_iter)
+                        result = repo_tools.run_mutating_agent(
+                            _agent_call, messages, repo_checkout_path,
+                            max_iterations=build_max_iter,
+                            max_result_chars=agentic_repo_max_chars,
+                            logger=logger,
+                        )
+                    else:
+                        result = repo_tools.run_agentic_fix(
+                            _agent_call, messages, repo_checkout_path,
+                            max_iterations=agentic_repo_max_iter,
+                            max_result_chars=agentic_repo_max_chars,
+                            logger=logger,
+                        )
                     if used_model_out is not None:
                         used_model_out.update({"key": candidate["key"], "provider": candidate["provider"],
                                                "model": candidate["model"], "base_url": candidate["base_url"]})
