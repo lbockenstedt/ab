@@ -65,6 +65,9 @@ _TERMINAL_STATUSES = {"feature_flagged", "feature_built", "feature_failed"}
 # re-classified next cycle, up to feature_classify_max_attempts, before being
 # parked for a human with flag_kind="classifier_error".
 _CLASSIFY_RETRY_STATUS = "feature_classify_retry"
+# The only prior statuses feature_drive (re-)classifies. Anything else was
+# written by the standard fix pipeline after a hand-off and is owned by it.
+_RECLASSIFY_STATUSES = {"feature_needs_info", _CLASSIFY_RETRY_STATUS}
 _CLASSIFIER_ERROR_PREFIX = "Classifier error"
 _CLASSIFIER_ERROR_MARKER = "<!-- ab-classifier-error: v1 -->"
 
@@ -404,6 +407,22 @@ def scan_feature_requests(gh, config):
                 prior = processed.get(issue_id) or {}
                 retrying = _is_classifier_error_record(prior)
                 if prior.get("status") in _TERMINAL_STATUSES and not retrying:
+                    continue
+                if prior.get("pipeline") == "fix_engine" or (
+                        prior.get("status") and not retrying
+                        and prior.get("status") not in _RECLASSIFY_STATUSES):
+                    # Handed off to the standard fix pipeline (feature_build's
+                    # no-mutating-agent fallback) — that pipeline owns it now.
+                    # scan_repo_issues skips feature-marker issues, so resume
+                    # an awaiting_review here; its own 1h timer still applies.
+                    if prior.get("status") == "awaiting_review":
+                        handled += 1
+                        try:
+                            from fix_engine import process_single_issue
+                            process_single_issue(repo_name, issue.number)
+                        except Exception as e:
+                            logger.exception(f"feature_drive: resume of {issue_id} failed: {e}")
+                        processed = load_processed()
                     continue
 
                 handled += 1

@@ -174,6 +174,18 @@ def main():
     ok &= _check("delete_all_issues: resets every counter to 0",
                  _counters() == (0, 0, 0, 0, 0, 0, 0, 0))
 
+    # ── a background writer (feature_drive/feature_build) only calls
+    # recompute_issue_counters(processed) — the feed rows (state["processed"])
+    # must follow, or the sidebar says 3 while the feed lists 2.
+    state["processed"] = {"o/r:1": {"status": "feature_classify_retry"}}
+    fresh = {"o/r:1": {"status": "feature_flagged"}, "o/r:2": {"status": "feature_flagged"},
+             "o/r:3": {"status": "feature_classify_retry"}}
+    recompute(fresh)
+    feed_flagged = sum(1 for i in state["processed"].values()
+                       if i.get("status") in ("feature_flagged", "feature_classify_retry"))
+    ok &= _check("recompute: feed rows match the Feature Flagged badge",
+                 feed_flagged == state["feature_flagged_count"] == 3)
+
     print()
     if ok:
         print("ALL CASES PASSED")
