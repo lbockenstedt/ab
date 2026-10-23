@@ -32,10 +32,12 @@ def _load_ns():
     want_funcs = {
         "classify", "_flag_issue", "_clarify_issue", "_clarify_marker",
         "_already_commented", "_is_feature_request", "scan_feature_requests",
+        "_model_label", "_is_classifier_error_record", "_flag_classifier_exhausted",
     }
     want_assigns = {
         "_TERMINAL_STATUSES", "_FEATURE_MARKER_RE", "_BOUNDARY_FLAG_MARKER",
         "_CLASSIFY_SYSTEM", "_CLASSIFY_PROMPT_TMPL", "_CLASSIFY_JSON_SCHEMA",
+        "_CLASSIFY_RETRY_STATUS", "_CLASSIFIER_ERROR_PREFIX", "_CLASSIFIER_ERROR_MARKER",
     }
     for node in fd_tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want_funcs:
@@ -49,11 +51,11 @@ def _load_ns():
     # constant) out of fix_engine.py by source too — real logic, no reimplementation,
     # no import of fix_engine itself (same app-boot trap as main.py).
     for node in fe_tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in ("_robust_json_loads", "_norm_confidence"):
+        if isinstance(node, ast.FunctionDef) and node.name in ("_robust_json_loads", "_loads_llm_json_object", "_norm_confidence"):
             segs.append(ast.get_source_segment(fe_src, node))
         if isinstance(node, ast.Assign):
             for t in node.targets:
-                if getattr(t, "id", "") == "_JSON_BAD_ESCAPE_RE":
+                if getattr(t, "id", "") in ("_JSON_BAD_ESCAPE_RE", "_JSON_FENCE_RE"):
                     segs.append(ast.get_source_segment(fe_src, node))
 
     class _NoLog:
@@ -81,14 +83,20 @@ def _load_ns():
             return list(self._comments)
         def add_to_labels(self, name):
             self.added_labels.append(name)
+        def remove_from_labels(self, name):
+            self.labels = [lbl for lbl in self.labels if lbl.name != name]
+            self.added_labels.append("-" + name)
         def create_comment(self, body):
             c = type("C", (), {"body": body})
             self._comments.append(c)
             self.comments_posted.append(body)
 
     class _FakeRepo:
-        def __init__(self):
+        def __init__(self, issues=None):
             self.ensured_labels = []
+            self.issues = list(issues or [])
+        def get_issues(self, labels=None, state=None):
+            return list(self.issues)
 
     _store = {}  # in-memory stand-in for processed.json
 
@@ -287,6 +295,84 @@ def main():
                 ns["_is_feature_request"]("blah\n<!-- report-type: feature -->\nblah"))
     ok &= _check("marker absent is not detected", not ns["_is_feature_request"]("just a normal bug body"))
     ok &= _check("empty/None body does not crash", ns["_is_feature_request"](None) is False)
+
+    # ── classify(): fenced JSON (Copilot claude-haiku-4.5 shape, cs#184) ───
+    ns["_config_holder"]["config"] = {"feature_boundaries": []}
+    ns["skills_loader"]._loaded = {}
+    ns["_llm_holder"]["fn"] = lambda *a, **k: (
+        '```json\n{\n  "verdict": "build",\n  "boundary_ids": [],\n  "skill": null,\n'
+        '  "reason": "UI-only change to sim-views.js", "confidence": 0.85\n}\n```'
+    )
+    result = ns["classify"]("x", "y", ns["load_config"]())
+    ok &= _check("a ```json-fenced response parses instead of failing closed",
+                result["verdict"] == "build" and not result.get("classifier_error"))
+
+    def _with_model(*a, **k):
+        k["used_model_out"].update({"provider": "copilot", "model": "claude-haiku-4.5"})
+        return ""
+    ns["_llm_holder"]["fn"] = _with_model
+    result = ns["classify"]("x", "y", ns["load_config"]())
+    ok &= _check("an empty response is a classifier_error (still verdict 'flag')",
+                result["verdict"] == "flag" and "empty" in result.get("classifier_error", ""))
+    ok &= _check("classifier errors record which model answered",
+                result.get("model") == "copilot/claude-haiku-4.5")
+
+    # ── scan: classifier errors retry, then park as classifier_error ───────
+    def _scan_env(issue, store):
+        repo = ns["_FakeRepo"]([issue])
+        repo.full_name = "owner/repo"
+        gh = type("G", (), {"get_repo": lambda self, n: repo})()
+        ns["_store"].clear()
+        ns["_store"].update(store)
+        cfg = {"feature_drive_enabled": True, "feature_drive_require_marker": False,
+               "feature_drive_repos": ["owner/repo"], "feature_boundaries": []}
+        ns["_config_holder"]["config"] = cfg
+        return gh, cfg
+
+    ns["_llm_holder"]["fn"] = lambda *a, **k: "not json"
+    issue = ns["_FakeIssue"](184, title="x", body="y", labels=["enhancement"])
+    gh, cfg = _scan_env(issue, {})
+    ns["scan_feature_requests"](gh, cfg)
+    rec = ns["_store"]["owner/repo:184"]
+    ok &= _check("first classifier error -> feature_classify_retry (not terminal)",
+                rec["status"] == "feature_classify_retry" and rec["attempts"] == 1)
+    ok &= _check("classifier error records the raw response excerpt", rec["raw_excerpt"] == "not json")
+    ok &= _check("classifier error posts NO boundary comment",
+                not issue.comments_posted and "ab-needs-human" not in issue.added_labels)
+    ns["scan_feature_requests"](gh, cfg)
+    ns["scan_feature_requests"](gh, cfg)
+    rec = ns["_store"]["owner/repo:184"]
+    ok &= _check("third failure parks it: feature_flagged, flag_kind=classifier_error",
+                rec["status"] == "feature_flagged" and rec["flag_kind"] == "classifier_error"
+                and rec["attempts"] == 3)
+    ok &= _check("exhausted comment says it is NOT a boundary decision",
+                len(issue.comments_posted) == 1 and "not** a boundary" in issue.comments_posted[0])
+    ns["_llm_holder"]["fn"] = lambda *a, **k: '{"verdict": "clarify", "questions": ["Q?"], "reason": "r", "confidence": 0.5}'
+    ns["scan_feature_requests"](gh, cfg)
+    ok &= _check("an exhausted classifier_error record is terminal (not re-classified)",
+                ns["_store"]["owner/repo:184"]["status"] == "feature_flagged")
+
+    # ── scan: legacy stuck record (pre-retry) is un-stuck ──────────────────
+    legacy = {"owner/repo:184": {
+        "status": "feature_flagged", "boundary_ids": [],
+        "reason": "Classifier error (failed closed): Expecting value: line 1 column 1 (char 0)"}}
+    issue = ns["_FakeIssue"](184, title="x", body="y", labels=["enhancement", "ab-needs-human"])
+    gh, cfg = _scan_env(issue, legacy)
+    ns["scan_feature_requests"](gh, cfg)
+    ok &= _check("a legacy classifier-error flag is re-classified on the next cycle",
+                ns["_store"]["owner/repo:184"]["status"] == "feature_needs_info")
+    ok &= _check("re-classifying a legacy flag clears its stale ab-needs-human label",
+                "-ab-needs-human" in issue.added_labels)
+
+    # ── scan: a real boundary flag stays terminal ──────────────────────────
+    real = {"owner/repo:9": {"status": "feature_flagged", "flag_kind": "boundary",
+                             "boundary_ids": ["psk-hardcode"], "reason": "x"}}
+    issue = ns["_FakeIssue"](9, title="x", body="y", labels=["enhancement"])
+    gh, cfg = _scan_env(issue, real)
+    called["n"] = 0
+    ns["_llm_holder"]["fn"] = lambda *a, **k: called.__setitem__("n", called["n"] + 1) or "{}"
+    ns["scan_feature_requests"](gh, cfg)
+    ok &= _check("a real boundary flag is still terminal (no re-classify)", called["n"] == 0)
 
     print()
     if ok:

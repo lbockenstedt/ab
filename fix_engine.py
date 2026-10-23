@@ -130,6 +130,36 @@ def _robust_json_loads(text):
             raise e
 
 
+_JSON_FENCE_RE = re.compile(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+
+
+def _loads_llm_json_object(text):
+    """_robust_json_loads for a single-object LLM answer that may arrive wrapped
+    in a ```json fence or surrounded by prose. Some providers (e.g. Copilot-
+    routed claude-haiku-4.5) fence their JSON even when a json_schema was
+    requested, and a bare json.loads on that fails at char 0 ("Expecting
+    value"). Tries the raw text, then the first fenced block, then the
+    outermost {...} span; re-raises the ORIGINAL error if none parse, so
+    genuinely malformed output still fails loudly."""
+    text = (text or "").strip()
+    try:
+        return _robust_json_loads(text)
+    except json.JSONDecodeError as first_err:
+        candidates = []
+        m = _JSON_FENCE_RE.search(text)
+        if m:
+            candidates.append(m.group(1).strip())
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            candidates.append(text[start:end + 1])
+        for cand in candidates:
+            try:
+                return _robust_json_loads(cand)
+            except json.JSONDecodeError:
+                continue
+        raise first_err
+
+
 def _sanitize_json_string_newlines(raw):
     """Escape raw control characters (newline/CR/tab) found INSIDE a JSON or
     Python-dict string literal — the other recurring, confirmed way an LLM's

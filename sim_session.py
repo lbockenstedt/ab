@@ -1037,6 +1037,10 @@ class SimSessionManager:
                         "status": rec.get("status") or "queued",
                         "pr_url": rec.get("pr_url") or "",
                         "reason": str(rec.get("reason") or "")[:500],
+                        "flag_kind": rec.get("flag_kind") or "",
+                        "boundary_ids": list(rec.get("boundary_ids") or []),
+                        "attempts": rec.get("attempts"),
+                        "model": rec.get("model") or "",
                         "done": rec.get("status") in TERMINAL_BUILD_STATUSES})
         return out
 

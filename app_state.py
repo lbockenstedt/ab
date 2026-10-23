@@ -544,7 +544,7 @@ non_actionable_count = sum(1 for i in processed_init.values() if i.get("status")
 # Feature auto-drive (feature_drive.py) — three statuses, none of them "resolved":
 # a flagged request needs a human decision; a needs-info request needs a reply;
 # a built one has an open PR still needing review/merge.
-feature_flagged_count = sum(1 for i in processed_init.values() if i.get("status") == "feature_flagged")
+feature_flagged_count = sum(1 for i in processed_init.values() if i.get("status") in ("feature_flagged", "feature_classify_retry"))
 feature_needs_info_count = sum(1 for i in processed_init.values() if i.get("status") == "feature_needs_info")
 feature_built_count = sum(1 for i in processed_init.values() if i.get("status") == "feature_built")
 
@@ -635,7 +635,7 @@ def recompute_issue_counters(processed=None):
     state["pending_verification_count"] = sum(1 for i in vals if i.get("status") == "pending_verification")
     state["non_actionable_count"] = sum(1 for i in vals if i.get("status") == "non-actionable")
     state["failure_count"] = sum(1 for i in vals if i.get("status") == "failed")
-    state["feature_flagged_count"] = sum(1 for i in vals if i.get("status") == "feature_flagged")
+    state["feature_flagged_count"] = sum(1 for i in vals if i.get("status") in ("feature_flagged", "feature_classify_retry"))
     state["feature_needs_info_count"] = sum(1 for i in vals if i.get("status") == "feature_needs_info")
     state["feature_built_count"] = sum(1 for i in vals if i.get("status") == "feature_built")
     return state
