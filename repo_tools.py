@@ -225,6 +225,11 @@ def _result_text(result: Any) -> str:
     return str(result or "")
 
 
+_PROSE_NUDGE = ("Your last reply contained neither a tool call nor the JSON edits object. "
+                "If you still need to inspect the repo, call a tool. Otherwise return ONLY "
+                "the final JSON edits object now — no prose.")
+
+
 def run_agentic_fix(call_llm_fn: Callable[[List[Dict[str, Any]], Optional[List[Dict[str, Any]]]], Any],
                      messages: List[Dict[str, Any]], repo_checkout_path: str, *, max_iterations: int = 8,
                      max_result_chars: int = 12000, logger: Any = None) -> str:
@@ -233,6 +238,12 @@ def run_agentic_fix(call_llm_fn: Callable[[List[Dict[str, Any]], Optional[List[D
     loop_messages = _augment_messages(messages)
     max_iterations = max(1, int(max_iterations or 8))
 
+    # A reply with no tool calls AND no JSON object is the model narrating
+    # mid-investigation ("Now let me check the serializer…"), not its answer.
+    # Returning it as final burned two of cs#184's three fix attempts as
+    # "no JSON". Ask for the edits object instead — bounded, so a model that
+    # only ever replies in prose still terminates.
+    prose_nudges_left = 2
     for _ in range(max_iterations):
         result = call_llm_fn(loop_messages, REPO_TOOLS)
         if not isinstance(result, dict):
@@ -240,7 +251,15 @@ def run_agentic_fix(call_llm_fn: Callable[[List[Dict[str, Any]], Optional[List[D
         tool_calls = result.get("tool_calls") or []
         text = result.get("text") or ""
         if not tool_calls:
-            return text
+            if "{" in text or prose_nudges_left <= 0:
+                return text
+            prose_nudges_left -= 1
+            if logger:
+                logger.info("agentic fix loop: reply had no tool call and no JSON object; "
+                            "asking for the final edits object")
+            loop_messages.append({"role": "assistant", "content": text})
+            loop_messages.append({"role": "user", "content": _PROSE_NUDGE})
+            continue
         loop_messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
         for tc in tool_calls:
             name, args = _tool_name_and_args(tc)
