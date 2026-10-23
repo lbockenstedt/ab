@@ -657,8 +657,11 @@
                                         {% endif %}
                                         {% if info.get('failure_detail') %}
                                         <span class="mx-2 text-slate-300">|</span>
-                                        <span class="font-semibold">Reviewer feedback:</span> {{ info.failure_detail }}
+                                        <span class="font-semibold">{{ 'Reviewer feedback' if info.get('failure_kind') == 'review_rejected' else 'Detail' }}:</span> {{ info.failure_detail }}
                                         {% endif %}
+                                        {% if info.get('failure_model') %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Last model:</span> {{ info.failure_model }}{% endif %}
+                                        {% if info.get('pipeline') == 'fix_engine' %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Feature request</span> via standard fix pipeline ({{ info.handoff_reason }}){% endif %}
+                                        {% if info.get('failure_raw_excerpt') is not none %}<details class="mt-1"><summary class="cursor-pointer text-slate-500">Last raw model reply</summary><pre class="whitespace-pre-wrap text-[11px] bg-slate-50 p-2 rounded">{{ info.failure_raw_excerpt or '(empty)' }}</pre></details>{% endif %}
                                         <span class="mx-2 text-slate-300">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% elif info.status in ('feature_flagged', 'feature_classify_retry', 'feature_failed') %}
