@@ -3332,6 +3332,9 @@ _FAILURE_LABELS = {
     "qa_failed":       "Fix failed QA tests",
     "error":           "Error during fix",
     "invalid_json":    "AI output was not parseable JSON",
+    "empty_response":  "AI returned an empty response",
+    "no_json":         "AI replied without a JSON object",
+    "truncated_json":  "AI response was cut off mid-object",
     "edit_anchor_miss": "Edit search text did not match the file",
     "no_edits":        "AI returned no edits",
     "unsafe_rewrite":  "Fix rejected as an unsafe/truncated rewrite",
@@ -4914,10 +4917,31 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 "identifies the spot (a few lines, not the whole function), "
                                 "and split unrelated changes across separate edits.")
                             _kind = "truncated_json"
+                        elif _reason == "empty":
+                            failure_msg = (
+                                "Your previous response was EMPTY. Return ONLY a JSON object "
+                                "with an \"edits\" array (file/search/replace) and a "
+                                "\"confidence\" number — no prose.")
+                            _kind = "empty_response"
+                        elif _reason == "no_json":
+                            failure_msg = (
+                                "Your previous response contained no JSON object (prose only). "
+                                "Return ONLY a JSON object with an \"edits\" array "
+                                "(file/search/replace) and a \"confidence\" number.")
+                            _kind = "no_json"
                         else:
                             failure_msg = "AI generated invalid JSON format"
                             _kind = "invalid_json"
-                        last_failure = {"kind": _kind, "detail": failure_msg}
+                        _raw_prefix = getattr(parse_and_apply, "last_raw_prefix", "") or ""
+                        _model = "/".join(str(p) for p in built_key if p) if built_key else "unknown"
+                        # The only evidence of WHY an unusable reply happened —
+                        # it was captured but never logged, leaving "invalid JSON"
+                        # with no trail (cs#184).
+                        logger.warning(
+                            f"Unusable fix response for {issue_id} (attempt {attempt}/{max_attempts}, "
+                            f"model {_model}): {_kind} — raw prefix: {_raw_prefix!r}")
+                        last_failure = {"kind": _kind, "detail": failure_msg,
+                                        "model": _model, "raw_excerpt": _raw_prefix}
                         error_context = failure_msg
                         # parse_and_apply can apply some edits before hitting the
                         # malformed tail, so reset to a pristine tree before the
@@ -5145,7 +5169,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     logger.warning(f"Could not post failure comment to {issue_id}: {ce}")
 
                 processed = load_processed()
+                _prior = processed.get(f"{repo_name}:{issue_num}") or {}
                 processed[f"{repo_name}:{issue_num}"] = {
+                    # Keep a feature request's hand-off context (feature_build ->
+                    # this pipeline) so the failed row still says how it got here.
+                    **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
+                                              "classifier_reason") if k in _prior},
                     "status": "failed",
                     "timestamp": datetime.now().isoformat(),
                     "error": failure_reason,
@@ -5155,6 +5184,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     "failure_detail": (last_failure.get("detail") or "")[:1000],
                     "failure_confidence": last_failure.get("confidence"),
                     "failure_threshold": last_failure.get("threshold"),
+                    "failure_model": last_failure.get("model"),
+                    "failure_raw_excerpt": last_failure.get("raw_excerpt"),
                     "attempts": max_attempts,
                     "original_body": issue.body
                 }
