@@ -184,6 +184,7 @@ def _load_ns():
         "_worktree_state": lambda path: {},
         "discard_verification_artifacts": lambda path, before: None,
         "repo_tools": _FakeRepoTools(),
+        "push_or_raise": lambda remote, refspec, force=False: remote.push(refspec, force=force),
     }
 
     # _robust_json_loads: the real one (fix_engine.py) needs `json` + a regex

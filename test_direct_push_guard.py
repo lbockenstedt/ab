@@ -148,7 +148,7 @@ def test_guard_runs_before_the_direct_push_and_disables_it():
     existing pull-request path, rather than merely logging and pushing anyway."""
     src = _fix_engine_src()
     guard_at = src.index("may_direct_push(")
-    push_at = src.index('push(f"HEAD:{base_branch}")')
+    push_at = src.index('push_or_raise(repo_git.remotes.origin, f"HEAD:{base_branch}")')
     assert guard_at < push_at, "the guard must be evaluated before the push"
 
     window = src[guard_at:push_at]
