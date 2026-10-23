@@ -41,7 +41,7 @@ def _load_ns():
     want_funcs = {
         "_build_prompt", "_materialize_skill", "_changed_files", "_docs_touched",
         "_non_doc_files", "_run_build_agent", "_mark_failed", "_mark_built",
-        "_flag_incomplete", "build_feature",
+        "_flag_incomplete", "build_feature", "_handoff_to_fix_pipeline",
     }
     want_assigns = {"_FEATURE_DRIVE_MARKER", "_BUILD_JSON_SCHEMA", "_BUILD_SYSTEM", "_DOCS_NUDGE_TMPL"}
     for node in tree.body:
@@ -57,6 +57,7 @@ def _load_ns():
             return lambda *a, **k: None
 
     _store = {}
+    _handoffs = []
 
     def load_processed():
         return dict(_store)
@@ -146,6 +147,7 @@ def _load_ns():
         "integration_branch": real_branch_policy.integration_branch,
         "may_force_push": real_branch_policy.may_force_push,
         "call_llm": call_llm,
+        "process_single_issue": lambda repo, num: (_handoffs.append((repo, num)) or (True, "fix pipeline ran")),
         "GithubException": GithubException,
         "git": real_git,  # patched per-test-case via _patch_clone(); real module otherwise
         "os": __import__("os"), "tempfile": __import__("tempfile"),
@@ -170,6 +172,7 @@ def _load_ns():
 
     exec("\n\n".join(segs), ns)
     ns["_store"] = _store
+    ns["_handoffs"] = _handoffs
     ns["_candidates_holder"] = _candidates_holder
     ns["_pr_holder"] = _pr_holder
     ns["_llm_holder"] = _llm_holder
@@ -295,14 +298,27 @@ def main():
     ok &= _check("no skill resolved -> status recorded as feature_flagged",
                 ns["_store"]["owner/repo:42"]["status"] == "feature_flagged")
 
-    # ── no claude_cli slot configured -> refuses, flags ─────────────────────
+    # ── no claude_cli slot -> hands off to the standard fix pipeline ───────
     ns["_store"].clear()
     issue = _FakeGhIssue()
     repo = _FakeGhRepo()
     ns["_candidates_holder"]["candidates"] = []
     ok_result, msg = ns["build_feature"](None, repo, issue, classify_build, config)
-    ok &= _check("no claude_cli slot -> refuses to build", ok_result is False)
-    ok &= _check("no claude_cli slot -> flags", ns["_store"]["owner/repo:42"]["status"] == "feature_flagged")
+    ok &= _check("no claude_cli slot -> hands off to process_single_issue",
+                ns["_handoffs"] == [("owner/repo", 42)] and ok_result is True)
+    rec = ns["_store"]["owner/repo:42"]
+    ok &= _check("hand-off record names the pipeline and why",
+                rec.get("pipeline") == "fix_engine" and "claude_cli" in rec.get("handoff_reason", ""))
+    ok &= _check("hand-off does not flag for a human", "ab-needs-human" not in issue.added_labels)
+
+    # ── ...unless the fallback is turned off -> refuses, flags ─────────────
+    ns["_store"].clear()
+    issue = _FakeGhIssue()
+    ok_result, msg = ns["build_feature"](None, repo, issue, classify_build,
+                                         {**config, "feature_build_fix_pipeline_fallback": False})
+    ok &= _check("fallback off + no claude_cli slot -> refuses to build", ok_result is False)
+    ok &= _check("fallback off + no claude_cli slot -> flags",
+                ns["_store"]["owner/repo:42"]["status"] == "feature_flagged")
     ns["_candidates_holder"]["candidates"] = [{
         "key": ("claude_cli", "", "claude"), "provider": "claude_cli", "model": "claude",
         "base_url": "", "api_key": "", "rpm": 0, "available": True, "unavailable_reason": None,
