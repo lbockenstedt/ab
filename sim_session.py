@@ -862,7 +862,27 @@ class SimSessionManager:
         return spec_problems(spec, set(self.resolve_repos(config)),
                              self.allowed_paths(config), self.known_simulations())
 
-    def first_turn_prompt(self, config, message):
+    # Hooks a sibling session kind (request_session.py) overrides; the
+    # simulation behaviour lives in these defaults.
+    def _is_ready(self, spec, problems=None):
+        return spec_is_ready(spec, problems)
+
+    def _extract(self, text):
+        return extract_spec(text)
+
+    def _reminder(self):
+        return _REMINDER
+
+    def _sync_status_text(self):
+        return "Syncing the cs/lm repos and AppBuilder skills…"
+
+    def _agent_feedback(self, spec):
+        """Guardrail findings fed back to the agent with the user's next message."""
+        if (spec or {}).get("intent") == "explain":
+            return []
+        return self.problems_for(spec)
+
+    def first_turn_prompt(self, config, message, sess=None):
         repos = self.resolve_repos(config)
         repo_lines = "\n".join(f"  {s}/{' ' * max(1, 13 - len(s))}{full} (branch "
                                f"{(config.get('sim_assistant_branch') or 'dev')})"
@@ -896,7 +916,7 @@ class SimSessionManager:
         self._info(f"[sim-assistant-audit] {json.dumps(rec)[:2000]}")
 
     # -- public API (called from hub_agent) --
-    def start(self, owner, message):
+    def start(self, owner, message, context=None):
         message = (message or "").strip()
         if not message:
             raise ValueError("message is required")
@@ -924,6 +944,8 @@ class SimSessionManager:
             sess = {"id": sid, "owner": owner, "created": time.time(), "updated": time.time(),
                     "state": "preparing", "turns": 0, "seq": 0, "events": [], "spec": None,
                     "choices": [], "premium_requests": 0.0, "submitted": []}
+            if context:
+                sess["context"] = context
             self._sessions[sid] = sess
             self._add_event(sess, "user", message)
             self._save(sess)
@@ -947,9 +969,9 @@ class SimSessionManager:
             sess.pop("_cancelled", None)
             self._add_event(sess, "user", message)
             self._save(sess)
-            problems = self.problems_for(sess.get("spec"))
+            problems = self._agent_feedback(sess.get("spec"))
         agent_msg = message
-        if problems and (sess.get("spec") or {}).get("intent") != "explain":
+        if problems:
             agent_msg += ("\n\n(AppBuilder guardrail check on your last spec — fix these or "
                           "explain to the user why it can't be done: "
                           + "; ".join(problems) + ")")
@@ -986,7 +1008,7 @@ class SimSessionManager:
         spec = sess.get("spec")
         problems = self.problems_for(spec)
         return {"session_id": sess["id"], "state": sess.get("state"), "seq": sess.get("seq", 0),
-                "spec": spec, "ready": spec_is_ready(spec, problems), "problems": problems,
+                "spec": spec, "ready": self._is_ready(spec, problems), "problems": problems,
                 "intent": (spec or {}).get("intent") or "",
                 "choices": sess.get("choices") or [],
                 "turns": sess.get("turns", 0), "submitted": sess.get("submitted") or [],
@@ -1128,7 +1150,7 @@ class SimSessionManager:
         sess = self._sessions[sid]
         if first or not os.path.isdir(os.path.join(self.workspace, "skills")):
             with self._lock:
-                self._add_event(sess, "status", "Syncing the cs/lm repos and AppBuilder skills…")
+                self._add_event(sess, "status", self._sync_status_text())
             self.refresh_workspace()
         max_running = int(config.get("sim_assistant_max_running") or DEFAULT_MAX_RUNNING)
         waited = 0
@@ -1150,7 +1172,8 @@ class SimSessionManager:
         login_home = (config.get("sim_assistant_copilot_home") or "").strip()
         if not binary or not (token or login_home):
             raise RuntimeError("; ".join(self.status()["reasons"]) or "Copilot CLI unavailable")
-        prompt = self.first_turn_prompt(config, message) if first else f"{message}\n\n{_REMINDER}"
+        prompt = (self.first_turn_prompt(config, message, sess) if first
+                  else f"{message}\n\n{self._reminder()}")
         cmd = build_copilot_command(binary, prompt, sid, not first, self.workspace,
                                     model=(config.get("sim_assistant_model") or "").strip(),
                                     reasoning_effort=(config.get("sim_assistant_reasoning_effort") or "").strip())
@@ -1198,7 +1221,7 @@ class SimSessionManager:
                     continue
                 with self._lock:
                     if ev["kind"] == "assistant_raw":
-                        display, spec, choices = extract_spec(ev["text"])
+                        display, spec, choices = self._extract(ev["text"])
                         if spec is not None:
                             last_spec, last_choices = spec, choices
                         if display:
@@ -1224,7 +1247,7 @@ class SimSessionManager:
             if last_spec is not None:
                 sess["spec"] = last_spec
                 sess["choices"] = last_choices or []
-                self._add_event(sess, "spec", "", ready=spec_is_ready(
+                self._add_event(sess, "spec", "", ready=self._is_ready(
                     last_spec, self.problems_for(last_spec)))
             if sess.get("_cancelled"):
                 self._add_event(sess, "status", "Stopped.")

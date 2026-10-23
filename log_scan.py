@@ -1139,6 +1139,10 @@ def scan_bugs(gh_current, config, hub_logs):
         rtype = (report.get("report_json") and _safe_json_field(report.get("report_json"), "type")) \
             or report.get("type") or "bug"
         is_feature = str(rtype).strip().lower() == "feature"
+        # Reports captured by the Request Assistant carry a short structured title
+        # (their explanation is a long rendered report). Absent on one-shot reports.
+        _title_hint = " ".join(str((report.get("report_json") and _safe_json_field(
+            report.get("report_json"), "title")) or "").split())
         # Per-type ingest knobs (Settings): "BugFixes from LM" and "Feature
         # Requests from LM" toggle independently. Bug reports default ON (keep the
         # bug-fix pipeline working); a disabled type is skipped (not filed).
@@ -1162,7 +1166,8 @@ def scan_bugs(gh_current, config, hub_logs):
             # ``automated-fix`` label → scan_repo_issues/process_single_issue
             # will NOT attempt to auto-implement it (a feature is a product
             # decision, not a fix). Severity/context still captured.
-            title = f"💡 Feature Request: {textwrap.shorten(str(explanation), width=80, placeholder=' …').strip()}"
+            _feat_src = _title_hint or explanation
+            title = f"💡 Feature Request: {textwrap.shorten(str(_feat_src), width=80, placeholder=' …').strip()}"
             body = (
                 f'**Filed via the LM WebUI "Bug/Feature Request" button**\n\n'
                 f"### The request\n{explanation}\n\n"
@@ -1190,6 +1195,8 @@ def scan_bugs(gh_current, config, hub_logs):
             # to show data f"). Collapsed to one line (join/split), not capped.
             _msg = _err[6:].strip() if _err.lower().startswith("error:") else \
                 (_err or " ".join(str(explanation).split()).strip())
+            if _title_hint and not _err:
+                _msg = _title_hint
             _err_line = f"**Error:** {_msg}\n\n" if _msg else ""
             # single-line, word-boundary-truncated for the title (never cuts mid-word)
             _summary = textwrap.shorten(_msg, width=80, placeholder=" …").strip()
