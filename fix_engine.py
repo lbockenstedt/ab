@@ -972,6 +972,21 @@ def _needs_spoke_core(repo_path):
     return False
 
 
+def _exclude_spoke_core_from_pytest(test_cmd, repo_path):
+    """Keep default pytest discovery out of a provisioned _lm checkout.
+
+    _lm is there only so the spoke can IMPORT BaseSpoke; CI runs the spoke's
+    own tests, never lm's. A bare `pytest` recursed into _lm/ and collected
+    lm core's suite, which errors at import without lm's Fernet key (cs#184:
+    "125 errors ... No Fernet key available") — failing every spoke fix for a
+    reason outside the diff."""
+    if not os.path.isdir(os.path.join(repo_path, SPOKE_CORE_DIRNAME)):
+        return test_cmd
+    if test_cmd.strip() not in ("pytest", "python3 -m pytest", "python -m pytest"):
+        return test_cmd
+    return f"{test_cmd.strip()} --ignore={SPOKE_CORE_DIRNAME}"
+
+
 def _spoke_core_pythonpath(cwd):
     """PYTHONPATH entries for a provisioned _lm checkout, or None."""
     base = os.path.join(cwd, SPOKE_CORE_DIRNAME)
@@ -4549,6 +4564,7 @@ def verify_fix(repo_path, repo_name, config):
             if not test_cmd:
                 logger.info("No standard test framework detected. Assuming success (blind apply).")
                 return True, "No tests found, assuming success"
+            test_cmd = _exclude_spoke_core_from_pytest(test_cmd, repo_path)
             logger.info(f"Executing test command: {test_cmd}")
             result = run_sandboxed_command(test_cmd, repo_path)
             if _sandbox_infra_failure(result):
