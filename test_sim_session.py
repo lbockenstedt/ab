@@ -546,3 +546,102 @@ def test_create_submit_records_user_and_duplicate_of(mgr):
         assert "Requested by (LM user):** `alice`" in issue.body[:1500]
         assert "Duplicated from:** `dns_fail`" in issue.body
     assert os.path.isfile(os.path.join(mgr.base_dir, "audit.jsonl"))
+
+
+# ── cosmetic Simulations UI changes: never duplicated, sim-views.js twins only ──
+
+UI = {"intent": "ui", "name": "move_stop_all_button", "title": "Move Stop all to the toolbar",
+      "summary": "Move the Stop all button next to Refresh.",
+      "behavior": "The Stop all button renders in the top toolbar instead of the table footer.",
+      "touchpoints": [{"repo": "lm", "path": "WebUI/sim-views.js", "change": "move button"},
+                      {"repo": "cs", "path": "lm-spoke/static/sim-views.js", "change": "twin"},
+                      {"repo": "lm", "path": "docs/CHANGELOG.md", "change": "entry"}],
+      "open_questions": [], "ready": True}
+
+
+def _ui_probs(**kw):
+    return ss.spec_problems(ss.normalize_spec(dict(UI, **kw)), {"cs", "lm"}, None, {"dns_fail"})
+
+
+def test_ui_spec_submittable_without_duplicate_or_confirmation():
+    spec = ss.normalize_spec(UI)
+    assert spec["intent"] == "ui"
+    assert _ui_probs() == []
+    assert ss.spec_is_ready(spec, [])
+
+
+@pytest.mark.parametrize("repo,path", [
+    ("lm", "core/src/simulations/sim_quota.py"),
+    ("cs", "clients/linux/dns_fail.sh"),
+    ("cs", "lm-spoke/src/sim_quota.py"),
+    ("lm", "WebUI/main.js"),
+])
+def test_ui_spec_outside_ui_surface_blocked(repo, path):
+    tps = UI["touchpoints"] + [{"repo": repo, "path": path, "change": "x"}]
+    assert _ui_probs(touchpoints=tps)
+
+
+def test_ui_spec_needs_both_sim_views_twins():
+    for keep in ("lm", "cs"):
+        tps = [t for t in UI["touchpoints"] if t["repo"] == keep]
+        assert any("both sim-views.js copies" in p for p in _ui_probs(touchpoints=tps))
+
+
+def test_ui_submit_unlabelled_and_titled_simulations_ui(mgr):
+    sid = _ready_session(mgr, UI)
+    mgr.submit(OWNER, sid)
+    assert len(mgr._gh.created) == 2
+    for _repo, title, labels, issue in mgr._gh.created:
+        assert title.startswith("Simulations UI: ")
+        assert ss.MODIFY_LABEL not in labels and ss.REMOVE_LABEL not in labels
+        assert "ab-sim-modify" not in issue.body and "Skill:** add-simulation" not in issue.body
+        assert "dual-copy-guard" in issue.body[:1500]
+
+
+# ── removing an existing simulation: warn → confirm → reason, dedicated PR ──
+
+RM = dict(SPEC, intent="remove", target="dns_fail", name="dns_fail", title="Retire dns_fail",
+          touchpoints=[{"repo": "cs", "path": "clients/linux/dns_fail.sh", "change": "delete"}])
+
+
+def _rm_probs(**kw):
+    return ss.spec_problems(ss.normalize_spec(dict(RM, **kw)), {"cs", "lm"}, None, {"dns_fail"})
+
+
+def test_remove_requires_confirmation_reason_and_existing_target():
+    assert any("explicit confirmation" in p for p in _rm_probs(remove_reason="unused"))
+    assert any("reason" in p for p in _rm_probs(remove_confirmed=True))
+    assert any("not an existing" in p for p in _rm_probs(remove_confirmed=True,
+                                                         remove_reason="unused", target="nope"))
+    assert _rm_probs(remove_confirmed=True, remove_reason="unused") == []
+    tps = RM["touchpoints"] + [{"repo": "lm", "path": "core/src/main.py", "change": "x"}]
+    assert _rm_probs(remove_confirmed=True, remove_reason="unused", touchpoints=tps)
+
+
+def test_remove_submit_dedicated_labelled_issue_with_audit(mgr):
+    os.makedirs(os.path.join(mgr.workspace, "cs", "clients", "linux"), exist_ok=True)
+    open(os.path.join(mgr.workspace, "cs", "clients", "linux", "dns_fail.sh"), "w").close()
+    sid = _ready_session(mgr, dict(RM))
+    with pytest.raises(RuntimeError, match="guardrails"):
+        mgr.submit(OWNER, sid)
+    sid = _ready_session(mgr, dict(RM, remove_confirmed=True, remove_reason="Nobody uses it."))
+    submitter = {"user": "admin1", "tenant": "", "admin": True, "auth_type": "sso", "ip": "10.0.0.5"}
+    mgr.submit(submitter, sid)
+    repo, title, labels, issue = mgr._gh.created[0]
+    assert ss.REMOVE_LABEL in labels and ss.MODIFY_LABEL not in labels
+    assert title.startswith("Simulation removal (existing `dns_fail`)")
+    head = issue.body[:1500]
+    for needle in ("<!-- ab-sim-remove: dns_fail -->", "dedicated PR", "Nobody uses it.",
+                   "Requested by (LM user):** `alice`", "Submitted by (LM user):** `admin1`",
+                   "sso, 10.0.0.5", sid):
+        assert needle in head, needle
+    r = [json.loads(l) for l in open(os.path.join(mgr.base_dir, "audit.jsonl"))][-1]
+    assert r["intent"] == "remove" and r["remove_reason"] == "Nobody uses it."
+
+
+def test_prompt_covers_ui_and_remove(mgr):
+    p = mgr.first_turn_prompt(mgr._cfgd, "hi")
+    for needle in ('intent "ui"', "NEVER duplicated", "REMOVE an existing", "remove_confirmed",
+                   "remove_reason", "lm-spoke/static/sim-views.js"):
+        assert needle in p, needle
+    assert "ui" in ss._REMINDER and "remove" in ss._REMINDER and "never duplicated" in ss._REMINDER
