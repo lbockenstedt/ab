@@ -1,7 +1,11 @@
-"""check_parity / _resolve_cross_repo_twins — the dns & dhcp dual-copy advisories.
+"""check_parity / _resolve_cross_repo_twins — dns & dhcp retirement + twin resolver.
 
-WHY THIS EXISTS
-The dns and dhcp modules exist in two shapes: a standalone repo (`dns`, root =
+The standalone dns / dhcp repos are retired: lm/dns and lm/dhcp are the only
+live copies, so lm PRs get no twin advisory and code changes in the retired
+repos are flagged. The resolver tests below still use dns-shaped findings.
+
+HISTORY
+The dns and dhcp modules used to exist in two shapes: a standalone repo (`dns`, root =
 the module) and a copy nested in the lm repo (`lm/dns/`). The advisory used to
 map EVERY changed path 1:1 onto the other shape, but the two shapes do not have
 the same file set -- of the 20 files in the dns repo only 4 have any counterpart
@@ -57,87 +61,44 @@ def _twins(findings):
 
 
 # --------------------------------------------------------------------------
-# The regression: repo plumbing is not twinned
+# dns / dhcp standalone repos are retired -- lm/dns and lm/dhcp are the only copies
 # --------------------------------------------------------------------------
-# The exact changed-file set of lbockenstedt/dns#14, which produced three
-# unsatisfiable WARNINGs.
-DNS_14 = [
-    ".github/scripts/promote.sh",
-    ".github/workflows/backmerge.yml",
-    ".github/workflows/branch-flow.yml",
-    "VERSION",
-]
-
-
-def test_ci_plumbing_pr_produces_no_twin_advisories():
-    assert _twins(check_parity("lbockenstedt/dns", DNS_14)) == []
+def _retired(findings):
+    return [f for f in findings if "is retired" in f.get("title", "")]
 
 
 @pytest.mark.parametrize("path", [
-    ".github/workflows/ci.yml",
-    ".github/scripts/promote.sh",
-    "docs/dns.md",
-    "README.md",
-    "AGENTS.md",
-    ".gitignore",
-    ".env.template",
-    "tests/test_dns_spoke_offload.py",
+    "dns/src/dns_spoke.py", "dns/requirements.txt", "dhcp/src/kea_manager.py",
+    "dns/VERSION", "dhcp/.github/workflows/ci.yml",
 ])
-def test_per_repo_plumbing_is_never_twinned(path):
-    """`lm/dns` is a subdirectory of the lm repo -- it cannot have its own
-    `.github/`, and the standalone repo owns its own docs and tests."""
-    assert _twins(check_parity("lbockenstedt/dns", [path])) == []
+def test_lm_side_gets_no_twin_advisory(path):
+    out = check_parity("lbockenstedt/lm", [path])
+    assert _twins(out) == [] and _retired(out) == []
 
 
-def test_version_is_never_twinned_even_though_it_exists_on_both_sides():
-    """VERSION is the one path present in BOTH shapes that must NOT be synced:
-    every repo and branch owns its own version sequence (promote.sh pins
-    VERSION to the target branch precisely to keep them separate)."""
-    assert _twins(check_parity("lbockenstedt/dns", ["VERSION"])) == []
-    assert _twins(check_parity("lbockenstedt/dhcp", ["VERSION"])) == []
-    assert _twins(check_parity("lbockenstedt/lm", ["dns/VERSION", "dhcp/VERSION"])) == []
-
-
-# --------------------------------------------------------------------------
-# The payload IS still twinned -- the fix must not silence the real signal
-# --------------------------------------------------------------------------
-@pytest.mark.parametrize("repo,path,twin_repo,twin_path", [
-    ("lbockenstedt/dns", "src/dns_spoke.py", "lbockenstedt/lm", "dns/src/dns_spoke.py"),
-    ("lbockenstedt/dns", "src/unbound_manager.py", "lbockenstedt/lm", "dns/src/unbound_manager.py"),
-    ("lbockenstedt/dns", "requirements.txt", "lbockenstedt/lm", "dns/requirements.txt"),
-    ("lbockenstedt/dhcp", "src/dhcp_spoke.py", "lbockenstedt/lm", "dhcp/src/dhcp_spoke.py"),
-    ("lbockenstedt/dhcp", "src/kea_manager.py", "lbockenstedt/lm", "dhcp/src/kea_manager.py"),
+@pytest.mark.parametrize("repo,path", [
+    ("lbockenstedt/dns", "src/dns_spoke.py"),
+    ("lbockenstedt/dns", "requirements.txt"),
+    ("lbockenstedt/dhcp", "src/kea_manager.py"),
 ])
-def test_module_payload_is_still_flagged(repo, path, twin_repo, twin_path):
-    assert _twins(check_parity(repo, [path])) == [(twin_repo, twin_path)]
+def test_code_change_in_retired_repo_is_flagged(repo, path):
+    out = check_parity(repo, [path])
+    assert _twins(out) == []
+    assert len(_retired(out)) == 1 and _retired(out)[0]["level"] == "warning"
+    assert path in _retired(out)[0]["detail"]
 
 
-@pytest.mark.parametrize("path,twin_repo,twin_path", [
-    ("dns/src/dns_spoke.py", "lbockenstedt/dns", "src/dns_spoke.py"),
-    ("dns/requirements.txt", "lbockenstedt/dns", "requirements.txt"),
-    ("dhcp/src/kea_manager.py", "lbockenstedt/dhcp", "src/kea_manager.py"),
+@pytest.mark.parametrize("path", [
+    ".github/workflows/ci.yml", ".github/scripts/promote.sh", "VERSION",
+    "docs/dns.md", "README.md", "tests/test_dns_spoke_offload.py",
 ])
-def test_the_lm_side_is_scoped_the_same_way(path, twin_repo, twin_path):
-    assert _twins(check_parity("lbockenstedt/lm", [path])) == [(twin_repo, twin_path)]
+def test_plumbing_in_retired_repo_is_not_flagged(path):
+    assert check_parity("lbockenstedt/dns", [path]) == []
+    assert check_parity("lbockenstedt/dhcp", [path]) == []
 
 
-def test_lm_side_ignores_plumbing_under_the_module_dirs():
-    changed = ["dns/.github/workflows/ci.yml", "dns/VERSION", "dns/docs/x.md",
-               "dhcp/VERSION", "dns/src/dns_spoke.py"]
-    assert _twins(check_parity("lbockenstedt/lm", changed)) == [
-        ("lbockenstedt/dns", "src/dns_spoke.py")]
-
-
-def test_a_mixed_pr_reports_only_its_payload_files():
-    """The realistic shape: a PR that touches code AND bumps VERSION AND
-    tweaks CI should produce exactly one advisory."""
-    changed = DNS_14 + ["src/dns_spoke.py"]
-    assert _twins(check_parity("lbockenstedt/dns", changed)) == [
-        ("lbockenstedt/lm", "dns/src/dns_spoke.py")]
-
-
-def test_unrelated_repos_get_no_dns_advisories():
-    assert _twins(check_parity("lbockenstedt/ab", ["src/dns_spoke.py", "VERSION"])) == []
+def test_unrelated_repos_get_no_dns_findings():
+    assert check_parity("lbockenstedt/ab", ["src/dns_spoke.py", "VERSION"]) == []
 
 
 # --------------------------------------------------------------------------

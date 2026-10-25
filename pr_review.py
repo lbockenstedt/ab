@@ -55,8 +55,7 @@ INVARIANTS (see memory pr-gate-ab-prereview):
     All panel verdicts render ADVISORY-only; none ever approve/deny.
     (skill-completeness + QA layers still get added on top later.)
 
-Cross-repo caveat: several mirror pairs span SEPARATE GitHub repos (lm <-> cs,
-dns <-> lm/dns, dhcp <-> lm/dhcp). A PR lives in ONE repo, so those can only be
+Cross-repo caveat: some mirror pairs span SEPARATE GitHub repos (lm <-> cs). A PR lives in ONE repo, so those can only be
 flagged ADVISORY ("ensure the twin PR exists"); within-repo pairs are hard
 findings. ``_resolve_cross_repo_twins`` auto-drops the advisory when a matching
 open PR in the twin repo already touches the twin path.
@@ -207,83 +206,26 @@ def check_parity(repo_full_name, changed):
                 "twin": {"repo": "%s/cs" % owner, "path": "lm-spoke/src/sim_quota.py"},
             })
 
-    # ---- dns / dhcp dual-module-copy advisories ---------------------------
-    # These two modules deliberately exist in TWO shapes: a standalone repo
-    # (dns / dhcp, root = the module) and a copy nested under lm/ (lm/dns/,
-    # lm/dhcp/). Unlike the single-file pairs above, a changed file inside the
-    # module's PAYLOAD maps 1:1 to its twin path in the other repo — one
-    # advisory per file (not one combined advisory) so _resolve_cross_repo_twins
-    # can verify/drop each individually against the twin repo's open PRs.
-    #
-    # ONLY THE PAYLOAD IS TWINNED. The two shapes do NOT have the same file
-    # set: of the 20 files in the dns repo only 4 have any counterpart under
-    # lm/dns, so mapping *every* changed path produced warnings naming files
-    # that cannot exist. The standalone repo owns its own CI, docs and tests;
-    # `lm/dns` is a subdirectory of the lm repo and can never have its own
-    # `.github/`. A PR that merely rolled shared CI plumbing into the dns repo
-    # was reported as three "twin NOT updated" WARNINGs for
-    # `lm/dns/.github/...` paths, none of which were real or actionable --
-    # and an advisory that cannot be satisfied trains people to ignore the
-    # ones that can.
-    #
-    # VERSION is excluded for the opposite reason: it exists on BOTH sides but
-    # must NEVER be synced. Each repo (and each branch) owns its own version
-    # sequence -- see promote.sh, which pins VERSION to the target branch.
-    _DNS_DHCP_CAP = 15  # a module-wide rename/refactor could touch many files
-
-    def _is_twinned_module_path(rel):
-        """Is this module-relative path part of the shared payload?
-
-        Payload = the runtime code and its dependency list. Everything else
-        (VERSION, .github/, docs/, tests/, README/AGENTS/.gitignore/.env*) is
-        per-repo plumbing that legitimately differs between the two shapes.
-        """
+    # ---- dns / dhcp: standalone repos are RETIRED --------------------------
+    # The fleet runs only lm/dns and lm/dhcp (their roles ship in the lm repo,
+    # repo_url None). The standalone dns / dhcp repos were frozen after their
+    # last fixes were ported into lm, so there is no twin to keep in sync: lm
+    # PRs get no advisory, and a code change to a retired repo is flagged so it
+    # gets re-made against the live copy instead of silently never deploying.
+    def _is_module_payload(rel):
         return rel == "requirements.txt" or rel.startswith("src/")
 
-    if is_dns:
-        for p in sorted(p for p in changed if _is_twinned_module_path(p))[:_DNS_DHCP_CAP]:
+    for _retired, _flag in (("dns", is_dns), ("dhcp", is_dhcp)):
+        if not _flag:
+            continue
+        _payload = sorted(p for p in changed if _is_module_payload(p))
+        if _payload:
             findings.append({
-                "level": "advisory",
-                "title": "dns module twin lives in the lm repo",
-                "detail": "This PR changes `%s`; its twin `lm/dns/%s` is in the **lm** repo "
-                          "(dual-copy — see memory `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`). "
-                          "Ensure a matching lm PR." % (p, p),
-                "twin": {"repo": "%s/lm" % owner, "path": "dns/%s" % p},
-            })
-    if is_dhcp:
-        for p in sorted(p for p in changed if _is_twinned_module_path(p))[:_DNS_DHCP_CAP]:
-            findings.append({
-                "level": "advisory",
-                "title": "dhcp module twin lives in the lm repo",
-                "detail": "This PR changes `%s`; its twin `lm/dhcp/%s` is in the **lm** repo "
-                          "(dual-copy — see memory `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`). "
-                          "Ensure a matching lm PR." % (p, p),
-                "twin": {"repo": "%s/lm" % owner, "path": "dhcp/%s" % p},
-            })
-    if is_lm:
-        _dns_changed = sorted(p for p in changed if p.startswith("dns/")
-                              and _is_twinned_module_path(p[len("dns/"):]))[:_DNS_DHCP_CAP]
-        for p in _dns_changed:
-            stripped = p[len("dns/"):]
-            findings.append({
-                "level": "advisory",
-                "title": "lm/dns twin lives in the standalone dns repo",
-                "detail": "This PR changes `%s`; its twin `%s` is in the **dns** repo "
-                          "(dual-copy — see memory `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`). "
-                          "Ensure a matching dns PR." % (p, stripped),
-                "twin": {"repo": "%s/dns" % owner, "path": stripped},
-            })
-        _dhcp_changed = sorted(p for p in changed if p.startswith("dhcp/")
-                               and _is_twinned_module_path(p[len("dhcp/"):]))[:_DNS_DHCP_CAP]
-        for p in _dhcp_changed:
-            stripped = p[len("dhcp/"):]
-            findings.append({
-                "level": "advisory",
-                "title": "lm/dhcp twin lives in the standalone dhcp repo",
-                "detail": "This PR changes `%s`; its twin `%s` is in the **dhcp** repo "
-                          "(dual-copy — see memory `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`). "
-                          "Ensure a matching dhcp PR." % (p, stripped),
-                "twin": {"repo": "%s/dhcp" % owner, "path": stripped},
+                "level": "warning",
+                "title": "%s repo is retired — change lm/%s instead" % (_retired, _retired),
+                "detail": "This PR changes %s in the retired standalone `%s` repo. That code never "
+                          "deploys; the fleet runs `lm/%s/` in the **lm** repo. Make the change there."
+                          % (", ".join("`%s`" % p for p in _payload[:10]), _retired, _retired),
             })
 
     return findings
