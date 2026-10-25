@@ -643,8 +643,9 @@ MODULE_TYPE_REPO = {
     "storage": "lbockenstedt/truenas",
     "nw": "lbockenstedt/nw",
     "ab": "lbockenstedt/ab",
-    "dhcp": "lbockenstedt/dhcp",
-    "dns": "lbockenstedt/dns",
+    # dns/dhcp roles ship in the lm repo (standalone repos retired).
+    "dhcp": "lbockenstedt/lm",
+    "dns": "lbockenstedt/lm",
     "hub": "lbockenstedt/lm",
 }
 
