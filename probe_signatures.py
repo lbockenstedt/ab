@@ -5,8 +5,10 @@ vulnerability scanner fingerprinting the port?" — used by the hub HTTP
 middleware (``core/src/api.py``) AND by every edge component that serves its own
 HTTPS surface (the reverse proxy, AppBuilder, role-hosted spoke UIs). Keeping
 the signature lists in ONE importable module (rather than a copy per edge) means
-a new scanner signature added here is picked up everywhere at once — there is no
-twin to drift out of sync.
+a new scanner signature added here is picked up everywhere at once. The one
+exception is AB, a separate repo: ab/probe_signatures.py is a byte-identical
+vendored copy of lm/core/src/security/probe_signatures.py (canonical) — re-copy
+it when this file changes.
 
 The components that import this all serve a Python API + a static JS SPA over
 :443 — they never serve PHP/ASP/JSP/CGI, dotfiles, DB admin panels, or
