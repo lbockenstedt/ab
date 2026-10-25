@@ -243,6 +243,14 @@ def run_scheduled_promotions(cfg, now=None):
                 results.append({"repo": name, "source": src, "target": tgt, "ok": True, "url": url})
                 ok_count += 1
             except Exception as e:  # noqa: BLE001 — one repo must not abort the fan-out
+                if getattr(e, "status", None) == 404:
+                    # No promote.yml (or an empty repo, e.g. lbockenstedt/amt):
+                    # nothing to promote. Not an error — it used to log one
+                    # every cycle for each such monitored repo.
+                    logger.info("promote scheduler: %s has no promote.yml — skipped", name)
+                    results.append({"repo": name, "source": src, "target": tgt,
+                                    "ok": False, "skipped": True, "error": "no promote.yml"})
+                    continue
                 logger.error("promote scheduler: %s %s -> %s failed: %s", name, src, tgt, e)
                 results.append({"repo": name, "source": src, "target": tgt, "ok": False, "error": str(e)})
         if ok_count:
