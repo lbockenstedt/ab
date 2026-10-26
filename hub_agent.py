@@ -106,7 +106,10 @@ _SLOW_CMDS = frozenset({"ANALYZE_LOGS", "ESCALATE_LOG_ISSUE", "HELP_ASK", "help_
                         # Bug/Feature Request capture sessions (request_session.py).
                         "REQ_SESSION_PING", "REQ_SESSION_START", "REQ_SESSION_REPLY",
                         "REQ_SESSION_POLL", "REQ_SESSION_CANCEL", "REQ_SESSION_SUBMIT",
-                        "REQ_SESSION_FILED"})
+                        "REQ_SESSION_FILED",
+                        # OS Updates check shells out to apt (os_updates_ab.py).
+                        "OS_UPDATE_CHECK", "OS_UPDATE_APPLY",
+                        "OS_UPDATE_APPLY_PACKAGES", "OS_REBOOT"})
 # Backstop against a flood of slow commands spawning unbounded tasks. Real
 # traffic runs 1-2 concurrently; at the cap we drop and let the hub's durable
 # mailbox redeliver, rather than stall the reader (the bug we're fixing).
@@ -1461,6 +1464,24 @@ class HubAgentClient:
 
         task.add_done_callback(_done)
 
+    async def _send_command_result(self, msg: dict, cmd_type: str, rdata: dict) -> None:
+        """Reply a COMMAND_RESULT correlated to the inbound message_id (the key
+        the hub's request_response waits on)."""
+        reply = {
+            "correlation_id": msg.get("header", {}).get("message_id"),
+            "header": {
+                "message_id": str(uuid.uuid4()),
+                "timestamp": round(time.time(), 6),
+                "sender_id": self.spoke_id,
+                "destination_id": "hub",
+            },
+            "payload": {"type": "COMMAND_RESULT", "data": rdata},
+        }
+        try:
+            await self._ws.send(encode_frame(self.signer, reply))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to send %s reply: %s", cmd_type, e)
+
     async def _handle_message(self, msg: dict) -> None:
         if not self._verify(msg):
             logger.warning("Invalid signature on inbound message; dropping.")
@@ -1714,20 +1735,20 @@ class HubAgentClient:
             else:
                 import sim_session as _sessions  # lazy: imports main
             rdata = await asyncio.to_thread(_sessions.handle_command, cmd_type, data)
-            reply = {
-                "correlation_id": msg.get("header", {}).get("message_id"),
-                "header": {
-                    "message_id": str(uuid.uuid4()),
-                    "timestamp": round(time.time(), 6),
-                    "sender_id": self.spoke_id,
-                    "destination_id": "hub",
-                },
-                "payload": {"type": "COMMAND_RESULT", "data": rdata},
-            }
+            await self._send_command_result(msg, cmd_type, rdata)
+            return
+
+        if cmd_type in ("OS_UPDATE_CHECK", "OS_UPDATE_APPLY",
+                        "OS_UPDATE_APPLY_PACKAGES", "OS_REBOOT"):
+            # Hub OS Updates panel. Read-only on this host — see os_updates_ab.py.
+            if self._ws is None:
+                return
+            import os_updates_ab
             try:
-                await self._ws.send(encode_frame(self.signer, reply))
+                rdata = await asyncio.to_thread(os_updates_ab.handle_command, cmd_type, data)
             except Exception as e:  # noqa: BLE001
-                logger.warning("Failed to send %s reply: %s", cmd_type, e)
+                rdata = {"status": "ERROR", "message": f"{cmd_type} failed: {e}"}
+            await self._send_command_result(msg, cmd_type, rdata)
             return
 
         if cmd_type in ("get_version", "GET_VERSION"):
