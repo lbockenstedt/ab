@@ -235,9 +235,48 @@ def test_dispatch_contract():
         raise AssertionError("a rejected dispatch (False) must raise, not report success")
 
 
+@_isolated
+def test_run_cycle_skips_repo_without_promote_workflow_quietly():
+    """A monitored repo with no promote.yml (GitHub 404 — e.g. an empty repo)
+    is skipped at INFO, not logged as an ERROR every cycle."""
+    import logging
+    po = _fresh_promote_ops(tempfile.mkdtemp())
+    _install_fake_routes(["own/a", "own/empty"])
+    now = _now()
+
+    class _NotFound(Exception):
+        status = 404
+
+    def dispatch(token, repo, src, tgt, is_override):
+        if repo == "own/empty":
+            raise _NotFound("Not Found")
+        return "ok"
+
+    po.dispatch_promote_workflow = dispatch
+    seen = []
+
+    class _H(logging.Handler):
+        def emit(self, rec):
+            seen.append(rec)
+
+    h = _H()
+    po.logger.addHandler(h)
+    try:
+        cfg = {"GITHUB_TOKEN": "t", "promote_schedule_dev_to_qa_hours": 24,
+               "promote_schedule_qa_to_main_hours": 0, "promote_schedule_repo": "__all__"}
+        r = po.run_scheduled_promotions(cfg, now=now)
+    finally:
+        po.logger.removeHandler(h)
+    skipped = [x for x in r["results"] if x.get("skipped")]
+    assert [x["repo"] for x in skipped] == ["own/empty"]
+    assert not [x for x in seen if x.levelno >= logging.ERROR]
+    assert po.load_schedule_state().get("dev->qa") == now
+
+
 def main():
     tests = [test_due_routes, test_state_roundtrip, test_run_cycle,
-             test_run_cycle_isolates_repo_failures, test_dispatch_contract]
+             test_run_cycle_isolates_repo_failures,
+             test_run_cycle_skips_repo_without_promote_workflow_quietly, test_dispatch_contract]
     failures = 0
     for fn in tests:
         try:
