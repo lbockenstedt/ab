@@ -47,6 +47,8 @@ from main import (
     delete_conversation,
     get_conversation,
     get_hub_logs,
+    hub_log_line_count,
+    CHAT_HUB_LOG_LINES_PER_MODULE,
     get_log_path,
     get_version,
     load_chats,
@@ -1913,8 +1915,8 @@ async def get_hub_logs_page(request: Request):
     # (still large) result is truncated to that after the sort rather than
     # handing Jinja an unbounded table to render.
     loop = asyncio.get_event_loop()
-    all_logs = await loop.run_in_executor(None, get_hub_logs)
-    total_logs = len(all_logs)
+    all_logs = await loop.run_in_executor(None, get_hub_logs, HUB_LOGS_PAGE_LIMIT)
+    total_logs = await loop.run_in_executor(None, hub_log_line_count)
     logs = all_logs[:HUB_LOGS_PAGE_LIMIT]
     if logs:
         fetch_status = 200
@@ -2017,7 +2019,7 @@ def _collect_logs_for_analysis(source, window_minutes=None):
     window_minutes, restrict to that trailing time window (falling back to a line
     tail if too little is in-window); else the last lines. Char-capped for the LLM."""
     if source == "hub":
-        rows = get_hub_logs() or []
+        rows = get_hub_logs(CHAT_HUB_LOG_LINES_PER_MODULE) or []
         if window_minutes:
             win = _window_lines_since(rows, window_minutes,
                                       get_text=lambda r: r.get("log", "") if isinstance(r, dict) else str(r),

@@ -760,6 +760,11 @@ UPDATER_INTERVAL_SECONDS = 300  # 5 minutes — was 3600 (hourly), which let the
                                  # fleet drift stale on `main` for up to an hour
                                  # after a merge before anyone noticed.
 
+# Repo labels only feed the Settings label picker, so re-listing them (one
+# GitHub call per repo) every poll cycle is wasted API quota.
+LABEL_DISCOVERY_TTL_S = 6 * 3600
+_label_cache = {"at": 0.0, "repos": None}
+
 def updater_worker():
     """Dedicated worker to check for updates every 5 minutes.
 
@@ -1453,10 +1458,14 @@ def run_scan_cycle():
         if not monitored_repos:
             logger.warning("No monitored repositories configured. Skipping scan.")
 
-        update_task_state(task_id="Discovery", task_name="Discovering Labels", action="start")
-        state["available_labels"] = main.discover_labels(gh_current, monitored_repos)
-        logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
-        update_task_state(task_id="Discovery", action="end")
+        if (not state.get("available_labels")
+                or _label_cache["repos"] != sorted(monitored_repos)
+                or time.time() - _label_cache["at"] >= LABEL_DISCOVERY_TTL_S):
+            update_task_state(task_id="Discovery", task_name="Discovering Labels", action="start")
+            state["available_labels"] = main.discover_labels(gh_current, monitored_repos)
+            _label_cache.update(at=time.time(), repos=sorted(monitored_repos))
+            logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
+            update_task_state(task_id="Discovery", action="end")
 
         main.verify_production_fixes(gh_current, processed)
 
