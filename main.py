@@ -728,8 +728,20 @@ try:
 except Exception as _e:
     logger.warning(f"Hub agent startup failed (non-fatal): {_e}")
 
+def _access_log_filter(record):
+    """Drop routine uvicorn access lines. Successful UI polling and 404
+    internet-scanner probes (/.env, /wp-json, ...) were about half of ab.log;
+    other 4xx (auth failures) and 5xx are kept."""
+    try:
+        status = int(record.args[-1])
+    except Exception:
+        return True
+    return status >= 400 and status != 404
+
+
 if __name__ == "__main__":
     import uvicorn
+    logging.getLogger("uvicorn.access").addFilter(_access_log_filter)
     # Promote the deployed LE/mTLS cert to the WebUI cert if the WebUI is still
     # self-signed (before uvicorn reads SSL_CERT/SSL_KEY).
     try:
