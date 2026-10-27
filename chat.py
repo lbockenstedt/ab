@@ -13,6 +13,7 @@ from main import (
     call_llm,
     filter_error_logs,
     get_hub_logs,
+    CHAT_HUB_LOG_LINES_PER_MODULE,
     get_log_path,
     get_monitored_repos,
     load_config,
@@ -108,7 +109,7 @@ def _build_chat_context_index_uncached(config, gh=None):
     try:
         hub_url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
         if hub_url and "your-netbox" not in str(hub_url):
-            logs = get_hub_logs()
+            logs = get_hub_logs(CHAT_HUB_LOG_LINES_PER_MODULE)
             n = len(filter_error_logs(logs)) if logs else 0
             lines.append(f"Recent Hub errors: {n} (use get_recent_errors for detail)")
     except Exception:
@@ -660,7 +661,7 @@ def _tool_get_processed_issues(gh, config, args):
 def _tool_get_recent_errors(gh, config, args):
     limit = max(1, min(50, int(args.get("limit") or 15)))
     hub_errors = []
-    logs = get_hub_logs()
+    logs = get_hub_logs(CHAT_HUB_LOG_LINES_PER_MODULE)
     if logs:
         try:
             hub_errors = filter_error_logs(logs)[:limit]

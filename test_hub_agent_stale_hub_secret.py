@@ -15,6 +15,16 @@ import hub_agent
 from hub_agent import HubAgentClient
 
 
+@pytest.fixture(autouse=True)
+def _isolate_ab_paths(monkeypatch, tmp_path):
+    # HubAgentClient.__init__ recovers the hub CA from AB_SSL_CERT and persists
+    # LM_HUB_CA_CERT into AB_CONFIG_DIR/.env. AB runs this suite on LM-AB during
+    # fix verification, so without this a test's fake CA path leaked into the
+    # live /etc/ab/.env and broke every later INSTALL_CERT.
+    monkeypatch.setenv("AB_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("AB_SSL_CERT", str(tmp_path / "cert.pem"))
+
+
 def _sig(secret, challenge):
     return hmac.new(secret.encode(), challenge.encode(), hashlib.sha256).hexdigest()
 

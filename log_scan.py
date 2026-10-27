@@ -35,6 +35,8 @@ from main import (
 HUB_LOG_DIR = os.path.join(CONFIG_DIR, "hub_logs")
 HUB_LOG_MAX_LINES = 20000   # per-module cap; oldest trimmed when exceeded
 HUB_LOG_DEDUP_TAIL = 500    # skip incoming lines already in this many recent locals
+HUB_LOG_STALE_DAYS = 7      # delete mirror files untouched this long
+CHAT_HUB_LOG_LINES_PER_MODULE = 2000  # chat/analysis readers only need recent lines
 
 _TS_PAT = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
 
@@ -74,15 +76,14 @@ def _persist_hub_logs(raw_logs):
     for mod, lines in by_module.items():
         path = _module_log_path(mod)
         try:
-            with open(path, "r") as f:
-                existing = f.read().splitlines()
+            existing = _tail_lines(path, HUB_LOG_DEDUP_TAIL)
         except FileNotFoundError:
             existing = []
         except Exception as e:
             logger.debug(f"hub_log_sync: could not read {path}: {e}")
             existing = []
         # Dedup against the recent tail (and within this batch).
-        tail = set(existing[-HUB_LOG_DEDUP_TAIL:]) if existing else set()
+        tail = set(existing)
         appended = 0
         try:
             with open(path, "a") as f:
@@ -96,15 +97,85 @@ def _persist_hub_logs(raw_logs):
             logger.warning(f"hub_log_sync: could not append to {path}: {e}")
             continue
         # Cap: if the file grew past the limit, rewrite keeping the newest N.
+        # Count newlines in binary chunks first so files under the cap are
+        # never decoded and split into lines.
         if appended:
             try:
-                with open(path, "r") as f:
-                    all_lines = f.read().splitlines()
-                if len(all_lines) > HUB_LOG_MAX_LINES:
-                    with open(path, "w") as f:
-                        f.write("\n".join(all_lines[-HUB_LOG_MAX_LINES:]) + "\n")
+                if _count_lines(path) > HUB_LOG_MAX_LINES:
+                    with open(path, "r", errors="replace") as f:
+                        all_lines = f.read().splitlines()
+                    if len(all_lines) > HUB_LOG_MAX_LINES:
+                        with open(path, "w") as f:
+                            f.write("\n".join(all_lines[-HUB_LOG_MAX_LINES:]) + "\n")
             except Exception as e:
                 logger.debug(f"hub_log_sync: cap trim failed for {path}: {e}")
+    _prune_stale_hub_logs()
+
+
+def _count_lines(path):
+    with open(path, "rb") as f:
+        return sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1024 * 1024), b""))
+
+
+def _tail_lines(path, n):
+    """Last n lines of path, reading only the end of the file."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        block = 64 * 1024
+        data = b""
+        while size > 0 and data.count(b"\n") <= n:
+            step = min(block, size)
+            size -= step
+            f.seek(size)
+            data = f.read(step) + data
+    lines = data.decode("utf-8", errors="replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines[-n:]
+
+
+def _prune_stale_hub_logs(now=None):
+    """Delete mirror files not written for HUB_LOG_STALE_DAYS (spokes that were
+    renamed or removed), so the mirror doesn't grow without bound."""
+    cutoff = (now or time.time()) - HUB_LOG_STALE_DAYS * 86400
+    try:
+        names = os.listdir(HUB_LOG_DIR)
+    except Exception:
+        return
+    for name in names:
+        path = os.path.join(HUB_LOG_DIR, name)
+        try:
+            if name.endswith(".log") and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                logger.info(f"hub_log_sync: pruned stale mirror file {name}")
+        except Exception as e:
+            logger.debug(f"hub_log_sync: could not prune {path}: {e}")
+
+
+def _mirror_contains(snippet):
+    """Whether snippet (case-insensitive) appears in any hub-log mirror file.
+    Returns None when the mirror is empty, so callers can tell "absent" from
+    "nothing to search". Reads one file at a time instead of loading the
+    whole mirror into memory."""
+    needle = snippet.lower()
+    searched = False
+    try:
+        names = os.listdir(HUB_LOG_DIR)
+    except Exception:
+        return None
+    for name in names:
+        if not name.endswith(".log"):
+            continue
+        try:
+            with open(os.path.join(HUB_LOG_DIR, name), "r", errors="replace") as f:
+                text = f.read()
+        except Exception:
+            continue
+        searched = True
+        if needle in text.lower():
+            return True
+    return False if searched else None
 
 
 def sync_hub_logs():
@@ -133,15 +204,17 @@ def sync_hub_logs():
     return sorted(raw_logs, key=_log_ts, reverse=True)
 
 
-def get_hub_logs():
+def get_hub_logs(max_per_module=None):
     """Read hub logs from the LOCAL sync mirror
     (``<HUB_LOG_DIR>/<module>.log``) instead of a live GET_LOGS pull. Returns a
     list of {"module","log"} entries sorted newest-first, or [] when the
     mirror is empty (first run / wiped). The mirror is refreshed once per
-    cycle by sync_hub_logs(); on-demand readers (chat, logs page,
-    verify_production_fixes) read this snapshot. To force a fresh pull+write,
-    call sync_hub_logs() directly. Returns [] (NOT None) — a local read is
-    never "unreachable"; the None contract belongs to sync_hub_logs()."""
+    cycle by sync_hub_logs(); on-demand readers (chat, logs page) read this
+    snapshot. To force a fresh pull+write, call sync_hub_logs() directly.
+    Returns [] (NOT None) — a local read is never "unreachable"; the None
+    contract belongs to sync_hub_logs(). max_per_module reads only the newest
+    N lines of each file (files are oldest→newest), which is all a
+    "newest N rows" reader needs and avoids loading the whole mirror."""
     try:
         if not os.path.isdir(HUB_LOG_DIR):
             return []
@@ -155,16 +228,32 @@ def get_hub_logs():
             mod = name[:-4]
             path = os.path.join(HUB_LOG_DIR, name)
             try:
-                with open(path, "r") as f:
-                    for line in f:
-                        line = line.rstrip("\n")
-                        if line:
-                            out.append({"module": mod, "log": line})
+                if max_per_module:
+                    lines = _tail_lines(path, max_per_module)
+                else:
+                    with open(path, "r") as f:
+                        lines = [line.rstrip("\n") for line in f]
+                out.extend({"module": mod, "log": line} for line in lines if line)
             except Exception as e:
                 logger.debug(f"hub_log_sync: could not read {path}: {e}")
     except Exception as e:
         logger.debug(f"hub_log_sync: listing {HUB_LOG_DIR} failed: {e}")
     return sorted(out, key=_log_ts, reverse=True)
+
+
+def hub_log_line_count():
+    """Total lines across the mirror, without decoding them."""
+    total = 0
+    try:
+        for name in os.listdir(HUB_LOG_DIR):
+            if name.endswith(".log"):
+                try:
+                    total += _count_lines(os.path.join(HUB_LOG_DIR, name))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return total
 
 
 def get_hub_state():
@@ -554,75 +643,69 @@ def verify_production_fixes(gh_current, processed):
     Now implements a configurable 'cooling period' (PROD_VERIFICATION_DAYS).
     The issue is only closed if the error snippet has been absent for the full period.
     """
+    awaiting = [(k, v) for k, v in processed.items()
+                if v.get("status") == "awaiting_prod_verification"]
+    if not awaiting:
+        return
     config = load_config()
     days_required = int(config.get("PROD_VERIFICATION_DAYS", 7))
 
-    # Read the LOCAL log mirror (refreshed once per cycle by scan_hub_logs →
+    # Searches the LOCAL log mirror (refreshed once per cycle by scan_hub_logs →
     # sync_hub_logs). This is one cycle behind the live pull by design — the
     # 7-day PROD_VERIFICATION_DAYS gate bounds that staleness so a one-cycle
-    # lag can't flip a not-yet-clean issue to closed. Avoids a second live
-    # GET_LOGS pull per cycle (the sync model: one pull, local readers).
-    hub_logs_cache = get_hub_logs()
+    # lag can't flip a not-yet-clean issue to closed.
+    for issue_id, info in awaiting:
+        repo_name, issue_num = issue_id.split(":")
+        logger.info(f"Verifying production fix for {issue_id} (Required clean period: {days_required} days)...")
+        try:
+            repo_obj = gh_current.get_repo(repo_name)
+            issue = repo_obj.get_issue(int(issue_num))
 
-    for issue_id, info in list(processed.items()):
-        if info.get("status") == "awaiting_prod_verification":
-            repo_name, issue_num = issue_id.split(":")
-            logger.info(f"Verifying production fix for {issue_id} (Required clean period: {days_required} days)...")
-            try:
-                repo_obj = gh_current.get_repo(repo_name)
-                issue = repo_obj.get_issue(int(issue_num))
+            match = re.search(r"### Log Evidence:\n```\n(.*?)\n```", issue.body or "", re.DOTALL)
+            if match:
+                found = _mirror_contains(match.group(1).strip())
+                if found is not None:
+                    if not found:
+                        # Snippet is gone. Check if we've been clean long enough.
+                        clean_since = info.get("clean_since")
+                        now = datetime.now()
 
-                logs = hub_logs_cache
-                if logs:
-                    module_name = repo_name.split('/')[-1]
-                    relevant_logs = [l['log'] for l in logs if l.get('module') == module_name]
-                    full_log_text = "\n".join(relevant_logs)
-
-                    import re
-                    match = re.search(r"### Log Evidence:\n```\n(.*?)\n```", issue.body, re.DOTALL)
-                    if match:
-                        snippet = match.group(1).strip()
-                        if snippet.lower() not in full_log_text.lower():
-                            # Snippet is gone. Check if we've been clean long enough.
-                            clean_since = info.get("clean_since")
-                            now = datetime.now()
-
-                            if not clean_since:
-                                logger.info(f"Issue {issue_id} is clean. Starting {days_required}-day cooling period.")
-                                info["clean_since"] = now.isoformat()
-                                processed[issue_id] = info
+                        if not clean_since:
+                            logger.info(f"Issue {issue_id} is clean. Starting {days_required}-day cooling period.")
+                            info["clean_since"] = now.isoformat()
+                            processed[issue_id] = info
+                            save_processed(processed)
+                        else:
+                            first_clean_ts = datetime.fromisoformat(clean_since)
+                            days_clean = (now - first_clean_ts).days
+                            if days_clean >= days_required:
+                                logger.info(f"Verified: Issue {issue_id} has been clean for {days_clean} days. Closing issue.")
+                                try:
+                                    issue.create_comment(f"🤖 **AppBuilder AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
+                                except Exception as ce:
+                                    logger.warning(f"Could not post verification comment to {issue_id}: {ce}")
+                                issue.edit(state='closed')
+                                _apply_closed_label(repo_obj, issue, issue_id)
+                                processed[issue_id]["status"] = "closed"
+                                # Leaves Resolved (was counted via the QA-pass increment when
+                                # first fixed) and enters Closed. This also avoids the old
+                                # double-count where awaiting_prod_verification issues got a
+                                # second success_count += 1 on verification.
+                                state["success_count"] = max(0, state["success_count"] - 1)
+                                state["closed_count"] = state.get("closed_count", 0) + 1
                                 save_processed(processed)
                             else:
-                                first_clean_ts = datetime.fromisoformat(clean_since)
-                                days_clean = (now - first_clean_ts).days
-                                if days_clean >= days_required:
-                                    logger.info(f"Verified: Issue {issue_id} has been clean for {days_clean} days. Closing issue.")
-                                    try:
-                                        issue.create_comment(f"🤖 **AppBuilder AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
-                                    except Exception as ce:
-                                        logger.warning(f"Could not post verification comment to {issue_id}: {ce}")
-                                    issue.edit(state='closed')
-                                    _apply_closed_label(repo_obj, issue, issue_id)
-                                    processed[issue_id]["status"] = "closed"
-                                    # Leaves Resolved (was counted via the QA-pass increment when
-                                    # first fixed) and enters Closed. This also avoids the old
-                                    # double-count where awaiting_prod_verification issues got a
-                                    # second success_count += 1 on verification.
-                                    state["success_count"] = max(0, state["success_count"] - 1)
-                                    state["closed_count"] = state.get("closed_count", 0) + 1
-                                    save_processed(processed)
-                                else:
-                                    logger.info(f"Issue {issue_id} is clean, but only for {days_clean}/{days_required} days. Waiting...")
-                        else:
-                            # Error reappeared. Reset the clean timer.
-                            if info.get("clean_since"):
-                                logger.warning(f"Issue {issue_id} error reappeared in logs. Resetting cooling period.")
-                                info["clean_since"] = None
-                                processed[issue_id] = info
-                                save_processed(processed)
-                            logger.info(f"Issue {issue_id} still failing in production logs.")
-            except Exception as e:
-                logger.error(f"Error verifying {issue_id}: {e}")
+                                logger.info(f"Issue {issue_id} is clean, but only for {days_clean}/{days_required} days. Waiting...")
+                    else:
+                        # Error reappeared. Reset the clean timer.
+                        if info.get("clean_since"):
+                            logger.warning(f"Issue {issue_id} error reappeared in logs. Resetting cooling period.")
+                            info["clean_since"] = None
+                            processed[issue_id] = info
+                            save_processed(processed)
+                        logger.info(f"Issue {issue_id} still failing in production logs.")
+        except Exception as e:
+            logger.error(f"Error verifying {issue_id}: {e}")
 
 
 # Canonical module_type -> repo map. The KEY is the module_type a spoke DECLARES
@@ -1637,6 +1720,8 @@ def scan_hub_logs(gh_current, config):
 
 __all__ = [
     'get_hub_logs',
+    'hub_log_line_count',
+    'CHAT_HUB_LOG_LINES_PER_MODULE',
     'sync_hub_logs',
     'get_hub_state',
     'filter_error_logs',
