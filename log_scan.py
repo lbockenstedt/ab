@@ -1415,6 +1415,24 @@ def _module_log_fix_context(issue_body):
     )
 
 
+_ESCALATION_HEADER = re.compile(
+    r"^(\d+\.\s*)?\*\*(is there a problem|what is going wrong|what to check)[^*]*\*\*[\s:.]*(yes|no)?\.?$",
+    re.IGNORECASE)
+
+
+def _escalation_summary_line(analysis):
+    """First line of the hub sentinel's analysis that describes the actual
+    problem. The analysis always opens with "1. **Is there a problem?** Yes.",
+    so titling on the first line gave every hub escalation the same title and
+    dedup folded unrelated problems into one issue (lm#1228, 172 comments)."""
+    for ln in (analysis or "").splitlines():
+        ln = ln.strip().lstrip("*->#").strip()
+        if not ln or _ESCALATION_HEADER.match(ln):
+            continue
+        return re.sub(r"[*`]", "", ln)
+    return ""
+
+
 def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config=None):
     """Tier-2 deep-triage entry point. The LM hub's per-module log sentinel flagged a
     real problem and shipped {module, offending log slice, its analysis} down to us.
@@ -1434,6 +1452,8 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
         if not repo_name:
             return False, f"no repo maps to module {module!r} (add a module_repo_map entry)"
         first_line = next((ln.strip() for ln in (analysis or "").splitlines() if ln.strip()), "")
+        if config.get("escalation_specific_titles", False):
+            first_line = _escalation_summary_line(analysis)
         summary = " ".join(first_line.split())[:90] or f"{module} log problem"
         title = f"Hub log alert ({module}): {summary}"
         body = (
