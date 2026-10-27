@@ -179,6 +179,22 @@ cat > /etc/logrotate.d/lm <<'LOGROTATE'
 }
 LOGROTATE
 
+# Cap ab's own logs the same way. Both writers (the logging FileHandler and the
+# unit's StandardOutput=append) are O_APPEND, so copytruncate is safe, and the
+# self-scan already resets its offset when the file shrinks.
+cat > /etc/logrotate.d/ab <<LOGROTATE
+${LOG_FILE} ${WATCHDOG_LOG} {
+    su root root
+    size 50M
+    rotate 5
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+LOGROTATE
+
 # 5. Python venv + dependencies
 echo ">> Installing Python dependencies (this may take a minute)..."
 cd "$INSTALL_DIR"

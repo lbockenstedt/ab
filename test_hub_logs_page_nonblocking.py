@@ -29,7 +29,7 @@ import asyncio
 import time
 
 
-def _load_ns(get_hub_logs_stub):
+def _load_ns(get_hub_logs_stub, total=0):
     src = open("routes.py").read()
     tree = ast.parse(src)
     segs = []
@@ -59,6 +59,7 @@ def _load_ns(get_hub_logs_stub):
         "asyncio": asyncio,
         "load_config": lambda: {},
         "get_hub_logs": get_hub_logs_stub,
+        "hub_log_line_count": lambda: total,
         "templates": _FakeTemplates(),
         "state": {},
         "datetime": _datetime,
@@ -90,11 +91,12 @@ def main():
     big_logs = [{"module": f"m{i % 40}", "log": f"2026-08-29 12:00:{i % 60:02d} - line {i}"}
                for i in range(50000)]
 
-    def _slow_get_hub_logs():
+    def _slow_get_hub_logs(max_per_module=None):
+        assert max_per_module == 500  # only the newest page-worth per module is read
         time.sleep(0.2)  # stands in for the real read+sort of 575K lines
         return big_logs
 
-    ns = _load_ns(_slow_get_hub_logs)
+    ns = _load_ns(_slow_get_hub_logs, total=len(big_logs))
 
     async def _concurrent_probe():
         """A trivial task that should keep making progress WHILE the hub-logs
@@ -126,7 +128,7 @@ def main():
                 ctx["hub_logs"] == big_logs[:500])
 
     # ── a small mirror (under the limit) round-trips untouched ──────────────
-    small_ns = _load_ns(lambda: big_logs[:10])
+    small_ns = _load_ns(lambda _n=None: big_logs[:10], total=10)
     small_resp = _run(small_ns["get_hub_logs_page"](request=None))
     ok &= _check("a mirror smaller than the limit is not padded/altered",
                 len(small_resp.context["hub_logs"]) == 10
@@ -134,7 +136,7 @@ def main():
 
     # ── an empty mirror still produces the existing "waiting for first
     # scan cycle" error message, unaffected by the truncation change ────────
-    empty_ns = _load_ns(lambda: [])
+    empty_ns = _load_ns(lambda _n=None: [])
     empty_resp = _run(empty_ns["get_hub_logs_page"](request=None))
     ok &= _check("an empty mirror still reports fetch_error (not silently swallowed)",
                 bool(empty_resp.context["hub_fetch_error"]))

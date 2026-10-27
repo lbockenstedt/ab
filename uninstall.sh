@@ -57,7 +57,7 @@ say "AppBuilder uninstaller"
 say ""
 say "Will remove:"
 say "  services   ab.service, ab-watchdog.service"
-say "  files      $INSTALL_DIR, $LOG_FILE"
+say "  files      $INSTALL_DIR, $LOG_FILE, /etc/logrotate.d/ab"
 [ "$KEEP_CONFIG" -eq 1 ] && say "  config     KEPT ($CONFIG_DIR)" || say "  config     $CONFIG_DIR  (credentials, tokens, PR history)"
 say "  helpers    /usr/local/bin/ab-*, /etc/sudoers.d/ab"
 say "  user       $SVC_USER"
@@ -129,6 +129,7 @@ else
     skip "$CONFIG_DIR absent"
 fi
 rm -f "$LOG_FILE" "${LOG_FILE}".* 2>/dev/null && ok "removed $LOG_FILE*" || skip "no log files"
+[ -f /etc/logrotate.d/ab ] && { rm -f /etc/logrotate.d/ab; ok "removed /etc/logrotate.d/ab"; } || skip "no ab logrotate config"
 
 # ── 4. Service user ─────────────────────────────────────────────────────────
 say ">> Removing user..."
