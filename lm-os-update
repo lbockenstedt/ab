@@ -1,0 +1,49 @@
+#!/bin/bash
+# lm-os-update — the only privileged path LM's non-root services (svc_lm) use
+# for fleet OS updates (core/src/os_update.py). Installed root-owned to
+# /usr/local/bin with a sudoers rule; never run from /opt/lm, which svc_lm can
+# write. A fixed set of actions, and package names are validated here too, so
+# the sudo grant can't be widened into arbitrary apt arguments.
+set -euo pipefail
+
+usage() {
+  echo "usage: lm-os-update update|dist-upgrade|upgrade-only PKG...|reboot" >&2
+  exit 2
+}
+
+case "${1:-}" in
+  update|dist-upgrade|reboot) ;;
+  upgrade-only)
+    [ $# -gt 1 ] || { echo "lm-os-update: no packages given" >&2; exit 2; }
+    for p in "${@:2}"; do
+      [[ "$p" =~ ^[a-z0-9][a-z0-9+.-]*(:[a-z0-9-]+)?$ ]] \
+        || { echo "lm-os-update: invalid package name: $p" >&2; exit 2; }
+    done ;;
+  *) usage ;;
+esac
+
+# lm.service's CapabilityBoundingSet also bounds this sudo'd child, so "root"
+# here lacks CAP_CHOWN/CAP_DAC_OVERRIDE/CAP_FOWNER: apt can't hand its _apt
+# download sandbox the files it needs ("open (13: Permission denied)") and dpkg
+# can't set file ownership. Re-run in a transient unit owned by PID 1, which has
+# the full capability set. --wait --pipe keeps stdout/stderr and the exit code.
+if [ "$(id -u)" = 0 ] && [ -z "${LM_OS_UPDATE_UNIT:-}" ] \
+   && [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
+  exec systemd-run --wait --pipe --quiet --collect \
+    --description="LM OS update ($1)" --setenv=LM_OS_UPDATE_UNIT=1 "$0" "$@"
+fi
+
+export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a
+CONF=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
+case "$1" in
+  update)
+    exec apt-get update -qq -o DPkg::Lock::Timeout=120 ;;
+  dist-upgrade)
+    exec apt-get dist-upgrade -y "${CONF[@]}" -o DPkg::Lock::Timeout=600 ;;
+  upgrade-only)
+    shift
+    exec apt-get install --only-upgrade -y "${CONF[@]}" -o DPkg::Lock::Timeout=600 "$@" ;;
+  reboot)
+    exec shutdown -r +1 "LM: operator-approved reboot" ;;
+esac
