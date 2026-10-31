@@ -419,6 +419,25 @@ def _maybe_reload_on_code_change(orig_mtime):
             logger.error(f"WATCHDOG: self-reload exec failed ({e}); continuing on old code.")
 
 
+_os_update_thread = None
+
+
+def handle_os_update_request():
+    """Run an OS Updates apply/reboot queued by ab.service (see
+    os_updates_ab.py). In a thread: an apt run can take many minutes and must
+    not hold up the health checks below."""
+    global _os_update_thread
+    import threading
+    import os_updates_ab
+    if not os.path.exists(os_updates_ab.REQUEST_FILE):
+        return
+    if _os_update_thread is not None and _os_update_thread.is_alive():
+        return
+    logger.info("os-update: running a request from ab.service")
+    _os_update_thread = threading.Thread(target=os_updates_ab.run_request, daemon=True)
+    _os_update_thread.start()
+
+
 def main():
     logger.info("AppBuilder Watchdog started.")
     _reset_stale_ollama_status()
@@ -435,6 +454,9 @@ def main():
         try: handle_ollama_setup_request()
         except Exception as e:  # noqa: BLE001
             logger.error(f"ollama-setup handler error: {e}")
+        try: handle_os_update_request()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"os-update handler error: {e}")
         try: handle_restart_request()
         except Exception as e:  # noqa: BLE001
             logger.error(f"restart-request handler error: {e}")

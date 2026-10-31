@@ -450,19 +450,23 @@ fi
 echo "installer completed but no binary at $HOME_DIR/.local/bin/claude"; exit 1
 HELPER
 
+# OS Updates helper (verbatim copy of lm's scripts/lm-os-update): the watchdog
+# patches/reboots this host through it when the hub's OS Updates asks.
+install -m 0755 "${INSTALL_DIR}/lm-os-update" /usr/local/bin/lm-os-update
 chown root:root /usr/local/bin/ab-self-restart /usr/local/bin/ab-sandbox /usr/local/bin/ab-ollama-setup /usr/local/bin/ab-claude-install
 chmod 0755 /usr/local/bin/ab-self-restart /usr/local/bin/ab-sandbox /usr/local/bin/ab-ollama-setup /usr/local/bin/ab-claude-install
 
-# Sudoers: svc_bg may invoke ONLY these four exact paths, passwordless.
+# Sudoers: svc_bg may invoke ONLY these five exact paths, passwordless.
 # No direct systemctl, no docker, no apt — least privilege.
 mkdir -p /etc/sudoers.d   # belt-and-suspenders: exists once `sudo` is installed
 cat > /etc/sudoers.d/ab <<SUDOERS
-# Grants the ab service user (svc_bg) passwordless access to its four
+# Grants the ab service user (svc_bg) passwordless access to its five
 # narrow root helpers ONLY. Mirrors lm/install_all.sh's /etc/sudoers.d/lm.
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/ab-self-restart
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/ab-sandbox *
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/ab-ollama-setup *
 ${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/ab-claude-install *
+${SVC_USER} ALL=(root) NOPASSWD: /usr/local/bin/lm-os-update *
 SUDOERS
 chmod 440 /etc/sudoers.d/ab
 # Validate the sudoers syntax before leaving it in place (visudo -c would
