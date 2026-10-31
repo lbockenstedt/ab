@@ -1740,7 +1740,7 @@ class HubAgentClient:
 
         if cmd_type in ("OS_UPDATE_CHECK", "OS_UPDATE_APPLY",
                         "OS_UPDATE_APPLY_PACKAGES", "OS_REBOOT"):
-            # Hub OS Updates panel. Read-only on this host — see os_updates_ab.py.
+            # Hub OS Updates panel. Apply/reboot run via the watchdog — see os_updates_ab.py.
             if self._ws is None:
                 return
             import os_updates_ab
