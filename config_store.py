@@ -14,24 +14,32 @@ The one adaptation required to preserve behavior: write_startup_stamp records th
 code). ``__file__`` here would be config_store.py, so it explicitly reads the
 main module's file instead.
 """
+# os builds paths and swaps files; json reads/writes the stores; git reads the running
+# commit for the startup stamp; datetime timestamps records.
 import os
 import json
 import git
 from datetime import datetime
 
+# Shared AppBuilder logger (main defines it before importing this module).
 from main import logger
 
+# Directory that holds every persistent AppBuilder file.
 # Persistent Configuration Paths
 CONFIG_DIR = "/etc/ab"
+# Main settings file, and the .env file with secrets for the service.
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ENV_FILE = os.path.join(CONFIG_DIR, ".env")
+# Record of every issue AppBuilder has handled and its status.
 STATE_FILE = os.path.join(CONFIG_DIR, "processed_issues.json")
+# Saved PR pre-review results shown on the "PRs Reviewed" page.
 PR_REVIEWS_FILE = os.path.join(CONFIG_DIR, "pr_reviews.json")
 # Lifetime merge ledger. pr_reviews.json is a ring buffer capped at
 # _PR_REVIEWS_MAX, so counting merged PRs by scanning it yields "merged among
 # the last N reviewed" — a number that goes DOWN whenever an older merged
 # record is evicted to make room. This file is never trimmed.
 PR_MERGE_LEDGER_FILE = os.path.join(CONFIG_DIR, "pr_merge_ledger.json")
+# Update-recovery state, self-log scan position, chat conversations, and tok/s samples.
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
 SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
 CHAT_HISTORY_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
@@ -43,6 +51,7 @@ LLM_TPS_FILE = os.path.join(CONFIG_DIR, "llm_tps.json")
 #: functions live here — this constant just keeps the path centralized with
 #: every other state file, per this module's existing convention.
 LLM_PERF_FILE = os.path.join(CONFIG_DIR, "llm_perf.json")
+# VERSION file in the working directory (the deployed checkout).
 VERSION_FILE = os.path.join(os.getcwd(), "VERSION")
 
 # Chat-agent configuration defaults. Applied (without overriding user values) by
@@ -99,17 +108,24 @@ def _atomic_write_json(path, data, *, indent=2, chmod=None):
     Raises on failure after removing the temp file: callers own their own
     fallback and logging, so the error must still reach them.
     """
+    # Temporary file written first, then renamed over the real one.
     tmp = path + ".tmp"
+    # Any failure removes the temp file and re-raises (see below).
     try:
+        # Make sure the parent directory exists.
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        # Write the JSON to the temp file.
         with open(tmp, "w") as f:
             json.dump(data, f, indent=indent)
+        # Optionally restrict permissions (e.g. 0600 for files holding secrets).
         if chmod is not None:
             try:
                 os.chmod(tmp, chmod)
             except Exception:
                 pass
+        # Atomically swap the finished file into place.
         os.replace(tmp, path)
+    # Clean up the temp file, then let the caller handle the error.
     except Exception:
         try:
             os.remove(tmp)
@@ -138,6 +154,7 @@ def save_config(config):
         # permission failure still raises and still lands in the fallback below.
         _atomic_write_json(CONFIG_FILE, config, chmod=0o600)
         logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
+    # Persistent location failed: fall back to ./config.json in the working directory.
     except Exception as e:
         logger.warning(f"Could not save to persistent storage ({e}), falling back to local config.json")
         try:
@@ -146,6 +163,7 @@ def save_config(config):
             logger.error(f"Critical failure saving config: {fe}")
 
 def load_config():
+    """Load settings from /etc/ab/config.json, else ./config.json, else built-in defaults."""
     # Try persistent config first
     config = None
     if os.path.exists(CONFIG_FILE):
@@ -158,6 +176,7 @@ def load_config():
         except Exception as e:
             logger.error(f"Error reading persistent config {CONFIG_FILE}: {e}")
             config = None
+    # Built-in defaults used when no config file can be read at all.
     # Fallback to local config
     if config is None:
         try:
@@ -187,14 +206,18 @@ def load_config():
     return config
 
 def load_processed():
+    # Persistent location first.
     # Try persistent state first
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
                 data = json.load(f)
+                # Old format was a plain list of issue ids; convert to the dict format, marking them
+                # fixed.
                 if isinstance(data, list):
                     return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
                 return data
+        # Unreadable file: try the fallback location.
         except: pass
     # Fallback to local state
     if os.path.exists("processed_issues.json"):
@@ -205,6 +228,7 @@ def load_processed():
                     return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
                 return data
         except: pass
+    # No history anywhere.
     return {}
 
 def save_processed(processed):
@@ -219,6 +243,7 @@ def save_processed(processed):
         _atomic_write_json(STATE_FILE, processed)
     except Exception as e:
         logger.error(f"Error saving to persistent state file {STATE_FILE}: {e}")
+        # Persistent location failed: fall back to the working directory.
         try:
             # Fallback: Local directory
             _atomic_write_json("processed_issues.json", processed)
@@ -232,14 +257,17 @@ def load_pr_reviews():
     Terminal PRs (merged/denied) are closed and never re-scanned, so after a
     restart they vanished from the list entirely; approved-but-open PRs lost
     their APPROVED badge. Persisting the store fixes that."""
+    # Read the file if present; only a dict is accepted.
     if os.path.exists(PR_REVIEWS_FILE):
         try:
             with open(PR_REVIEWS_FILE, "r") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
                     return data
+        # A bad file is logged and treated as empty.
         except Exception as e:
             logger.error(f"Error loading PR reviews from {PR_REVIEWS_FILE}: {e}")
+    # No saved reviews.
     return {}
 
 
@@ -249,6 +277,7 @@ def save_pr_reviews(pr_reviews):
     Written via a temp file + os.replace (see save_config) so a crash mid-write
     can't leave a truncated/empty PR_REVIEWS_FILE for the next load to choke on.
     """
+    # Atomic write; failures are logged, not raised.
     try:
         _atomic_write_json(PR_REVIEWS_FILE, pr_reviews)
     except Exception as e:
@@ -265,6 +294,8 @@ def load_pr_merge_ledger():
     poll. Re-recording a key that is already present is a no-op, so the tally
     is idempotent by construction and can only ever go up.
     """
+    # Read the file if present; keep only the two known keys whose values are lists,
+    # converting each list to a set.
     if os.path.exists(PR_MERGE_LEDGER_FILE):
         try:
             with open(PR_MERGE_LEDGER_FILE, "r") as f:
@@ -272,6 +303,7 @@ def load_pr_merge_ledger():
             if isinstance(data, dict):
                 return {k: set(v) for k, v in data.items()
                         if k in ("merged", "auto_merged") and isinstance(v, list)}
+        # A bad file is logged and treated as empty.
         except Exception as e:
             logger.error(f"Error loading PR merge ledger from {PR_MERGE_LEDGER_FILE}: {e}")
     return {}
@@ -280,6 +312,7 @@ def load_pr_merge_ledger():
 def save_pr_merge_ledger(ledger):
     """Persist the lifetime merge ledger. Sets are stored as sorted lists so the
     file is stable/diffable and does not churn on every write."""
+    # Atomic write of sorted lists; failures are logged, not raised.
     try:
         _atomic_write_json(PR_MERGE_LEDGER_FILE,
                            {k: sorted(v) for k, v in (ledger or {}).items()})
@@ -300,14 +333,18 @@ def load_llm_tps():
     trusted: a malformed entry would poison the averages, and the cost of
     dropping it is only that the numbers rebuild.
     """
+    # No saved samples yet.
     if not os.path.exists(LLM_TPS_FILE):
         return {}
+    # Read the file; any error is logged and treated as empty.
     try:
         with open(LLM_TPS_FILE, "r") as f:
             data = json.load(f)
+        # Only a {model: [numbers]} dict is accepted.
         if not isinstance(data, dict):
             return {}
         out = {}
+        # Keep only positive, plausible numbers per model, and only the last 20.
         for model, samples in data.items():
             if not isinstance(samples, list):
                 continue
@@ -328,6 +365,7 @@ def save_llm_tps(llm_tps):
     process death mid-write must not leave a truncated JSON that load_llm_tps
     then discards -- losing the very history the cache exists to keep.
     """
+    # Compact (no indent) atomic write; failures are logged, not raised.
     try:
         _atomic_write_json(LLM_TPS_FILE, llm_tps, indent=None)
     except Exception as e:
@@ -336,11 +374,13 @@ def save_llm_tps(llm_tps):
 
 def load_update_state():
     """Loads the update state for recovery."""
+    # Read the recovery state if the file exists; a bad file falls through to the default.
     if os.path.exists(UPDATE_STATE_FILE):
         try:
             with open(UPDATE_STATE_FILE, "r") as f:
                 return json.load(f)
         except: pass
+    # Default: no known-good commit and no failed commits.
     return {"last_known_good_commit": None, "failed_commits": []}
 
 def save_update_state(state):
@@ -351,6 +391,7 @@ def save_update_state(state):
     on -- this file specifically backs update-recovery, so a corrupt read here
     would defeat the recovery mechanism it exists for.
     """
+    # Atomic write; failures are logged, not raised.
     try:
         _atomic_write_json(UPDATE_STATE_FILE, state)
     except Exception as e:
@@ -358,10 +399,13 @@ def save_update_state(state):
 
 
 def get_version():
+    """Return the contents of the VERSION file, or "Unknown" if it cannot be read."""
+    # Read and trim the version string; any error gives "Unknown".
     try:
         with open(VERSION_FILE, "r") as f: return f.read().strip()
     except: return "Unknown"
 
+# File recording which commit/process is running, read by the watchdog.
 STARTUP_STAMP_FILE = os.path.join(CONFIG_DIR, "startup_stamp.json")
 
 def write_startup_stamp():
@@ -369,13 +413,16 @@ def write_startup_stamp():
     main.py mtime. The watchdog reads this to detect stale-running code (disk updated
     but the process never restarted) and force a restart to load the pending update.
     Also drives the Diagnostics panel's running-vs-disk version comparison."""
+    # Never let a stamp failure stop startup; it is only logged.
     try:
         import main  # for main.__file__ — the stamp records main.py's mtime, not config_store.py's
+        # Current git commit of the working directory, or "unknown".
         commit = "unknown"
         try:
             commit = git.Repo(os.getcwd()).head.commit.hexsha
         except Exception as ge:
             logger.warning(f"Startup stamp: could not read git commit: {ge}")
+        # Commit, version, start time, process id and main.py's modification time.
         stamp = {
             "commit": commit,
             "version": get_version(),
@@ -383,12 +430,14 @@ def write_startup_stamp():
             "pid": os.getpid(),
             "main_mtime": os.path.getmtime(main.__file__),
         }
+        # Write the stamp atomically and log a short summary.
         _atomic_write_json(STARTUP_STAMP_FILE, stamp)
         logger.info(f"Startup stamp written: commit={commit[:7] if commit != 'unknown' else 'unknown'} pid={os.getpid()}")
     except Exception as e:
         logger.warning(f"Could not write startup stamp: {e}")
 
 
+# Names re-exported by main via "from config_store import *".
 __all__ = [
     "_atomic_write_json",
     "load_llm_tps", "save_llm_tps", "LLM_TPS_FILE", "LLM_PERF_FILE",

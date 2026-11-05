@@ -61,21 +61,30 @@ _DEFAULT_MODELS = {
 
 
 def _family(provider):
+    """Map a provider name to its cloud family, or None for local/unknown providers."""
+    # Normalise case and whitespace so "Anthropic " and "anthropic" match.
     p = (provider or "").lower().strip()
+    # Anthropic models are routed using the Anthropic tier table.
     if p == "anthropic":
         return "anthropic"
+    # Google is accepted under either its company or product name.
     if p in ("google", "gemini"):
         return "google"
     return None  # local / other → not routed
 
 
 def task_tier(task_kind, config=None):
+    """Return the tier (small/medium/large) for a task kind, honouring config overrides."""
+    # Start from the built-in task tiers (copied so the defaults are never mutated).
     tiers = dict(_DEFAULT_TASK_TIERS)
+    # Merge any per-task overrides from config on top of the defaults.
     if config:
         try:
             tiers.update(config.get("router_task_tiers") or {})
+        # A malformed override must never break model selection; keep the defaults instead.
         except Exception:
             pass
+    # Unknown or missing task kinds fall back to the "default" tier.
     return tiers.get(task_kind or "default", tiers["default"])
 
 
@@ -86,30 +95,40 @@ def pick_model(task_kind, provider, config=None, default=None):
     family without them (google, by design) and anything local → ``default``,
     the slot's configured model. Router disabled → default.
     """
+    # Treat a missing config as empty so .get() works below.
     config = config or {}
+    # Any unexpected error below falls back to the slot's own model.
     try:
+        # The router can be switched off entirely via config.
         if not config.get("router_enabled", True):
             return default
+        # Local or unknown providers are never re-targeted.
         fam = _family(provider)
         if not fam:
             return default
+        # Work out how big a model this task needs.
         tier = task_tier(task_kind, config)
         # .get: a family may deliberately carry no defaults (see google above),
         # in which case nothing substitutes and `default` -- the slot's own model
         # -- is returned.
         catalog = dict(_DEFAULT_MODELS.get(fam) or {})
+        # Apply any config overrides for this family, then pick the tier's model if one exists.
         catalog.update((config.get("router_models") or {}).get(fam) or {})
         return catalog.get(tier) or default
+    # A bad config shape must never stop an LLM call; use the slot's model.
     except Exception:
         return default
 
 
 def recommendations(config=None):
     """Task → tier → (anthropic model, gemini model) table — for docs/UI/tooltips."""
+    # One row per task kind, sorted alphabetically with "default" pushed to the end.
     out = []
     for task in sorted(_DEFAULT_TASK_TIERS, key=lambda t: (t == "default", t)):
+        # "default" is a fallback, not a real task, so it is not listed.
         if task == "default":
             continue
+        # Look up the tier and the model each cloud family would use for this task.
         tier = task_tier(task, config)
         out.append({
             "task": task,
@@ -117,4 +136,5 @@ def recommendations(config=None):
             "anthropic": pick_model(task, "anthropic", config),
             "google": pick_model(task, "google", config) or "(slot's own model)",
         })
+    # Return the table for display.
     return out

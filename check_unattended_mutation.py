@@ -26,27 +26,39 @@ whole PR looks like a test (path contains a `test`/`tests` segment, or the
 filename matches `test_*` / `*_test.*` / `*.test.*` / `*.spec.*`), emit one
 advisory finding naming the file(s).
 """
+# Regular expressions detect loops, sleeps, mutation calls and test file paths.
 import re
 
+# Signal 1a: a "while True:" loop.
 _LOOP_RE = re.compile(r"\bwhile\s+True\s*:")
+# Signal 1b: any sleep(...) call (time.sleep or asyncio.sleep).
 _SLEEP_RE = re.compile(r"\bsleep\s*\(")
+# Signal 2: a call whose name starts with a delete-like verb (delete_, purge, drop...).
 _MUTATION_RE = re.compile(
     r"(?i)\b(delete|purge|destroy|remove|scrub|evict|shed|drop|wipe)\w*\s*\("
 )
+# Paths that look like tests: a test/tests directory, test_*.ext, *_test.ext,
+# *.test.ext or *.spec.ext.
 _TEST_PATH_RE = re.compile(
     r"(?i)(^|/)(tests?)(/|$)|(^|/)test_[^/]+\.\w+$|[^/]+_test\.\w+$|"
     r"[^/]+\.(test|spec)\.\w+$"
 )
 
+# Only the first 40 changed files are scanned, to bound work on huge PRs.
 _MAX_FILES = 40
 
 
 def _added_lines(patch):
+    """Yield the text of every added ("+") line in a unified diff patch, without the "+"."""
+    # No patch text (binary or oversized file): yield nothing.
     if not patch:
         return
+    # Walk the diff line by line.
     for line in patch.splitlines():
+        # Skip the "+++ b/file" header, which is not an added line.
         if line.startswith("+++"):
             continue
+        # Added lines start with "+"; strip that marker.
         if line.startswith("+"):
             yield line[1:]
 
@@ -56,21 +68,30 @@ def check_unattended_mutation(files):
     already fetched). Returns a list of {level, title, detail} findings,
     level='advisory'. Best-effort: a file with no .patch (binary/too-large) is
     silently skipped; never raises."""
+    # Whether the PR touches any test file, and which files trip both signals.
     has_test_file = False
     flagged = []
+    # Look at each changed file (capped).
     for f in list(files)[:_MAX_FILES]:
+        # Any test-looking file in the PR means tests were (probably) added.
         filename = getattr(f, "filename", "") or ""
         if _TEST_PATH_RE.search(filename):
             has_test_file = True
+        # Files without a patch cannot be scanned.
         patch = getattr(f, "patch", None)
         if not patch:
             continue
+        # Only added lines count.
         added = "\n".join(_added_lines(patch))
+        # Flag the file if it adds a loop, a sleep and a mutation call.
         if _LOOP_RE.search(added) and _SLEEP_RE.search(added) and _MUTATION_RE.search(added):
             flagged.append(filename)
+    # Nothing flagged, or tests are included: no finding.
     if not flagged or has_test_file:
         return []
+    # List the flagged files in backticks.
     names = ", ".join("`%s`" % f for f in flagged)
+    # One advisory finding asking for a test of the loop's safety rails.
     return [{
         "level": "advisory",
         "title": "Unattended background loop + data mutation, no test file in this PR",

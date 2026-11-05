@@ -46,6 +46,7 @@ import logging
 
 import model_registry
 
+# Logger and the current config schema version.
 logger = logging.getLogger("AppBuilder")
 
 CONFIG_VERSION = 6
@@ -53,6 +54,7 @@ CONFIG_VERSION = 6
 
 def _slot_entry_id(config, slot):
     """The entry id assigned to a legacy slot number (str or int), or None."""
+    # Look up the slot in the old slot table.
     slots = config.get("llm_slots") or {}
     return slots.get(str(slot))
 
@@ -60,6 +62,7 @@ def _slot_entry_id(config, slot):
 def _model_key_str(provider, base_url, model):
     """A stable ``provider|base_url|model`` key string (base_url normalised the
     same way llm_client._model_key normalises its tuple)."""
+    # Normalise each part and join with "|".
     return "|".join([
         (provider or "").lower().strip(),
         (base_url or "").strip().rstrip("/"),
@@ -69,12 +72,14 @@ def _model_key_str(provider, base_url, model):
 
 def _chat_pin_from_slot(config):
     """Resolve the old ``chat_slot`` pin to a ModelKey string via its entry."""
+    # No chat slot, or slot not assigned: no pin.
     slot = config.get("chat_slot")
     if slot in (None, ""):
         return None
     entry_id = _slot_entry_id(config, slot)
     if not entry_id:
         return None
+    # Find the slot's entry and build its key, using the provider's saved base URL as a fallback.
     credentials = config.get("llm_credentials") or {}
     for entry in (config.get("llm_entries") or []):
         if entry.get("id") != entry_id:
@@ -96,10 +101,13 @@ def _seed_registry_stubs(config):
     pulls in `main`, which we must not trigger at migration time)."""
     import os
 
+    # Unique (provider, model) pairs, in order.
     seen = []
     seen_keys = set()
 
     def _add(provider, model):
+        """Record a (provider, model) pair once, ignoring blanks."""
+        # Normalise and skip blanks and duplicates.
         provider = (provider or "").lower().strip()
         model = (model or "").strip()
         if not provider or not model:
@@ -110,12 +118,14 @@ def _seed_registry_stubs(config):
         seen_keys.add(key)
         seen.append(key)
 
+    # Collect pairs from the entries and from the legacy numbered slots.
     for entry in (config.get("llm_entries") or []):
         _add(entry.get("provider"), entry.get("model"))
     for n in range(1, 9):
         _add(config.get(f"LLM_PROVIDER_{n}") or os.getenv(f"LLM_PROVIDER_{n}", ""),
              config.get(f"LLM_MODEL_{n}") or os.getenv(f"LLM_MODEL_{n}", ""))
 
+    # Count pairs the registry already knows; add stubs for the rest.
     classified = sum(1 for p, m in seen if model_registry.find_matching_rules(p, m, config))
     stubs = model_registry.registry_sync(seen, config)
     if stubs:
@@ -136,6 +146,7 @@ def upgrade_registry(config):
     Every helper here is append-only, idempotent, and skips rules the operator
     curated themselves, so running this on every boot is safe.
     """
+    # Only works on a config that has a registry list.
     if not isinstance(config, dict) or not isinstance(config.get("model_registry"), list):
         return config, False
     changed = False
@@ -148,23 +159,27 @@ def upgrade_registry(config):
         config["model_registry"] = _topped
         changed = True
         logger.info("LLM registry: added missing local/free rules %s.", _added)
+    # Add rules for capable self-hosted models.
     _topped, _added_cap = model_registry.upgrade_capable_local_rules(config["model_registry"])
     if _added_cap:
         config["model_registry"] = _topped
         changed = True
         logger.info("LLM registry: added capable self-hosted model rules %s.", _added_cap)
+    # Mark claude_cli as paid (frontier).
     _repaired, _reclassified = model_registry.reclassify_claude_cli_paid(config["model_registry"])
     if _reclassified:
         config["model_registry"] = _repaired
         changed = True
         logger.info("LLM registry: reclassified claude_cli free -> frontier (bills the "
                     "operator's Anthropic account).")
+    # Add per-model claude_cli rules.
     _topped, _added_cc = model_registry.upgrade_claude_cli_model_rules(config["model_registry"])
     if _added_cc:
         config["model_registry"] = _topped
         changed = True
         logger.info("LLM registry: added per-model claude_cli capability rules %s "
                     "(Haiku=medium, Sonnet/Opus=large).", _added_cc)
+    # Add per-model copilot rules.
     _topped, _added_copilot = model_registry.upgrade_copilot_model_rules(config["model_registry"])
     if _added_copilot:
         config["model_registry"] = _topped
@@ -172,6 +187,7 @@ def upgrade_registry(config):
         logger.info("LLM registry: added per-model copilot capability rules %s "
                     "(Opus/Sonnet/GPT-5=frontier, Haiku/GPT-4/mini=cheap).",
                     _added_copilot)
+    # Add the OpenRouter free router rule.
     _topped, _added_router = model_registry.upgrade_openrouter_free_router_rule(config["model_registry"])
     if _added_router:
         config["model_registry"] = _topped
@@ -179,18 +195,21 @@ def upgrade_registry(config):
         logger.info("LLM registry: added the OpenRouter Free Models Router rule "
                     "(openrouter/free -> free tier).")
 
+    # Add per-model ollama_cloud rules.
     _topped, _added_oc = model_registry.upgrade_ollama_cloud_model_rules(config["model_registry"])
     if _added_oc:
         config["model_registry"] = _topped
         changed = True
         logger.info("LLM registry: added per-model ollama_cloud capability rules %s "
                     "(nano/flash/20b=medium, ultra=large).", _added_oc)
+    # Turn on tool support for ollama_cloud.
     _repaired, _oc_tools = model_registry.enable_ollama_cloud_tools(config["model_registry"])
     if _oc_tools:
         config["model_registry"] = _repaired
         changed = True
         logger.info("LLM registry: enabled supports_tools on the ollama_cloud rule "
                     "(the client has always sent tools; the flag was wrong).")
+    # Turn on tool support for copilot.
     _cp_tools, _cp_changed = model_registry.enable_copilot_tools(config["model_registry"])
     if _cp_changed:
         config["model_registry"] = _cp_tools
@@ -198,6 +217,7 @@ def upgrade_registry(config):
         logger.info("LLM registry: enabled supports_tools on the copilot rules "
                     "(_request_copilot has always sent tools; the flag was wrong, and it "
                     "hard-excluded every Copilot endpoint from tool-requiring jobs).")
+    # Fill in capability ranks.
     _ranked, _ranks = model_registry.backfill_capability_ranks(config["model_registry"])
     if _ranks:
         config["model_registry"] = _ranked
@@ -205,6 +225,7 @@ def upgrade_registry(config):
         logger.info("LLM registry: backfilled capability_rank and lifted the claude_cli "
                     "sonnet/haiku max_complexity caps (Opus now outranks Sonnet within "
                     "the frontier tier instead of losing to it on raw speed).")
+    # Fill in speed tiers.
     _sped, _speeds = model_registry.backfill_speed_tiers(config["model_registry"])
     if _speeds:
         config["model_registry"] = _sped
@@ -217,11 +238,13 @@ def upgrade_registry(config):
 
 def migrate(config):
     """Upgrade *config* in place to schema version 2. Returns (config, changed)."""
+    # Skip non-dicts and configs already at the current version.
     if not isinstance(config, dict):
         return config, False
     if config.get("llm_config_version") == CONFIG_VERSION:
         return config, False
 
+    # Entries assigned to any slot.
     slots = config.get("llm_slots") or {}
     slotted_entry_ids = {v for v in slots.values() if v}
 
@@ -241,6 +264,7 @@ def migrate(config):
     # llm_slots is fully consumed now.
     config.pop("llm_slots", None)
 
+    # Apply the registry top-ups.
     config, _ = upgrade_registry(config)
 
     # 6: capability seeding + one summary line.
@@ -252,5 +276,6 @@ def migrate(config):
     except Exception as e:  # noqa: BLE001 — seeding is best-effort, never blocks boot
         logger.warning("LLM registry capability seeding skipped during migration: %s", e)
 
+    # Record the new version.
     config["llm_config_version"] = CONFIG_VERSION
     return config, True

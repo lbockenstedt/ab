@@ -49,6 +49,7 @@ except ImportError:
 # Multi-Provider LLM Routing
 # ============================================================================
 
+# Base URLs and API version for the hosted providers.
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com"
@@ -64,10 +65,12 @@ OPENROUTER_HEADERS = {
     "HTTP-Referer": "https://github.com/lbockenstedt/ab",
     "X-Title": "AppBuilder",
 }
+# LM Studio's default local server.
 LMSTUDIO_BASE_URL = "http://localhost:1234/v1"  # LM Studio local OpenAI-compatible server
 LMSTUDIO_DEFAULT_PORT = 1234
 ANTHROPIC_API_VERSION = "2023-06-01"
 
+# Copilot OAuth client id, endpoints and editor version headers.
 # GitHub Copilot: OAuth device-flow → a long-lived GitHub OAuth token (stored as the
 # provider's api_key) → exchanged for a short-lived Copilot API token → used against the
 # OpenAI-compatible Copilot chat endpoint. Client id is the public VS Code / Copilot one.
@@ -88,6 +91,7 @@ def _chat_defaults():
     """Lazily resolve CHAT_CONFIG_DEFAULTS. llm_client is imported *before*
     config_store (main import order), so a module-level import would be circular;
     at call time config_store is fully loaded."""
+    # Import at call time; fall back to a minimal default.
     try:
         from config_store import CHAT_CONFIG_DEFAULTS
         return CHAT_CONFIG_DEFAULTS
@@ -112,11 +116,13 @@ def _normalize_lmstudio_url(base_url):
     """
     from urllib.parse import urlsplit, urlunsplit
 
+    # Empty: use the default. Add http:// when no scheme was given.
     base = (base_url or "").strip()
     if not base:
         return LMSTUDIO_BASE_URL
     if "://" not in base:
         base = "http://" + base
+    # Split out host and port, defaulting the port.
     parts = urlsplit(base)
     host = parts.hostname or ""
     port = parts.port
@@ -130,6 +136,7 @@ def _normalize_lmstudio_url(base_url):
         path = "/v1"
     else:
         path = path.rstrip("/")
+    # Rebuild the URL.
     netloc = f"{host}:{port}" if host else f":{port}"
     return urlunsplit((parts.scheme or "http", netloc, path, "", ""))
 
@@ -143,6 +150,7 @@ def _is_lmstudio(provider):
     servers coexist (e.g. a workstation instance and a second box). Matching by
     prefix means adding further instances needs no code change here.
     """
+    # Prefix match on the provider name.
     return (provider or "").lower().strip().startswith("lmstudio")
 
 
@@ -159,6 +167,7 @@ def _is_ollama(provider):
     remote host on the LAN/cloud). Matching by prefix means adding further
     instances needs no code change here.
     """
+    # Prefix match on the provider name.
     return (provider or "").lower().strip().startswith("ollama")
 
 
@@ -179,6 +188,7 @@ def _is_ollama_cloud(provider):
     every call. Kept as an exact-name check (not a prefix) so a self-hosted slot
     can never be accidentally forced to carry a key.
     """
+    # Exact name match.
     return (provider or "").lower().strip() == OLLAMA_CLOUD_PROVIDER
 
 
@@ -186,6 +196,7 @@ def _ollama_base_url(provider, base_url):
     """Resolve the endpoint for an Ollama slot: an explicit per-entry ``base_url``
     always wins; otherwise Ollama Cloud defaults to ollama.com and a self-hosted
     slot to localhost."""
+    # An explicit URL wins; otherwise cloud or localhost.
     if base_url:
         return base_url
     return (OLLAMA_CLOUD_BASE_URL if _is_ollama_cloud(provider)
@@ -219,15 +230,18 @@ def claude_bin(config=None):
     interactive shell, which is the usual reason this slot reports "not found"
     on a box where Claude Code is plainly installed.
     """
+    # A configured path wins.
     cfg = config if config is not None else load_config()
     override = str((cfg or {}).get("claude_binary") or "").strip()
     if override:
         p = os.path.expanduser(override)
         # Honour the override even if not executable so the UI can report WHY.
         return p if os.path.exists(p) else None
+    # Then PATH.
     found = shutil.which("claude")
     if found:
         return found
+    # Finally the well-known install paths.
     for cand in _CLAUDE_FALLBACK_PATHS:
         p = os.path.expanduser(cand)
         if os.path.isfile(p) and os.access(p, os.X_OK):
@@ -237,6 +251,7 @@ def claude_bin(config=None):
 
 def claude_bin_or_raise(config=None):
     """``claude_bin`` but raising the operator-facing error when unresolved."""
+    # Resolve it, or raise an error explaining where we looked.
     p = claude_bin(config)
     if not p:
         raise Exception(
@@ -250,12 +265,14 @@ def claude_bin_or_raise(config=None):
 
 def _is_copilot(provider):
     """True for any GitHub Copilot provider (``copilot``, ``copilot2``, …)."""
+    # Prefix match on the provider name.
     return (provider or "").lower().strip().startswith("copilot")
 
 
 def _copilot_headers(bearer):
     """Headers the Copilot API requires (it rejects requests without the editor +
     integration identifiers)."""
+    # Bearer token plus the editor and integration headers.
     return {
         "Authorization": f"Bearer {bearer}",
         "Content-Type": "application/json",
@@ -269,12 +286,15 @@ def _copilot_headers(bearer):
 def _copilot_api_token(gh_token):
     """Exchange the stored GitHub OAuth token for a short-lived Copilot API token,
     cached until ~1 min before expiry. Raises on failure (e.g. no Copilot subscription)."""
+    # Need a GitHub token.
     if not gh_token:
         raise Exception("Copilot not authenticated — sign in with GitHub (device flow) first.")
+    # Use the cached token if it has more than a minute left.
     with _COPILOT_TOKEN_LOCK:
         cached = _COPILOT_TOKEN_CACHE.get(gh_token)
         if cached and cached[1] - 60 > time.time():
             return cached[0]
+    # Otherwise exchange the GitHub token for a new one.
     resp = requests.get(COPILOT_TOKEN_URL, headers={
         "Authorization": f"token {gh_token}",
         "Editor-Version": COPILOT_EDITOR_VERSION,
@@ -283,11 +303,13 @@ def _copilot_api_token(gh_token):
     if resp.status_code != 200:
         raise Exception(f"Copilot token exchange failed ({resp.status_code}): {resp.text[:200]} "
                         "— is a GitHub Copilot subscription active for this account?")
+    # Read the token and expiry (default about 25 minutes).
     data = resp.json()
     token = data.get("token")
     expires = int(data.get("expires_at") or (time.time() + 1500))
     if not token:
         raise Exception("Copilot token exchange returned no token.")
+    # Cache it.
     with _COPILOT_TOKEN_LOCK:
         _COPILOT_TOKEN_CACHE[gh_token] = (token, expires)
     return token
@@ -299,6 +321,7 @@ def _provider_is_nokey(provider):
     explicitly excluded — it is the one ``ollama*`` slot that DOES need a key, and
     treating it as no-key would mark a key-less cloud slot 'configured' only for
     every call to 401."""
+    # claude_cli, LM Studio and self-hosted Ollama need no key.
     return (provider == "claude_cli"
             or _is_lmstudio(provider)
             or (_is_ollama(provider) and not _is_ollama_cloud(provider)))
@@ -309,6 +332,7 @@ def _provider_configured(provider, key, model):
     provider (claude_cli session auth, LM Studio / self-hosted Ollama). Centralizes
     the no-key exception so every configured-check site agrees on what "configured"
     means."""
+    # Needs a model, and a key unless the provider needs none.
     return bool(model and (key or _provider_is_nokey(provider)))
 
 
@@ -319,6 +343,7 @@ def _record_provider_result(n, status, reason=""):
     the Diagnostics panel so they are visible without reading CLI logs. Best-effort:
     never raises into the failover path.
     """
+    # Save the status, reason and time for this slot.
     try:
         main.state["provider_last_result"][n] = {
             "status": status,
@@ -331,6 +356,7 @@ def _record_provider_result(n, status, reason=""):
 
 def _find_claude_cli_slot(config):
     """Return the provider slot number (1-4) configured as claude_cli, or None."""
+    # Check slots 1-4.
     for n in (1, 2, 3, 4):
         provider, _, _, _ = _get_provider_config(n, config)
         if provider == "claude_cli":
@@ -338,6 +364,7 @@ def _find_claude_cli_slot(config):
     return None
 
 
+# Task kinds and slot numbers for the code, log and review pools.
 #: Task kinds that are LOG analysis rather than code work. Log review wants a
 #: different model from code repair — summarising noisy operational text is not
 #: the same job as writing a patch — so it gets its own provider pool instead of
@@ -362,6 +389,7 @@ _REVIEW_TASK_KINDS = frozenset({"review", "pr_confidence"})
 _ALL_SLOTS = _CODE_SLOTS + _LOG_SLOTS + _REVIEW_SLOTS
 
 
+# Cache of model lists, how long entries last, and its lock.
 #: Live model catalogue per (provider, base_url), so routing can check whether a
 #: model actually EXISTS on this account before spending a call on it. Cached:
 #: the listing is a network round-trip and routing runs on every task.
@@ -377,12 +405,14 @@ def _live_models(provider, api_key, base_url):
     endpoint) and callers MUST treat it as "do not block" — refusing to route on
     a failed lookup would be worse than the 404 it is trying to avoid.
     """
+    # Return the cached list if still fresh.
     key = ((provider or "").lower().strip(), (base_url or "").strip())
     now = time.time()
     with _MODEL_CATALOG_LOCK:
         hit = _MODEL_CATALOG.get(key)
         if hit and (now - hit[0]) < _MODEL_CATALOG_TTL_S:
             return hit[1]
+    # Otherwise fetch the provider's model names.
     try:
         # Lazy import: workers imports llm_client, so a module-level import here
         # would be a cycle.
@@ -393,11 +423,13 @@ def _live_models(provider, api_key, base_url):
     except Exception as e:  # noqa: BLE001 — never let a lookup break routing
         logger.debug("live model lookup failed for %s: %s", provider, e)
         names = None
+    # Cache the result, even None.
     with _MODEL_CATALOG_LOCK:
         _MODEL_CATALOG[key] = (now, names)
     return names
 
 
+# Dead routed models and their lock.
 #: Routed models that have 404'd for a provider — (provider, model) pairs.
 #: A router tier default the account cannot reach 404s on EVERY task of that
 #: tier. The retry-on-configured-model fallback below keeps the work flowing, but
@@ -409,6 +441,8 @@ _ROUTED_404_LOCK = threading.Lock()
 
 
 def _routed_model_dead(provider, model) -> bool:
+    """True if this (provider, model) has already returned 404 when routed to."""
+    # Missing names never count as dead.
     if not provider or not model:
         return False
     with _ROUTED_404_LOCK:
@@ -416,6 +450,8 @@ def _routed_model_dead(provider, model) -> bool:
 
 
 def _mark_routed_model_dead(provider, model) -> None:
+    """Remember that this (provider, model) returned 404."""
+    # Ignore missing names.
     if not provider or not model:
         return
     with _ROUTED_404_LOCK:
@@ -428,6 +464,7 @@ def _get_provider_config(n, config):
     Supports the new vault-based config (llm_credentials + llm_entries + llm_slots)
     with a transparent fallback to the legacy flat LLM_PROVIDER_N / LLM_API_KEY_N keys.
     """
+    # New config: find the entry assigned to this slot.
     slots = config.get("llm_slots") or {}
     entry_id = slots.get(str(n))
     if entry_id:
@@ -435,6 +472,7 @@ def _get_provider_config(n, config):
         credentials = config.get("llm_credentials") or {}
         entry = next((e for e in entries_list if e.get("id") == entry_id), None)
         if entry:
+            # Read provider and model, and the provider's shared credentials.
             provider = (entry.get("provider") or "openai").lower().strip()
             model = (entry.get("model") or "").strip()
             cred = credentials.get(provider) or {}
@@ -457,6 +495,7 @@ def _get_provider_config(n, config):
 
 def _get_provider_rpm(n, config):
     """Return RPM cap for slot n, from vault entry or legacy LLM_RPM_N key."""
+    # Use the slot's entry rpm if there is one, else the legacy key.
     slots = config.get("llm_slots") or {}
     entry_id = slots.get(str(n))
     if entry_id:
@@ -468,6 +507,7 @@ def _get_provider_rpm(n, config):
 
 def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
     """Parse a Retry-After header into a wait time in seconds."""
+    # Retry-After may be seconds or an HTTP date; cap it at backoff_max.
     if retry_after_header:
         try:
             return min(float(retry_after_header), backoff_max)
@@ -480,6 +520,7 @@ def _parse_retry_after(retry_after_header, backoff_base, backoff_max, attempt):
                     return min(max(0, wait), backoff_max)
             except Exception:
                 pass
+    # No header: exponential backoff with jitter.
     return min(backoff_base ** attempt, backoff_max) * random.uniform(0.5, 1.0)
 
 
@@ -512,6 +553,7 @@ def _gemini_type(v):
     Gemini rejects an array-valued `type` ("Proto field is not repeating").
     Returns ``(type_str_or_None, nullable)`` — the first non-"null" member and
     whether "null" was among the members (surfaced as OpenAPI `nullable`)."""
+    # A list: take the first non-null type and note whether null was present.
     if isinstance(v, (list, tuple)):
         nullable = "null" in v
         non_null = [t for t in v if t != "null"]
@@ -521,10 +563,12 @@ def _gemini_type(v):
 
 def _sanitize_gemini_schema(node):
     """Return a copy of a JSON-Schema node keeping only Gemini-accepted fields."""
+    # Recurse into lists; leave scalars alone.
     if isinstance(node, list):
         return [_sanitize_gemini_schema(n) for n in node]
     if not isinstance(node, dict):
         return node
+    # Copy each key, dropping or translating the ones Gemini rejects.
     out = {}
     for k, v in node.items():
         if k in _GEMINI_SCHEMA_DROP_KEYS:
@@ -545,6 +589,7 @@ def _sanitize_gemini_schema(node):
             out["anyOf"] = [_sanitize_gemini_schema(n) for n in (v or [])]
         elif k == "properties" and isinstance(v, dict):
             out[k] = {pk: _sanitize_gemini_schema(pv) for pk, pv in v.items()}
+        # Recurse into nested values.
         elif isinstance(v, (dict, list)):
             out[k] = _sanitize_gemini_schema(v)
         else:
@@ -564,12 +609,14 @@ def _tool_spec(t):
     directly, which KeyError'd('name') on every nested tool — breaking every
     non-Ollama reviewer (copilot, openai, anthropic, google) whenever the PR
     pre-review panel's fetch_repo_file tool was in play (ab#727)."""
+    # Unwrap the nested "function" shape.
     fn = t.get("function")
     return fn if isinstance(fn, dict) else t
 
 
 def _tools_to_openai(tools):
     """Convert either tool-schema shape (see _tool_spec) to OpenAI function-calling format."""
+    # Wrap each tool in OpenAI's function format.
     return [
         {"type": "function", "function": {"name": (fn := _tool_spec(t)).get("name", ""),
                                           "description": fn.get("description", ""),
@@ -580,6 +627,7 @@ def _tools_to_openai(tools):
 
 def _tools_to_anthropic(tools):
     """Convert either tool-schema shape (see _tool_spec) to Anthropic tool format."""
+    # Use Anthropic's input_schema field.
     return [
         {"name": (fn := _tool_spec(t)).get("name", ""), "description": fn.get("description", ""),
          "input_schema": fn.get("parameters", {"type": "object", "properties": {}, "required": []})}
@@ -594,6 +642,7 @@ def _tools_to_responses(tools):
     directly on the tool object rather than nested under a "function" key as
     chat/completions requires. Sending the nested shape is rejected outright.
     """
+    # Flat function entries.
     return [
         {"type": "function", "name": (fn := _tool_spec(t)).get("name", ""),
          "description": fn.get("description", ""),
@@ -611,11 +660,13 @@ def _responses_tool_calls(data):
     Returns None rather than [] when there are none, because the caller uses
     "no tool calls" to decide the turn is final.
     """
+    # Need a dict with an output list.
     if not isinstance(data, dict):
         return None
     out = data.get("output")
     if not isinstance(out, list):
         return None
+    # Collect each function_call item in our shape.
     calls = []
     for i, item in enumerate(out):
         if not isinstance(item, dict) or item.get("type") != "function_call":
@@ -630,15 +681,18 @@ def _responses_tool_calls(data):
 
 def _to_openai_messages(messages):
     """Adapt internal messages for the OpenAI API (normalises tool roles and tool_calls)."""
+    # Convert each message by role.
     result = []
     for m in messages:
         role = m.get("role")
+        # Tool results need a tool_call_id.
         if role == "tool":
             result.append({
                 "role": "tool",
                 "tool_call_id": m.get("tool_call_id") or m.get("name") or "unknown",
                 "content": m.get("content") or "",
             })
+        # Assistant tool calls need an id and JSON-string arguments.
         elif role == "assistant" and m.get("tool_calls"):
             tcs = []
             for idx, tc in enumerate(m["tool_calls"]):
@@ -652,6 +706,7 @@ def _to_openai_messages(messages):
                     "function": {"name": fn.get("name") or "", "arguments": args},
                 })
             result.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": tcs})
+        # Everything else: role and content.
         else:
             result.append({"role": role, "content": m.get("content") or ""})
     return result
@@ -659,6 +714,7 @@ def _to_openai_messages(messages):
 
 def _to_anthropic_messages(messages):
     """Convert internal messages to Anthropic format. Returns (system_str, messages_list)."""
+    # Collect system text separately and convert the rest.
     system = ""
     converted = []
     i = 0
@@ -669,6 +725,7 @@ def _to_anthropic_messages(messages):
             system += ("\n" if system else "") + (m.get("content") or "")
             i += 1
             continue
+        # Assistant: text plus a tool_use block per tool call.
         if role == "assistant":
             content = m.get("content") or ""
             tcs = m.get("tool_calls") or []
@@ -679,6 +736,7 @@ def _to_anthropic_messages(messages):
                 for tc in tcs:
                     fn = tc.get("function") or {}
                     args = fn.get("arguments") or {}
+                    # Arguments may be a JSON string; parse them.
                     if isinstance(args, str):
                         try:
                             args = json.loads(args)
@@ -694,6 +752,7 @@ def _to_anthropic_messages(messages):
             else:
                 converted.append({"role": "assistant", "content": content})
             i += 1
+        # Group consecutive tool results into one user message.
         elif role == "tool":
             tool_results = []
             while i < len(messages) and messages[i].get("role") == "tool":
@@ -704,10 +763,12 @@ def _to_anthropic_messages(messages):
                     "content": tm.get("content") or "",
                 })
                 i += 1
+            # Merge into a preceding user block list if there is one.
             if converted and converted[-1].get("role") == "user" and isinstance(converted[-1].get("content"), list):
                 converted[-1]["content"].extend(tool_results)
             else:
                 converted.append({"role": "user", "content": tool_results})
+        # Everything else: role and content.
         else:
             converted.append({"role": role, "content": m.get("content") or ""})
             i += 1
@@ -716,6 +777,7 @@ def _to_anthropic_messages(messages):
 
 def _to_google_contents(messages):
     """Convert internal messages to Google Gemini contents format. Returns (system_text, contents)."""
+    # Collect system text separately and convert the rest.
     system_text = ""
     contents = []
     for m in messages:
@@ -723,6 +785,7 @@ def _to_google_contents(messages):
         if role == "system":
             system_text += ("\n" if system_text else "") + (m.get("content") or "")
             continue
+        # Assistant becomes "model", with functionCall parts for tool calls.
         if role == "assistant":
             tcs = m.get("tool_calls") or []
             if tcs:
@@ -741,6 +804,7 @@ def _to_google_contents(messages):
                 contents.append({"role": "model", "parts": parts})
             else:
                 contents.append({"role": "model", "parts": [{"text": m.get("content") or ""}]})
+        # Tool results become functionResponse parts.
         elif role == "tool":
             contents.append({"role": "user", "parts": [{"functionResponse": {
                 "name": m.get("name") or m.get("tool_call_id") or "unknown",
@@ -753,6 +817,7 @@ def _to_google_contents(messages):
 
 def validate_llm_config_on_startup():
     """Validates that at least one LLM provider is fully configured."""
+    # Check slots 1 and 2.
     config = load_config()
     ok = False
     for n in (1, 2):
@@ -764,6 +829,7 @@ def validate_llm_config_on_startup():
             ok = True
         else:
             logger.info(f"LLM Provider {n}: not fully configured (provider={provider!r} model={model!r} key_set={bool(api_key)}).")
+    # Neither configured: log setup instructions.
     if not ok:
         logger.warning(
             "\n" + "=" * 78 + "\n"
@@ -784,6 +850,8 @@ def validate_llm_config_on_startup():
 class LLMCreditExhausted(Exception):
     """Raised immediately (no retry) when a provider signals billing/credit exhaustion."""
     def __init__(self, status_code, body, provider):
+        """Record the status code, response body and provider."""
+        # Keep the details for callers.
         self.status_code = status_code
         self.body = body
         self.provider = provider
@@ -803,6 +871,7 @@ class LlmHumanEscalationNeeded(Exception):
     pass
 
 
+# Message phrases that mean credits or quota ran out.
 _CREDIT_MSG_KEYWORDS = frozenset({
     "credit balance is too low", "credit balance too low",
     "insufficient credits", "insufficient_quota",
@@ -822,18 +891,22 @@ def _is_credit_exhaustion(status_code, body_text, provider):
                        (Anthropic wraps credit errors as invalid_request_error)
       Google         — RESOURCE_EXHAUSTED with billing/quota keyword in message
     """
+    # 402 always means billing.
     if status_code == 402:
         return True
 
+    # Parse the error body, if JSON.
     try:
         body = json.loads(body_text) if body_text else {}
     except Exception:
         body = {}
 
+    # Provider name and error message.
     p = (provider or "openai").lower().strip()
     err = body.get("error") if isinstance(body.get("error"), dict) else {}
     err_msg = (err.get("message") or "").lower()
 
+    # OpenAI-compatible providers: error codes, types or message phrases.
     if p in ("openai", "ollama", "openrouter"):
         if err.get("code") in {"insufficient_quota", "billing_hard_limit_reached"}:
             return True
@@ -858,6 +931,7 @@ def _is_credit_exhaustion(status_code, body_text, provider):
         if any(k in err_msg for k in _CREDIT_MSG_KEYWORDS):
             return True
 
+    # Google: RESOURCE_EXHAUSTED mentioning quota or billing.
     if p == "google":
         if err.get("status") == "RESOURCE_EXHAUSTED":
             msg = (err.get("message") or "").lower()
@@ -882,11 +956,15 @@ _PROVIDER_CREDIT_CB = {
         "provider": None}
     for n in _ALL_SLOTS
 }
+# Cooldown lengths.
 _CREDIT_COOLDOWN_SECONDS = 3600   # 1 hour for credit exhaustion
 _RATELIMIT_COOLDOWN_SECONDS = 600  # 10 minutes for sustained 429 storms
 
 
 def _provider_credit_cb_trip(n, reason, duration_s=None, cause="credit", provider=None):
+    """Put slot n into cooldown (credit exhaustion or a rate-limit storm), unless the provider is a
+    self-hosted server. Records who caused it so a later provider swap voids the cooldown.
+    """
     # A self-hosted server has no billing to exhaust and no quota to exceed, so a
     # CREDIT cooldown on one is always a mistake — either mis-attributed from
     # another provider or a misread error body. Parking a local model for an hour
@@ -899,8 +977,10 @@ def _provider_credit_cb_trip(n, reason, duration_s=None, cause="credit", provide
             "provider with no billing to exhaust. Reason was: %s",
             n, provider, str(reason)[:160])
         return
+    # Cooldown end time (default one hour).
     secs = duration_s if duration_s is not None else _CREDIT_COOLDOWN_SECONDS
     cd = time.time() + secs
+    # Record the cooldown and its cause.
     with _PROVIDER_CREDIT_CB_LOCK:
         _PROVIDER_CREDIT_CB[n]["cooldown_until"] = cd
         _PROVIDER_CREDIT_CB[n]["tripped_at"] = datetime.now().isoformat()
@@ -908,6 +988,7 @@ def _provider_credit_cb_trip(n, reason, duration_s=None, cause="credit", provide
         _PROVIDER_CREDIT_CB[n]["cause"] = cause
         # Bind the penalty to its owner so reassigning the slot clears it.
         _PROVIDER_CREDIT_CB[n]["provider"] = provider
+    # Log it: a warning for rate limits, an error for credit.
     until_str = datetime.fromtimestamp(cd).strftime("%H:%M:%S")
     if cause == "rate_limit":
         logger.warning(
@@ -929,6 +1010,7 @@ def _provider_credit_cb_remaining(n, provider=None):
     applies — clear it and report 0 rather than punishing the new provider for
     the old one's quota.
     """
+    # Clear the cooldown if a different provider now holds the slot.
     with _PROVIDER_CREDIT_CB_LOCK:
         entry = _PROVIDER_CREDIT_CB[n]
         owner = entry.get("provider")
@@ -941,10 +1023,13 @@ def _provider_credit_cb_remaining(n, provider=None):
             entry.update({"cooldown_until": 0.0, "tripped_at": None,
                           "reason": None, "cause": None, "provider": None})
             return 0.0
+        # Otherwise the seconds left.
         return max(0.0, entry["cooldown_until"] - time.time())
 
 
 def _provider_credit_cb_snapshot():
+    """Cooldown state for every slot, for the dashboard."""
+    # Build one entry per slot.
     result = {}
     with _PROVIDER_CREDIT_CB_LOCK:
         # _ALL_SLOTS: the map is keyed over every slot, and the dashboard reads
@@ -969,8 +1054,10 @@ def _any_provider_available(config):
     available=True  → at least one configured provider is not in cooldown.
     soonest_free_s  → seconds until the soonest cooldown expires (0 if available).
     """
+    # Track whether any slot is free and the soonest cooldown end.
     soonest = float("inf")
     any_free = False
+    # Check slots 1-4.
     for n in (1, 2, 3, 4):
         provider, key, model, _ = _get_provider_config(n, config)
         configured = _provider_configured(provider, key, model)
@@ -1007,11 +1094,13 @@ def _any_provider_available(config):
     except Exception:
         logger.exception("_any_provider_available: entry enumeration failed")
 
+    # Nothing configured: report 0.
     if soonest == float("inf"):
         soonest = 0.0  # no providers configured at all
     return any_free, soonest
 
 
+# Global breaker state and its lock.
 _LLM_CB_LOCK = threading.Lock()
 # Trips are counted in TWO classes, because they mean opposite things and want
 # opposite responses:
@@ -1048,6 +1137,7 @@ def _llm_cb_wait(provider=None):
     Passing no provider preserves the old fleet-wide behaviour for callers that
     genuinely want it.
     """
+    # Loop until the cooldown has passed.
     while True:
         with _LLM_CB_LOCK:
             cd = _LLM_CB["cooldown_until"]
@@ -1055,10 +1145,12 @@ def _llm_cb_wait(provider=None):
         # Different provider than the one being penalised → not our cooldown.
         if provider and owner and provider != owner:
             return
+        # Done: add a short random delay so threads don't all start at once.
         remaining = cd - time.time()
         if remaining <= 0:
             time.sleep(random.uniform(0, 1.5))
             return
+        # Wait in chunks of up to 5 seconds.
         sleep_chunk = min(remaining, 5.0)
         # Name the ACTUAL cause. This said "rate-limit cooldown" unconditionally,
         # so a local endpoint that was simply down reported a rate limit that no
@@ -1076,10 +1168,12 @@ def _llm_cb_wait(provider=None):
 def _llm_cb_trip(wait_time, reason="429", kind="rate_limit", provider=None):
     """Trip the global breaker. ``kind`` is 'rate_limit' (provider said 429/5xx) or
     'transient' (timeout / connection drop — nothing was rate-limited)."""
+    # Clamp the wait, and choose which counters to bump.
     wait_time = max(0.5, min(wait_time, 3600.0))
     kind = "transient" if kind == "transient" else "rate_limit"
     _c_key = "consecutive_transient" if kind == "transient" else "consecutive_429s"
     _t_key = "total_transient" if kind == "transient" else "total_429s"
+    # Extend the cooldown and record the trip.
     with _LLM_CB_LOCK:
         new_cd = max(_LLM_CB["cooldown_until"], time.time() + wait_time)
         _LLM_CB["cooldown_until"] = new_cd
@@ -1091,6 +1185,7 @@ def _llm_cb_trip(wait_time, reason="429", kind="rate_limit", provider=None):
         _LLM_CB["last_trip_time"] = datetime.now().isoformat()
         consecutive = _LLM_CB[_c_key]
         total = _LLM_CB[_t_key]
+    # Log it with a hint about the likely cause.
     _label = "consecutive_timeouts" if kind == "transient" else "consecutive_429s"
     _tlabel = "total_timeouts" if kind == "transient" else "total_429s"
     if kind != "transient":
@@ -1113,6 +1208,8 @@ def _llm_cb_trip(wait_time, reason="429", kind="rate_limit", provider=None):
     )
 
 def _llm_cb_reset():
+    """Clear the consecutive failure counters after a successful request."""
+    # Only log and reset if there were consecutive failures.
     with _LLM_CB_LOCK:
         if _LLM_CB["consecutive_429s"] > 0 or _LLM_CB["consecutive_transient"] > 0:
             logger.info(
@@ -1126,6 +1223,8 @@ def _llm_cb_reset():
             _LLM_CB["consecutive_transient"] = 0
 
 def _llm_cb_snapshot():
+    """Current state of the global breaker, for the dashboard."""
+    # Read the state under the lock.
     with _LLM_CB_LOCK:
         cd = _LLM_CB["cooldown_until"]
         return {
@@ -1143,6 +1242,7 @@ def _llm_cb_snapshot():
         }
 
 
+# One semaphore per pool, created on first use.
 #: Per-CATEGORY (CODE / LOG / REVIEW) concurrency cap, sized from
 #: LLM_MAX_CONCURRENT — this used to be ONE global limiter; now each pool gets
 #: its OWN semaphore of that size, so N jobs can run in CODE and, independently,
@@ -1154,6 +1254,8 @@ _CATEGORY_SEM_LOCK = threading.Lock()
 
 
 def _get_category_semaphore(pool_name):
+    """Get (or create) the concurrency semaphore for a pool, sized from LLM_MAX_CONCURRENT."""
+    # Create the semaphore on first use.
     with _CATEGORY_SEM_LOCK:
         sem = _CATEGORY_SEMAPHORES.get(pool_name)
         if sem is None:
@@ -1175,6 +1277,7 @@ def _reset_llm_semaphore():
     resets all three category gates (CODE/LOG/REVIEW) instead of one global
     one; slot locks need no reset, they aren't sized by config."""
     global _CATEGORY_SEMAPHORES
+    # Clear the cache under the lock.
     with _CATEGORY_SEM_LOCK:
         _CATEGORY_SEMAPHORES = {}
 
@@ -1186,8 +1289,10 @@ _SECRETISH_HEADERS = ("authorization", "x-api-key", "x-goog-api-key", "api-key")
 
 def _redact_secrets(text, headers=None):
     """Remove request credentials from a provider error body."""
+    # Nothing to redact.
     if not text:
         return text
+    # Replace each credential header's value (with and without "Bearer ") in the text.
     t = str(text)
     for name, val in (headers or {}).items():
         if not val or str(name).lower() not in _SECRETISH_HEADERS:
@@ -1212,10 +1317,12 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
     # hammering the overloaded one through the full 429 retry budget. (429 = rate
     # limit still uses the full max_retries, since waiting genuinely helps there.)
     max_5xx = int(config.get("LLM_5XX_MAX_RETRIES", 1))
+    # Backoff and timeout settings.
     backoff_base = float(config.get("LLM_BACKOFF_BASE", 2.0))
     backoff_max = float(config.get("LLM_BACKOFF_MAX", 60.0))
     timeout_val = int(config.get("LLM_TIMEOUT", 900))
 
+    # Try up to max_retries + 1 times, waiting out any breaker first.
     last_exception = None
     for attempt in range(max_retries + 1):
         is_last = attempt == max_retries
@@ -1238,6 +1345,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                     resp.close()
                     raise LLMCreditExhausted(resp.status_code, body_preview, provider)
 
+            # 429: wait (Retry-After or backoff) and retry; raise on the last attempt.
             if resp.status_code == 429:
                 wait_time = _parse_retry_after(resp.headers.get("Retry-After"), backoff_base, backoff_max, attempt)
                 if is_last:
@@ -1249,6 +1357,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                 time.sleep(wait_time)
                 continue
 
+            # 401: bad key.
             if resp.status_code == 401:
                 logger.error(f"LLM 401 Unauthorized at {endpoint}. Check API key in settings.")
                 resp.raise_for_status()
@@ -1274,6 +1383,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                         response=resp)
                 resp.raise_for_status()
 
+            # 5xx: back off and retry a few times, then raise so call_llm fails over.
             if 500 <= resp.status_code < 600:
                 # Give up after max_5xx same-provider attempts so call_llm fails over
                 # to the next provider (a 503 "high demand" needs a different model,
@@ -1316,10 +1426,12 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                     raise requests.exceptions.HTTPError(
                         f"{resp.status_code} Client Error: {resp.reason} for url: "
                         f"{endpoint} — {err_body}", response=resp)
+            # Success: reset the breaker and return the response.
             resp.raise_for_status()
             _llm_cb_reset()
             return resp
 
+        # HTTP errors: retry 429 and early 5xx; otherwise raise.
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
             _5xx_retry_ok = 500 <= (status or 0) < 600 and attempt < max_5xx
@@ -1333,6 +1445,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
             raise
         except LLMCreditExhausted:
             raise  # never retry a billing wall — propagate immediately
+        # Connection drops and timeouts: trip the breaker as transient and retry.
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
             last_exception = e
             if not is_last:
@@ -1342,6 +1455,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                 time.sleep(wait_time)
                 continue
             raise
+        # Anything else: retry with backoff, then raise.
         except Exception as e:
             last_exception = e
             if not is_last:
@@ -1351,6 +1465,7 @@ def _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="
                 continue
             raise
 
+    # Out of attempts: raise the last error.
     if last_exception:
         raise last_exception
     raise Exception(f"LLM request to {endpoint} exhausted all {max_retries+1} attempts")
@@ -1373,8 +1488,10 @@ def _response_format_from_schema(json_schema):
     still constrains the response to the schema's shape, which is all the
     downstream json.loads needs.
     """
+    # No schema: nothing to send.
     if not json_schema:
         return None
+    # Accept a JSON string or a dict.
     schema = json_schema
     if isinstance(schema, str):
         try:
@@ -1383,10 +1500,12 @@ def _response_format_from_schema(json_schema):
             return None
     if not isinstance(schema, dict):
         return None
+    # Non-strict json_schema response format.
     return {"type": "json_schema",
             "json_schema": {"name": "ab_response", "schema": schema, "strict": False}}
 
 
+# Error text that means response_format isn't supported.
 # Substrings that mark a 4xx as "this endpoint/model doesn't accept
 # response_format" rather than a real problem with the request.
 _UNSUPPORTED_SCHEMA_HINTS = (
@@ -1396,6 +1515,7 @@ _UNSUPPORTED_SCHEMA_HINTS = (
 )
 
 
+# Error bodies that say nothing useful.
 #: Bodies that are just a restatement of the HTTP status — they name no
 #: parameter, no model and no code, so nothing can be attributed to them.
 #: Compared after lower-casing and stripping surrounding whitespace/punctuation.
@@ -1419,6 +1539,7 @@ def _is_uninformative_4xx_body(body):
     informative ("maximum context length exceeded" is 31 characters), and
     retrying that one would fail identically at double the cost.
     """
+    # A known empty phrase counts as uninformative.
     low = (body or "").strip().strip(".!").lower()
     if low in _OPAQUE_4XX_BODIES:
         return True
@@ -1449,11 +1570,13 @@ def _post_maybe_structured(endpoint, payload, headers, config, stream, provider,
     Handles opaque 4xx bodies (e.g. "Bad Request\n") by retrying without schema
     enforcement if the body gives no attributable reason.
     """
+    # No schema, or tools in use: plain POST.
     rf = _response_format_from_schema(json_schema)
     if not rf or payload.get("tools"):
         # Tool-calling and forced-JSON are mutually exclusive on most backends;
         # the tools path has its own structured contract already.
         return _llm_retry_post(endpoint, payload, headers, config, stream=stream, provider=provider)
+    # Try with response_format.
     attempt = dict(payload)
     attempt["response_format"] = rf
     try:
@@ -1476,6 +1599,7 @@ def _post_maybe_structured(endpoint, payload, headers, config, stream, provider,
         except Exception:  # noqa: BLE001
             body = ""
             body_readable = False
+        # Unsupported-schema hint or an empty body: retry once without response_format.
         detail = (body or str(e).lower())
         uninformative = body_readable and _is_uninformative_4xx_body(body)
         if status in (400, 404, 422) and (
@@ -1500,6 +1624,7 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     own circuit-breaker/credit-exhaustion key (instead of silently sharing
     "openai"'s) and its own attribution headers. Every existing call site omits
     both and is unaffected."""
+    # Endpoint and headers, adding the key and any extra headers.
     base = (base_url or OPENAI_BASE_URL).rstrip("/")
     endpoint = f"{base}/chat/completions"
     headers = {"Content-Type": "application/json"}
@@ -1508,9 +1633,11 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     if extra_headers:
         headers.update(extra_headers)
 
+    # Convert messages; tool calls are never streamed.
     msgs = _to_openai_messages(messages)
     use_stream = False if tools else effective_stream
     payload = {"model": model, "messages": msgs, "stream": use_stream}
+    # Output token limit from config.
     # Explicit max_tokens gives the model room to return a complete JSON object
     # (matches the anthropic path's 8192). Without it, some OpenAI-compatible
     # backends (ollama) truncate mid-object → "Response ended prematurely" and
@@ -1521,9 +1648,11 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
         out_tok = _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]
     if out_tok > 0:
         payload["max_tokens"] = out_tok
+    # Add tools in OpenAI format.
     if tools:
         payload["tools"] = _tools_to_openai(tools)
 
+    # Send it, with the schema if one was given.
     resp = _post_maybe_structured(endpoint, payload, headers, config, use_stream, provider_name, json_schema)
 
     if not use_stream:
@@ -1540,8 +1669,10 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         text = msg.get("content") or ""
+        # Plain text when no tools were sent.
         if not tools:
             return text
+        # Convert any tool calls to our shape.
         raw_tcs = msg.get("tool_calls") or None
         tool_calls = None
         if raw_tcs:
@@ -1562,6 +1693,7 @@ def _request_openai(model, api_key, base_url, messages, tools, effective_stream,
     # by the caller regardless, so this only costs tok/s coverage, not the
     # exhaustion/ranking signal.
     full_response = ""
+    # Read the SSE stream, adding each delta's text and publishing progress to the UI state.
     for line in resp.iter_lines():
         if not line:
             continue
@@ -1586,8 +1718,10 @@ def _usage_from_openai_json(data, usage_out):
     """Shared by _request_openai and _request_copilot (identical response
     shape). Best-effort: an absent/malformed usage block leaves usage_out
     untouched rather than raising — telemetry must never fail an LLM call."""
+    # Nothing to fill in.
     if usage_out is None:
         return
+    # Copy token counts if present.
     try:
         usage = data.get("usage") or {}
         out_tok = usage.get("completion_tokens")
@@ -1600,6 +1734,7 @@ def _usage_from_openai_json(data, usage_out):
 
 def _request_anthropic(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None):
     """Call the Anthropic Messages API. Returns text string or tool-call dict."""
+    # Endpoint and headers.
     base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
     endpoint = f"{base}/messages"
     headers = {
@@ -1608,6 +1743,7 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
         "anthropic-version": ANTHROPIC_API_VERSION,
     }
 
+    # Convert messages; tool calls are never streamed.
     system, msgs = _to_anthropic_messages(messages)
     use_stream = False if tools else effective_stream
     payload = {"model": model, "max_tokens": 8192, "stream": use_stream}
@@ -1639,11 +1775,14 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
         payload["messages"] = msgs
         if system:
             payload["system"] = system
+    # Add tools in Anthropic format.
     if tools:
         payload["tools"] = _tools_to_anthropic(tools)
 
+    # Send it.
     resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="anthropic")
 
+    # Non-streamed: read usage, then text and tool_use blocks.
     if tools or not use_stream:
         data = resp.json()
         try:
@@ -1665,6 +1804,7 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
                     "id": block.get("id") or f"toolu_{uuid.uuid4().hex[:8]}",
                     "function": {"name": block.get("name") or "", "arguments": block.get("input") or {}},
                 })
+        # Return tool calls, or publish and return the text.
         if tools:
             return {"text": text, "tool_calls": tool_calls or None}
         main.state["llm_stream"] = text
@@ -1672,6 +1812,7 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
             main.state["active_tasks"][task_id]["stream"] = text
         return text
 
+    # Streamed: read SSE events, adding text and token counts.
     full_response = ""
     for line in resp.iter_lines():
         if not line:
@@ -1712,12 +1853,14 @@ def _request_anthropic(model, api_key, base_url, messages, tools, effective_stre
 
 def _request_google(model, api_key, base_url, messages, tools, effective_stream, task_id, config, usage_out=None):
     """Call the Google Gemini API. Returns text string or tool-call dict."""
+    # Default model, endpoint and headers.
     if not model:
         model = "gemini-1.5-pro"
     base = (base_url or GOOGLE_BASE_URL).rstrip("/")
     endpoint = f"{base}/v1beta/models/{model}:generateContent"
     headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
 
+    # Convert messages and add the system prompt and tools.
     system_text, contents = _to_google_contents(messages)
     payload = {"contents": contents}
     if system_text:
@@ -1729,6 +1872,7 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
             for t in tools
         ]}]
 
+    # Send it (no streaming) and read token usage.
     resp = _llm_retry_post(endpoint, payload, headers, config, stream=False, provider="google")
     data = resp.json()
     try:
@@ -1739,6 +1883,7 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
             usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
     except Exception:  # noqa: BLE001 — telemetry is never fatal
         pass
+    # Text and function calls from the first candidate.
     candidates = data.get("candidates") or []
     parts = ((candidates[0].get("content") or {}) if candidates else {}).get("parts") or []
 
@@ -1754,10 +1899,12 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
                 "function": {"name": fc.get("name") or "", "arguments": fc.get("args") or {}},
             })
 
+    # Publish the text for the UI.
     main.state["llm_stream"] = text
     if task_id and task_id in main.state.get("active_tasks", {}):
         main.state["active_tasks"][task_id]["stream"] = text
 
+    # Return tool calls or text.
     if tools:
         return {"text": text, "tool_calls": tool_calls or None}
     return text
@@ -1767,6 +1914,7 @@ def _request_google(model, api_key, base_url, messages, tools, effective_stream,
 #: enough to track a real change in box load, large enough that one unlucky
 #: generation does not swing the number an operator is watching.
 _TPS_WINDOW = 20
+# Cache write interval and when we last saved.
 #: Minimum seconds between cache writes (see _record_ollama_tps).
 _TPS_SAVE_INTERVAL = 60
 _tps_last_save = 0.0
@@ -1785,17 +1933,20 @@ def _record_ollama_tps(model, payload):
     Never raises: throughput telemetry must not be able to fail an LLM call.
     """
     try:
+        # Need eval_count and a positive eval_duration.
         if not isinstance(payload, dict):
             return
         n = payload.get("eval_count")
         ns = payload.get("eval_duration")
         if not n or not ns or ns <= 0:
             return
+        # Tokens per second of generation.
         tps = float(n) / (float(ns) / 1e9)
         # A nonsensical value means the fields were not what we assumed; drop it
         # rather than poison the average.
         if not (0 < tps < 100000):
             return
+        # Add the sample to this model's rolling window.
         import main
         store = main.state.setdefault("llm_tps", {})
         key = str(model or "unknown")
@@ -1826,8 +1977,10 @@ def _usage_from_ollama_payload(payload, usage_out):
     server-measured — no network/queue skew, unlike a wall-clock figure —
     the same data _record_ollama_tps already reads for the legacy panel;
     this is the new store's copy of that same read, not a second call."""
+    # Nothing to fill in.
     if usage_out is None or not isinstance(payload, dict):
         return
+    # Copy generated tokens and generation time (server-measured), and prompt tokens.
     try:
         eval_count = payload.get("eval_count")
         eval_duration_ns = payload.get("eval_duration")
@@ -1851,6 +2004,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
     ``provider`` only selects the DEFAULT endpoint when no per-entry base_url is
     set (ollama.com for the cloud slot, localhost otherwise); the wire protocol is
     identical either way."""
+    # Endpoint, plus a Bearer header if there is a key.
     base = _ollama_base_url(provider, base_url).rstrip("/")
     endpoint = f"{base}/api/chat"
     headers = {}
@@ -1858,6 +2012,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         clean_key = api_key.strip().strip('"').strip("'").replace("Bearer ", "").strip()
         headers["Authorization"] = f"Bearer {clean_key}"
 
+    # Tool calls are never streamed.
     use_stream = False if tools else effective_stream
     # Ollama defaults num_ctx to ~2048, which the fix prompt (windowed file + issue body
     # + context) blows past → 400 "prompt is longer than the context length". These
@@ -1887,6 +2042,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
             _num_ctx = int(_raw_ctx or 32768)
         except (TypeError, ValueError):
             _num_ctx = 32768
+    # Context window option.
     _options = {"num_ctx": _num_ctx}
     # CPU thread count. On a CPU box the big models (e.g. 32b) are slow; give ollama more
     # threads (up to physical cores) to speed inference. 0 = let ollama decide (its
@@ -1895,8 +2051,10 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         _num_thread = int(config.get("ollama_num_thread", 0) or 0)
     except (TypeError, ValueError):
         _num_thread = 0
+    # Set threads only if configured.
     if _num_thread > 0:
         _options["num_thread"] = _num_thread
+    # Request body (Ollama needs at least one message).
     payload = {
         "model": model,
         "messages": messages if messages else [{"role": "user", "content": ""}],
@@ -1909,11 +2067,14 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
     # ollama SERVER so all ensemble models can stay in memory at once.
     _ka = str(config.get("ollama_keep_alive", "-1") or "-1").strip()
     payload["keep_alive"] = int(_ka) if _ka.lstrip("-").isdigit() else _ka
+    # Ollama takes tools in OpenAI format as-is.
     if tools:
         payload["tools"] = tools
 
+    # Send it.
     resp = _llm_retry_post(endpoint, payload, headers, config, stream=use_stream, provider="ollama")
 
+    # Tool turn: read the single JSON reply, record throughput and usage.
     if tools:
         try:
             data = resp.json()
@@ -1928,6 +2089,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
         _usage_from_ollama_payload(data, usage_out)
         return {"text": text, "tool_calls": tool_calls}
 
+    # Streamed: one JSON object per line, adding each content chunk.
     full_response = ""
     for line in resp.iter_lines():
         if not line:
@@ -1940,6 +2102,7 @@ def _request_ollama(model, api_key, base_url, messages, tools, effective_stream,
             if chunk.get("done"):
                 _record_ollama_tps(model, chunk)
                 _usage_from_ollama_payload(chunk, usage_out)
+            # Add the text and publish progress for the UI.
             full_response += content
             main.state["llm_stream"] = full_response
             if task_id and task_id in main.state.get("active_tasks", {}):
@@ -2006,6 +2169,7 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
         prefix = "Human" if role == "user" else "Assistant"
         conv_lines.append(f"{prefix}: {content}")
 
+    # Put the first system message at the top.
     prompt = "\n\n".join(conv_lines)
     if system_parts:
         prompt = system_parts[0] + "\n\n" + prompt
@@ -2016,12 +2180,14 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
         json_schema=json_schema, enable_native_tools=enable_native_tools,
         search_model=search_model, profile=profile, extra_add_dirs=extra_add_dirs)
 
+    # Run the CLI with the prompt on stdin, within the timeout.
     timeout_val = int(config.get("LLM_TIMEOUT", 900))
     try:
         proc = subprocess.run(
             cmd, input=prompt, capture_output=True, text=True, timeout=timeout_val,
             cwd=repo_checkout_path if (enable_native_tools and repo_checkout_path) else None,
         )
+        # Collect its output.
         output = proc.stdout.strip()
         stderr = proc.stderr.strip()
 
@@ -2086,11 +2252,13 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
                         f"Raw: {(text or stderr)[:200]}"
                     )
                 raise Exception(f"claude CLI reported an error: {(text or stderr)[:300]}")
+        # Not JSON: use the raw output.
         except json.JSONDecodeError:
             text = output or stderr
             if "session limit" in text.lower():
                 raise Exception(f"claude_cli_rate_limit:Session limit reached")
 
+        # Non-zero exit: report a login problem or the error.
         if proc.returncode != 0:
             # Same contamination risk as above: `output` is the JSON envelope,
             # which CARRIES the model's content. Only scan it when it did NOT
@@ -2102,10 +2270,12 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
                 )
             raise Exception(f"claude CLI exited {proc.returncode}: {stderr[:300]}")
 
+        # Publish and return the text.
         main.state["llm_stream"] = text
         if task_id and task_id in main.state.get("active_tasks", {}):
             main.state["active_tasks"][task_id]["stream"] = text
         return text
+    # Timeouts become a clear error.
     except subprocess.TimeoutExpired:
         raise Exception(f"claude CLI timed out after {timeout_val}s")
     except FileNotFoundError:
@@ -2114,6 +2284,7 @@ def _request_claude_cli(model, messages, task_id, config, repo_checkout_path=Non
                         "on this server, or set 'claude_binary' in Settings.")
 
 
+# Copilot model endpoint cache, its age, lifetime and lock.
 #: Endpoint support per Copilot model, from the live catalogue. GitHub is moving
 #: its newer OpenAI models to the Responses API and REMOVING /chat/completions
 #: from them -- as of this writing gpt-5.5 and all three gpt-5.6 variants list
@@ -2135,11 +2306,13 @@ def _copilot_model_endpoints(bearer, model):
     total outage, which is strictly worse than the 400 it is trying to avoid.
     """
     global _COPILOT_ENDPOINTS_TS
+    # Use the cached table if fresh.
     now = time.time()
     with _COPILOT_ENDPOINTS_LOCK:
         fresh = _COPILOT_ENDPOINTS and (now - _COPILOT_ENDPOINTS_TS) < _COPILOT_ENDPOINTS_TTL_S
         if fresh:
             return _COPILOT_ENDPOINTS.get(model)
+    # Otherwise fetch the model list and map each id to its endpoints.
     try:
         r = requests.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(bearer), timeout=20)
         r.raise_for_status()
@@ -2150,6 +2323,7 @@ def _copilot_model_endpoints(bearer, model):
     except Exception as e:  # noqa: BLE001 — never let a lookup break routing
         logger.debug("copilot model catalogue lookup failed: %s", e)
         return None
+    # Cache the new table.
     with _COPILOT_ENDPOINTS_LOCK:
         _COPILOT_ENDPOINTS.clear()
         _COPILOT_ENDPOINTS.update(table)
@@ -2160,6 +2334,7 @@ def _copilot_model_endpoints(bearer, model):
 def _copilot_wants_responses_api(bearer, model):
     """True only when the catalogue positively says chat/completions is gone and
     /responses is available. Unknown or ambiguous => False (stay on the old path)."""
+    # Unknown: stay on chat/completions.
     eps = _copilot_model_endpoints(bearer, model)
     if not eps:
         return False
@@ -2183,6 +2358,7 @@ def _to_responses_input(messages):
     it then either repeats the call until the iteration budget runs out or
     answers without the file it asked for.
     """
+    # System prompts go to instructions; everything else becomes an item.
     systems = []
     items = []
     for m in messages or ():
@@ -2193,6 +2369,7 @@ def _to_responses_input(messages):
         if role == "system":
             systems.append(content)
             continue
+        # Tool results become function_call_output items.
         if role == "tool":
             items.append({"type": "function_call_output",
                           # Must match the call_id emitted below; the API rejects
@@ -2200,6 +2377,7 @@ def _to_responses_input(messages):
                           "call_id": m.get("tool_call_id") or m.get("name") or "call_0",
                           "output": content})
             continue
+        # Assistant turns with tool calls become function_call items.
         tool_calls = m.get("tool_calls") if role == "assistant" else None
         if not isinstance(tool_calls, (list, tuple)):
             tool_calls = None
@@ -2209,6 +2387,7 @@ def _to_responses_input(messages):
             if content:
                 items.append({"role": "assistant",
                               "content": [{"type": "output_text", "text": content}]})
+            # One function_call item per call, with JSON-string arguments.
             for i, tc in enumerate(tool_calls):
                 if not isinstance(tc, dict):
                     continue
@@ -2221,9 +2400,11 @@ def _to_responses_input(messages):
                               "name": (fn.get("name") if fn else None) or tc.get("name") or "",
                               "arguments": args})
             continue
+        # Plain messages: wrap the text in the right content part type.
         part = "output_text" if role == "assistant" else "input_text"
         items.append({"role": role or "user",
                       "content": [{"type": part, "text": content}]})
+    # Join the system prompts.
     instructions = "\n\n".join(s for s in systems if s) or None
     return instructions, items
 
@@ -2236,11 +2417,13 @@ def _responses_output_text(data):
     convenience `output_text` field is frequently null, so both have to be
     handled or the caller silently reads an empty completion as a refusal.
     """
+    # Use the output_text shortcut if set.
     if not isinstance(data, dict):
         return ""
     shortcut = data.get("output_text")
     if isinstance(shortcut, str) and shortcut:
         return shortcut
+    # Otherwise join output_text parts from message items.
     parts = []
     for item in data.get("output") or ():
         if not isinstance(item, dict) or item.get("type") != "message":
@@ -2254,8 +2437,10 @@ def _responses_output_text(data):
 def _usage_from_responses_json(data, usage_out):
     """Responses spells the usage counters differently from chat/completions
     (input_tokens/output_tokens, not prompt_tokens/completion_tokens)."""
+    # Nothing to fill in.
     if usage_out is None:
         return
+    # Copy the token counts if present.
     try:
         usage = data.get("usage") or {}
         out_tok = usage.get("output_tokens")
@@ -2281,11 +2466,13 @@ def _request_copilot_responses(model, bearer, base, messages, config, usage_out=
     same-vendor. The return contract matches _request_copilot's: a bare string
     when no tools were offered, else {"text", "tool_calls"}.
     """
+    # Build the input items and instructions.
     payload = {"model": model, "input": []}
     instructions, items = _to_responses_input(messages)
     payload["input"] = items
     if instructions:
         payload["instructions"] = instructions
+    # Output token limit from config.
     try:
         out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]) or _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"])
     except Exception:
@@ -2297,13 +2484,16 @@ def _request_copilot_responses(model, bearer, base, messages, config, usage_out=
         # carries the schema inline rather than nested under a "json_schema" key.
         payload["text"] = {"format": {"type": "json_schema", "name": "response",
                                       "schema": json_schema, "strict": False}}
+    # Add tools in Responses format.
     if tools:
         payload["tools"] = _tools_to_responses(tools)
+    # Send it and read usage and text.
     r = _llm_retry_post(f"{base}/responses", payload, _copilot_headers(bearer), config,
                         stream=False, provider="copilot")
     data = r.json()
     _usage_from_responses_json(data, usage_out)
     text = _responses_output_text(data)
+    # Plain text, or text plus tool calls.
     if not tools:
         return text
     return {"text": text, "tool_calls": _responses_tool_calls(data)}
@@ -2313,6 +2503,7 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
     """Call the GitHub Copilot chat API (OpenAI-compatible). api_key is the stored GitHub
     OAuth token; we exchange it for a short-lived Copilot token and add the editor headers
     Copilot requires. Mirrors _request_openai's response handling."""
+    # Get the Copilot token and base URL.
     bearer = _copilot_api_token(api_key)  # gh_token -> copilot token (cached)
     base = (base_url or COPILOT_API_BASE).rstrip("/")
     # Models GitHub has moved off chat/completions entirely can only be reached
@@ -2327,11 +2518,13 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
         return _request_copilot_responses(model, bearer, base, messages, config,
                                           usage_out=usage_out, json_schema=json_schema,
                                           tools=tools)
+    # chat/completions endpoint, headers and messages; tool calls are never streamed.
     endpoint = f"{base}/chat/completions"
     headers = _copilot_headers(bearer)
     msgs = _to_openai_messages(messages)
     use_stream = False if tools else effective_stream
     payload = {"model": model, "messages": msgs, "stream": use_stream}
+    # Output token limit from config.
     try:
         out_tok = int((config or {}).get("FIX_MAX_OUTPUT_TOKENS", _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"]) or _chat_defaults()["FIX_MAX_OUTPUT_TOKENS"])
     except Exception:
@@ -2354,8 +2547,10 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
         # path only -- _request_openai still sends max_tokens, because it also
         # serves ollama/LM Studio backends that only understand that spelling.
         payload["max_completion_tokens"] = out_tok
+    # Add tools in OpenAI format.
     if tools:
         payload["tools"] = _tools_to_openai(tools)
+    # Send it, with the schema if one was given.
     resp = _post_maybe_structured(endpoint, payload, headers, config, use_stream, "copilot", json_schema)
     if not use_stream:
         # See _request_openai's matching branch: a non-streamed response is ONE
@@ -2367,8 +2562,10 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         text = msg.get("content") or ""
+        # Plain text when no tools were sent.
         if not tools:
             return text
+        # Convert any tool calls to our shape.
         raw_tcs = msg.get("tool_calls") or None
         tool_calls = None
         if raw_tcs:
@@ -2380,6 +2577,7 @@ def _request_copilot(model, api_key, base_url, messages, tools, effective_stream
                 for i, tc in enumerate(raw_tcs)
             ]
         return {"text": text, "tool_calls": tool_calls}
+    # Read the SSE stream, adding each delta's text and publishing progress.
     full_response = ""
     for line in resp.iter_lines():
         if not line:
@@ -2429,6 +2627,7 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
     is covered too. Population is always best-effort — a provider whose
     response doesn't carry the fields it expects leaves usage_out untouched
     rather than raising; see each _request_*'s usage-capture comment."""
+    # Pick the provider implementation by name; unknown names use the OpenAI path.
     p = (provider or "openai").lower().strip()
     if _is_copilot(p):
         return _request_copilot(model, api_key, base_url, messages, tools, effective_stream, task_id, config,
@@ -2465,6 +2664,7 @@ def _call_provider(provider, model, api_key, base_url, messages, tools, effectiv
                            usage_out=usage_out, json_schema=json_schema)
 
 
+# Lazily loaded perf store, its lock and debounced save timing.
 # ============================================================================
 # Performance telemetry (llm_perf.py-backed) — the future model picker's
 # ranking/exhaustion signal. Recorded here, at the SAME choke point every
@@ -2480,6 +2680,7 @@ _LLM_PERF_SAVE_INTERVAL = 60  # debounced, same rationale as the legacy _TPS_SAV
 
 
 def _get_llm_perf_store():
+    """Load the perf store once, thread-safely."""
     global _LLM_PERF_STORE
     if _LLM_PERF_STORE is None:
         with _LLM_PERF_LOCK:
@@ -2495,9 +2696,11 @@ def get_llm_perf_snapshot():
 
 
 def _model_key(provider, base_url, model):
+    """Normalized (provider, base_url, model) key for health and perf tracking."""
     return ((provider or "").lower().strip(), (base_url or "").strip().rstrip("/"), model or "")
 
 
+# Health table and its lock.
 # ============================================================================
 # Per-entry health — lightweight in-memory failure/success tracking, keyed by
 # ModelKey. Feeds Settings' per-LLM-entry "failing" badge so a hard error a
@@ -2554,11 +2757,13 @@ _UNSUPPORTED_MODEL_MARKERS = (
 
 def _is_unsupported_model_error(err_str):
     """True when the provider blamed the model itself, not the request."""
+    # Match any marker, case-insensitively.
     low = (err_str or "").lower()
     return any(m in low for m in _UNSUPPORTED_MODEL_MARKERS)
 
 
 def _record_llm_success(key):
+    """Reset an entry's health after a successful call."""
     with _ENTRY_HEALTH_LOCK:
         _ENTRY_HEALTH[key] = {"consecutive_failures": 0, "last_error": None,
                               "last_error_at": None, "last_ok_at": datetime.now().isoformat(),
@@ -2566,7 +2771,9 @@ def _record_llm_success(key):
 
 
 def _record_llm_failure(key, exc):
+    """Record a failed call and set a cooldown when warranted."""
     with _ENTRY_HEALTH_LOCK:
+        # Bump the failure count and remember the error.
         entry = dict(_ENTRY_HEALTH.get(key) or {"consecutive_failures": 0, "last_ok_at": None})
         entry["consecutive_failures"] = entry.get("consecutive_failures", 0) + 1
         entry["last_error"] = str(exc)[:300]
@@ -2586,6 +2793,7 @@ def _record_llm_failure(key, exc):
                     "no retry can fix this. Change the model for this entry in "
                     "Settings -> Model Registry.",
                     key, entry["last_error"], _ENTRY_UNSUPPORTED_RETRY_SECONDS // 3600)
+        # Enough failures in a row: start the ordinary cooldown.
         elif entry["consecutive_failures"] >= _ENTRY_UNHEALTHY_THRESHOLD:
             entry["retry_after"] = time.time() + _ENTRY_UNHEALTHY_RETRY_SECONDS
         _ENTRY_HEALTH[key] = entry
@@ -2608,6 +2816,7 @@ def _entry_is_unhealthy(key):
     a success, so a purely one-shot exclusion would be permanent for the
     life of the process. After retry_after, one real attempt is allowed
     through; if it fails again, _record_llm_failure extends the cooldown."""
+    # Read the entry; no record means healthy.
     with _ENTRY_HEALTH_LOCK:
         entry = _ENTRY_HEALTH.get(key)
     if not entry:
@@ -2617,6 +2826,7 @@ def _entry_is_unhealthy(key):
     # consecutive-failure threshold (the count stays truthful for the badge).
     if entry.get("unsupported_model"):
         return time.time() < entry.get("retry_after", 0.0)
+    # Below the threshold is still healthy; otherwise excluded until the cooldown ends.
     if entry.get("consecutive_failures", 0) < _ENTRY_UNHEALTHY_THRESHOLD:
         return False
     return time.time() < entry.get("retry_after", 0.0)
@@ -2628,10 +2838,12 @@ def get_llm_entry_health(provider, base_url, model):
     "last_error_at": str|None} for the given (provider, base_url, model).
     An entry with no recorded calls yet reads as healthy, not unhealthy —
     silence isn't failure."""
+    # Compute health and read the entry.
     key = _model_key(provider, base_url, model)
     unhealthy = _entry_is_unhealthy(key)
     with _ENTRY_HEALTH_LOCK:
         entry = _ENTRY_HEALTH.get(key)
+    # No calls yet: report healthy.
     if not entry:
         return {"unhealthy": False, "consecutive_failures": 0, "last_error": None, "last_error_at": None}
     return {"unhealthy": unhealthy, "consecutive_failures": entry.get("consecutive_failures", 0),
@@ -2649,6 +2861,7 @@ def _call_provider_wrapper(provider, model, api_key, base_url, messages, tools, 
     (3.11+) and threading (3.9) branches behave identically. Without this a
     failing provider looks like a successful call returning None on 3.9, and
     _try_provider's failover/credit/rate-limit handling never sees the error."""
+    # Run the call and stash its result or exception.
     try:
         usage_out["_result"] = _call_provider(provider, model, api_key, base_url, messages, tools, effective_stream,
                                               task_id, config, usage_out=usage_out, **kwargs)
@@ -2673,6 +2886,7 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
 
     Also wraps the underlying _call_provider call with a timeout to prevent
     indefinite hangs on network or provider issues."""
+    # Perf key, usage dict and start time.
     key = _model_key(provider, base_url, model)
     usage_out = {}
     t0 = time.monotonic()
@@ -2707,20 +2921,25 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
             thread.start()
             thread.join(timeout=timeout_s)
 
+            # Still running after the timeout: fail over.
             if thread.is_alive():
                 logger.warning("%s/%s timed out after %d seconds — raising TimeoutError to trigger failover",
                                provider, model, timeout_s)
                 thread.join()  # Give it a moment to clean up
                 raise TimeoutError(f"LLM call to {provider}/{model} timed out after {timeout_s} seconds")
+            # Re-raise the worker's exception, or take its result.
             if usage_out.get("_exc") is not None:
                 raise usage_out.pop("_exc")
             result = usage_out.get("_result")
+    # Record any failure against the entry, then re-raise.
     except BaseException as e:
         _record_llm_failure(key, e)
         raise
 
+    # Success: mark healthy and measure wire latency.
     _record_llm_success(key)
     latency_ms_wire = (time.monotonic() - t0) * 1000.0
+    # Record a perf sample, saving to disk at most once a minute.
     try:
         out_tok = usage_out.get("output_tokens")
         gen_ms = usage_out.get("gen_duration_ms")
@@ -2757,6 +2976,7 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
 # ============================================================================
 
 def _endpoint_key(provider, base_url):
+    """Normalized (provider, base_url) key for account-wide cooldowns."""
     return ((provider or "").lower().strip(), (base_url or "").strip().rstrip("/"))
 
 
@@ -2773,16 +2993,19 @@ _MODEL_RATE_CB = {}
 
 
 def _cb_trip(cb_dict, cb_key, reason, duration_s, cause, provider):
+    """Start a credit or rate-limit cooldown for a key and log it."""
     if cause == "credit" and provider and _provider_is_nokey(provider):
         logger.warning(
             "Ignoring CREDIT cooldown for %s (%s): a local/no-key provider has no "
             "billing to exhaust. Reason was: %s", cb_key, provider, str(reason)[:160])
         return
+    # Work out when the cooldown ends and store it.
     secs = duration_s if duration_s is not None else _CREDIT_COOLDOWN_SECONDS
     cd = time.time() + secs
     with _ENDPOINT_CB_LOCK:
         cb_dict[cb_key] = {"cooldown_until": cd, "tripped_at": datetime.now().isoformat(),
                            "reason": reason, "cause": cause}
+    # Log it with a readable end time.
     until_str = datetime.fromtimestamp(cd).strftime("%H:%M:%S")
     label = "RATE-LIMITED" if cause == "rate_limit" else "CREDIT EXHAUSTED"
     logger.warning("%s %s — pausing for %s min (until ~%s). Reason: %s",
@@ -2790,6 +3013,7 @@ def _cb_trip(cb_dict, cb_key, reason, duration_s, cause, provider):
 
 
 def _cb_remaining(cb_dict, cb_key):
+    """Seconds left on a key's cooldown, or 0."""
     with _ENDPOINT_CB_LOCK:
         entry = cb_dict.get(cb_key)
         if not entry:
@@ -2797,6 +3021,7 @@ def _cb_remaining(cb_dict, cb_key):
         return max(0.0, entry["cooldown_until"] - time.time())
 
 
+# Per-model locks and the lock guarding that table.
 _MODEL_LOCKS_LOCK = threading.Lock()
 _MODEL_LOCKS = {}
 
@@ -2807,6 +3032,7 @@ def _model_lock(key):
     from the existing per-category semaphore under a dedicated "PICKER"
     category below rather than building new untested sizing logic for a
     path with zero real traffic yet)."""
+    # Create the lock on first use.
     with _MODEL_LOCKS_LOCK:
         lock = _MODEL_LOCKS.get(key)
         if lock is None:
@@ -2827,6 +3053,7 @@ def _iter_configured_endpoints(config):
     what "usable" means for their purpose (_enumerate_candidates filters to
     configured+available; _configured_entries filters to configured only,
     for the safety floor)."""
+    # Modern vault entries, skipping disabled ones; credentials fill in key and URL.
     credentials = config.get("llm_credentials") or {}
     for entry in (config.get("llm_entries") or []):
         if entry.get("enabled") is False:
@@ -2839,6 +3066,7 @@ def _iter_configured_endpoints(config):
         rpm = int(entry.get("rpm") or 0)
         yield entry.get("id"), provider, api_key, model, base_url, rpm
 
+    # Then the legacy numbered env-var slots, from config or the environment.
     for n in _ALL_SLOTS:
         provider = (config.get(f"LLM_PROVIDER_{n}") or os.getenv(f"LLM_PROVIDER_{n}", "")).lower().strip()
         if not provider:
@@ -2871,8 +3099,11 @@ _MIN_CAPABILITY_RANK_DEFAULT = 0
 
 
 def _min_capability_rank(config):
+    """The configured capability floor, or 0 (off) when unset or invalid."""
+    # Unset: floor is off.
     if "min_capability_rank" not in config:
         return _MIN_CAPABILITY_RANK_DEFAULT
+    # Use it if it is an integer, else warn and turn the floor off.
     raw = config["min_capability_rank"]
     try:
         return int(raw)
@@ -2889,9 +3120,11 @@ def _apply_capability_floor(candidates, config):
     model_selection.safety_floor when select_model resolves nothing, which is
     the existing, loudly-logged (logger.warning) last resort for "nothing
     else works" — this floor only changes what NORMAL routing may pick."""
+    # Floor off: keep everything.
     min_rank = _min_capability_rank(config)
     if min_rank <= 0:
         return candidates
+    # Keep only candidates at or above the floor.
     return [c for c in candidates
             if model_registry.capability_rank(c.get("caps") or {}) >= min_rank]
 
@@ -2906,6 +3139,7 @@ def _enumerate_candidates(config):
     row and a legacy env var is one candidate, not two."""
     candidates = []
     seen_keys = set()
+    # Skip unconfigured endpoints and duplicates.
     for entry_id, provider, api_key, model, base_url, rpm in _iter_configured_endpoints(config):
         if not _provider_configured(provider, api_key, model):
             continue
@@ -2913,7 +3147,9 @@ def _enumerate_candidates(config):
         if key in seen_keys:
             continue
         seen_keys.add(key)
+        # Look up its capabilities.
         caps = model_registry.resolve(provider, model, config)
+        # Mark it unavailable if cooling down, dead or failing.
         available, unavailable_reason = True, None
         if _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url)) > 0:
             available, unavailable_reason = False, "credit_cooldown"
@@ -2930,6 +3166,7 @@ def _enumerate_candidates(config):
             # _entry_is_unhealthy's docstring for why this must share state
             # with the Settings badge rather than compute its own check.
             available, unavailable_reason = False, "hard_failing"
+        # Add it either way, with availability and reason.
         candidates.append({
             "key": key, "provider": provider, "model": model, "base_url": base_url,
             "api_key": api_key, "rpm": rpm, "caps": caps,
@@ -2967,6 +3204,7 @@ def _is_tool_unsupported_400(err_str):
     _llm_retry_post folds the response body into the message, so the provider's
     own explanation ("model does not support tools", "unsupported_parameter:
     tools", ...) is available here."""
+    # Must be a 400 that mentions tools.
     if "400" not in err_str:
         return False
     low = err_str.lower()
@@ -2987,9 +3225,11 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
     endpoint *should* accept tools; this is the runtime net for when it does
     not. Still missing from the old path and worth porting later: the ollama
     404/403 message detail and the routed-model retry."""
+    # Unpack the candidate.
     provider, model, base_url, api_key = (candidate["provider"], candidate["model"],
                                           candidate["base_url"], candidate["api_key"])
     mk = candidate["key"]
+    # One call per model at a time; record what is running, then call it.
     with _model_lock(mk):
         try:
             main.state["active_llm"] = model
@@ -2999,15 +3239,18 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
             result = _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream,
                                           task_id, config, **kwargs)
             return result, None
+        # Out of credit: pause the whole account.
         except LLMCreditExhausted as ce:
             _cb_trip(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url), str(ce), None, "credit", provider)
             return None, "credit_exhausted"
         except Exception as e:
             err_str = str(e)
+            # claude_cli session limit: pause this model.
             if err_str.startswith("claude_cli_rate_limit:"):
                 reason = err_str[len("claude_cli_rate_limit:"):]
                 _cb_trip(_MODEL_RATE_CB, mk, reason, 900, "rate_limit", provider)
                 return None, "rate_limited"
+            # 429: pause this model.
             if "429" in err_str:
                 _cb_trip(_MODEL_RATE_CB, mk, f"Rate-limited: {err_str[:120]}",
                          _RATELIMIT_COOLDOWN_SECONDS, "rate_limit", provider)
@@ -3032,6 +3275,7 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
                 if not isinstance(degraded, dict):
                     degraded = {"text": str(degraded or ""), "tool_calls": None}
                 return degraded, None
+            # Anything else: report the error.
             return None, e
 
 
@@ -3067,6 +3311,7 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
     just-used model from both the next attempt and the reviewer panel —
     learn that without call_llm's return-value contract changing for every
     other caller."""
+    # Stream by default; build messages from the prompts if none were given.
     effective_stream = True if stream is None else bool(stream)
     _explicit_messages = messages is not None
     if messages is None:
@@ -3075,6 +3320,7 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
             {"role": "user", "content": prompt},
         ]
 
+    # Gather candidates, perf and tuning, then let the picker choose.
     candidates = _enumerate_candidates(config)
     perf = get_llm_perf_snapshot()
     tuning = {}
@@ -3085,9 +3331,11 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
     picker_candidates = _apply_capability_floor(candidates, config)
     selection = model_selection.select_model(reqs, picker_candidates, perf, tuning)
 
+    # Try the winner first, then the alternatives.
     if selection is not None:
         winning = next((c for c in candidates if c["key"] == selection.key), None)
         chain = ([winning] if winning else []) + list(selection.alternatives or [])
+    # Nothing selectable: escalate if asked, else use the safety floor.
     else:
         # A floored-out pool can make select_model() come up empty even though
         # the requirements themselves are satisfiable — that's a policy
@@ -3107,9 +3355,11 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
             raise LlmHumanEscalationNeeded(
                 f"No candidate satisfies requirements (reqs={reqs!r}) — the caller opted "
                 "into must_escalate_to_human instead of the rule-based safety floor.")
+        # Pick the safety-floor entry, failing if there is none.
         floor_entry = model_selection.safety_floor(_configured_entries(config))
         if floor_entry is None:
             raise Exception("No LLM providers configured")
+        # Log why we fell to the floor.
         if floor_excluded_a_selection:
             logger.warning(
                 "select_model: %d candidate(s) satisfied requirements but were excluded by the "
@@ -3119,6 +3369,7 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
         else:
             logger.warning("select_model resolved nothing for this call (reqs=%r) — falling to the safety "
                            "floor: %s / %s", reqs, floor_entry["provider"], floor_entry["model"])
+        # The floor entry becomes the only candidate.
         chain = [{
             "key": _model_key(floor_entry["provider"], floor_entry.get("base_url", ""), floor_entry["model"]),
             "provider": floor_entry["provider"], "model": floor_entry["model"],
@@ -3126,6 +3377,7 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
             "rpm": floor_entry.get("rpm", 0),
         }]
 
+    # No candidates at all.
     if not chain:
         raise Exception("No LLM providers configured")
 
@@ -3148,15 +3400,18 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
             except Exception as e:  # noqa: BLE001
                 logger.debug("call_llm: batch enqueue failed (%s) — falling back to a synchronous call", e)
 
+    # Options passed to each attempt.
     kwargs = dict(repo_checkout_path=repo_checkout_path, json_schema=json_schema,
                   enable_native_tools=enable_native_tools, search_model=search_model,
                   profile=profile, extra_add_dirs=extra_add_dirs)
+    # Is an agentic repo tool loop wanted, and can any candidate do it?
     agentic_repo_requested = bool(enable_native_tools and repo_checkout_path and not tools)
     agentic_repo_available = any(
         ((c.get("provider") or "").lower().strip() == "claude_cli")
         or bool((c.get("caps") or {}).get("supports_tools"))
         for c in chain
     ) if agentic_repo_requested else False
+    # Iteration and output limits for the tool loop.
     try:
         agentic_repo_max_iter = int(config.get("FIX_AGENTIC_MAX_ITERATIONS", 8) or 8)
     except Exception:
@@ -3166,12 +3421,15 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
     except Exception:
         agentic_repo_max_chars = 12000
 
+    # Limit concurrent picker calls.
     sem = _get_category_semaphore("PICKER")
     sem.acquire()
     try:
+        # Try each candidate in order.
         last_err = None
         for candidate in chain:
             provider = (candidate.get("provider") or "").lower().strip()
+            # Skip candidates without tool support when one with it exists.
             if (agentic_repo_requested and agentic_repo_available
                     and provider != "claude_cli"
                     and not (candidate.get("caps") or {}).get("supports_tools")):
@@ -3186,6 +3444,7 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
                 agent_kwargs = dict(kwargs, json_schema=None) if profile == "build" else kwargs
 
                 def _agent_call(agent_messages, agent_tools, _cand=candidate, _kw=agent_kwargs):
+                    """Run one tool-loop turn on this candidate, raising on failure."""
                     result, err = _try_candidate(_cand, agent_messages, agent_tools, False,
                                                  task_id, config, **_kw)
                     if err is not None:
@@ -3211,12 +3470,14 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
                             logger=logger,
                         )
                     else:
+                        # Otherwise run the read-only fix loop.
                         result = repo_tools.run_agentic_fix(
                             _agent_call, messages, repo_checkout_path,
                             max_iterations=agentic_repo_max_iter,
                             max_result_chars=agentic_repo_max_chars,
                             logger=logger,
                         )
+                    # Report which model won, then return.
                     if used_model_out is not None:
                         used_model_out.update({"key": candidate["key"], "provider": candidate["provider"],
                                                "model": candidate["model"], "base_url": candidate["base_url"]})
@@ -3225,12 +3486,14 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
                     last_err = e
                     continue
 
+            # Plain call; on success report the winner and return.
             result, err = _try_candidate(candidate, messages, tools, effective_stream, task_id, config, **kwargs)
             if err is None:
                 if used_model_out is not None:
                     used_model_out.update({"key": candidate["key"], "provider": candidate["provider"],
                                            "model": candidate["model"], "base_url": candidate["base_url"]})
                 return result
+            # Remember the error and move on; all failed if we get here.
             last_err = err
         raise Exception(f"All LLM candidates failed. Last error: {last_err}")
     finally:
@@ -3276,6 +3539,7 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=No
     # autonomous-engine defaults (LLM_TIMEOUT=900, LLM_MAX_RETRIES=5). Defaults
     # to the on-disk config for every existing caller.
     config = config if config is not None else load_config()
+    # The picker path is the only one left.
     if requirements is None:
         raise ValueError("call_llm requires a requirements=LlmRequirements (the "
                          "capability/cost-aware picker path); legacy slot routing "
@@ -3293,11 +3557,13 @@ def is_llm_cooldown_error(e) -> bool:
     limited / out of credit' transient (raised by call_llm) — an EXPECTED deferral,
     not a fault. Callers that wrap call_llm use it to log at WARNING instead of
     ERROR so a routine billing cooldown doesn't read as a real failure."""
+    # Match any cooldown marker.
     s = str(e).lower()
     return any(k in s for k in ("credit_cooldown", "credit_exhausted",
                                 "rate_limited", "providers cooling down"))
 
 
+# Text and status-code markers of an auth failure.
 _LLM_AUTH_MARKERS = ("not authenticated", "not logged in", "forbidden", "unauthorized",
                      "invalid api key", "invalid_api_key", "authentication_error",
                      "permission denied", "missing scope")
@@ -3323,14 +3589,17 @@ def is_llm_auth_error(e) -> bool:
 
     The 401/403 codes are matched on word boundaries, so a token count or a
     commit SHA containing those digits is not mistaken for a status code."""
+    # No error, or a cooldown: not an auth problem.
     if e is None:
         return False
     if is_llm_cooldown_error(e):
         return False
+    # Match an auth marker or a 401/403 code.
     s = str(e).lower()
     return any(k in s for k in _LLM_AUTH_MARKERS) or bool(_LLM_AUTH_STATUS_RE.search(s))
 
 
+# System prompt and input size cap for log analysis.
 LOG_ANALYSIS_SYSTEM_PROMPT = (
     "You are a senior SRE reading application logs for the user. Be concise, "
     "specific, and calm. Do not invent problems that aren't in the logs."
@@ -3352,9 +3621,11 @@ def analyze_logs(log_text, title="logs", task_id=None, requirements=None):
     request runs off the event loop with no one blocking on it. Defaults to a plain
     complexity="small" profile (latency_sensitive=False) if the caller doesn't pass
     one, so this never regresses to raising on a missing param."""
+    # Keep only the newest part of long logs.
     text = log_text or ""
     if len(text) > _LOG_ANALYSIS_MAX_CHARS:
         text = text[-_LOG_ANALYSIS_MAX_CHARS:]
+    # Ask for a VERDICT line, then a short plain answer.
     prompt = (
         f"These are the most recent {title}. Analyze them.\n\n"
         "Begin your reply with EXACTLY one of these lines (nothing before it):\n"
@@ -3371,14 +3642,17 @@ def analyze_logs(log_text, title="logs", task_id=None, requirements=None):
         "not routine warnings. Keep it under ~250 words.\n\n"
         f"----- LOGS -----\n{text}\n----- END LOGS -----"
     )
+    # Default to a small model sized for the prompt.
     if requirements is None:
         requirements = model_selection.LlmRequirements(complexity="small",
                                                         min_context_tokens=len(prompt) // 4)
+    # Call the LLM; an empty reply counts as healthy.
     result = call_llm(prompt, system_prompt=LOG_ANALYSIS_SYSTEM_PROMPT, task_id=task_id,
                       requirements=requirements)
     return (result or "").strip() or "VERDICT: none\n(the LLM returned an empty analysis)"
 
 
+# Finds the VERDICT line.
 _LOG_VERDICT_RE = re.compile(r"VERDICT:\s*(none|watch|escalate)\b", re.IGNORECASE)
 
 
@@ -3386,6 +3660,7 @@ def parse_log_verdict(text):
     """Split an analyze_logs result into (verdict, cleaned_text). verdict is one of
     'none'|'watch'|'escalate' (defaults to 'none' if the model omitted the line).
     cleaned_text has the VERDICT line stripped for display."""
+    # Read the verdict (default none) and strip that line from the text.
     s = text or ""
     m = _LOG_VERDICT_RE.search(s)
     verdict = m.group(1).lower() if m else "none"
@@ -3422,6 +3697,7 @@ _DIAG_PRESETS = [
 def _diag_reqs(kwargs, overrides=None):
     """Build an LlmRequirements from a preset's kwargs, applying any UI
     overrides (only known field names, coerced to the field's type)."""
+    # Apply only overrides that are real requirement fields, with the right type.
     merged = dict(kwargs)
     for k, v in (overrides or {}).items():
         if not hasattr(model_selection.LlmRequirements, k):
@@ -3435,6 +3711,7 @@ def _diag_reqs(kwargs, overrides=None):
                 pass
         else:  # boolean capability flags
             merged[k] = bool(v)
+    # Build the requirements object.
     return model_selection.LlmRequirements(**merged)
 
 
@@ -3461,14 +3738,17 @@ def llm_diag(preset=None, overrides=None, config=None):
     selected, permissive, rows:[...]}, ...]}``. Never raises: a preset that
     blows up is reported with an ``error`` field instead of a resolution.
     """
+    # Load candidates and apply the capability floor, noting what it excluded.
     config = config or load_config()
     candidates = _enumerate_candidates(config)
     picker_candidates = _apply_capability_floor(candidates, config)
     picker_keys = {c["key"] for c in picker_candidates}
     floor_excluded = [c for c in candidates if c["key"] not in picker_keys]
     effective_min_rank = _min_capability_rank(config)
+    # Perf data and the presets to run.
     perf = get_llm_perf_snapshot()
     wanted = [p for p in _DIAG_PRESETS if not preset or p[0] == preset]
+    # Explain the picker's choice for each preset; errors are reported, not raised.
     out = []
     for label, description, kwargs in wanted:
         entry = {"label": label, "description": description}
@@ -3481,6 +3761,7 @@ def llm_diag(preset=None, overrides=None, config=None):
             entry["selected"] = None
             entry["rows"] = []
         finally:
+            # Note which candidates the floor excluded.
             if effective_min_rank > 0 and floor_excluded:
                 entry["capability_floor"] = {
                     "min_rank": effective_min_rank,
@@ -3491,6 +3772,7 @@ def llm_diag(preset=None, overrides=None, config=None):
                     ],
                 }
         out.append(entry)
+    # Return all results.
     return {"candidate_count": len(candidates), "presets": out}
 
 

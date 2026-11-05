@@ -21,6 +21,7 @@ was rephrased / re-logged at a new timestamp as the same issue, so the caller ca
 reopen the existing (possibly closed) issue instead of filing a duplicate.
 """
 
+# Regular expressions do all the text normalisation.
 import re
 
 # Minimal, explicit module aliases — ONLY modules that are unambiguously the
@@ -59,6 +60,7 @@ _EMOJI_RE = re.compile(
 
 # ISO-style timestamps: 2026-06-18 00:02:06,054  (optional comma-ms, T or space sep)
 _TS_RE = re.compile(r'\b\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}:\d{2}(?:,\d+)?\b')
+# Any punctuation character, and any run of whitespace.
 _PUNCT_RE = re.compile(r'[^\w\s]')
 _WS_RE = re.compile(r'\s+')
 
@@ -76,8 +78,10 @@ def strip_boilerplate(text):
     Returns the text with boilerplate phrases and emoji replaced by spaces.
     Does not lowercase or touch punctuation/numbers — that is the caller's job.
     """
+    # Nothing to strip.
     if not text:
         return ""
+    # Replace emoji first, then the boilerplate phrases, with spaces.
     t = _EMOJI_RE.sub(" ", str(text))
     t = _BOILERPLATE_RE.sub(" ", t)
     return t
@@ -85,6 +89,7 @@ def strip_boilerplate(text):
 
 def _apply_aliases(token_text):
     """Map module-alias tokens to their canonical form, preserving order."""
+    # Swap each alias token for its canonical name.
     return " ".join(MODULE_ALIASES.get(tok, tok) for tok in token_text.split())
 
 
@@ -104,24 +109,33 @@ def _normalize_for_dedup(text):
     genuinely-new bug got folded into an existing issue. Only whole timestamps
     (genuine noise) are removed; every other number is kept as a discriminator.
     """
+    # Nothing to normalise.
     if not text:
         return ""
+    # Lower-case, then remove boilerplate and emoji.
     t = str(text).lower()
     t = strip_boilerplate(t)
+    # Drop full timestamps, then punctuation.
     t = _TS_RE.sub(" ", t)
     t = _PUNCT_RE.sub(" ", t)
+    # Map module aliases, then collapse whitespace.
     t = _apply_aliases(t)
     t = _WS_RE.sub(" ", t).strip()
     return t
 
 
 def _token_set(text):
+    """Return the set of normalised words in text."""
+    # Normalise, split on spaces, and de-duplicate.
     return set(_normalize_for_dedup(text).split())
 
 
 def _jaccard(a, b):
+    """Return the Jaccard similarity (shared / total distinct items) of two sets, 0.0 if empty."""
+    # Empty sets have no similarity.
     if not a or not b:
         return 0.0
+    # Size of the intersection divided by size of the union.
     return len(a & b) / float(len(a | b))
 
 
@@ -130,12 +144,15 @@ def _body_containment_match(new_body, ex_body):
     "same error" signal for recurring LOG snippets, and near-identical enough to
     treat the two as the same underlying bug. Length-guarded so trivially short
     bodies don't produce spurious substring hits."""
+    # Normalise both bodies and split into words.
     nb = _normalize_for_dedup(new_body)
     eb = _normalize_for_dedup(ex_body)
     nb_tokens = nb.split()
     eb_tokens = eb.split()
+    # Too little text on either side to trust a substring match.
     if not nb or not eb or len(nb_tokens) < 5 or len(eb_tokens) < 5:
         return False
+    # Same error if one body appears inside the other.
     return nb in eb or eb in nb
 
 
@@ -143,12 +160,15 @@ def _body_signal_match(new_body, ex_body):
     """True when there is a BODY-level duplicate signal — containment OR high
     (>= _BODY_JACCARD_THRESHOLD) token overlap. Used to require actual body
     evidence (not a title-only coincidence) before reopening a closed issue."""
+    # Containment is the strongest signal.
     if _body_containment_match(new_body, ex_body):
         return True
+    # Otherwise compare word sets, but only for bodies with enough words.
     nb_tokens = _normalize_for_dedup(new_body).split()
     eb_tokens = _normalize_for_dedup(ex_body).split()
     if len(nb_tokens) < 5 or len(eb_tokens) < 5:
         return False
+    # Duplicate when the word overlap is high enough.
     return _jaccard(set(nb_tokens), set(eb_tokens)) >= _BODY_JACCARD_THRESHOLD
 
 
@@ -156,6 +176,7 @@ def _is_duplicate_match(new_title, new_body, ex_title, ex_body):
     """Returns True if a new error matches an existing issue, using normalized +
     fuzzy comparison so LLM rephrasing, timestamp drift, boilerplate wrapper,
     and module-name variants (opns/opnsense) don't defeat dedup."""
+    # Normalise both titles and split into words.
     nt = _normalize_for_dedup(new_title)
     et = _normalize_for_dedup(ex_title)
 
@@ -175,4 +196,5 @@ def _is_duplicate_match(new_title, new_body, ex_title, ex_body):
     # matches even though timestamps differ) or high token overlap.
     if _body_signal_match(new_body, ex_body):
         return True
+    # No duplicate signal found.
     return False

@@ -12,10 +12,14 @@ get_version, _llm_cb_snapshot, _provider_credit_cb_snapshot, logger) is imported
 from main. main re-exports config_store and llm_client names into its namespace
 *before* it imports app_state, so these ``from main import`` lookups resolve.
 """
+# os reports the CPU core count; threading provides the locks guarding shared state;
+# datetime timestamps task starts and PR reviews.
 import os
 import threading
 from datetime import datetime
 
+# Persistence helpers, version lookup and circuit-breaker snapshots, all re-exported by
+# main (see the module docstring for why importing from main is safe here).
 from main import (
     logger,
     load_config,
@@ -30,20 +34,27 @@ from main import (
     _provider_credit_cb_snapshot,
 )
 
+# Lock protecting active_tasks / pr_reviews updates made from many worker threads.
 _task_state_lock = threading.Lock()
+# Re-entrant lock for chat state, so a chat helper holding it can call another that does too.
 _chat_lock = threading.RLock()
 
 
 def update_task_state(task_id, task_name="Unknown Task", action="start", kind="scan"):
     """Manages active tasks and their start times. action can be 'start' or 'end'.
     kind tags the work type for the UI ('scan'/'fix' vs 'pr' for PR pre-review)."""
+    # state is the module-level dict defined further down; we mutate it in place.
     global state
+    # Without an id there is nothing to track, so log quietly and do nothing.
     if not task_id:
         logger.debug("update_task_state called with no task_id; ignoring.")
         return
+    # Never let bookkeeping errors break the caller; failures are logged below.
     try:
+        # Starting (or re-starting) a task: create or refresh its entry under the lock.
         if action == "start":
             with _task_state_lock:
+                # Reuse the previous entry's text stream and add a heading for the new sub-step.
                 # Same task_id restarting for a new sub-step (e.g. the next CPU-ensemble
                 # model) — carry the previous reasoning forward instead of blanking the
                 # "AI Thought Process" panel to empty between the many short model calls.
@@ -60,6 +71,7 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
                 # re-start of the same phase; a new phase name starts blank
                 # rather than showing the previous phase's last step.
                 carried_step = prev.get("step") or "" if prev.get("name") == task_name else ""
+                # Store the task entry the UI reads for the Active Tasks card.
                 state["active_tasks"][task_id] = {
                     "name": task_name,
                     "start_time": started,
@@ -70,15 +82,18 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
                     "step": carried_step,
                 }
             logger.info(f"Task started: {task_id} - {task_name}")
+        # Finishing a task: remove it from the active list if it is still there.
         elif action == "end":
             with _task_state_lock:
                 if task_id in state["active_tasks"]:
                     del state["active_tasks"][task_id]
             logger.info(f"Task completed: {task_id}")
+    # Any unexpected failure is logged rather than raised to the worker.
     except Exception as e:
         logger.error(f"update_task_state failed for task_id={task_id!r} action={action!r}: {e}")
 
 
+# Maximum number of PR review records kept; older ones are dropped to bound file size.
 _PR_REVIEWS_MAX = 100
 
 
@@ -92,13 +107,17 @@ def set_task_step(task_id, step):
     parity/secrets checks, GitHub API calls, cloning, test runs) showing nothing
     at all. No-op for an unknown/finished task; never raises.
     """
+    # No task id means no task to update.
     if not task_id:
         return
+    # Update under the lock; the task may already have finished, in which case do nothing.
     try:
         with _task_state_lock:
             task = state["active_tasks"].get(task_id)
             if task is not None:
+                # Keep the step short (200 chars) so the UI card stays one line.
                 task["step"] = str(step)[:200]
+    # Status lines are cosmetic, so a failure is only logged at debug level.
     except Exception as e:  # noqa: BLE001
         logger.debug(f"set_task_step failed for task_id={task_id!r}: {e}")
 
@@ -127,29 +146,36 @@ def _panel_dissent_stats(review):
     depending on whether the provider happened to emit a space. Both now mean
     the same thing: we did not hear from this seat.
     """
+    # No review, or a panel that could not run (status set): nothing to count.
     if not review or review.get("status"):
         return (0, 0, None, 0)
 
+    # The individual reviewer entries must be a non-empty list to be counted.
     reviews = review.get("reviews")
     if not isinstance(reviews, list) or not reviews:
         return (0, 0, None, 0)
 
+    # Running totals: objecting reviewers, reviewers with a verdict, lowest confidence seen,
+    # and reviewers we could not score.
     dissents = 0
     rated = 0
     min_conf = None
     unrated = 0
 
+    # Walk every reviewer seat in the panel.
     for item in reviews:
         if not isinstance(item, dict):
             # A seat we cannot read at all is still a seat we did not hear from.
             unrated += 1
             continue
 
+        # A non-blank verdict counts as rated; anything other than "approve" is a dissent.
         verdict = item.get("verdict")
         if verdict is not None and str(verdict).strip():
             rated += 1
             if str(verdict).strip().lower() != "approve":
                 dissents += 1
+        # Missing or blank verdict: we did not hear from this seat.
         else:
             unrated += 1
 
@@ -157,17 +183,21 @@ def _panel_dissent_stats(review):
         # a number but no parseable verdict still told us how sure it was, and
         # dropping that would hide a low rating behind an unusable verdict.
         confidence = item.get("confidence")
+        # Convert the confidence to a float; skip values that are not numbers.
         if confidence is not None:
             try:
                 conf_float = float(confidence)
             except (TypeError, ValueError):
                 continue
+            # Accept both 0-1 and 0-100 scales, then clamp into 0.0-1.0.
             if conf_float > 1.0:
                 conf_float /= 100.0
             conf_float = max(0.0, min(1.0, conf_float))
+            # Keep the lowest confidence any reviewer reported.
             if min_conf is None or conf_float < min_conf:
                 min_conf = conf_float
 
+    # Return the four counters as a tuple.
     return (dissents, rated, min_conf, unrated)
 
 
@@ -182,7 +212,9 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     visible on github.com but nowhere in AppBuilder's own UI. Stored flat as
     panel_verdict / panel_confidence / panel_status so the PR list can show it
     without re-reading the comment."""
+    # state is the module-level dict; we mutate it in place.
     global state
+    # Count findings per severity level for the UI badges.
     levels = {"error": 0, "warning": 0, "advisory": 0}
     # Tier-1 findings whose fix lives in ANOTHER repo (cross-repo twins). Counted
     # separately so should_remediate can tell "blocked by work this PR can do"
@@ -190,14 +222,19 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     # `findings` on every scan exactly like the level counts, so -- unlike the
     # per-PR attempt counters below -- it must NOT be carried over from `prev`.
     tier1_external = 0
+    # Short, trimmed copies of each finding for display.
     items = []
+    # Walk every finding, tolerating None entries.
     for f in (findings or []):
         f = f or {}
         lvl = f.get("level")
+        # Bump the matching severity counter.
         if lvl in levels:
             levels[lvl] += 1
+        # Blocking findings that must be fixed in another repo are counted separately.
         if lvl in ("error", "warning") and f.get("external"):
             tier1_external += 1
+        # Keep a trimmed display copy (title 140 chars, detail 300 chars).
         items.append({"level": lvl or "advisory",
                       "title": (f.get("title") or "")[:140],
                       "detail": (f.get("detail") or "")[:300]})
@@ -215,6 +252,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     # done. Bounded because it is persisted to pr_reviews.json and rendered in a
     # table row.
     panel_critique = ("" if panel_status else str(_r.get("critique") or "").strip())[:4000]
+    # Parse and normalise the first panel's confidence; bad values become None.
     panel_confidence = None
     if not panel_status and _r.get("confidence") is not None:
         try:
@@ -234,6 +272,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     panel2_status = _r2.get("status") or ""
     panel2_verdict = "" if panel2_status else str(_r2.get("verdict") or "")
     panel2_critique = ("" if panel2_status else str(_r2.get("critique") or "").strip())[:4000]
+    # Parse and normalise the second panel's confidence the same way.
     panel2_confidence = None
     if not panel2_status and _r2.get("confidence") is not None:
         try:
@@ -247,12 +286,15 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     panel_dissents, panel_rated, panel_min_conf, panel_unrated = _panel_dissent_stats(_r)
     panel2_dissents, panel2_rated, panel2_min_conf, panel2_unrated = _panel_dissent_stats(_r2)
 
+    # Average the confidences of whichever panels produced one.
     # Composite consensus & average confidence computation
     valid_confs = [c for c in (panel_confidence, panel2_confidence) if c is not None]
     panel_avg_confidence = (sum(valid_confs) / len(valid_confs)) if valid_confs else None
 
+    # A panel "counts" only if it produced a verdict and was not marked unavailable.
     p1_active = bool(panel_verdict and not panel_status)
     p2_active = bool(panel2_verdict and not panel2_status)
+    # Both panels voted: Approve if both approve, Split if only one does, else Deny.
     if p1_active and p2_active:
         v1_app = panel_verdict.strip().lower() == "approve"
         v2_app = panel2_verdict.strip().lower() == "approve"
@@ -262,17 +304,23 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
             composite_verdict = "Split"
         else:
             composite_verdict = "Deny"
+    # Only one panel voted: its verdict is the composite verdict.
     elif p1_active:
         composite_verdict = panel_verdict
     elif p2_active:
         composite_verdict = panel2_verdict
+    # Neither panel produced a verdict.
     else:
         composite_verdict = ""
 
+    # Records are keyed "owner/repo#number".
     key = "%s#%s" % (repo, number)
+    # Update under the lock; any failure is logged instead of raised.
     try:
         with _task_state_lock:
+            # The previous record (if any) supplies fields that must survive a re-scan.
             prev = state["pr_reviews"].get(key) or {}
+            # Rebuild the record from this scan plus the carried-over sticky fields.
             state["pr_reviews"][key] = {
                 "repo": repo,
                 "number": number,
@@ -419,6 +467,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 for k in list(state["pr_reviews"].keys())[:extra]:
                     state["pr_reviews"].pop(k, None)
             save_pr_reviews(state["pr_reviews"])
+    # Persisting a review is best-effort; log and carry on.
     except Exception as e:
         logger.error(f"record_pr_review failed for {repo}#{number}: {e}")
 
@@ -426,6 +475,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
 def mark_pr_approved(repo, number, approved=True):
     """Flag a reviewed PR as human-approved (set by the Approve button). Returns
     True if the record existed and was updated."""
+    # Approval is just one field on the record, so reuse the generic updater.
     return update_pr_review(repo, number, approved=bool(approved))
 
 
@@ -441,10 +491,13 @@ def _record_merge_milestone(key, fields):
     "PRs Merged" number DROPPED if that record happened to be a merged one.
     The ledger is never trimmed, so the count is monotonic.
     """
+    # Only merge flags matter here; other field updates are ignored.
     if not any(fields.get(f) for f in ("merged", "auto_merged")):
         return
+    # The ledger maps "merged"/"auto_merged" to sets of PR keys.
     ledger = state.setdefault("pr_merge_ledger", {})
     dirty = False
+    # Add the PR key to each merge flag that was turned on.
     for flag in ("merged", "auto_merged"):
         if not fields.get(flag):
             continue
@@ -452,6 +505,7 @@ def _record_merge_milestone(key, fields):
         if key not in bucket:
             bucket.add(key)
             dirty = True
+    # Only write to disk and refresh the badge totals if something new was added.
     if dirty:
         save_pr_merge_ledger(ledger)
         state["pr_merge_totals"] = pr_merge_totals()
@@ -461,8 +515,11 @@ def update_pr_review(repo, number, **fields):
     """Merge fields (e.g. merged=True, denied=True) into a reviewed-PR record,
     KEEPING it in the list (so merged/denied PRs stay visible with a badge instead
     of vanishing). Returns True if the record existed."""
+    # state is the module-level dict; we mutate it in place.
     global state
+    # Records are keyed "owner/repo#number".
     key = "%s#%s" % (repo, number)
+    # Update under the lock; failures are logged and reported as False.
     try:
         with _task_state_lock:
             rec = state["pr_reviews"].get(key)
@@ -471,12 +528,14 @@ def update_pr_review(repo, number, **fields):
                 # is lifetime and must still be tallied in the ledger.
                 _record_merge_milestone(key, fields)
                 return False
+            # Apply the new fields and save the review list.
             rec.update(fields)
             save_pr_reviews(state["pr_reviews"])
             # After the record is safely persisted: the ledger is a derived
             # tally, so losing it is recoverable, but losing the review is not.
             _record_merge_milestone(key, fields)
             return True
+    # Persistence problems are logged and reported as "not updated".
     except Exception as e:
         logger.error(f"update_pr_review failed for {repo}#{number}: {e}")
         return False
@@ -489,9 +548,11 @@ def pr_merge_totals():
     the auto_merged bucket only, so "merged" here excludes those to keep the
     two badges disjoint and their sum equal to the number of PRs merged.
     """
+    # Read the ledger sets; PRs in the auto-merged set are excluded from the plain merged count.
     ledger = state.get("pr_merge_ledger") or {}
     auto = ledger.get("auto_merged") or set()
     merged = (ledger.get("merged") or set()) - auto
+    # Return the two badge counts.
     return {"merged": len(merged), "auto_merged": len(auto)}
 
 
@@ -506,7 +567,9 @@ def _seed_merge_ledger(ledger, pr_reviews):
     re-seeding is harmless, and it re-captures anything written while an older
     build without the ledger was running.
     """
+    # Work on a copy so the caller's ledger is not modified.
     ledger = dict(ledger or {})
+    # Add every merged / auto-merged record still in the review buffer to the ledger.
     try:
         for key, rec in (pr_reviews or {}).items():
             if not isinstance(rec, dict):
@@ -514,11 +577,13 @@ def _seed_merge_ledger(ledger, pr_reviews):
             for flag in ("merged", "auto_merged"):
                 if rec.get(flag):
                     ledger.setdefault(flag, set()).add(key)
+    # A malformed reviews file must not stop startup; log and return what we have.
     except Exception as e:  # noqa: BLE001
         logger.error(f"_seed_merge_ledger failed: {e}")
     return ledger
 
 
+# Settings and the processed-issue store as they were at startup; used to seed state.
 config_on_start = load_config()
 processed_init = load_processed()
 
@@ -548,20 +613,26 @@ feature_flagged_count = sum(1 for i in processed_init.values() if i.get("status"
 feature_needs_info_count = sum(1 for i in processed_init.values() if i.get("status") == "feature_needs_info")
 feature_built_count = sum(1 for i in processed_init.values() if i.get("status") == "feature_built")
 
+# The single shared state dict that the web UI, routes and workers all read and update.
 state = {
+    # Overall service status and which LLM is currently active.
     "status": "Idle", "active_llm": "Unknown",
+    # Online flags for the four legacy provider slots.
     "provider_1_online": False, "provider_2_online": False, "provider_3_online": False, "provider_4_online": False,
     # Entry-aware endpoint reachability (the routable llm_entries set) + an
     # any-online rollup. Header pills prefer this over the legacy per-slot flags.
     "llm_endpoints_online": [], "any_llm_online": False,
+    # Whether each of the four provider slots has been configured.
     "provider_1_configured": False, "provider_2_configured": False, "provider_3_configured": False, "provider_4_configured": False,
     # Per-slot last failover outcome (status sentinel + reason + iso8601), surfaced in the
     # Diagnostics panel so silent skips (e.g. "not_configured") are visible without CLI logs.
     "provider_last_result": {1: None, 2: None, 3: None, 4: None},
     # Bounded recent log of self-update / restart events for the Diagnostics panel.
     "restart_log": [],
+    # Simple local/cloud reachability flags plus last-run and API status text for the header.
     "local_online": False, "cloud_online": False,
     "last_run": "Never", "api_status": "Not Triggered",
+    # All processed issues, the app version, and the live LLM output stream.
     "processed": processed_init,
     "version": get_version(), "llm_stream": "",
     # Rolling generation throughput, "when busy": each entry is one completed
@@ -575,10 +646,12 @@ state = {
     # immediately after a restart instead of blank until every model
     # happens to run again.
     "llm_tps": load_llm_tps(),
+    # Running tasks, saved PR reviews, loaded skills, and whether QA is enabled.
     "active_tasks": {}, "pr_reviews": load_pr_reviews(), "skills": [], "qa_enabled": config_on_start.get("qa_enabled", True),
     # Lifetime merge tally, kept outside the capped pr_reviews ring buffer so
     # the UI badges can only ever go up (see _record_merge_milestone).
     "pr_merge_ledger": _seed_merge_ledger(load_pr_merge_ledger(), load_pr_reviews()),
+    # Feature auto-drive counters for the sidebar.
     "feature_flagged_count": feature_flagged_count,
     "feature_needs_info_count": feature_needs_info_count,
     "feature_built_count": feature_built_count,
@@ -588,21 +661,28 @@ state = {
     # "error", "message": str}. Entries are transient — overwritten per dismiss,
     # never persisted to disk.
     "dismiss_jobs": {},
+    # Issue outcome counters, derived from the processed store above.
     "success_count": success_count, "failure_count": failure_count, "closed_count": closed_count,
     "pending_verification_count": pending_verification_count,
     "non_actionable_count": non_actionable_count,
+    # Current circuit-breaker state for LLMs and for provider credit errors.
     "llm_circuit_breaker": _llm_cb_snapshot(),
     "provider_credit_cb": _provider_credit_cb_snapshot(),
+    # Pause / blackout switches that stop scheduled work.
     "paused": False,
     "blackout": False,
+    # Per-chat streaming output and pending fix proposals.
     "chat_streams": {}, "chat_fix_proposals": {},
+    # Daily fix budget tracking: fixes done today and which day that count belongs to.
     "daily_fixes_count": 0,
     "daily_budget_date": "",
+    # Which scheduler mode is active ("full" runs every job).
     "scheduler_mode": "full",
     "claude_auth_proc": None,    # background subprocess running `claude auth login`
     "claude_auth_url": "",       # OAuth URL captured from that process
     "claude_auth_done": False,   # True once the process exits 0
     "restart_pending": False,    # True when an update was pulled; restart deferred until cycle end
+    # How often (in seconds) the UI polls the status and log endpoints.
     "refresh_status_seconds": config_on_start.get("refresh_status_seconds", 30),
     "refresh_logs_seconds": config_on_start.get("refresh_logs_seconds", 10),
     "cpu_count": os.cpu_count() or 4,  # detected core count, surfaced in the Local LLM setup UI
@@ -627,6 +707,7 @@ def recompute_issue_counters(processed=None):
     (close, reopen, dismiss, delete) so the dashboard totals always match reality
     instead of drifting from running +=/-= increments. Reopened issues fold into the
     base buckets — recurrence is tracked via the pending-verification workflow."""
+    # Load a fresh snapshot from disk when the caller did not pass one.
     if processed is None:
         processed = load_processed()
     # The Activity Feed renders state["processed"]; refresh it from the same
@@ -634,6 +715,7 @@ def recompute_issue_counters(processed=None):
     # (background writers like feature_drive only call this, not the routes'
     # explicit state["processed"] = ... assignment).
     state["processed"] = processed
+    # Recount every status bucket from the snapshot.
     vals = list(processed.values())
     state["success_count"] = sum(1 for i in vals if i.get("status") in _RESOLVED_STATUSES)
     state["closed_count"] = sum(1 for i in vals if i.get("status") == "closed")
@@ -643,6 +725,7 @@ def recompute_issue_counters(processed=None):
     state["feature_flagged_count"] = sum(1 for i in vals if i.get("status") in ("feature_flagged", "feature_classify_retry"))
     state["feature_needs_info_count"] = sum(1 for i in vals if i.get("status") == "feature_needs_info")
     state["feature_built_count"] = sum(1 for i in vals if i.get("status") == "feature_built")
+    # Return state so callers can chain or inspect the new totals.
     return state
 
 # Explicit __all__ so ``from app_state import *`` in main re-exports the

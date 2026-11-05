@@ -19,17 +19,21 @@ High-confidence signatures only: SPA deep-links and static assets
 mistaken for an attack.
 """
 
+# Postpone evaluation of type hints so annotations stay plain strings at runtime.
 from __future__ import annotations
 
 # Path SUFFIXES a legitimate SPA/API never serves. Extension-based scanner
-# fingerprints (PHP/ASP/JSP/CGI stacks, secret/backup files).
+# fingerprints (PHP/ASP/JSP/CGI stacks, secret/backup files). A tuple so it is
+# immutable and can be fed straight to the endswith() check below.
 PROBE_SUFFIXES = (
     ".php", ".php5", ".php7", ".phtml", ".asp", ".aspx", ".jsp", ".jspx",
     ".cgi", ".env", ".sql", ".bak", ".htaccess", ".htpasswd",
 )
 
 # Path SUBSTRINGS that only appear in scanner traffic (CMS probes, VCS/secret
-# dirs, DB admin panels, app-server consoles, known-CVE endpoints).
+# dirs, DB admin panels, app-server consoles, known-CVE endpoints). Matched
+# anywhere in the lower-cased path, so each token starts with "/" to anchor it
+# to a path segment and avoid false hits inside ordinary words.
 PROBE_TOKENS = (
     "/wp-", "/wordpress/", "/.git", "/.env", "/.aws", "/.ssh/", "/.svn",
     "/phpmyadmin", "/pma/", "/adminer", "/dbadmin", "/mysql", "/xmlrpc",
@@ -46,9 +50,14 @@ def looks_like_probe(path: str) -> bool:
     High-confidence only — SPA deep-links and static assets never match, so a
     mistyped in-app route is not mistaken for an attack.
     """
+    # Lower-case the path (treating None as empty) so "/WP-Admin" and "/wp-admin"
+    # match the same lower-case signature.
     p = (path or "").lower()
+    # An empty path cannot be a probe; bail out early.
     if not p:
         return False
+    # Extension check first: a forbidden file type at the end is a sure scanner sign.
     if any(p.endswith(sfx) for sfx in PROBE_SUFFIXES):
         return True
+    # Otherwise it is a probe only if a scanner-only substring appears anywhere.
     return any(tok in p for tok in PROBE_TOKENS)

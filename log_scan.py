@@ -38,18 +38,23 @@ HUB_LOG_DEDUP_TAIL = 500    # skip incoming lines already in this many recent lo
 HUB_LOG_STALE_DAYS = 7      # delete mirror files untouched this long
 CHAT_HUB_LOG_LINES_PER_MODULE = 2000  # chat/analysis readers only need recent lines
 
+# Matches a leading timestamp on a log line.
 _TS_PAT = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
 
 
 def _log_ts(entry):
+    """The leading timestamp of a log entry's line, or "" if it has none (used to sort newest-first)."""
+    # Return the timestamp text, if any.
     m = _TS_PAT.match((entry.get('log') or '').strip())
     return m.group(1) if m else ''
 
 
 def _module_log_path(module):
+    """Path of the mirror file for a module, with the name made filesystem-safe."""
     # module is a spoke/agent id or a /var/log/lm file basename — keep the
     # filename safe and bounded.
     safe = re.sub(r'[^A-Za-z0-9._-]', '_', str(module or "unknown"))[:120] or "unknown"
+    # One .log file per module in HUB_LOG_DIR.
     return os.path.join(HUB_LOG_DIR, safe + ".log")
 
 
@@ -59,6 +64,7 @@ def _persist_hub_logs(raw_logs):
     when a file exceeds HUB_LOG_MAX_LINES. The Hub returns per-module lines
     in oldest→newest order, so appends preserve chronological order.
     Best-effort; never raises into the scan path."""
+    # Make sure the mirror directory exists.
     try:
         os.makedirs(HUB_LOG_DIR, exist_ok=True)
     except Exception as e:
@@ -73,6 +79,7 @@ def _persist_hub_logs(raw_logs):
         if not line:
             continue
         by_module.setdefault(entry.get("module") or "unknown", []).append(line)
+    # For each module, load the recent tail of its file for dedup.
     for mod, lines in by_module.items():
         path = _module_log_path(mod)
         try:
@@ -85,6 +92,7 @@ def _persist_hub_logs(raw_logs):
         # Dedup against the recent tail (and within this batch).
         tail = set(existing)
         appended = 0
+        # Append new lines, skipping duplicates.
         try:
             with open(path, "a") as f:
                 for line in lines:
@@ -109,16 +117,20 @@ def _persist_hub_logs(raw_logs):
                             f.write("\n".join(all_lines[-HUB_LOG_MAX_LINES:]) + "\n")
             except Exception as e:
                 logger.debug(f"hub_log_sync: cap trim failed for {path}: {e}")
+    # Remove mirror files that are no longer written.
     _prune_stale_hub_logs()
 
 
 def _count_lines(path):
+    """Count the lines in a file by reading it in 1 MB binary chunks."""
+    # Sum the newlines in each chunk.
     with open(path, "rb") as f:
         return sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1024 * 1024), b""))
 
 
 def _tail_lines(path, n):
     """Last n lines of path, reading only the end of the file."""
+    # Read blocks backwards from the end until we have more than n lines.
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
         size = f.tell()
@@ -129,6 +141,7 @@ def _tail_lines(path, n):
             size -= step
             f.seek(size)
             data = f.read(step) + data
+    # Decode, drop the trailing empty piece, and keep the last n.
     lines = data.decode("utf-8", errors="replace").split("\n")
     if lines and lines[-1] == "":
         lines.pop()
@@ -138,11 +151,14 @@ def _tail_lines(path, n):
 def _prune_stale_hub_logs(now=None):
     """Delete mirror files not written for HUB_LOG_STALE_DAYS (spokes that were
     renamed or removed), so the mirror doesn't grow without bound."""
+    # Files older than this are deleted.
     cutoff = (now or time.time()) - HUB_LOG_STALE_DAYS * 86400
+    # List the mirror directory; give up if it's missing.
     try:
         names = os.listdir(HUB_LOG_DIR)
     except Exception:
         return
+    # Delete stale .log files.
     for name in names:
         path = os.path.join(HUB_LOG_DIR, name)
         try:
@@ -158,12 +174,15 @@ def _mirror_contains(snippet):
     Returns None when the mirror is empty, so callers can tell "absent" from
     "nothing to search". Reads one file at a time instead of loading the
     whole mirror into memory."""
+    # Case-insensitive search; track whether any file was read.
     needle = snippet.lower()
     searched = False
+    # No mirror directory: nothing to search.
     try:
         names = os.listdir(HUB_LOG_DIR)
     except Exception:
         return None
+    # Search each .log file in turn.
     for name in names:
         if not name.endswith(".log"):
             continue
@@ -186,12 +205,15 @@ def sync_hub_logs():
     scan_hub_logs relies on to suppress connectivity triage). This is the ONE
     live pull per cycle; every other reader reads the local mirror via
     get_hub_logs()."""
+    # Need a connected hub agent.
     client = _get_hub_agent_client()
     if not client:
         return None
+    # Ask the hub for its logs.
     result = client.request_sync("GET_LOGS", {}, timeout=20)
     if not isinstance(result, dict):
         return None
+    # Use the list of entries, or an empty list.
     raw_logs = result.get("logs", [])
     if not isinstance(raw_logs, list):
         raw_logs = []
@@ -201,6 +223,7 @@ def sync_hub_logs():
             _persist_hub_logs(raw_logs)
         except Exception as e:
             logger.warning(f"hub_log_sync: persist failed ({e}); returning in-memory list only")
+    # Return newest first.
     return sorted(raw_logs, key=_log_ts, reverse=True)
 
 
@@ -215,11 +238,13 @@ def get_hub_logs(max_per_module=None):
     contract belongs to sync_hub_logs(). max_per_module reads only the newest
     N lines of each file (files are oldest→newest), which is all a
     "newest N rows" reader needs and avoids loading the whole mirror."""
+    # No mirror directory yet: no logs.
     try:
         if not os.path.isdir(HUB_LOG_DIR):
             return []
     except Exception:
         return []
+    # Read each module's .log file, or just its last max_per_module lines.
     out = []
     try:
         for name in os.listdir(HUB_LOG_DIR):
@@ -238,11 +263,13 @@ def get_hub_logs(max_per_module=None):
                 logger.debug(f"hub_log_sync: could not read {path}: {e}")
     except Exception as e:
         logger.debug(f"hub_log_sync: listing {HUB_LOG_DIR} failed: {e}")
+    # Return newest first.
     return sorted(out, key=_log_ts, reverse=True)
 
 
 def hub_log_line_count():
     """Total lines across the mirror, without decoding them."""
+    # Add up line counts of every .log file, ignoring errors.
     total = 0
     try:
         for name in os.listdir(HUB_LOG_DIR):
@@ -258,9 +285,11 @@ def hub_log_line_count():
 
 def get_hub_state():
     """Fetches the current state of the hub for verification."""
+    # Hub query URL; skip if unset or still the placeholder.
     config = load_config()
     url = config.get("HUB_QUERY_URL") or os.getenv("HUB_QUERY_URL")
     if not url or "your-netbox" in url: return None
+    # Fetch it; any failure returns None.
     try:
         resp = requests.get(url.rstrip('/'), timeout=15)
         if resp.status_code == 200:
@@ -353,6 +382,7 @@ _SELF_SCAN_NOISE = re.compile(
 )
 
 
+# Level names we recognise.
 _LOG_LEVEL_NAMES = ("CRITICAL", "FATAL", "ERROR", "WARNING", "WARN",
                     "NOTICE", "INFO", "DEBUG", "TRACE")
 #: Bracketed (``[ERROR]``) or python-logging dash style (``- AppBuilder - ERROR -``).
@@ -386,11 +416,13 @@ def _explicit_log_level(text):
     Normalizes WARN -> WARNING and FATAL -> CRITICAL. Returns the FIRST level tag
     found in the prefix, so the line's own level wins over any later mention.
     """
+    # Look for a level tag near the start of the line.
     if not text:
         return None
     m = _LOG_LEVEL_RE.search(text[:_LOG_LEVEL_PREFIX_CHARS])
     if not m:
         return None
+    # Normalise WARN and FATAL.
     level = (m.group(1) or m.group(2) or "").upper()
     if level == "WARN":
         return "WARNING"
@@ -417,6 +449,7 @@ def filter_error_logs(logs):
     SelfScan shape {"module":..., "timestamp":..., "log":...} equally, since it
     only inspects the 'log' field (falling back to the stringified entry).
     """
+    # Nothing to filter.
     import re
     if not logs:
         return []
@@ -429,14 +462,17 @@ def filter_error_logs(logs):
         re.IGNORECASE
     )
 
+    # Limits on how many entries and characters to keep.
     cfg = load_config()
     max_entries = int(cfg.get("LLM_LOG_MAX_ENTRIES", 200))
     max_chars = int(cfg.get("LLM_LOG_MAX_CHARS", 60000))
 
+    # Walk the logs, deduping and keeping errors within the limits.
     seen = set()
     kept = []
     total_chars = 0
     for entry in logs:
+        # Get the module and log text from the entry.
         if isinstance(entry, dict):
             module = str(entry.get('module', '') or '')
             text = entry.get('log')
@@ -463,11 +499,13 @@ def filter_error_logs(logs):
         if _SELF_SCAN_NOISE.search(text):
             continue
 
+        # Skip exact duplicates per module.
         key = (module, text.strip())
         if key in seen:
             continue
         seen.add(key)
 
+        # Stop once the character budget is reached.
         line_len = len(text) + len(module) + 16
         if total_chars + line_len > max_chars:
             logger.info(
@@ -475,6 +513,7 @@ def filter_error_logs(logs):
                 f"{len(kept)} entries; stopping."
             )
             break
+        # Keep the entry; stop at the entry cap.
         kept.append(entry if isinstance(entry, dict) else {"module": "", "log": text})
         total_chars += line_len
         if len(kept) >= max_entries:
@@ -486,6 +525,7 @@ def filter_error_logs(logs):
 
 def _json_string_spans(text):
     """(start, end) index pairs of every JSON string literal in *text*."""
+    # Scan for quotes, skipping escaped characters, and record each string's span.
     spans, i, n = [], 0, len(text)
     while i < n:
         if text[i] == '"':
@@ -512,14 +552,17 @@ def _first_json_array_of_objects(text):
     
     Returns the list if found, or None if no valid candidate is found.
     """
+    # Map each string's start to its end so brackets inside strings are ignored.
     spans = _json_string_spans(text)
     ends = {s: e for s, e in spans}
     i, n = 0, len(text)
+    # Scan for each "[" outside strings.
     while i < n:
         if i in ends:
             i = ends[i] + 1
             continue
         if text[i] == '[':
+            # Find its matching close bracket by tracking depth.
             depth, j = 0, i
             while j < n:
                 if j in ends:
@@ -530,6 +573,8 @@ def _first_json_array_of_objects(text):
                 elif text[j] in ']}':
                     depth -= 1
                     if depth == 0:
+                        # Parse that slice; return it if it's a list of dicts, else try the next
+                        # "[".
                         try:
                             val = json.loads(text[i:j + 1])
                         except Exception:
@@ -560,8 +605,10 @@ def analyze_logs_for_errors(logs):
     task_kind="log_review" pool pin -- i.e. the most capable FREE model, since
     this runs unattended and triage quality matters more than latency.
     """
+    # Nothing to analyse.
     if not logs: return []
 
+    # Build the prompt with the logs as JSON.
     log_text = json.dumps(logs, indent=2)
     prompt = (
         f"Logs from Hub:\n{log_text}\n\n"
@@ -586,6 +633,7 @@ def analyze_logs_for_errors(logs):
                                deprioritize_local=True,
                                prefer_capable_within_tier=True,
                                min_context_tokens=len(prompt) // 4)
+        # Ask the LLM and pull out the JSON array.
         res = call_llm(prompt, system_prompt="You are a log analysis expert. Return only a JSON array.",
                        requirements=reqs)
         parsed = _first_json_array_of_objects(res or "")
@@ -595,6 +643,7 @@ def analyze_logs_for_errors(logs):
                 f"sweep. Response head: {str(res)[:300]!r}"
             )
             return []
+        # Keep only entries with module, title and body.
         # _first_json_array_of_objects already guarantees a list whose entries are
         # all dicts, so the old isinstance(parsed, dict) / non-list guards here are
         # gone: they existed only because the greedy regex could hand back anything.
@@ -631,6 +680,7 @@ def analyze_logs_for_errors(logs):
             })
         return cleaned
     except Exception as e:
+        # LLM failures return no issues.
         if is_llm_cooldown_error(e):
             logger.warning(f"Log analysis deferred — LLM providers cooling down: {e}")
         else:
@@ -643,10 +693,12 @@ def verify_production_fixes(gh_current, processed):
     Now implements a configurable 'cooling period' (PROD_VERIFICATION_DAYS).
     The issue is only closed if the error snippet has been absent for the full period.
     """
+    # Issues waiting for production verification.
     awaiting = [(k, v) for k, v in processed.items()
                 if v.get("status") == "awaiting_prod_verification"]
     if not awaiting:
         return
+    # How many clean days are required.
     config = load_config()
     days_required = int(config.get("PROD_VERIFICATION_DAYS", 7))
 
@@ -655,12 +707,15 @@ def verify_production_fixes(gh_current, processed):
     # 7-day PROD_VERIFICATION_DAYS gate bounds that staleness so a one-cycle
     # lag can't flip a not-yet-clean issue to closed.
     for issue_id, info in awaiting:
+        # Check each one.
         repo_name, issue_num = issue_id.split(":")
         logger.info(f"Verifying production fix for {issue_id} (Required clean period: {days_required} days)...")
         try:
+            # Load the issue.
             repo_obj = gh_current.get_repo(repo_name)
             issue = repo_obj.get_issue(int(issue_num))
 
+            # Find the log snippet recorded on the issue and look for it in the mirror.
             match = re.search(r"### Log Evidence:\n```\n(.*?)\n```", issue.body or "", re.DOTALL)
             if match:
                 found = _mirror_contains(match.group(1).strip())
@@ -676,10 +731,12 @@ def verify_production_fixes(gh_current, processed):
                             processed[issue_id] = info
                             save_processed(processed)
                         else:
+                            # Already clean: close once the period has passed.
                             first_clean_ts = datetime.fromisoformat(clean_since)
                             days_clean = (now - first_clean_ts).days
                             if days_clean >= days_required:
                                 logger.info(f"Verified: Issue {issue_id} has been clean for {days_clean} days. Closing issue.")
+                                # Comment, close, label and update the counters.
                                 try:
                                     issue.create_comment(f"🤖 **AppBuilder AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
                                 except Exception as ce:
@@ -733,6 +790,7 @@ MODULE_TYPE_REPO = {
 }
 
 
+# How old a heartbeat may be before it counts as stale.
 HEARTBEAT_STALE_S_DEFAULT = 300
 # After a reinstall (Hub or AppBuilder), the agent reconnects and the Hub's
 # telemetry pipeline takes a minute or two to come back up: spokes reconnect
@@ -748,9 +806,11 @@ HEARTBEAT_WARMUP_S = 300
 def _approved_at_epoch():
     """Epoch seconds of the agent's last (re)approval, or None if never
     approved/unknown. Drives the heartbeat warm-up backstop."""
+    # No approval time recorded: None.
     s = state.get("hub_agent_approved_at")
     if not s:
         return None
+    # Parse the saved timestamp.
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").timestamp()
     except Exception:
@@ -762,6 +822,7 @@ def _record_hb_suppression(reason):
     Diagnostics UI can show WHY no issues are being filed (vs. silently
     dropping them). Pass None to clear it when triage is active again."""
     try:
+        # Clear the reason, or save it with the current time.
         if reason is None:
             state.pop("heartbeat_suppression", None)
         else:
@@ -788,10 +849,12 @@ def scan_heartbeats(gh_current, config, hub_logs):
     not immediately trip) and the global dedup/reopen logic (a recurring missing
     heartbeat reopens the closed prior issue instead of spamming duplicates).
     """
+    # Staleness limit from config, with a default.
     try:
         stale_s = int(config.get("HEARTBEAT_STALE_S", HEARTBEAT_STALE_S_DEFAULT) or HEARTBEAT_STALE_S_DEFAULT)
     except Exception:
         stale_s = HEARTBEAT_STALE_S_DEFAULT
+    # Modules to skip; a string is split on commas and newlines.
     exclude_raw = config.get("heartbeat_exclude") or []
     if isinstance(exclude_raw, str):
         exclude_raw = [s.strip() for s in exclude_raw.replace(",", "\n").splitlines() if s.strip()]
@@ -824,9 +887,11 @@ def scan_heartbeats(gh_current, config, hub_logs):
         logger.info(f"scan_heartbeats: not fully connected to hub yet ({reason}); "
                     f"suppressing heartbeat triage to avoid a false-positive flood.")
         return
+    # Approved spokes and their module types.
     approved = spoke_status.get("approved") or {}
     module_types = spoke_status.get("module_types") or {}
 
+    # Expect a heartbeat from each approved, non-agent, non-excluded spoke, plus the hub.
     expected = {}  # spoke_id -> module_type
     for sid, is_approved in approved.items():
         if not is_approved:
@@ -840,6 +905,7 @@ def scan_heartbeats(gh_current, config, hub_logs):
     if "hub" not in exclude:
         expected["hub"] = "hub"
 
+    # Nothing to check.
     if not expected:
         logger.info("scan_heartbeats: no expected modules to check this cycle.")
         return
@@ -849,6 +915,7 @@ def scan_heartbeats(gh_current, config, hub_logs):
     # heartbeat line encountered per module is the latest.
     latest_hb = {}  # module -> timestamp_str
     ts_pat = re.compile(r'^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})')
+    # Record the newest heartbeat timestamp per module.
     for entry in hub_logs or []:
         if not isinstance(entry, dict):
             continue
@@ -861,6 +928,7 @@ def scan_heartbeats(gh_current, config, hub_logs):
         m = ts_pat.match(log.strip())
         latest_hb[mod] = m.group(1) if m else ""
 
+    # Remember whether we have ever seen the hub's own heartbeat.
     # GATE 2 — telemetry pipeline warm-up. The Hub emits its own
     # `[heartbeat] ok module=hub` line every ~60s. Until we have observed it
     # at least once since this process started, the pipeline is still warming
@@ -876,8 +944,10 @@ def scan_heartbeats(gh_current, config, hub_logs):
     if latest_hb.get("hub"):
         scan_heartbeats._hub_hb_observed = True
     if not scan_heartbeats._hub_hb_observed:
+        # Hub heartbeat not seen yet: time since approval.
         approved_at = _approved_at_epoch()
         elapsed = (time.time() - approved_at) if approved_at else None
+        # Still within the warm-up window: hold off.
         elapsed_s = int(elapsed) if elapsed is not None else 0
         if elapsed is None or elapsed < HEARTBEAT_WARMUP_S:
             _record_hb_suppression(
@@ -898,9 +968,11 @@ def scan_heartbeats(gh_current, config, hub_logs):
     # any prior suppression note so the UI shows triage is active again.
     _record_hb_suppression(None)
 
+    # Repos we watch, and a counter of issues filed.
     monitored_repos = get_monitored_repos(config)
     now = time.time()
     triaged = 0
+    # Check each expected module's newest heartbeat.
     for sid, mtype in expected.items():
         hb = latest_hb.get(sid)
         age_s = None
@@ -910,11 +982,13 @@ def scan_heartbeats(gh_current, config, hub_logs):
                 age_s = now - dt.timestamp()
             except Exception:
                 age_s = None
+        # Fresh heartbeat: nothing to do.
         missing = not hb
         stale = (age_s is not None and age_s > stale_s)
         if not (missing or stale):
             continue
 
+        # Read the hub's recovery state for this spoke.
         # Hub-side recovery handoff. The Hub watchdog (run_spoke_recovery_loop)
         # already restarts stranded spoke units with backoff and exposes per-
         # spoke recovery state via GET_SPOKE_STATUS (included in the payload
@@ -936,6 +1010,7 @@ def scan_heartbeats(gh_current, config, hub_logs):
         rec_paused = bool(recovery.get("manual_pause"))
         rec_in_progress = bool(recovery.get("in_progress")) and not bool(recovery.get("gave_up"))
         rec_gave_up = bool(recovery.get("gave_up"))
+        # Paused or already recovering: don't file.
         if rec_paused:
             logger.info(f"scan_heartbeats: {sid} recovery paused by admin; not triaging.")
             continue
@@ -970,10 +1045,12 @@ def scan_heartbeats(gh_current, config, hub_logs):
             repo_name = resolve_module_repo(sid, monitored_repos, config)
         if not repo_name:
             repo_name = resolve_self_diagnosis_repo(config)
+        # No repo found: skip.
         if not repo_name:
             logger.warning(f"scan_heartbeats: no repo maps to {sid} (module_type={mtype!r}); skipping triage. Add a 'module_repo_map' entry if this module should be tracked.")
             continue
 
+        # Pick the title and body: recovery gave up, missing, or stale.
         if rec_gave_up:
             last_err = recovery.get("last_error") or "unknown"
             crash_sig = recovery.get("last_crash_sig") or "unknown"
@@ -1001,12 +1078,14 @@ def scan_heartbeats(gh_current, config, hub_logs):
                     f"**{sid}** (type={mtype or 'unknown'}) is {int(age_s)}s old (stale threshold {stale_s}s). "
                     f"Last heartbeat timestamp: {hb}.\n\nThe module may be hung or its telemetry relay is delayed. "
                     f"This issue was automatically created for triage.")
+        # File (or reopen) the issue.
         error_data = {"module": sid, "title": title, "body": body, "repo": repo_name}
         try:
             repo_obj = gh_current.get_repo(repo_name)
             create_automated_issue(gh_current, monitored_repos, repo_obj, error_data)
             triaged += 1
             logger.info(f"scan_heartbeats: triaged {sid} (missing={missing}, age_s={age_s}) -> {repo_name}")
+        # Log failures and move on.
         except GithubException as ge:
             if ge.status == 404:
                 logger.error(f"scan_heartbeats: repo {repo_name} not found (404) for {sid}; skipping.")
@@ -1014,6 +1093,7 @@ def scan_heartbeats(gh_current, config, hub_logs):
                 logger.error(f"scan_heartbeats: failed to create issue for {sid} in {repo_name}: {ge}")
         except Exception as e:
             logger.error(f"scan_heartbeats: failed to triage {sid}: {e}")
+    # Summary for this cycle.
     if triaged:
         logger.info(f"scan_heartbeats: triaged {triaged} module(s) with missing/stale heartbeats.")
     else:
@@ -1054,11 +1134,13 @@ def scan_bugs(gh_current, config, hub_logs):
     # on the Diagnostics page (the "LM Feature Request Ingestion" card).
     _fi = {"last_run": time.time(), "features_total": None, "awaiting_approval": 0,
            "approved": 0, "filed_this_cycle": 0, "note": "", "error": ""}
+    # Publish the status dicts so the Diagnostics page can read them.
     try:
         state["bug_ingest"] = _bi
         state["feature_ingest"] = _fi
     except Exception:  # noqa: BLE001
         pass
+    # Disabled, or no logs: nothing to do.
     if not config.get("bug_report_enabled", True):
         _bi["note"] = _fi["note"] = "bug_report_enabled is OFF (Settings)"
         return
@@ -1071,6 +1153,7 @@ def scan_bugs(gh_current, config, hub_logs):
     # view=... summary=...". Only the id is needed here; the full report is
     # fetched from the hub.
     id_pat = re.compile(r'\[bug-report\][^\n]*?\bid=([0-9a-fA-F]+)')
+    # Collect unique report ids from the markers.
     seen_ids = []
     seen_set = set()
     for entry in hub_logs or []:
@@ -1098,6 +1181,7 @@ def scan_bugs(gh_current, config, hub_logs):
     # (GET_BUG_REPORTS below), which is durable and was already being fetched purely
     # for dedup. Markers stay as a fast path for same-cycle pickup.
 
+    # Need a hub agent client.
     client = _get_hub_agent_client()
     if not client:
         _bi["note"] = "no hub agent client"
@@ -1115,12 +1199,15 @@ def scan_bugs(gh_current, config, hub_logs):
     # occasionally in case the body ever comes back.
     if not hasattr(scan_bugs, "_evicted"):
         scan_bugs._evicted = {}
+    # Reports the hub says are already filed.
     filed_on_hub = set()
     # Ids of feature requests still awaiting admin approval — the hub annotates
     # each report gated_pending_approval; we must NOT file these until approved.
     gated_ids = set()
     # Unfiled, ungated reports the hub itself lists — the durable discovery set.
     listed_unfiled = []
+    # Fetch the hub's report list, count bugs and features, and sort ids into filed, gated and
+    # unfiled.
     try:
         reports = client.request_sync("GET_BUG_REPORTS", {}, timeout=10)
         _rlist = (reports.get("reports") if isinstance(reports, dict) else []) or []
@@ -1143,10 +1230,12 @@ def scan_bugs(gh_current, config, hub_logs):
         _fi["awaiting_approval"] = len(gated_ids)
         _fi["approved"] = sum(1 for r in _feat
                               if not r.get("gated_pending_approval") and not r.get("filed"))
+    # List failed: record the error and rely on markers alone.
     except Exception as e:
         _bi["error"] = f"GET_BUG_REPORTS failed: {e}"
         _fi["error"] = f"GET_BUG_REPORTS failed: {e}"
         logger.warning(f"scan_bugs: GET_BUG_REPORTS failed: {e}")
+    # Remember filed reports.
     scan_bugs._filed |= filed_on_hub
 
     # Candidates = markers (fast path, newest-first) ∪ the hub's unfiled index
@@ -1160,25 +1249,30 @@ def scan_bugs(gh_current, config, hub_logs):
         # the marker-only scan would have dropped on the floor.
         logger.info("scan_bugs: %d unfiled report(s) found via the hub index with no "
                     "surviving log marker: %s", len(_recovered), ", ".join(_recovered[:10]))
+    # Nothing to file.
     if not candidate_ids:
         _bi["note"] = ("no unfiled bug reports on the hub"
                        if _bi.get("reports_total") is not None
                        else "no [bug-report] markers and the hub report list was unavailable")
         return
 
+    # Repo to file bug reports in: config, then the hub repo, then self-diagnosis.
     monitored_repos = get_monitored_repos(config)
     repo_name = (config.get("bug_report_repo") or "").strip()
     if not repo_name:
         repo_name = MODULE_TYPE_REPO.get("hub") or resolve_self_diagnosis_repo(config)
+    # No repo: give up.
     if not repo_name:
         _bi["note"] = "no bug_report_repo configured (Settings) and no hub repo resolved"
         logger.warning("scan_bugs: no bug_report_repo/hub repo resolved; skipping.")
         return
 
+    # File each candidate report.
     _bi["repo"] = repo_name
     filed_this_cycle = 0
     feat_filed_this_cycle = 0
     for rid in candidate_ids:
+        # Skip ones already filed.
         if rid in scan_bugs._filed:
             continue
         # A feature awaiting admin approval is off-limits until approved. The hub
@@ -1200,6 +1294,7 @@ def scan_bugs(gh_current, config, hub_logs):
         except Exception as e:
             logger.warning(f"scan_bugs: GET_BUG_REPORT {rid} failed: {e}")
             continue
+        # Missing on the hub: remember as evicted and skip.
         if not isinstance(report, dict) or not report.get("id"):
             if rid not in scan_bugs._evicted:
                 logger.warning(f"scan_bugs: report {rid} not found on hub (may have been evicted); "
@@ -1212,10 +1307,12 @@ def scan_bugs(gh_current, config, hub_logs):
             # Feature awaiting admin approval — hub withheld the full report.
             gated_ids.add(rid)
             continue
+        # Already filed: remember and skip.
         if report.get("filed"):
             scan_bugs._filed.add(rid)
             continue
 
+        # Explanation, severity and type, preferring the report's JSON fields.
         explanation = (report.get("report_json") and _safe_json_field(report.get("report_json"), "explanation")) \
             or report.get("summary") or ""
         severity = (report.get("report_json") and _safe_json_field(report.get("report_json"), "severity")) \
@@ -1236,6 +1333,7 @@ def scan_bugs(gh_current, config, hub_logs):
         if not is_feature and not config.get("bug_reports_enabled", True):
             _bi["note"] = "bug_reports_enabled is OFF (Settings)"
             continue
+        # Context fields to include in the issue.
         ctx = report.get("context") or {}
         # Build a clean, public-safe issue body.
         ctx_lines = []
@@ -1279,6 +1377,7 @@ def scan_bugs(gh_current, config, hub_logs):
             # to show data f"). Collapsed to one line (join/split), not capped.
             _msg = _err[6:].strip() if _err.lower().startswith("error:") else \
                 (_err or " ".join(str(explanation).split()).strip())
+            # Prefer the assistant's title when there is no Error: line.
             if _title_hint and not _err:
                 _msg = _title_hint
             _err_line = f"**Error:** {_msg}\n\n" if _msg else ""
@@ -1298,14 +1397,17 @@ def scan_bugs(gh_current, config, hub_logs):
                 f"AppBuilder pulls them from the hub as fix context._\n"
             )
             file_labels = ["automated-fix", (config.get("SCHEDULER_BUG_LABEL") or "bug").strip()]
+        # File the issue (dedup may return an existing one).
         error_data = {"module": "hub", "title": title, "body": body, "repo": repo_name}
         try:
             gh_repo = gh_current.get_repo(repo_name)
             issue = create_automated_issue(gh_current, monitored_repos, gh_repo, error_data,
                                            labels=file_labels, raw=True)
+            # Nothing filed this time.
             if issue is None:
                 logger.info(f"scan_bugs: {rid} not filed this cycle (cooldown/dedup/no-op).")
                 continue
+            # Link to the issue.
             issue_url = getattr(issue, "html_url", "") or ""
             # Dedup: this report matched an EXISTING issue (recurrence / same error)
             # rather than filing a fresh one. Mark it "duplicate" (→ links the same
@@ -1314,10 +1416,12 @@ def scan_bugs(gh_current, config, hub_logs):
             # fixed once ab closes it, so the issue_url must be recorded here.
             was_dup = bool(getattr(issue, "_bf_was_duplicate", False))
             mark_msg = "MARK_BUG_DUPLICATE" if was_dup else "MARK_BUG_FILED"
+            # Tell the hub it's filed (or a duplicate).
             try:
                 client.request_sync(mark_msg, {"id": rid, "issue_url": issue_url}, timeout=10)
             except Exception as me:
                 logger.warning(f"scan_bugs: {mark_msg} {rid} failed: {me}")
+            # Record it and update the counts.
             scan_bugs._filed.add(rid)
             filed_this_cycle += 1
             if is_feature:
@@ -1327,6 +1431,7 @@ def scan_bugs(gh_current, config, hub_logs):
             logger.info(f"scan_bugs: {_verb} {_kind} {rid} -> {repo_name}#{getattr(issue, 'number', '?')} ({issue_url})")
         except Exception as e:
             logger.error(f"scan_bugs: failed to file bug report {rid} in {repo_name}: {e}")
+    # Save this cycle's counts and pick a status note for features.
     _bi["filed_this_cycle"] = filed_this_cycle
     _fi["filed_this_cycle"] = feat_filed_this_cycle
     _fi["repo"] = repo_name
@@ -1337,6 +1442,7 @@ def scan_bugs(gh_current, config, hub_logs):
             _fi["note"] = "all feature requests approved/filed"
         else:
             _fi["note"] = "no feature requests"
+    # Summary log line.
     if filed_this_cycle:
         logger.info(f"scan_bugs: filed {filed_this_cycle} new report(s) "
                     f"({feat_filed_this_cycle} feature(s)).")
@@ -1351,6 +1457,7 @@ def _safe_json_field(json_str, field):
     the hub returns via GET_BUG_REPORT without crashing on a malformed string.
     """
     try:
+        # Parse and return the field; anything else gives "".
         obj = json.loads(json_str) if isinstance(json_str, str) else None
         if isinstance(obj, dict):
             v = obj.get(field)
@@ -1372,12 +1479,14 @@ def _bug_report_fix_context(issue_body):
     artifacts WITHOUT them ever landing in the public issue. Returns "" if no
     marker is present or anything fails (never blocks the fix).
     """
+    # Find the report id marker in the issue body.
     if not isinstance(issue_body, str) or not issue_body:
         return ""
     m = re.search(r'<!--\s*bug-report-id:\s*([0-9a-fA-F]+)\s*-->', issue_body)
     if not m:
         return ""
     rid = m.group(1)
+    # Fetch the report from the hub; any failure gives "".
     client = _get_hub_agent_client()
     if not client:
         return ""
@@ -1389,6 +1498,7 @@ def _bug_report_fix_context(issue_body):
     if not isinstance(report, dict) or not report.get("id"):
         return ""
 
+    # Console error lines (last 40).
     console = str(report.get("console") or "")
     # Surface only the error/exception lines from the console — the most useful
     # signal for a UI bug — capped to keep the prompt bounded.
@@ -1396,13 +1506,16 @@ def _bug_report_fix_context(issue_body):
                  if re.search(r'\b(error|exception|failed|uncaught|traceback)\b', ln, re.IGNORECASE)]
     console_excerpt = "\n".join(err_lines[-40:]) if err_lines else "(no error-level console lines)"
 
+    # First 4 KB of the page HTML.
     dom = str(report.get("dom") or "")
     dom_excerpt = dom[:4096] if dom else "(not captured)"
     if len(dom) > 4096:
         dom_excerpt += "\n…[DOM truncated]"
 
+    # Note whether a screenshot exists.
     has_shot = "present (stored on hub, not inlined)" if report.get("screenshot_b64") else "not captured"
 
+    # Build the context section.
     return (
         f"\n\n--- Additional fix context from File-a-Bug report `{rid}` ---\n"
         f"The user filed this bug from the LM WebUI. The captured browser state "
@@ -1414,6 +1527,7 @@ def _bug_report_fix_context(issue_body):
     )
 
 
+# Size limits for the excerpt and the pattern for error lines.
 # Bounded excerpt of the source module's local hub-log mirror appended to the
 # fix prompt so the LLM sees the surrounding log context for an auto-filed
 # error issue — not just the single error snippet in the issue body.
@@ -1443,16 +1557,19 @@ def _module_log_fix_context(issue_body):
     Reusing the local mirror (not a live GET_LOGS pull) keeps the fix step
     offline-safe and bounded; the mirror is refreshed once per scan cycle.
     """
+    # Find the module marker in the issue body.
     if not isinstance(issue_body, str) or not issue_body:
         return ""
     m = re.search(r'<!--\s*bf-module:\s*([^\s>]+)\s*-->', issue_body)
     if not m:
         return ""
     module = m.group(1)
+    # Need the module's mirror file.
     path = _module_log_path(module)
     if not path or not os.path.exists(path):
         logger.debug(f"fix-context: no local log mirror for module={module!r}")
         return ""
+    # Read it.
     try:
         with open(path, "r", errors="replace") as f:
             lines = f.read().splitlines()
@@ -1486,6 +1603,7 @@ def _module_log_fix_context(issue_body):
             break
         out.append(ln)
         total += len(ln) + 1
+    # Return the excerpt as a context section.
     if not out:
         return ""
     excerpt_text = "\n".join(out)
@@ -1498,6 +1616,7 @@ def _module_log_fix_context(issue_body):
     )
 
 
+# Matches the analysis's standard heading lines.
 _ESCALATION_HEADER = re.compile(
     r"^(\d+\.\s*)?\*\*(is there a problem|what is going wrong|what to check)[^*]*\*\*[\s:.]*(yes|no)?\.?$",
     re.IGNORECASE)
@@ -1508,6 +1627,7 @@ def _escalation_summary_line(analysis):
     problem. The analysis always opens with "1. **Is there a problem?** Yes.",
     so titling on the first line gave every hub escalation the same title and
     dedup folded unrelated problems into one issue (lm#1228, 172 comments)."""
+    # Skip blank and heading lines; return the first real line without markdown.
     for ln in (analysis or "").splitlines():
         ln = ln.strip().lstrip("*->#").strip()
         if not ln or _ESCALATION_HEADER.match(ln):
@@ -1522,34 +1642,41 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
     File a GitHub issue in the module's repo (deduped via create_automated_issue) so the
     normal RepoScan -> process_single_issue fix pipeline engages; AppBuilder's fix step can
     then pull ALL logs as needed. Returns (ok: bool, detail: str)."""
+    # Load config and default the module to "hub".
     config = config or load_config()
     module = (module or "hub").strip()
     try:
+        # Need a GitHub token.
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
         if not token:
             return False, "no GITHUB_TOKEN configured"
         gh = Github(token)
+        # Find the module's repo.
         monitored_repos = get_monitored_repos(config)
         repo_name = (MODULE_TYPE_REPO.get(module.lower())
                      or resolve_module_repo(module, monitored_repos, config))
         if not repo_name:
             return False, f"no repo maps to module {module!r} (add a module_repo_map entry)"
+        # Title summary from the analysis.
         first_line = next((ln.strip() for ln in (analysis or "").splitlines() if ln.strip()), "")
         if config.get("escalation_specific_titles", False):
             first_line = _escalation_summary_line(analysis)
         summary = " ".join(first_line.split())[:90] or f"{module} log problem"
+        # Build the issue title and body.
         title = f"Hub log alert ({module}): {summary}"
         body = (
             f"**Escalated by the LM hub log sentinel** (verdict: `{verdict}`, module: `{module}`).\n\n"
             f"### Analysis\n{analysis or '(none)'}\n\n"
             f"### Offending log lines\n```\n{(log_slice or '')[:6000]}\n```\n"
         )
+        # File it (or match an existing issue).
         error_data = {"module": module, "title": title, "body": body, "repo": repo_name}
         repo_obj = gh.get_repo(repo_name)
         issue = create_automated_issue(gh, monitored_repos, repo_obj, error_data)
         if issue is None:
             return True, f"deduped/no-op in {repo_name}"
         return True, f"{repo_name}#{getattr(issue, 'number', '?')}"
+    # Any failure is reported back to the caller.
     except Exception as e:  # noqa: BLE001
         logger.error(f"file_escalated_issue failed for module={module!r}: {e}")
         return False, str(e)
@@ -1557,6 +1684,7 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
 
 def scan_hub_logs(gh_current, config):
     """Phase: Scan Hub for new errors and create GitHub issues."""
+    # Mark the task as started.
     global state
     # With hub_gated_triage on (default), the LM hub sentinel owns hub-log analysis, so
     # this phase no longer SCANS hub logs for errors — it just syncs the local mirror
@@ -1630,6 +1758,7 @@ def scan_hub_logs(gh_current, config):
                     logger.info("No error-level Hub log entries this cycle. Skipping LLM analysis.")
                 else:
                     actionable_errors = analyze_logs_for_errors(error_logs)
+            # File an issue for each actionable error.
             monitored_repos = get_monitored_repos(config)
             for error in actionable_errors:
                 # Defensive: ensure error is a dict (analyze_logs_for_errors already
@@ -1675,6 +1804,7 @@ def scan_hub_logs(gh_current, config):
                         continue
                 # Make the resolved repo authoritative for downstream code.
                 error['repo'] = repo_name
+                # Create (or reopen) the issue; log failures.
                 try:
                     repo_obj = gh_current.get_repo(repo_name)
                     create_automated_issue(gh_current, monitored_repos, repo_obj, error)
@@ -1691,6 +1821,7 @@ def scan_hub_logs(gh_current, config):
                 except Exception as e:
                     logger.error(f"Failed to create auto-issue for {repo_name}: {e}")
         else:
+            # Record why nothing was filed.
             # Hub unreachable: sync_hub_logs() returned None — AppBuilder cannot
             # read Hub logs this cycle (it did not pull, so the local mirror was
             # not refreshed either; scan does NOT fall back to stale local data,
@@ -1712,12 +1843,14 @@ def scan_hub_logs(gh_current, config):
             logger.info(f"Hub log scan skipped — cannot read hub logs this cycle "
                         f"(agent status={agent_status}); suppressing connectivity "
                         f"triage to avoid a false flood.")
+    # Always mark the task as finished.
     except Exception as e:
         logger.error(f"Hub log scan failed: {e}")
     finally:
         update_task_state(task_id="HubScan", action="end")
 
 
+# Public names of this module.
 __all__ = [
     'get_hub_logs',
     'hub_log_line_count',
