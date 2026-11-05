@@ -32,10 +32,13 @@ and only for a request that already cleared LM's admin-approval gate. So the
 v1 operator flow is exactly: someone files a feature request in LM -> an
 admin approves it -> this pipeline picks it up automatically the next cycle.
 """
+# hashlib fingerprints comment text, re finds the feature marker, datetime stamps records.
 import hashlib
 import re
 from datetime import datetime
 
+# Shared logger, config, the processed-issue store, monitored repos, the LLM call, and app
+# state from main.
 from main import (
     logger,
     load_config,
@@ -46,6 +49,7 @@ from main import (
     call_llm,
     state,
 )
+# Helpers reused from the fix engine, scheduler, boundary rules, skills and labels.
 from fix_engine import _loads_llm_json_object, _norm_confidence
 from workers import _schedule_check
 import feature_boundary
@@ -68,12 +72,15 @@ _CLASSIFY_RETRY_STATUS = "feature_classify_retry"
 # The only prior statuses feature_drive (re-)classifies. Anything else was
 # written by the standard fix pipeline after a hand-off and is owned by it.
 _RECLASSIFY_STATUSES = {"feature_needs_info", _CLASSIFY_RETRY_STATUS}
+# Reason prefix and hidden comment marker for classifier failures.
 _CLASSIFIER_ERROR_PREFIX = "Classifier error"
 _CLASSIFIER_ERROR_MARKER = "<!-- ab-classifier-error: v1 -->"
 
+# Hidden marker that identifies a feature request, and the marker on boundary-flag comments.
 _FEATURE_MARKER_RE = re.compile(r"<!--\s*report-type:\s*feature\s*-->")
 _BOUNDARY_FLAG_MARKER = "<!-- ab-boundary-flag: v1 -->"
 
+# System prompt for the classifier LLM.
 _CLASSIFY_SYSTEM = (
     "You are AppBuilder's feature-request classifier. You decide whether an "
     "incoming feature request is a safe, small bolt-on that can be built "
@@ -87,6 +94,7 @@ _CLASSIFY_SYSTEM = (
     "something that touches a listed boundary even slightly."
 )
 
+# User prompt for the classifier; {{ }} are literal braces in the JSON example.
 _CLASSIFY_PROMPT_TMPL = """## Feature request
 
 Title: {title}
@@ -119,6 +127,7 @@ Return ONLY a JSON object:
   "questions": [...], "reason": "<one or two sentences>", "confidence": <0.0-1.0>}}
 """
 
+# JSON shape the classifier must return.
 _CLASSIFY_JSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -134,6 +143,8 @@ _CLASSIFY_JSON_SCHEMA = {
 
 
 def _is_feature_request(body):
+    """True if the issue body carries the feature-request marker."""
+    # Search the body (empty if None) for the marker.
     return bool(_FEATURE_MARKER_RE.search(body or ""))
 
 
@@ -142,6 +153,7 @@ def _fix_context_block(body):
     scan_bugs's fix pipeline already uses — genuinely useful for "add a
     button here" style requests. Never raises; empty string on any failure
     (matches _bug_report_fix_context's own contract)."""
+    # Import lazily and ask log_scan for screenshot/console context; never fail on errors.
     try:
         from log_scan import _bug_report_fix_context
         return _bug_report_fix_context(body or "")
@@ -157,8 +169,10 @@ def classify(issue_title, issue_body, config):
     Fails CLOSED to "flag" on any error, unparseable response, or an
     unrecognized verdict string — ambiguity is never treated as permission
     to build."""
+    # Operator-configured boundary rules.
     boundaries = config.get("feature_boundaries") or []
 
+    # Stage A: deterministic keyword/path check. A hard hit flags without any LLM call.
     pre = feature_boundary.prefilter(issue_title, issue_body, boundaries)
     if pre["hard"]:
         ids = [h["id"] for h in pre["hits"]]
@@ -168,17 +182,22 @@ def classify(issue_title, issue_body, config):
             "confidence": 1.0,
         }
 
+    # Filled in by call_llm with the model used; raw keeps the reply for error reporting.
     used_model = {}
     raw = None
+    # Stage B: any error below fails closed to "flag".
     try:
+        # List the available skills (name and short description) for the prompt.
         skills = skills_loader.get_loaded()
         skills_block = "\n".join(
             f"- {n}: {(s.get('description') or '')[:200]}" for n, s in sorted(skills.items())
         ) or "(no skills loaded — a \"build\" verdict will have nothing to work from)"
         boundaries_block = feature_boundary.render_boundaries_for_prompt(boundaries) \
             or "(no boundaries configured — nothing to flag on)"
+        # Optional screenshot/console context for the request.
         fix_context = _fix_context_block(issue_body)
 
+        # Fill in the prompt and ask a small model for structured output.
         prompt = _CLASSIFY_PROMPT_TMPL.format(
             title=issue_title or "", body=issue_body or "", fix_context=fix_context,
             boundaries=boundaries_block, skills=skills_block,
@@ -188,20 +207,24 @@ def classify(issue_title, issue_body, config):
                                min_context_tokens=len(prompt) // 4)
         raw = call_llm(prompt, system_prompt=_CLASSIFY_SYSTEM, requirements=reqs,
                        json_schema=_CLASSIFY_JSON_SCHEMA, used_model_out=used_model)
+        # Reject empty replies and anything that is not a JSON object.
         if not (raw or "").strip():
             raise ValueError("classifier LLM returned an empty response")
         data = _loads_llm_json_object(raw)
         if not isinstance(data, dict):
             raise ValueError(f"classifier response was not a JSON object: {raw[:200]!r}")
 
+        # Only the three known verdicts are accepted.
         verdict = str(data.get("verdict") or "").strip().lower()
         if verdict not in ("build", "flag", "clarify"):
             raise ValueError(f"unrecognized verdict: {verdict!r}")
 
+        # Normalise the fields; each list only applies to its own verdict, capped and cleaned.
         confidence = _norm_confidence(data.get("confidence"))
         boundary_ids = [str(x) for x in (data.get("boundary_ids") or [])] if verdict == "flag" else []
         questions = [str(x).strip() for x in (data.get("questions") or []) if str(x).strip()][:6] \
             if verdict == "clarify" else []
+        # Keep the skill only for "build", and only if it is a real loaded skill.
         skill = data.get("skill") if verdict == "build" else None
         skill = skill if (skill and skill in skills) else None
         reason = str(data.get("reason") or "").strip()[:1000]
@@ -212,9 +235,11 @@ def classify(issue_title, issue_body, config):
             # so a human at least sees it, rather than silently vanishing.
             raise ValueError("verdict='clarify' but no questions were provided")
 
+        # Return the validated verdict and which model produced it.
         return {"verdict": verdict, "boundary_ids": boundary_ids, "skill": skill,
                 "questions": questions, "reason": reason, "confidence": confidence,
                 "model": _model_label(used_model)}
+    # Log the failure and return a "flag" verdict with error details for retry tracking.
     except Exception as e:
         model = _model_label(used_model)
         raw_excerpt = str(raw)[:500] if raw is not None else ""
@@ -228,6 +253,8 @@ def classify(issue_title, issue_body, config):
 
 
 def _model_label(used_model):
+    """Return "provider/model" for the model that ran, or "" if unknown."""
+    # No model recorded.
     if not used_model or not used_model.get("model"):
         return ""
     return f"{used_model.get('provider') or '?'}/{used_model['model']}"
@@ -239,10 +266,13 @@ def _is_classifier_error_record(rec):
     is a classifier error with no boundary ids (those were written as
     terminal and would otherwise stay stuck forever). Records that already
     exhausted their retries (flag_kind="classifier_error") are NOT retryable."""
+    # No record at all.
     if not rec:
         return False
+    # Records already waiting for retry.
     if rec.get("status") == _CLASSIFY_RETRY_STATUS:
         return True
+    # Legacy records: flagged, no flag kind or boundaries, reason starting with the error prefix.
     return (rec.get("status") == "feature_flagged" and not rec.get("flag_kind")
             and not rec.get("boundary_ids")
             and str(rec.get("reason") or "").startswith(_CLASSIFIER_ERROR_PREFIX))
@@ -252,13 +282,16 @@ def _flag_classifier_exhausted(gh_repo, issue, rec):
     """Park an issue whose classification failed on every attempt. Unlike
     _flag_issue, the comment says plainly that NO boundary was evaluated —
     the request was never judged, so a human shouldn't read it as risky."""
+    # Make sure the needs-human label exists, then add it to the issue.
     _ensure_label(gh_repo, "ab-needs-human")
     try:
         issue.add_to_labels("ab-needs-human")
     except Exception as e:
         logger.warning(f"feature_drive: could not label {issue.number} needs-human: {e}")
+    # Comment only once.
     if _already_commented(issue, _CLASSIFIER_ERROR_MARKER):
         return
+    # Explain that classification failed and no boundary was judged.
     body = (
         "🤖 **AppBuilder — Feature Auto-Drive**\n\n"
         f"AppBuilder could not classify this request after {rec.get('attempts')} attempt(s), so "
@@ -269,6 +302,7 @@ def _flag_classifier_exhausted(gh_repo, issue, rec):
         f"**Model:** {rec.get('model') or 'n/a'}\n\n"
         f"{_CLASSIFIER_ERROR_MARKER}"
     )
+    # Post the comment; failures are only logged.
     try:
         issue.create_comment(body)
     except Exception as e:
@@ -279,6 +313,7 @@ def _already_commented(issue, marker_prefix):
     """True if a comment carrying `marker_prefix` already exists — the
     idempotency check shared by _flag_issue and _clarify_issue so a repeat
     scan of the same still-open issue doesn't re-comment every cycle."""
+    # Look through existing comments for the marker; on API errors assume none.
     try:
         for c in issue.get_comments():
             if marker_prefix in (c.body or ""):
@@ -293,15 +328,19 @@ def _flag_issue(gh_repo, issue, result, force_comment=False):
     stays open. Idempotent via _BOUNDARY_FLAG_MARKER — except force_comment,
     used when re-classifying an issue whose earlier marker comment only
     reported a classifier error, so the real boundary is still explained."""
+    # Make sure the label exists; comment only once unless forced.
     _ensure_label(gh_repo, "ab-needs-human")
     if not force_comment and _already_commented(issue, _BOUNDARY_FLAG_MARKER):
         return
+    # Look up the matched boundary rules by id from the current config.
     boundaries = {b.get("id"): b for b in (load_config().get("feature_boundaries") or [])}
     matched = [boundaries[i] for i in result["boundary_ids"] if i in boundaries]
+    # List the matched rules, or fall back to the classifier's reason.
     if matched:
         rule_lines = "\n".join(f"- **{b.get('label', b.get('id'))}**: {b.get('rule', '')}" for b in matched)
     else:
         rule_lines = f"- {result.get('reason') or 'Crosses a configured boundary.'}"
+    # Comment text explaining which boundary was crossed.
     body = (
         "🤖 **AppBuilder — Feature Auto-Drive**\n\n"
         "This request would require touching something outside what AppBuilder is allowed to "
@@ -310,6 +349,7 @@ def _flag_issue(gh_repo, issue, result, force_comment=False):
         f"**Boundary crossed:**\n{rule_lines}\n\n"
         f"{_BOUNDARY_FLAG_MARKER}"
     )
+    # Label and comment; failures are only logged.
     try:
         issue.add_to_labels("ab-needs-human")
     except Exception as e:
@@ -325,6 +365,7 @@ def _clarify_marker(questions):
     questions doesn't re-comment (idempotent), but a re-run with DIFFERENT
     questions (e.g. a partial reply prompted a second round) does comment
     again — a plain fixed marker would suppress that legitimate update."""
+    # Short hash of the question text, embedded in a hidden marker.
     qhash = hashlib.sha1("\n".join(questions).encode("utf-8", "replace")).hexdigest()[:10]
     return f"<!-- ab-clarify: v1:{qhash} -->"
 
@@ -333,6 +374,7 @@ def _clarify_issue(gh_repo, issue, result):
     """Labels + comments an under-specified (but not risky) request with
     concrete follow-up questions. No code touched, issue stays open, and is
     NOT terminal — it's re-classified on the next cycle in case of a reply."""
+    # Make sure the needs-info label exists, and build the marker for these questions.
     _ensure_label(gh_repo, "ab-needs-info")
     marker = _clarify_marker(result["questions"])
     # Exact-marker match: the hash is derived from the question text itself,
@@ -340,6 +382,7 @@ def _clarify_issue(gh_repo, issue, result):
     # comment again" without any separate prefix check.
     if _already_commented(issue, marker):
         return
+    # Numbered question list and the comment text.
     q_lines = "\n".join(f"{i}. {q}" for i, q in enumerate(result["questions"], 1))
     body = (
         "🤖 **AppBuilder — Feature Auto-Drive**\n\n"
@@ -349,6 +392,7 @@ def _clarify_issue(gh_repo, issue, result):
         "No code has been touched. This will be re-evaluated automatically once there's a reply.\n\n"
         f"{marker}"
     )
+    # Label and comment; failures are only logged.
     try:
         issue.add_to_labels("ab-needs-info")
     except Exception as e:
@@ -365,6 +409,7 @@ def scan_feature_requests(gh, config):
     flag/clarify are fully handled here (Phase 1). A "build" verdict is only
     logged for now — feature_build.py (Phase 2) is what actually picks up and
     builds those."""
+    # Do nothing unless the feature is on, and not while paused or in a blackout.
     global state
     if not config.get("feature_drive_enabled", False):
         return
@@ -372,11 +417,13 @@ def scan_feature_requests(gh, config):
         logger.debug("feature_drive: skipped — paused/blackout")
         return
 
+    # Respect the operator's schedule window.
     sched = _schedule_check(config)
     if not sched.get("allowed", True):
         logger.info(f"feature_drive: deferring — {sched.get('reason')}")
         return
 
+    # Which label to scan for, whether the marker is required, and the per-cycle cap.
     label = (config.get("feature_drive_label") or "enhancement").strip()
     if not label:
         return
@@ -384,18 +431,23 @@ def scan_feature_requests(gh, config):
     max_per_cycle = max(0, int(config.get("feature_drive_max_per_cycle") or 1))
     if max_per_cycle == 0:
         return
+    # Repos to scan: an explicit list, else every monitored repo.
     repos = config.get("feature_drive_repos") or get_monitored_repos(config)
 
+    # Load issue history and count how many issues are handled this cycle.
     processed = load_processed()
     handled = 0
     for repo_name in repos:
         if handled >= max_per_cycle:
             break
+        # Any error in one repo is logged and the next repo is tried.
         try:
             repo_obj = gh.get_repo(repo_name)
+            # Open issues with the feature label.
             for issue in repo_obj.get_issues(labels=[label], state="open"):
                 if handled >= max_per_cycle:
                     break
+                # Skip pull requests, dismissed issues, and (if required) issues without the marker.
                 if issue.pull_request:
                     continue
                 if any(lbl.name == "ab-dismissed" for lbl in issue.labels):
@@ -403,9 +455,11 @@ def scan_feature_requests(gh, config):
                 body = issue.body or ""
                 if require_marker and not _is_feature_request(body):
                     continue
+                # This issue's prior record and whether it is a classifier-error retry.
                 issue_id = f"{repo_name}:{issue.number}"
                 prior = processed.get(issue_id) or {}
                 retrying = _is_classifier_error_record(prior)
+                # Finished issues are skipped unless they are retrying a classifier error.
                 if prior.get("status") in _TERMINAL_STATUSES and not retrying:
                     continue
                 if prior.get("pipeline") == "fix_engine" or (
@@ -425,6 +479,7 @@ def scan_feature_requests(gh, config):
                         processed = load_processed()
                     continue
 
+                # Count it and classify it.
                 handled += 1
                 try:
                     result = classify(issue.title or "", body, config)
@@ -433,6 +488,7 @@ def scan_feature_requests(gh, config):
                                 f"classify() itself — this is a bug): {e}")
                     continue
 
+                # Classifier failed: record a retry, or park for a human after too many attempts.
                 if result.get("classifier_error"):
                     max_attempts = max(1, int(config.get("feature_classify_max_attempts") or 3))
                     attempts = int(prior.get("attempts") or 0) + 1 if retrying else 1
@@ -456,6 +512,7 @@ def scan_feature_requests(gh, config):
                     else:
                         logger.info(f"feature_drive: {issue_id} classifier error, attempt "
                                     f"{attempts}/{max_attempts} — will retry next cycle")
+                    # Save the record and move on.
                     processed[issue_id] = rec
                     save_processed(processed)
                     recompute_issue_counters(processed)
@@ -471,6 +528,7 @@ def scan_feature_requests(gh, config):
                     except Exception as e:
                         logger.debug(f"feature_drive: could not clear needs-human on {issue_id}: {e}")
 
+                # Act on the verdict: flag, ask questions, or build.
                 if result["verdict"] == "flag":
                     _flag_issue(repo_obj, issue, result, force_comment=retrying)
                     processed[issue_id] = {

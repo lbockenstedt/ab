@@ -26,6 +26,7 @@ Boundary record shape (dict):
         "enabled": true,   # False: rule is kept but never evaluated
     }
 """
+# fnmatch checks file paths against globs; re finds path-like tokens in free text.
 import fnmatch
 import re
 
@@ -36,6 +37,7 @@ import re
 # one. Drawn from this project's own standing architectural invariants.
 DEFAULT_BOUNDARIES = [
     {
+        # Each entry below is one boundary rule: id, label, rule text, path globs, keywords, flags.
         "id": "psk-hardcode",
         "label": "Hardcoded credentials / PSKs / secrets",
         "rule": "Never hardcode a PSK, API key, password, or shared secret. "
@@ -137,6 +139,7 @@ def _keyword_hit(text, keyword):
     phrases, not single tokens), so this is a literal substring match on
     already-casefolded text rather than a \\b-word regex, which would fail on
     multi-word keywords like 'pre-shared key'."""
+    # The text is already case-folded by the caller, so fold only the keyword.
     return keyword.casefold() in text
 
 
@@ -146,6 +149,7 @@ def _path_hit(path, patterns):
     so '**/x.py' and '*/x.py' behave identically here — '**' is kept in
     DEFAULT_BOUNDARIES purely as the conventional glob spelling operators
     will expect to type, not because this module treats it specially."""
+    # Stop at the first matching pattern.
     return any(fnmatch.fnmatch(path, pat) for pat in patterns)
 
 
@@ -156,13 +160,17 @@ def boundary_hits(paths, boundaries):
     `paths` triggered it. Used both by prefilter() (path tokens mentioned in
     an issue) and by pr_review._automerge_decision (the REAL diff, which is
     the only check that actually gates auto-merge)."""
+    # Collect each enabled boundary whose path globs match any of the given paths.
     hits = []
     for b in boundaries or []:
+        # Disabled rules are kept in config but skipped.
         if not b.get("enabled", True):
             continue
+        # Paths that trigger this boundary.
         matched = [p for p in (paths or []) if _path_hit(p, b.get("paths") or [])]
         if matched:
             hits.append({**b, "_matched_paths": matched})
+    # Return the matched boundaries (copies with _matched_paths added).
     return hits
 
 
@@ -176,6 +184,7 @@ def prefilter(title, body, boundaries):
     hit (keyword matched but no `hard` boundary) is evidence handed to the
     LLM classifier, not a verdict by itself — a legitimate bolt-on request
     can innocently share a word with a boundary's keyword list."""
+    # Combine title and body, and keep a case-folded copy for keyword matching.
     text = f"{title or ''}\n{body or ''}"
     text_cf = text.casefold()
 
@@ -184,23 +193,31 @@ def prefilter(title, body, boundaries):
     # request that pastes a stack trace or file reference gets checked.
     path_tokens = re.findall(r"[A-Za-z0-9_./-]*/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+", text)
 
+    # Hard hits flag immediately; soft hits are only evidence for the LLM.
     hits, soft_hits = [], []
     for b in boundaries or []:
+        # Disabled rules are kept in config but skipped.
         if not b.get("enabled", True):
             continue
+        # Does any keyword appear, or does any mentioned path match the rule's globs?
         kw_hit = any(_keyword_hit(text_cf, kw) for kw in (b.get("keywords") or []))
         path_hit = bool(path_tokens) and _path_hit_any(path_tokens, b.get("paths") or [])
+        # Neither matched: this boundary is not relevant.
         if not (kw_hit or path_hit):
             continue
+        # Copy the boundary with match details and sort it into hard or soft hits.
         record = {**b, "_kw_hit": kw_hit, "_path_hit": path_hit}
         if b.get("hard"):
             hits.append(record)
         else:
             soft_hits.append(record)
+    # Hard is true if any hard boundary matched.
     return {"hard": bool(hits), "hits": hits, "soft_hits": soft_hits}
 
 
 def _path_hit_any(paths, patterns):
+    """True if any of the paths matches any of the glob patterns."""
+    # Stop at the first matching path.
     return any(_path_hit(p, patterns) for p in paths)
 
 
@@ -209,10 +226,13 @@ def render_boundaries_for_prompt(boundaries, max_chars=4000):
     the classifier LLM prompt. Empty string when there are no rules (an
     empty boundary list means the operator hasn't configured any — the
     caller should treat that as "nothing to check", not an error)."""
+    # Only enabled rules go into the prompt; none means nothing to render.
     enabled = [b for b in (boundaries or []) if b.get("enabled", True)]
     if not enabled:
         return ""
+    # Heading line, then one numbered line per rule (rule text, else its label).
     lines = ["## Boundaries — flag (do not build) if the request requires touching any of these:"]
     for i, b in enumerate(enabled, 1):
         lines.append(f"{i}. [{b.get('id', '?')}] {b.get('rule', b.get('label', ''))}")
+    # Join and cap the length to keep the prompt bounded.
     return "\n".join(lines)[:max_chars]

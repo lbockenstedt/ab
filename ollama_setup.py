@@ -10,6 +10,7 @@ which imports run_local_llm_setup). All dependencies (state, update_task_state,
 _task_state_lock, load_config, save_config, logger) come from modules re-exported
 into main before ollama_setup, so they are imported directly — no lazy refs.
 """
+# Standard modules for JSON, files, the helper process, timing, ids and timestamps.
 import json
 import os
 import subprocess
@@ -17,8 +18,10 @@ import time
 import uuid
 from datetime import datetime
 
+# HTTP client used to talk to the Ollama API.
 import requests
 
+# Shared state, config and logging, all re-exported by main before this module loads.
 from main import (
     _task_state_lock,
     load_config,
@@ -29,7 +32,9 @@ from main import (
     CONFIG_DIR,
 )
 
+# Default local Ollama API address.
 OLLAMA_BASE_URL = "http://localhost:11434"
+# systemd drop-in where the root helper writes the Ollama CPU tuning.
 OLLAMA_OVERRIDE_DIR = "/etc/systemd/system/ollama.service.d"
 OLLAMA_OVERRIDE_PATH = os.path.join(OLLAMA_OVERRIDE_DIR, "ab-tuning.conf")
 
@@ -42,20 +47,25 @@ def _llm_setup_log(line, replace_last=False):
     scrolling. Mirrors the overwrite-the-stream approach the _request_* handlers
     use, but keeps a growing log for staged steps.
     """
+    # Edit the task stream under the lock; the UI reads it concurrently.
     with _task_state_lock:
         task = state["active_tasks"].get("LocalLLMSetup")
+        # No setup task running: nothing to log to.
         if task is None:
             return
         s = task["stream"]
+        # Progress update: replace everything after the last newline with the new line.
         if replace_last and s:
             idx = s.rfind("\n")
             task["stream"] = (s[:idx + 1] if idx != -1 else "") + line + "\n"
+        # Normal line: append it.
         else:
             task["stream"] = s + line + "\n"
 
 
 def _ollama_reachable(base_url=OLLAMA_BASE_URL, timeout=5):
     """True if the Ollama HTTP API answers at {base_url}/api/tags."""
+    # Any HTTP 200 from /api/tags means the API is up; errors mean it is not.
     try:
         resp = requests.get(base_url.rstrip("/") + "/api/tags", timeout=timeout)
         return resp.status_code == 200
@@ -69,16 +79,19 @@ def _watchdog_active():
     that needs no privilege, so the cap-locked main service can run it — this is
     how we tell "watchdog is down" apart from "watchdog is up but not consuming"
     (stale code) instead of waiting out the full 16-min poll for a blank timeout."""
+    # --quiet makes the exit code the whole answer: 0 means active.
     try:
         r = subprocess.run(["systemctl", "is-active", "--quiet", "ab-watchdog"],
                            timeout=10)
         return r.returncode == 0
+    # systemctl unavailable or failed: we cannot tell.
     except Exception:
         return None
 
 
 def _wait_for_ollama(base_url, timeout=60):
     """Poll {base_url}/api/tags until it answers 200 (or timeout). Returns True if reachable."""
+    # Retry every 2 seconds until the deadline.
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _ollama_reachable(base_url, timeout=5):
@@ -94,10 +107,12 @@ def _ollama_tags(base_url=OLLAMA_BASE_URL):
     runs under systemd with a minimal PATH that does not include /usr/local/bin
     (where the Ollama installer places the binary).
     """
+    # Ask the API for the model list and keep just the non-empty names.
     try:
         resp = requests.get(base_url.rstrip("/") + "/api/tags", timeout=15)
         resp.raise_for_status()
         return {m.get("name", "") for m in resp.json().get("models", []) if m.get("name")}
+    # Any failure means "no models known".
     except Exception as e:
         logger.debug(f"ollama /api/tags failed: {e}")
         return set()
@@ -106,10 +121,12 @@ def _ollama_tags(base_url=OLLAMA_BASE_URL):
 def _ollama_models_detailed(base_url=OLLAMA_BASE_URL):
     """Return [{name, size, size_gb, modified}] for the models on an ollama
     endpoint (empty list on failure). Powers the Manage-Models UI."""
+    # Fetch the model list from the API.
     try:
         resp = requests.get(base_url.rstrip("/") + "/api/tags", timeout=15)
         resp.raise_for_status()
         out = []
+        # Build one entry per named model, with the size also in GB for display.
         for m in resp.json().get("models", []):
             name = m.get("name") or ""
             if not name:
@@ -121,8 +138,10 @@ def _ollama_models_detailed(base_url=OLLAMA_BASE_URL):
                 "size_gb": round(size / 1e9, 1),
                 "modified": m.get("modified_at") or "",
             })
+        # Sort alphabetically so the UI list is stable.
         out.sort(key=lambda x: x["name"])
         return out
+    # Any failure gives an empty list.
     except Exception as e:
         logger.debug(f"ollama detailed /api/tags failed: {e}")
         return []
@@ -130,12 +149,15 @@ def _ollama_models_detailed(base_url=OLLAMA_BASE_URL):
 
 def _ollama_delete(name, base_url=OLLAMA_BASE_URL):
     """Delete a model via DELETE /api/delete. Returns (ok, message)."""
+    # Ask Ollama to delete the model.
     try:
         resp = requests.delete(base_url.rstrip("/") + "/api/delete",
                                json={"name": name}, timeout=60)
+        # 404 means it was already gone, which counts as success.
         if resp.status_code in (200, 404):
             return True, ("deleted" if resp.status_code == 200 else "not found")
         return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    # Network or other errors become a failure message.
     except Exception as e:  # noqa: BLE001
         return False, str(e)
 
@@ -146,10 +168,12 @@ def _ollama_bin_path():
     Returns the path string if found, else None. Used only to decide whether
     the installer needs to run; pull/create/list go through the HTTP API.
     """
+    # First look on PATH.
     import shutil
     p = shutil.which("ollama")
     if p:
         return p
+    # Then try the usual install locations, since the service's PATH is minimal.
     for cand in ("/usr/local/bin/ollama", "/usr/bin/ollama",
                  os.path.expanduser("~/.local/bin/ollama")):
         if os.path.exists(cand):
@@ -164,24 +188,29 @@ def _ollama_http_pull(model, log_fn, base_url=OLLAMA_BASE_URL):
     with a final {"status": "success"}. We render a compact progress line that
     replaces the last log line so the bar updates in place.
     """
+    # Start the pull and stream the response.
     try:
         resp = requests.post(base_url.rstrip("/") + "/api/pull",
                               json={"name": model}, stream=True, timeout=None)
         resp.raise_for_status()
         saw_success = False
+        # Read the progress events one line at a time.
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw:
                 continue
+            # Lines that are not JSON are logged as-is.
             try:
                 obj = json.loads(raw)
             except Exception:
                 log_fn("  " + str(raw))
                 continue
+            # The final "success" event ends the pull.
             status = obj.get("status", "")
             if status == "success":
                 log_fn("  " + status)
                 saw_success = True
                 break
+            # Byte counts present: show a percentage; otherwise just the status text.
             total = obj.get("total")
             completed = obj.get("completed")
             if total and completed:
@@ -189,13 +218,16 @@ def _ollama_http_pull(model, log_fn, base_url=OLLAMA_BASE_URL):
                 line = f"{status}: {pct:.1f}% ({_gb(completed)}/{_gb(total)})"
             else:
                 line = status
+            # Overwrite the previous progress line.
             log_fn("  " + line, replace_last=True)
         if not saw_success:
             # stream ended without an explicit success — verify via /api/tags
             if model not in _ollama_tags(base_url):
                 raise RuntimeError("pull stream ended without success and model not present")
+    # Our own errors pass through unchanged.
     except RuntimeError:
         raise
+    # Wrap anything else (network, HTTP) in a RuntimeError for the caller.
     except Exception as e:
         raise RuntimeError(f"ollama /api/pull failed: {e}")
 
@@ -212,6 +244,7 @@ def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
     is still the single source the caller builds (FROM + PARAMETER lines),
     kept for readability and in case a future engine re-introduces it.
     """
+    # Turn the legacy modelfile text into the base model and a parameter dict.
     base_model, parameters = None, {}
     for line in modelfile.splitlines():
         parts = line.split(None, 1)
@@ -228,11 +261,13 @@ def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
                     parameters[kv[0]] = int(kv[1])
                 except ValueError:
                     parameters[kv[0]] = kv[1]
+    # Build the new field-based request body.
     body = {"model": name, "stream": True}
     if base_model:
         body["from"] = base_model
     if parameters:
         body["parameters"] = parameters
+    # Send the create request and stream the response.
     try:
         resp = requests.post(base_url.rstrip("/") + "/api/create",
                              json=body, stream=True, timeout=None)
@@ -248,10 +283,12 @@ def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
                 rbody = ""
             raise RuntimeError(f"ollama /api/create failed ({resp.status_code}) for "
                                f"{name}: {rbody or resp.reason}")
+        # Read the status events one line at a time.
         saw_success = False
         for raw in resp.iter_lines(decode_unicode=True):
             if not raw:
                 continue
+            # Lines that are not JSON are logged as-is.
             try:
                 obj = json.loads(raw)
             except Exception:
@@ -260,15 +297,19 @@ def _ollama_http_create(name, modelfile, log_fn, base_url=OLLAMA_BASE_URL):
             # Ollama can return 200 and stream an {"error": ...} line on failure.
             if obj.get("error"):
                 raise RuntimeError(f"ollama /api/create failed for {name}: {obj['error']}")
+            # Show the status in place; "success" ends the stream.
             status = obj.get("status", "")
             log_fn("  " + status, replace_last=True)
             if status == "success":
                 saw_success = True
                 break
+        # No success event and the model is missing: treat as a failure.
         if not saw_success and name not in _ollama_tags(base_url):
             raise RuntimeError("create stream ended without success and model not present")
+    # Our own errors pass through unchanged.
     except RuntimeError:
         raise
+    # Wrap anything else in a RuntimeError for the caller.
     except Exception as e:
         raise RuntimeError(f"ollama /api/create failed: {e}")
 
@@ -289,6 +330,7 @@ def run_local_llm_setup(model, num_ctx, cores):
     The model is added as an enabled llm_entries endpoint (no slot to pick) —
     routing is capability/cost-aware over the enabled endpoint set now.
     """
+    # Register the task so the UI shows it, and default the result to "failed".
     task_id = "LocalLLMSetup"
     update_task_state(task_id, "Local LLM Setup", action="start")
     base_url = OLLAMA_BASE_URL
@@ -315,6 +357,7 @@ def run_local_llm_setup(model, num_ctx, cores):
         # Stage 5 tuning. HTTP-API stages (pull/create model, verify) stay
         # here in svc_bg. Paths kept in sync with watchdog.py.
         _llm_setup_log("▶ Stage 1/7 — Prerequisites + installing/tuning Ollama (root helper via watchdog)…")
+        # Pre-check: is the API already up, and where is the binary? Logged for diagnosis.
         already_up = _ollama_reachable(base_url, timeout=5)
         bin_path = _ollama_bin_path()
         _llm_setup_log(f"  pre-check: ollama service {'up' if already_up else 'down'}, "
@@ -327,15 +370,18 @@ def run_local_llm_setup(model, num_ctx, cores):
                 "ollama-setup helper can't run. Start it with "
                 "'systemctl restart ab-watchdog' (check "
                 "'systemctl status ab-watchdog' / 'journalctl -u ab-watchdog').")
+        # Request and status files shared with the watchdog.
         req_path = os.path.join(CONFIG_DIR, "ollama_setup_request.json")
         status_path = os.path.join(CONFIG_DIR, "ollama_setup_status.json")
         # Clear any stale status so we read a fresh run (not a previous done/failed).
         try: os.remove(status_path)
         except OSError: pass
+        # How many models Ollama may keep loaded at once (default 3).
         try:
             _max_loaded = int(load_config().get("ollama_max_loaded_models", 3) or 3)
         except (TypeError, ValueError):
             _max_loaded = 3
+        # Write the request for the watchdog to pick up.
         try:
             with open(req_path, "w") as f:
                 json.dump({"cores": int(cores), "max_loaded": _max_loaded,
@@ -354,18 +400,23 @@ def run_local_llm_setup(model, num_ctx, cores):
         # watchdog is up but not consuming — almost always a stale watchdog process
         # (watchdog.py was updated on disk but the long-lived process wasn't
         # restarted). Fail fast with the exact remedy instead of hanging 16 min.
+        # Track whether the request was claimed, how much output we relayed, and the result.
         claim_deadline = time.time() + 120
         claimed = False
         relay_len = 0
         final = None
+        # Poll until the deadline.
         while time.time() < deadline:
+            # Read the current status (None if not written yet or mid-write).
             try:
                 with open(status_path, "r") as f:
                     st = json.load(f)
             except Exception:
                 st = None
+            # A status file or a deleted request file means the watchdog took the job.
             if not claimed and (st or not os.path.exists(req_path)):
                 claimed = True
+            # Relay only output we have not shown yet.
             if st:
                 stream = st.get("stream") or ""
                 if len(stream) > relay_len:
@@ -373,9 +424,11 @@ def run_local_llm_setup(model, num_ctx, cores):
                         if line.strip():
                             _llm_setup_log(f"  [helper] {line}")
                     relay_len = len(stream)
+                # A finished run ends the polling.
                 if st.get("state") in ("done", "failed"):
                     final = st
                     break
+            # Not claimed in time: withdraw the request and explain the likely cause.
             if not claimed and time.time() > claim_deadline:
                 try: os.remove(req_path)
                 except OSError: pass
@@ -385,6 +438,7 @@ def run_local_llm_setup(model, num_ctx, cores):
                     "but the long-lived watchdog process wasn't restarted). Run "
                     "'systemctl restart ab-watchdog' and try again.")
             time.sleep(2)
+        # Timed out, or the helper reported failure: stop with the reason.
         if not final:
             raise RuntimeError("ollama-setup helper did not finish in time — is ab-watchdog "
                                "running? The watchdog runs the privileged helper; check "
@@ -402,6 +456,7 @@ def run_local_llm_setup(model, num_ctx, cores):
 
         # ---- Stage 3: pull the model (skip if already present) ----
         _llm_setup_log(f"▶ Stage 3/7 — Pulling model {model} (skip if present)…")
+        # Skip the download if the model is already there.
         present = _ollama_tags(base_url)
         if model in present:
             _llm_setup_log(f"✓ Model {model} already present")
@@ -410,7 +465,9 @@ def run_local_llm_setup(model, num_ctx, cores):
             _llm_setup_log(f"✓ Model {model} pulled")
 
         # ---- Stage 4: create a context-tuned derived model ----
+        # Only build a derived model when a context size was given.
         if num_ctx and int(num_ctx) > 0:
+            # Name it after the context size, e.g. "llama3-8k".
             ctx_k = int(num_ctx) // 1024
             derived_tag = f"{model}-{ctx_k}k" if ctx_k else f"{model}-{int(num_ctx)}"
             # Only emit num_thread when cores > 0. Ollama rejects
@@ -419,11 +476,14 @@ def run_local_llm_setup(model, num_ctx, cores):
             # safer default than a bogus 0 from an unset/blank field.
             cores_i = int(cores) if cores else 0
             _llm_setup_log(f"▶ Stage 4/7 — Creating context-tuned model {derived_tag} (num_ctx={int(num_ctx)}, num_thread={cores_i or 'auto'})…")
+            # Build the modelfile: base model, context size, and threads if set.
             modelfile = f"FROM {model}\nPARAMETER num_ctx {int(num_ctx)}\n"
             if cores_i > 0:
                 modelfile += f"PARAMETER num_thread {cores_i}\n"
+            # Ask Ollama to create it.
             _ollama_http_create(derived_tag, modelfile, _llm_setup_log, base_url)
             _llm_setup_log(f"✓ Derived model {derived_tag} created")
+        # No context size: use the base model directly.
         else:
             _llm_setup_log("▶ Stage 4/7 — num_ctx unset; using base model as-is")
             _llm_setup_log("✓ Skipped derived-model step")
@@ -435,14 +495,17 @@ def run_local_llm_setup(model, num_ctx, cores):
         # see the tuning landed. The privileged writes/restart are NOT repeated
         # here — that would require systemd access svc_bg no longer has.
         _llm_setup_log("▶ Stage 5/7 — Confirming systemd CPU tuning applied by helper…")
+        # The tuning line the helper should have written.
         wanted_line = f"OLLAMA_NUM_THREAD={int(cores)}"
         current = ""
+        # Read the override file if it exists.
         if os.path.exists(OLLAMA_OVERRIDE_PATH):
             try:
                 with open(OLLAMA_OVERRIDE_PATH) as f:
                     current = f.read()
             except Exception:
                 current = ""
+        # Report whether the tuning is in place.
         if wanted_line in current:
             _llm_setup_log(f"✓ systemd override already applied by helper ({OLLAMA_OVERRIDE_PATH})")
         else:
@@ -457,10 +520,13 @@ def run_local_llm_setup(model, num_ctx, cores):
 
         # ---- Stage 6: register the model as an enabled endpoint ----
         _llm_setup_log("▶ Stage 6/7 — Registering the local model as an enabled endpoint…")
+        # Save the Ollama credentials (no key, local URL).
         config = load_config()
         config.setdefault("llm_credentials", {})["ollama"] = {"api_key": "", "base_url": base_url}
+        # Find an existing entry for this model, if any.
         entries = config.setdefault("llm_entries", [])
         entry = next((e for e in entries if e.get("provider") == "ollama" and e.get("model") == derived_tag), None)
+        # None yet: add a new enabled entry.
         if entry is None:
             entry = {
                 "id": str(uuid.uuid4())[:12],
@@ -471,15 +537,18 @@ def run_local_llm_setup(model, num_ctx, cores):
                 "enabled": True,
             }
             entries.append(entry)
+        # Already there: refresh it and make sure it is enabled.
         else:
             entry["label"] = "Local Ollama (CPU)"
             entry["model"] = derived_tag
             entry["enabled"] = True
+        # Save the config and report.
         save_config(config)
         _llm_setup_log(f"✓ Endpoint enabled → {entry['label']} / {derived_tag}")
 
         # ---- Stage 7: verify ----
         _llm_setup_log("▶ Stage 7/7 — Verifying Ollama responds with the model…")
+        # Check the model now shows up in Ollama's list and record the outcome.
         names = _ollama_tags(base_url)
         if derived_tag in names:
             _llm_setup_log(f"✓ Verified — {len(names)} model(s) available, {derived_tag} present")
@@ -489,10 +558,12 @@ def run_local_llm_setup(model, num_ctx, cores):
             _llm_setup_log(f"⚠ Verify: {derived_tag} not yet in ollama list ({len(names)} models); endpoint still configured.")
             _llm_setup_log(f"\n✅ Setup complete with a warning. Enabled endpoint {derived_tag} @ {base_url}")
             summary = {"state": "warning", "model": derived_tag, "base_url": base_url, "message": "Configured but model not yet listed"}
+    # Any stage failing: log it and record the failure.
     except Exception as e:
         logger.exception("Local LLM setup failed")
         _llm_setup_log(f"\n✗ Setup failed: {e}")
         summary = {"state": "failed", "message": str(e)}
+    # Always record the result for the UI and close the task.
     finally:
         state["local_llm_setup"] = {**summary, "updated": datetime.now().isoformat()}
         update_task_state(task_id, action="end")
@@ -501,16 +572,21 @@ def run_local_llm_setup(model, num_ctx, cores):
 def run_local_llm_pull(model, base_url=OLLAMA_BASE_URL):
     """Background: pull a single model onto an ollama endpoint, streaming progress
     into the LocalLLMPull task (the UI polls /api/task-details?task_id=LocalLLMPull)."""
+    # Use the default URL if none is given, then register the task.
     task_id = "LocalLLMPull"
     base_url = (base_url or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
     update_task_state(task_id, f"Pulling {model}", action="start")
 
     def _log(line, replace_last=False):
+        """Append a line to this task's stream, optionally replacing the last line."""
+        # Edit the task stream under the lock; the UI reads it concurrently.
         with _task_state_lock:
             task = state["active_tasks"].get(task_id)
+            # Task no longer exists: nothing to log to.
             if task is None:
                 return
             s = task["stream"]
+            # Progress update: replace the last line; otherwise append.
             if replace_last and s:
                 idx = s.rfind("\n")
                 task["stream"] = (s[:idx + 1] if idx != -1 else "") + line + "\n"
@@ -518,19 +594,24 @@ def run_local_llm_pull(model, base_url=OLLAMA_BASE_URL):
                 task["stream"] = s + line + "\n"
 
     try:
+        # Pull the model and record success.
         _log(f"▶ Pulling {model} from {base_url} …")
         _ollama_http_pull(model, _log, base_url)   # raises on failure
         _log(f"✓ {model} is ready.")
         state["local_llm_pull"] = {"state": "ok", "model": model, "updated": datetime.now().isoformat()}
+    # Record the failure for the UI.
     except Exception as e:  # noqa: BLE001
         _log(f"✗ pull failed: {e}")
         state["local_llm_pull"] = {"state": "failed", "model": model, "error": str(e),
                                    "updated": datetime.now().isoformat()}
+    # Always close the task.
     finally:
         update_task_state(task_id, action="end")
 
 
+# Names imported from elsewhere that `from ollama_setup import *` should not re-export.
 __EXCLUDE = {"json", "os", "time", "uuid", "datetime", "requests",
              "_task_state_lock", "load_config", "logger", "save_config",
              "state", "update_task_state"}
+# Export every other public or private name defined here.
 __all__ = [__n for __n in dir() if not __n.startswith("__") and __n not in __EXCLUDE]

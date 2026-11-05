@@ -5,6 +5,7 @@ Translates technical guardrail violations and review panel critiques into
 operator-friendly markdown with clear architectural context and copy-paste
 ready AI assistant prompts.
 """
+# Type hints only; they document the shapes of the parameters.
 from typing import List, Optional
 
 
@@ -21,6 +22,7 @@ def generate_user_guidance(
 
     and an IDE-ready copy-paste prompt.
     """
+    # Treat missing violation/report text as empty strings so string operations are safe.
     violation_str = violation or ""
     report_str = review_report or ""
 
@@ -29,8 +31,10 @@ def generate_user_guidance(
     why_rule_exists = ""
     specific_action = ""
 
+    # Lower-case the violation once so the keyword checks below are case-insensitive.
     v_lower = violation_str.lower()
 
+    # The PR hand-edited VERSION, which only promotion automation may change.
     if "version" in v_lower:
         flagged_desc = (
             "The Pull Request modified the `VERSION` file. Hand-editing `VERSION` is prohibited."
@@ -42,6 +46,7 @@ def generate_user_guidance(
         )
         specific_action = "Revert all modifications to `VERSION` (`git checkout origin/dev -- VERSION`)."
 
+    # The PR brought npm/JSX tooling into a WebUI that must stay build-free vanilla JS.
     elif "vanilla js" in v_lower or "package.json" in v_lower or "node_modules" in v_lower or "jsx" in v_lower:
         flagged_desc = (
             "The Pull Request introduced npm manifests (`package.json`, `package-lock.json`), "
@@ -57,6 +62,7 @@ def generate_user_guidance(
             "Implement UI components using native browser DOM APIs and vanilla ES6 modules."
         )
 
+    # The PR removed or changed a global DOM container the whole UI relies on.
     elif "dom container" in v_lower or "toast" in v_lower or "#app" in v_lower or "_lmtoastregion" in v_lower:
         flagged_desc = (
             "The Pull Request removed or mutated a core global DOM container (`#_lmToastRegion`, `#app`, or `window._lmToastRegion`)."
@@ -71,6 +77,7 @@ def generate_user_guidance(
             "without overwriting the global toast host."
         )
 
+    # The PR added shell=True subprocess calls, which open the door to shell injection.
     elif "shell=true" in v_lower or "subprocess" in v_lower:
         flagged_desc = (
             "The Pull Request introduced unsafe `subprocess` execution using `shell=True` with string formatting or variable interpolation."
@@ -84,6 +91,7 @@ def generate_user_guidance(
             "Replace `subprocess.run(..., shell=True)` with a list of arguments: `subprocess.run(['command', arg1, arg2])`."
         )
 
+    # The PR referenced public CDNs, which cannot load in air-gapped deployments.
     elif "cdn" in v_lower or "egress" in v_lower:
         flagged_desc = (
             "The Pull Request included links or references to external public CDNs (e.g. jsdelivr, unpkg, cdnjs, Google Fonts)."
@@ -94,6 +102,7 @@ def generate_user_guidance(
         )
         specific_action = "Remove external CDN references. Vendor any required assets locally within the spoke repository or use inline SVG/CSS."
 
+    # Twin files in pxmx (agent/src/ vs src/) were changed out of sync.
     elif "twin" in v_lower:
         flagged_desc = (
             f"Twin drift was detected: {violation_str}"
@@ -104,6 +113,7 @@ def generate_user_guidance(
         )
         specific_action = "Mirror all changes between `agent/src/` and `src/` so both paths stay in sync."
 
+    # Some other guardrail fired; show its text verbatim with a generic explanation.
     elif violation_str:
         flagged_desc = violation_str
         why_rule_exists = (
@@ -112,6 +122,7 @@ def generate_user_guidance(
         )
         specific_action = "Address the flagged guardrail violation before resubmitting the Pull Request."
 
+    # No guardrail violation, but the review panels left critique that auto-fix could not resolve.
     elif report_str:
         flagged_desc = f"Automated remediation could not resolve the following review critique:\n\n{report_str}"
         why_rule_exists = (
@@ -120,6 +131,7 @@ def generate_user_guidance(
         )
         specific_action = "Review the critique findings below, update the code, and verify tests locally before pushing."
 
+    # Nothing specific was supplied; fall back to generic "needs a human" guidance.
     else:
         flagged_desc = "Review panel findings require human developer attention."
         why_rule_exists = "Lab Manager requires deterministic validation and high reliability across all components."
@@ -127,6 +139,7 @@ def generate_user_guidance(
 
     # Status / Attempt note
     attempt_note = ""
+    # Once auto-remediation has used all its attempts, add a caution banner asking for a human.
     if attempts >= max_attempts:
         attempt_note = (
             f"\n> [!CAUTION]\n> **Automated Remediation Limit Reached ({attempts}/{max_attempts})**\n> "
@@ -135,6 +148,7 @@ def generate_user_guidance(
 
     # Format files list
     files_section = ""
+    # List the changed files (if known) so the IDE prompt can point at them.
     if changed_files:
         files_section = "Changed Files:\n" + "\n".join(f"- {f}" for f in changed_files) + "\n"
 
@@ -160,6 +174,7 @@ Required Action:
 
 Please inspect the changed files, correct the issues to comply with all invariants, and ensure all tests pass with pytest."""
 
+    # Assemble the final markdown: what was flagged, why the rule exists, and the IDE prompt.
     guidance = f"""## 🚨 What Was Flagged
 {flagged_desc}
 {attempt_note}
@@ -172,4 +187,5 @@ Please inspect the changed files, correct the issues to comply with all invarian
 {prompt_text}
 ```
 """
+    # Trim leading/trailing whitespace before returning the markdown.
     return guidance.strip()

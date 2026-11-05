@@ -13,6 +13,7 @@ always level="error" (the most severe existing tier) so a real hit sorts to
 the top of the review comment. This is advisory-only like everything else in
 pr_review.py — it flags for human review, it never blocks or redacts.
 """
+# Regular expressions describe every credential shape this scan looks for.
 import re
 
 # Patterns with high specificity — a matched prefix/shape that's essentially
@@ -68,6 +69,8 @@ _ENV_ASSIGN = re.compile(
     r"['\"]?([A-Za-z0-9+/=_.~-]{12,})['\"]?\s*(?:[#;].*)?$"
 )
 
+# Values that are obviously placeholders (changeme, xxx, <your-key>, ${VAR}, booleans,
+# ...) and must not be reported as real secrets.
 _PLACEHOLDER_RE = re.compile(
     r"(?i)^(changeme|change_me|xxx+|todo|fixme|example|placeholder|redacted|"
     r"your[_-].*|<.*>|\{\{.*\}\}|\$\{.*\}|none|null|false|true|\.\.\.)$"
@@ -79,6 +82,7 @@ _LOOKUP_CONTEXT_RE = re.compile(
     r"secret_manager|keyring\.|\.env\b|ENV\[|SecretStr|Depends\()"
 )
 
+# Only scan the first 40 files of a PR to keep the scan cheap on huge PRs.
 _MAX_FILES = 40
 _MAX_FINDINGS = 15  # cap so a vendored-file accident doesn't produce a wall of findings
 
@@ -87,46 +91,62 @@ def _added_lines(patch):
     """Yield (line_no_in_patch, text) for '+' lines in a unified diff patch,
     skipping the '+++' file-header line. line_no is 1-based within the patch
     text, only used for a stable, cheap per-file dedup key."""
+    # No diff text (binary or too large): nothing to yield.
     if not patch:
         return
+    # Walk the diff with line indices so each hit gets a stable position key.
     for i, line in enumerate(patch.splitlines()):
+        # Skip the "+++ b/file" header, which is not an added line.
         if line.startswith("+++"):
             continue
+        # Yield added lines without their leading "+".
         if line.startswith("+"):
             yield i, line[1:]
 
 
 def _scan_line(text):
     """Return a list of (signature_name, matched_text) for one added line."""
+    # Every (pattern name, matched text) found on this line.
     hits = []
+    # Try each high-specificity signature pattern against the line.
     for name, pat, _ in _SIGNATURE_PATTERNS:
         m = pat.search(text)
         if m:
             hits.append((name, m.group(0)))
+    # Then try the generic quoted "secret_name = 'value'" rule.
     m = _GENERIC_ASSIGN.search(text)
     if m:
+        # Group 3 is the quoted value being assigned.
         value = m.group(3)
+        # Report it unless the value is a placeholder or the line reads from env/config.
         if not _PLACEHOLDER_RE.match(value.strip()) and not _LOOKUP_CONTEXT_RE.search(text):
             hits.append(("Hardcoded credential-shaped assignment", m.group(0)))
     elif not any(n.startswith("Encryption key") for n, _ in hits):
         # Only when the quoted rule and the Fernet signature both stayed silent,
         # so one .env line never yields three findings for the same secret.
+        # Try the unquoted NAME=value (.env / shell / YAML) rule.
         m = _ENV_ASSIGN.search(text)
         if m:
+            # Group 2 is the assigned value.
             value = m.group(2)
+            # Same placeholder / lookup-context exclusions as the quoted rule.
             if (not _PLACEHOLDER_RE.match(value.strip())
                     and not _LOOKUP_CONTEXT_RE.search(text)):
                 hits.append(("Hardcoded credential in an unquoted assignment",
                              m.group(0).strip()))
+    # Return every hit for this line (empty list when the line is clean).
     return hits
 
 
 def _redact(matched_text, keep=4):
     """Never echo the actual secret value back into a PUBLIC PR comment —
     show only enough to identify the finding (first `keep` chars + length)."""
+    # Work on the trimmed match text.
     s = matched_text.strip()
+    # Very short matches are fully masked.
     if len(s) <= keep:
         return "*" * len(s)
+    # Show the first few characters plus how many characters were hidden.
     return s[:keep] + "…(%d more chars, redacted)" % (len(s) - keep)
 
 
@@ -136,8 +156,11 @@ def check_secrets(files):
     lines only. Returns a list of {level, title, detail} findings, level
     always 'error'. Best-effort: a file with no .patch (binary/too-large) is
     silently skipped, never raises."""
+    # Findings for the whole PR, across all scanned files.
     findings = []
+    # Scan files in order, up to the per-PR file limit.
     for f in list(files)[:_MAX_FILES]:
+        # Too many findings already: add one "capped" notice and stop scanning.
         if len(findings) >= _MAX_FINDINGS:
             findings.append({
                 "level": "error",
@@ -146,16 +169,22 @@ def check_secrets(files):
                           "Review the full diff manually before merging." % _MAX_FINDINGS,
             })
             break
+        # Read the file's name and diff text; files without a diff are skipped.
         filename = getattr(f, "filename", "?")
         patch = getattr(f, "patch", None)
         if not patch:
             continue
+        # Avoid reporting the same secret twice within one file.
         seen_on_this_file = set()
+        # Check every added line in this file's diff.
         for _, line in _added_lines(patch):
+            # Report each distinct hit on the line.
             for name, matched in _scan_line(line):
+                # A finding is identified by its pattern name plus the exact matched text.
                 key = (name, matched)
                 if key in seen_on_this_file:
                     continue  # same secret repeated in the file — one finding is enough
+                # Record the hit, redacting the secret so it is not republished in the PR comment.
                 seen_on_this_file.add(key)
                 findings.append({
                     "level": "error",
@@ -170,8 +199,11 @@ def check_secrets(files):
                         % _redact(matched)
                     ),
                 })
+                # Stop scanning this file's hits once the cap is reached ...
                 if len(findings) >= _MAX_FINDINGS:
                     break
+            # ... and stop scanning further lines of this file too (the outer loop adds the notice).
             if len(findings) >= _MAX_FINDINGS:
                 break
+    # Return all findings (empty list means nothing credential-shaped was added).
     return findings

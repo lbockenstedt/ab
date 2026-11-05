@@ -9,30 +9,37 @@ Deterministic pre-checks enforcing Lab Manager fleet invariants:
   5. External CDN / egress blocker: prevent references to remote CDNs/fonts in air-gapped environments.
   6. Twin-parity enforcement: ensure agent/src/ and src/ remain identical in twin repos like pxmx.
 """
+# Standard-library imports only; the checks are deterministic.
 import ast
 import os
 import re
 from typing import Any, List, Optional, Tuple
 
+# Message returned when a PR hand-edits VERSION.
 VERSION_VIOLATION = (
     "Fleet invariant violation: `VERSION` is branch-owned and incremented by promotion automation. "
     "Hand-editing `VERSION` is prohibited."
 )
+# Message for npm manifests or JSX/TSX in the WebUI.
 VANILLA_JS_VIOLATION = (
     "Fleet invariant violation: Lab Manager WebUI is dependency-free vanilla JS. "
     "No npm manifests, lockfiles, or JSX/TSX build steps are allowed."
 )
+# Message for removing or clearing a core DOM container.
 DOM_PROTECTION_VIOLATION = (
     "Architectural guardrail violation: deletion or mutation of core global DOM container detected."
 )
+# Message for unsafe shell=True subprocess calls.
 SHELL_EXEC_VIOLATION = (
     "Security guardrail violation: unsafe `shell=True` subprocess execution detected. "
     "Commands must use tokenized argument lists without shell interpolation."
 )
+# Message for references to external CDNs.
 CDN_EGRESS_VIOLATION = (
     "Security guardrail violation: external CDN or unauthenticated remote egress URL detected in isolated datacenter environment."
 )
 
+# Remote CDN/font hosts not allowed in air-gapped deployments.
 BLOCKED_CDNS = (
     "cdn.jsdelivr.net",
     "unpkg.com",
@@ -41,6 +48,7 @@ BLOCKED_CDNS = (
     "fonts.gstatic.com",
 )
 
+# Global DOM anchors the WebUI depends on.
 CORE_DOM_ANCHORS = (
     "#_lmToastRegion",
     "#app",
@@ -51,6 +59,7 @@ CORE_DOM_ANCHORS = (
 
 def _is_unified_diff(lines: List[str]) -> bool:
     """Return True if the lines constitute a unified diff (hunk or file headers)."""
+    # A diff has hunk headers or both ---/+++ file headers.
     has_hunk = any(l.startswith("@@") for l in lines)
     has_file_headers = (
         any(l.startswith("--- ") for l in lines)
@@ -61,8 +70,10 @@ def _is_unified_diff(lines: List[str]) -> bool:
 
 def _extract_added_lines(raw_patch: str) -> str:
     """Extract added lines from a unified diff patch."""
+    # Empty patch: nothing added.
     if not raw_patch:
         return ""
+    # Return the "+" lines (without the marker), skipping +++ headers.
     lines = raw_patch.splitlines()
     has_plus = any(l.startswith("+") for l in lines if not l.startswith("+++"))
     if has_plus:
@@ -79,6 +90,7 @@ def _extract_removed_lines(raw_patch: str) -> str:
     """Extract removed lines from a unified diff patch."""
     if not raw_patch:
         return ""
+    # Return the "-" lines (without the marker), skipping --- headers.
     lines = raw_patch.splitlines()
     has_diff_markers = any(l.startswith("-") for l in lines if not l.startswith("---"))
     if has_diff_markers:
@@ -89,6 +101,7 @@ def _extract_removed_lines(raw_patch: str) -> str:
 
 def _is_unsafe_subprocess_call(added_text: str) -> bool:
     """Scan added Python code for unsafe subprocess calls with shell=True."""
+    # Quick exit when shell=True cannot be present.
     if "shell" not in added_text or "True" not in added_text:
         return False
 
@@ -101,6 +114,7 @@ def _is_unsafe_subprocess_call(added_text: str) -> bool:
         r"subprocess\.(?:Popen|run|check_output|check_call|call)\s*\((.*?)\)",
         re.DOTALL,
     )
+    # Find subprocess calls in the added code.
     matches = list(subproc_pattern.finditer(added_text))
     if not matches:
         # If shell=True is present with subprocess reference in added lines
@@ -108,6 +122,7 @@ def _is_unsafe_subprocess_call(added_text: str) -> bool:
             return True
         return False
 
+    # Check each call that passes shell=True.
     for m in matches:
         call_content = m.group(1).strip()
         if not shell_true_pattern.search(call_content):
@@ -136,12 +151,15 @@ def _is_unsafe_subprocess_call(added_text: str) -> bool:
 
 def _is_dom_mutation_or_deletion(raw_patch: str) -> bool:
     """Inspect JS diff patch for removal or overwrite of critical global DOM elements."""
+    # Empty patch: nothing to check.
     if not raw_patch:
         return False
 
+    # Split the patch into removed and added text.
     removed_text = _extract_removed_lines(raw_patch)
     added_text = _extract_added_lines(raw_patch)
 
+    # Patterns that remove, empty or null out a core DOM container.
     mutation_patterns = (
         r"(?:document\.(?:getElementById|querySelector)\s*\(\s*['\"]#?_lmToastRegion['\"]\s*\)|window\._lmToastRegion|_lmToastRegion)\s*\.(?:remove|empty)\s*\(",
         r"(?:document\.(?:getElementById|querySelector)\s*\(\s*['\"]#?_lmToastRegion['\"]\s*\)|window\._lmToastRegion|_lmToastRegion)\s*\.(?:innerHTML|textContent)\s*=\s*['\"]\s*['\"]",
@@ -157,10 +175,12 @@ def _is_dom_mutation_or_deletion(raw_patch: str) -> bool:
     ]
     clean_removed_text = "\n".join(clean_removed)
 
+    # Raw added lines, to see whether a removed anchor was added back.
     added_only = "\n".join(
         l[1:] for l in raw_patch.splitlines()
         if l.startswith("+") and not l.startswith("+++")
     )
+    # An anchor removed and not re-added is a deletion.
     for anchor in CORE_DOM_ANCHORS:
         if anchor in clean_removed_text and anchor not in added_only:
             return True
@@ -199,10 +219,12 @@ def check_fleet_invariants(
       (True, None) if clean.
       (False, violation_message) if any guardrail is violated.
     """
+    # Changed paths: given directly, or taken from the file objects.
     paths = list(changed_paths or [])
     if not paths and files:
         paths = [getattr(f, "filename", "") for f in files if getattr(f, "filename", "")]
 
+    # Promotion PRs (by branch, title or bot user) may change VERSION.
     head_ref = getattr(pr, "head_ref", None) or getattr(getattr(pr, "head", None), "ref", "") or ""
     pr_title = str(getattr(pr, "title", "") or "").lower()
     pr_user = str(getattr(getattr(pr, "user", None), "login", "") or "").lower()
@@ -230,6 +252,7 @@ def check_fleet_invariants(
         if (p.endswith(".jsx") or p.endswith(".tsx")) and ("webui" in p_lower or p_lower.startswith("webui")):
             return False, VANILLA_JS_VIOLATION
 
+    # Read each file's name and patch.
     # Iterate over files for content/patch based checks
     for f in (files or []):
         filename = getattr(f, "filename", "") or ""
@@ -255,6 +278,7 @@ def check_fleet_invariants(
                 if cdn in added_patch:
                     return False, CDN_EGRESS_VIOLATION
 
+    # Work out the repo name from the PR object (or the PR itself if it is a string).
     # f) Twin-Parity Check for pxmx
     repo_name = ""
     if pr is not None:
@@ -266,6 +290,8 @@ def check_fleet_invariants(
         if not repo_name and isinstance(pr, str):
             repo_name = pr
 
+    # For pxmx, every change under agent/src/ must have an identical twin under src/, and vice
+    # versa.
     if "pxmx" in str(repo_name).lower() and files:
         file_map = {getattr(f, "filename", ""): f for f in files}
         for fn, f in file_map.items():
@@ -284,4 +310,5 @@ def check_fleet_invariants(
                 if (getattr(f, "patch", "") or "") != (getattr(twin_f, "patch", "") or ""):
                     return False, f"Twin-parity violation: twin files `{fn}` and `{twin_path}` diff contents are not identical."
 
+    # No violations.
     return True, None
