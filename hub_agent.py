@@ -12,6 +12,7 @@ handshake from core/src/messaging/control_plane.py without importing the lm
 package, so AppBuilder can run on hosts that don't have the lm source tree.
 """
 
+# Standard-library imports.
 import asyncio
 import collections
 import errno
@@ -28,6 +29,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Optional
 
+# WebSocket client library.
 import websockets
 from websockets.exceptions import ConnectionClosedError
 
@@ -42,12 +44,15 @@ except ImportError:
         from core.src.logging_setup import set_log_level
     except ImportError:
         def set_log_level(enabled):
+            """Fallback: set the root logger and every named logger to DEBUG or INFO."""
+            # Apply the level to the root and every existing logger.
             level = logging.DEBUG if enabled else logging.INFO
             logging.getLogger().setLevel(level)
             for _n in list(logging.root.manager.loggerDict):
                 logging.getLogger(_n).setLevel(level)
             return level
 
+# Logger for this module.
 logger = logging.getLogger("HubAgent")
 
 
@@ -59,10 +64,14 @@ class _HubLogRelayHandler(logging.Handler):
     while disconnected; drained by the relay task once connected."""
 
     def __init__(self, buf: "collections.deque"):
+        """Store the shared ring buffer that records are appended to."""
+        # INFO and above only.
         super().__init__(level=logging.INFO)
         self._buf = buf
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Append a formatted, timestamped line to the buffer (never raises)."""
+        # Format as "time [LEVEL] logger: message"; logging must never fail.
         try:
             self._buf.append(
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{record.levelname}] "
@@ -73,6 +82,7 @@ class _HubLogRelayHandler(logging.Handler):
 
 # Reconnect backoff (seconds) after a lost/failed connection.
 _RECONNECT_DELAY = 5
+# Heartbeat interval and handshake timeout, in seconds.
 _HEARTBEAT_INTERVAL = 30
 _HANDSHAKE_TIMEOUT = 5.0
 # After the hub rejects our client cert we disengage it (connect on the session
@@ -130,10 +140,12 @@ def _hub_unreachable(exc: BaseException) -> bool:
     when something IS listening, so it stays a rejection candidate (as does a
     reset mid-handshake, which is how a server commonly refuses a client cert).
     """
+    # Timeouts and DNS failures mean the hub never answered.
     if isinstance(exc, (asyncio.TimeoutError, socket.gaierror, socket.timeout)):
         return True                      # timed out / DNS — hub never answered
     if isinstance(exc, ssl.SSLError):
         return False                     # TLS spoke → the hub is up
+    # Connection refused / no route errors mean the hub is down.
     if isinstance(exc, OSError) and exc.errno in _HUB_DOWN_ERRNOS:
         return True
     return False
@@ -149,10 +161,14 @@ class MessageSigner:
     """
 
     def __init__(self, secret: str):
+        """Store the shared HMAC secret."""
+        # Shared HMAC secret.
         self.secret = secret
 
     @staticmethod
     def _canonicalize(obj: Any) -> Any:
+        """Return obj with dict keys sorted recursively."""
+        # Sort dict keys recursively; lists keep their order.
         if isinstance(obj, dict):
             return {k: MessageSigner._canonicalize(obj[k]) for k in sorted(obj.keys())}
         if isinstance(obj, list):
@@ -160,27 +176,36 @@ class MessageSigner:
         return obj
 
     def sign(self, msg: Dict[str, Any]) -> str:
+        """Return the hex HMAC-SHA256 of msg's canonical JSON, ignoring any "signature" field."""
+        # Drop the signature, sort the keys, and serialise compactly.
         data = {k: v for k, v in msg.items() if k != "signature"}
         canonical = self._canonicalize(data)
         message_bytes = json.dumps(canonical, separators=(",", ":")).encode()
         return hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
 
     def verify(self, msg: Dict[str, Any]) -> bool:
+        """True if msg's "signature" matches its contents."""
+        # Unsigned messages fail.
         sig = msg.get("signature")
         if not sig:
             return False
         return hmac.compare_digest(self.sign(msg), sig)
 
     def sign_bytes(self, message_bytes: bytes) -> str:
+        """Return the hex HMAC-SHA256 of raw bytes."""
+        # HMAC-SHA256 with the shared secret.
         return hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
 
     def verify_bytes(self, message_bytes: bytes, signature: str) -> bool:
+        """True if signature is the HMAC of message_bytes (constant-time compare)."""
+        # Constant-time comparison.
         return hmac.compare_digest(self.sign_bytes(message_bytes), signature)
 
 
 def encode_frame(signer, msg: Dict[str, Any]) -> str:
     """Wire form ``<sig>.<body>`` — body serialized ONCE, sig over those exact
     bytes; byte-identical to lm/core so the Hub verifies received bytes directly."""
+    # Serialise once and sign exactly those bytes (empty signature when unsigned).
     body = json.dumps(msg, separators=(",", ":"))
     sig = signer.sign_bytes(body.encode()) if signer is not None else ""
     return sig + "." + body
@@ -188,6 +213,7 @@ def encode_frame(signer, msg: Dict[str, Any]) -> str:
 
 def split_frame(wire: str):
     """Split ``<sig>.<body>`` → (sig, body) on the FIRST '.'; unsigned = ('', body)."""
+    # Split on the first "."; no dot means unsigned.
     sig, sep, body = wire.partition(".")
     return ("", wire) if not sep else (sig, body)
 
@@ -205,8 +231,10 @@ def _normalize_hub_ws_url(url: Optional[str]) -> Optional[str]:
     a legacy raw-socket listener with no path routing, so it's left alone).
     Empty/``None`` pass through unchanged.
     """
+    # Empty: unchanged.
     if not url:
         return url
+    # Add a wss:// scheme if there is none, then parse.
     raw = url.strip()
     if "://" not in raw:
         raw = "wss://" + raw
@@ -215,16 +243,20 @@ def _normalize_hub_ws_url(url: Optional[str]) -> Optional[str]:
         parts = urlsplit(raw)
     except Exception:
         return url
+    # Fill in a default scheme.
     scheme = parts.scheme or "wss"
     netloc = parts.netloc
+    # Add port 443 if no port was given (ignoring IPv6 brackets).
     host_part = netloc.rsplit("]", 1)[-1] if netloc else netloc
     if netloc and ":" not in host_part:
         netloc = f"{netloc}:443"
         port = 443
     else:
         port = parts.port
+    # ws on 443 means wss.
     if scheme == "ws" and port == 443:
         scheme = "wss"
+    # On 443, default the path to /ws/spoke; otherwise drop a trailing slash.
     path = parts.path
     if port == 443 and path in ("", "/"):
         path = "/ws/spoke"
@@ -253,10 +285,15 @@ class HubAgentClient:
         recovery_psk: str = "",
         on_recovery_psk: Optional[Callable[[str], None]] = None,
     ):
+        """Set up connection settings, TLS/mTLS options, callbacks and the log relay.
+        Nothing connects until start() is called.
+        """
+        # Hub URL, our identity, and the secrets for signing and verifying.
         self.hub_ws_url = _normalize_hub_ws_url(hub_ws_url)
         self.spoke_id = spoke_id
         self.secret = secret or ""
         self.hub_secrets = [hub_secret] if hub_secret else []
+        # Callbacks for status changes and new secrets (no-ops if not given).
         self.on_status = on_status or (lambda _s, _m: None)
         self.on_secret = on_secret or (lambda _s: None)
         # Fired with the LIVE socket state (True on a completed handshake, False when
@@ -265,6 +302,7 @@ class HubAgentClient:
         # registration state (approved/pending) that persists across brief drops.
         self.on_connection = on_connection or (lambda _c: None)
         self.on_hub_secret = on_hub_secret or (lambda _s: None)
+        # Recovery pre-shared key and its change callback.
         self.recovery_psk = (recovery_psk or "").strip()
         self.on_recovery_psk = on_recovery_psk or (lambda _s: None)
 
@@ -310,6 +348,7 @@ class HubAgentClient:
         self._cert_rejected = False     # did the hub reject our client cert (handshake died)?
         self._cert_rejected_at = None   # unix ts of the last cert rejection
 
+        # Message signer (only once we have a secret).
         self.signer = MessageSigner(self.secret) if self.secret else None
         # Pending request Futures keyed by the request header.message_id.
         self._pending: Dict[str, asyncio.Future] = {}
@@ -317,6 +356,7 @@ class HubAgentClient:
         # Held so they aren't garbage-collected mid-flight, and so the in-flight
         # count can be capped.
         self._inflight: set = set()
+        # Live socket, approval state, and the loop/thread that run the client.
         self._ws = None
         self._approved = bool(self.secret)  # optimistic; corrected by Hub messages
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -333,6 +373,7 @@ class HubAgentClient:
         logging.getLogger().addHandler(_relay_handler)
         self._install_uncaught_exception_relay()
 
+        # Console spokes registry, then try to load the hub CA from the WebUI cert.
         # Console spokes registry for credential distribution (lm console module).
         self._console_spokes: set = set()
         self._bootstrap_hub_ca_from_webui_cert()
@@ -346,17 +387,21 @@ class HubAgentClient:
         _prev = sys.excepthook
 
         def _hook(exc_type, exc, tb):
+            """Log the uncaught exception (except Ctrl+C), then call the previous hook."""
+            # Log it, unless it is a Ctrl+C, then always call the previous hook.
             try:
                 if not issubclass(exc_type, KeyboardInterrupt):
                     logger.error("Uncaught exception", exc_info=(exc_type, exc, tb))
             finally:
                 _prev(exc_type, exc, tb)
 
+        # Install the hook.
         sys.excepthook = _hook
 
     def _asyncio_exception_relay(self, loop, context) -> None:
         """asyncio loop exception handler — relays unhandled task exceptions
         through the HubAgent logger then defers to the default handler."""
+        # Log the exception (or the message if there is none), then call the default handler.
         exc = context.get("exception")
         msg = context.get("message") or "unhandled asyncio exception"
         if exc is not None:
@@ -370,6 +415,7 @@ class HubAgentClient:
         every 5s. The hub registers this agent in active_connections (it auths
         as a spoke), so SPOKE_LOG lands in agent_logs[spoke_id] → Error Log +
         GET_LOGS."""
+        # Every 5 seconds, send up to 300 buffered lines.
         while True:
             await asyncio.sleep(5)
             entries = []
@@ -377,6 +423,7 @@ class HubAgentClient:
                 entries.append(self._log_relay_buf.popleft())
             if not entries:
                 continue
+            # Wrap them in a signed SPOKE_LOG message; a send failure is only logged at debug.
             try:
                 msg = {
                     "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
@@ -391,13 +438,17 @@ class HubAgentClient:
 
     def start(self) -> None:
         """Start the client in a background daemon thread."""
+        # Already running: nothing to do.
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
 
         def _runner():
+            """Run the client's event loop in this thread until _run() ends."""
+            # Create and own a new event loop for this thread.
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
+            # Run the main loop; log and report if it dies.
             try:
                 self.loop.run_until_complete(self._run())
             except Exception as e:  # pragma: no cover — logged for diagnostics
@@ -406,15 +457,20 @@ class HubAgentClient:
             finally:
                 self.loop.close()
 
+        # Start the background thread.
         self._thread = threading.Thread(target=_runner, name="hub-agent", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop the client: signal the loop to stop and fail any pending requests."""
+        # Signal stop and cancel pending requests on the loop.
         self._stop.set()
         if self.loop:
             asyncio.run_coroutine_threadsafe(self._cancel_all(), self.loop)
 
     async def _cancel_all(self):
+        """Fail every pending request with a shutdown error."""
+        # Fail every waiting request, then clear the table.
         for fut in list(self._pending.values()):
             if not fut.done():
                 fut.set_exception(RuntimeError("agent shutting down"))
@@ -423,8 +479,10 @@ class HubAgentClient:
     def request_sync(self, req_type: str, data: Optional[dict] = None, timeout: float = 20.0) -> Optional[dict]:
         """Thread-safe request. Returns the result dict, or None if the agent
         is not approved/connected (callers treat None as "skip, not 401")."""
+        # Not running or not approved: skip.
         if not self.loop or not self._approved:
             return None
+        # Run the async request on the agent's loop and wait for it.
         try:
             coro = self.request(req_type, data or {}, timeout)
             future = asyncio.run_coroutine_threadsafe(coro, self.loop)
@@ -435,9 +493,11 @@ class HubAgentClient:
 
     async def request(self, req_type: str, data: dict, timeout: float = 20.0) -> dict:
         """Send a signed HUB_REQUEST and await the correlated HUB_RESPONSE."""
+        # Need both a signer and a live socket.
         if not self.signer or not self._ws:
             raise RuntimeError("agent not ready (no secret or no connection)")
 
+        # Build the signed HUB_REQUEST with a fresh message id.
         msg_id = str(uuid.uuid4())
         msg = {
             "header": {
@@ -449,6 +509,7 @@ class HubAgentClient:
             "payload": {"type": "HUB_REQUEST", "data": {"type": req_type, **data}},
         }
 
+        # Register a future for the reply, send, and wait (always unregister afterwards).
         fut = asyncio.get_event_loop().create_future()
         self._pending[msg_id] = fut
         try:
@@ -466,6 +527,7 @@ class HubAgentClient:
         probes on its own :443). The hub re-classifies the path server-side and
         rate-caps this reporter, so a report can never be abused to block an
         arbitrary victim."""
+        # Only when connected and approved.
         loop = self.loop
         if loop is None or self._ws is None or self.signer is None or not self._approved:
             return
@@ -473,6 +535,8 @@ class HubAgentClient:
                 "node": self.spoke_id or "appbuilder"}
 
         async def _send():
+            """Send the signed HTTP_PROBE_REPORT; failures are only logged at debug."""
+            # Build and send the report.
             try:
                 msg = {"header": {"message_id": str(uuid.uuid4()),
                                   "timestamp": round(time.time(), 6),
@@ -482,6 +546,7 @@ class HubAgentClient:
             except Exception as e:  # noqa: BLE001
                 logger.debug("HTTP_PROBE_REPORT send failed: %s", e)
 
+        # Schedule the send on the agent's loop without waiting.
         try:
             asyncio.run_coroutine_threadsafe(_send(), loop)
         except Exception:  # noqa: BLE001 — never break the request path over telemetry
@@ -497,6 +562,7 @@ class HubAgentClient:
         still works (local ``auth.py`` check already happened; this is telemetry
         only). The hub rate-caps this reporter, so a report can never be abused
         to block an arbitrary victim."""
+        # Only when connected and approved.
         loop = self.loop
         if loop is None or self._ws is None or self.signer is None or not self._approved:
             return
@@ -504,6 +570,8 @@ class HubAgentClient:
                 "node": self.spoke_id or "appbuilder"}
 
         async def _send():
+            """Send the signed APP_LOGIN_FAILURE; failures are only logged at debug."""
+            # Build and send the report.
             try:
                 msg = {"header": {"message_id": str(uuid.uuid4()),
                                   "timestamp": round(time.time(), 6),
@@ -513,6 +581,7 @@ class HubAgentClient:
             except Exception as e:  # noqa: BLE001
                 logger.debug("APP_LOGIN_FAILURE send failed: %s", e)
 
+        # Schedule the send on the agent's loop without waiting.
         try:
             asyncio.run_coroutine_threadsafe(_send(), loop)
         except Exception:  # noqa: BLE001 — never break the request path over telemetry
@@ -527,16 +596,20 @@ class HubAgentClient:
         latency_sensitive=False here (unlike routes.py's synchronous Log Analysis
         panel caller): this runs on a background executor thread with no human
         blocked on the reply, only the hub's own long request timeout."""
+        # Imported here to keep the agent light at startup.
         import asyncio as _aio
         from llm_client import analyze_logs, parse_log_verdict, is_llm_cooldown_error
         from model_selection import LlmRequirements
+        # Read the request and set default results.
         title = str(data.get("title") or "logs")[:200]
         log_text = data.get("logs") or ""
         status, analysis, verdict, error = "ok", "", "none", None
         try:
+            # No logs: error.
             if not str(log_text).strip():
                 status, error = "error", "no logs provided"
             else:
+                # Run the analysis in a worker thread with a small, capable, non-urgent model.
                 reqs = LlmRequirements(complexity="small", latency_sensitive=False,
                                        deprioritize_local=True,
                                        prefer_capable_within_tier=True,
@@ -544,13 +617,16 @@ class HubAgentClient:
                 raw = await _aio.get_event_loop().run_in_executor(
                     None, lambda: analyze_logs(log_text, title, requirements=reqs))
                 verdict, analysis = parse_log_verdict(raw)
+        # On failure, report the error (saying so when every provider is cooling down).
         except Exception as e:  # noqa: BLE001
             status = "error"
             error = (f"all LLM providers are cooling down / unavailable: {e}"
                      if is_llm_cooldown_error(e) else str(e))
             logger.warning("ANALYZE_LOGS failed: %s", e)
+        # Not connected any more: nothing to reply to.
         if self._ws is None or self.signer is None:
             return
+        # Reply with the result, linked to the request's message id.
         reply = {
             "correlation_id": msg.get("header", {}).get("message_id"),
             "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
@@ -570,11 +646,13 @@ class HubAgentClient:
         so the RepoScan -> fix pipeline engages; AppBuilder's fix step can pull ALL logs.
         Runs off-thread (GitHub I/O) and replies with the filing outcome."""
         import asyncio as _aio
+        # Read the escalation details.
         module = str(data.get("module") or "hub")
         log_slice = data.get("logs") or data.get("log_slice") or ""
         analysis = data.get("analysis") or ""
         verdict = data.get("verdict") or "escalate"
         status, detail = "ok", ""
+        # File the issue in a worker thread (GitHub calls block).
         try:
             from log_scan import file_escalated_issue
             ok, detail = await _aio.get_event_loop().run_in_executor(
@@ -585,8 +663,10 @@ class HubAgentClient:
         except Exception as e:  # noqa: BLE001
             status, detail = "error", str(e)
             logger.warning("ESCALATE_LOG_ISSUE failed for module=%s: %s", module, e)
+        # Not connected any more: nothing to reply to.
         if self._ws is None or self.signer is None:
             return
+        # Reply with the outcome, linked to the request's message id.
         reply = {
             "correlation_id": msg.get("header", {}).get("message_id"),
             "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
@@ -604,8 +684,10 @@ class HubAgentClient:
         (correlation_id = the inbound message_id), so a DURABLE push is cleared and
         not retried to exhaustion. Signed with our session secret; a no-op if we
         have no signer/connection yet."""
+        # No connection or signer: skip.
         if self._ws is None or self.signer is None:
             return
+        # Build the signed COMMAND_RESULT reply and send it.
         reply = {
             "correlation_id": msg.get("header", {}).get("message_id"),
             "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
@@ -627,18 +709,23 @@ class HubAgentClient:
         this cert as the AppBuilder identity — that half lives on the hub and can't
         be observed from here, so we report 'mTLS active', not 'authorized'."""
         def _cert_info(path):
+            """Describe a certificate file: existence, chain length, subject/issuer, expiry and SANs."""
+            # Missing file: report just that.
             info = {"path": path, "exists": bool(path and os.path.exists(path))}
             if not info["exists"]:
                 return info
+            # File modification time.
             try:
                 info["mtime"] = os.path.getmtime(path)
             except OSError:
                 pass
+            # Count the certificates in the chain.
             try:
                 with open(path, "r") as f:
                     info["chain_len"] = f.read().count("-----BEGIN CERTIFICATE-----")
             except Exception:  # noqa: BLE001
                 pass
+            # Parse the first certificate for subject, issuer, expiry and SANs.
             try:
                 from cryptography import x509
                 with open(path, "rb") as f:
@@ -695,6 +782,7 @@ class HubAgentClient:
                                           "self_signed": s == i})
                         except Exception:  # noqa: BLE001
                             continue
+                    # Store the parsed chain.
                     info["chain"] = chain
                 except Exception:  # noqa: BLE001
                     pass
@@ -702,8 +790,10 @@ class HubAgentClient:
                 info["parse_error"] = str(e)
             return info
 
+        # WebUI cert path and whether the socket is live.
         webui_cert = os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem")
         connected = self._ws is not None
+        # Return the connection and certificate state.
         return {
             "available": True,
             "hub_ws_url": self.hub_ws_url,
@@ -725,18 +815,23 @@ class HubAgentClient:
     # ------------------------------------------------------------------ loop
 
     async def _run(self):
+        """Main client loop: connect and serve, handle disconnects (stale secret, rejected cert),
+        and reconnect until stop() is called.
+        """
         # Relay unhandled asyncio-task exceptions through the logger → hub
         # (sync excepthook installed in __init__). Contract req 4.
         try:
             asyncio.get_running_loop().set_exception_handler(self._asyncio_exception_relay)
         except Exception:  # noqa: BLE001
             pass
+        # Report the starting state: reconnecting with a saved secret, or waiting for approval.
         logger.info("Hub agent starting: %s -> %s", self.spoke_id, self.hub_ws_url)
         if self.secret:
             self.on_status("pending", "reconnecting with stored secret")
         else:
             self.on_status("not_registered", "awaiting admin approval")
 
+        # Reconnect until asked to stop.
         while not self._stop.is_set():
             # Auto-retry a previously-rejected client cert on this reconnect once
             # enough time has passed — so mTLS log/update access self-heals after
@@ -746,6 +841,7 @@ class HubAgentClient:
                 self._present_cert = True
                 logger.info("wss: re-arming the mTLS client cert to retry "
                             "(>%ds since the last rejection)", _CERT_RETRY_INTERVAL)
+            # Connect and serve until the connection drops.
             try:
                 await self._connect_and_serve()
             except ConnectionClosedError as e:
@@ -768,6 +864,7 @@ class HubAgentClient:
                     self._approved = False
                     self.on_secret("")
                     self.on_status("not_registered", "secret rejected — re-onboarding")
+                # Any other close: just reconnect.
                 else:
                     logger.warning("Hub connection closed (%s); reconnecting", e)
             except (OSError, Exception) as e:
@@ -812,6 +909,7 @@ class HubAgentClient:
         private API used hub-wide (see memory ssl-create-unverified-context).
         Without this, ``websockets.connect`` builds a verifying context for a
         wss:// URI and the self-signed hub cert fails CERTIFICATE_VERIFY_FAILED."""
+        # With verification on and a CA file present, verify against that CA.
         try:
             if self._tls_verify and self._tls_ca_cert and os.path.exists(self._tls_ca_cert):
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
@@ -838,6 +936,7 @@ class HubAgentClient:
                         "will reject the hub's self-signed certificate.",
                         self._tls_ca_cert)
                 ctx = ssl.create_default_context()
+            # Default: encrypt without verifying the hub's self-signed cert.
             else:
                 ctx = ssl._create_unverified_context()
             # Present the installed mTLS client cert (needed for HUB_REQUEST) —
@@ -854,13 +953,16 @@ class HubAgentClient:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("wss: could not load client cert (mTLS off): %s", e)
             return ctx
+        # Could not build a context: log it and return None.
         except Exception as e:  # noqa: BLE001
             logger.error("Could not build wss SSL context: %s", e)
             return None
 
     def _atomic_write_file(self, path: str, content: str, mode: int = 0o644) -> bool:
         """Write a material file by same-directory replace; return True if changed."""
+        # Make sure the content ends with a newline.
         content = content if content.endswith("\n") else content + "\n"
+        # Unchanged: just fix the permissions and report no change.
         try:
             with open(path, "r") as f:
                 if f.read() == content:
@@ -871,6 +973,7 @@ class HubAgentClient:
                     return False
         except OSError:
             pass
+        # Write to a unique temporary file next to the target, flush to disk, and set its mode.
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         tmp = f"{path}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
         with open(tmp, "w") as f:
@@ -878,11 +981,13 @@ class HubAgentClient:
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, mode)
+        # Atomically swap it into place.
         os.replace(tmp, path)
         return True
 
     def _persist_env_key(self, key: str, value: str) -> None:
         """Persist a single environment key in /etc/ab/.env atomically."""
+        # Read the existing .env (if any).
         env_file = os.path.join(os.environ.get("AB_CONFIG_DIR", "/etc/ab"), ".env")
         os.makedirs(os.path.dirname(env_file) or ".", exist_ok=True)
         lines = []
@@ -891,6 +996,7 @@ class HubAgentClient:
                 lines = f.read().splitlines()
         except OSError:
             pass
+        # Replace the first line for this key, drop any repeats, or append it.
         rendered = f"{key}={value}"
         replaced = False
         out = []
@@ -903,6 +1009,7 @@ class HubAgentClient:
             out.append(line)
         if not replaced:
             out.append(rendered)
+        # Write atomically with owner-only permissions, then update this process's environment.
         tmp = f"{env_file}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
         with open(tmp, "w") as f:
             f.write("\n".join(out) + "\n")
@@ -914,6 +1021,8 @@ class HubAgentClient:
 
     @staticmethod
     def _ca_bundle_from_fullchain(fullchain: str) -> str:
+        """Return every certificate in a fullchain PEM except the first (the leaf): the CA bundle."""
+        # Split on BEGIN markers and rebuild each complete certificate block.
         blocks = []
         start = "-----BEGIN CERTIFICATE-----"
         end = "-----END CERTIFICATE-----"
@@ -922,16 +1031,21 @@ class HubAgentClient:
                 continue
             body = part.split(end, 1)[0]
             blocks.append(f"{start}{body}{end}\n")
+        # Drop the leaf certificate.
         return "".join(blocks[1:]).strip()
 
     def _persist_hub_ca_bundle(self, ca_bundle: str) -> bool:
+        """Save a hub CA bundle, point LM_HUB_CA_CERT at it, and return True if the file changed."""
+        # Empty bundle: nothing to save.
         ca_bundle = (ca_bundle or "").strip()
         if not ca_bundle:
             return False
+        # Write the bundle and use it as the CA from now on.
         ca_path = self._tls_ca_cert or "/etc/ab/hub-ca.pem"
         changed = self._atomic_write_file(ca_path, ca_bundle, 0o644)
         self._tls_ca_cert = ca_path
         self._tls_ca_cert_explicit = True
+        # Save the CA path to .env so it survives restarts.
         try:
             self._persist_env_key("LM_HUB_CA_CERT", ca_path)
         except Exception as e:  # noqa: BLE001
@@ -940,9 +1054,11 @@ class HubAgentClient:
 
     def _bootstrap_hub_ca_from_webui_cert(self) -> None:
         """Recover the CA bundle from AB's installed fullchain after upgrade."""
+        # Already have a CA file: nothing to do.
         ca_path = self._tls_ca_cert or "/etc/ab/hub-ca.pem"
         if os.path.exists(ca_path):
             return
+        # Extract the CA certs from the WebUI fullchain and save them.
         webui_cert = os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem")
         try:
             with open(webui_cert, "r") as f:
@@ -957,17 +1073,20 @@ class HubAgentClient:
         """Revocation: delete our mTLS client cert + stop presenting it (reconnect
         cert-less). The WebUI/LE cert is untouched. HUB_REQUEST access ends."""
         try:
+            # Delete the client cert and key files.
             for p in (self._client_cert_file, self._client_key_file):
                 try:
                     if os.path.exists(p):
                         os.remove(p)
                 except OSError:
                     pass
+            # Stop presenting a cert.
             self._present_cert = False
             self._cert_ever_worked = False
             logger.info("SPOKE_CLEAR_MTLS_CLIENT_CERT: mTLS client cert cleared (revoked)")
         except Exception as e:  # noqa: BLE001
             logger.warning("SPOKE_CLEAR_MTLS_CLIENT_CERT failed: %s", e)
+        # Acknowledge, then close the socket so we reconnect without the cert.
         await self._ack(msg, "SUCCESS", "mtls client cert cleared")
         if self._ws is not None:
             try:
@@ -986,8 +1105,10 @@ class HubAgentClient:
         up and we DO hold the hub-CA mTLS client cert). Read-only; no side
         effects. The top-level correlation_id echoes the inbound message_id so
         the hub's request_response path matches the reply."""
+        # Not connected: nothing to reply to.
         if self._ws is None or self.signer is None:
             return
+        # Report which mTLS files exist and whether the cert is presented.
         cc = self._client_cert_file
         ck = self._client_key_file
         ca = self._tls_ca_cert
@@ -1002,6 +1123,7 @@ class HubAgentClient:
             "client_key_path": ck,
             "server_cert_path": "",
         }
+        # Reply with the status, linked to the request's message id.
         reply = {
             "correlation_id": msg.get("header", {}).get("message_id"),
             "header": {"message_id": str(uuid.uuid4()), "timestamp": round(time.time(), 6),
@@ -1023,11 +1145,13 @@ class HubAgentClient:
         SAN-pins us."""
         status, message = "SUCCESS", "mtls client cert installed"
         try:
+            # Both cert and key are required.
             cert = data.get("cert") or ""
             key = data.get("key") or ""
             if not cert or not key:
                 status, message = "ERROR", "missing cert/key"
             else:
+                # Write the cert and key (key owner-only).
                 fc = cert if cert.endswith("\n") else cert + "\n"
                 pk = key if key.endswith("\n") else key + "\n"
                 os.makedirs(os.path.dirname(self._client_cert_file) or ".", exist_ok=True)
@@ -1039,6 +1163,7 @@ class HubAgentClient:
                     os.chmod(self._client_key_file, 0o600)
                 except OSError:
                     pass
+                # Present the new cert from now on.
                 self._present_cert = True
                 self._cert_ever_worked = False
                 self._cert_rejected = False
@@ -1047,6 +1172,7 @@ class HubAgentClient:
         except Exception as e:  # noqa: BLE001
             status, message = "ERROR", str(e)
             logger.warning("SPOKE_SET_MTLS_CLIENT_CERT failed: %s", e)
+        # Acknowledge, then reconnect to present the new cert.
         await self._ack(msg, status, message)
         if status == "SUCCESS" and self._ws is not None:
             try:
@@ -1074,6 +1200,7 @@ class HubAgentClient:
         (cert_distribution.py)."""
         status, message = "SUCCESS", "cert installed"
         try:
+            # Both fullchain and private key are required.
             fullchain = data.get("fullchain") or ""
             privkey = data.get("privkey") or ""
             if not fullchain or not privkey:
@@ -1103,9 +1230,11 @@ class HubAgentClient:
                     os.chmod(webui_key, 0o600)
                 except OSError:
                     pass
+                # Save the CA bundle (the separate chain, or the non-leaf certs of the fullchain).
                 ca_bundle = chain.strip() or self._ca_bundle_from_fullchain(fc)
                 if ca_bundle:
                     self._persist_hub_ca_bundle(ca_bundle)
+                # Report success.
                 message = (f"WebUI cert installed for {data.get('domain') or '?'}"
                            " — restarting to load it")
                 logger.info("INSTALL_CERT: %s", message)
@@ -1152,12 +1281,14 @@ class HubAgentClient:
         ``hub_secrets`` entry: the single ``signature`` first, then the hub's
         rotation-window ``signatures`` list. Returns ``(verified, matched_index)``;
         index 0 is the hub's current root secret, >0 an older retained one."""
+        # Collect the signatures to check: the single one (index 0), then the rotation list.
         challenge = challenge or ""
         sigs = []
         if isinstance(signature, str) and signature:
             sigs.append((0, signature))
         if isinstance(signatures_field, list):
             sigs.extend((i, sg) for i, sg in enumerate(signatures_field) if isinstance(sg, str) and sg)
+        # Try each known hub secret against each signature.
         for hs in self.hub_secrets:
             expected = hmac.new(hs.encode(), challenge.encode(), hashlib.sha256).hexdigest()
             for idx, sg in sigs:
@@ -1167,16 +1298,20 @@ class HubAgentClient:
 
     def _recovery_psk_verifies(self, challenge: str, recovery_signature) -> bool:
         """Fails closed on any missing piece (no stored PSK, no signature)."""
+        # Missing PSK, challenge or signature: not verified.
         if not self.recovery_psk or not challenge:
             return False
         if not isinstance(recovery_signature, str) or not recovery_signature:
             return False
+        # Compare against HMAC(recovery PSK, challenge).
         expected = hmac.new(self.recovery_psk.encode(), challenge.encode(),
                             hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, recovery_signature)
 
     @staticmethod
     def _hub_secret_proof_present(signature, signatures_field) -> bool:
+        """True if the hub sent any non-empty secret-based signature."""
+        # A single signature, or any non-empty entry in the list.
         if isinstance(signature, str) and signature:
             return True
         if isinstance(signatures_field, list):
@@ -1185,8 +1320,10 @@ class HubAgentClient:
 
     def _connection_has_verified_tls(self, websocket) -> bool:
         """True only for an active websocket on a TLS transport with verify-on."""
+        # Verification turned off: not verified TLS.
         if not self._tls_verify:
             return False
+        # Check that the socket really is TLS.
         transport = getattr(websocket, "transport", None)
         if transport is None:
             return False
@@ -1196,6 +1333,8 @@ class HubAgentClient:
             return False
 
     def _drop_stale_hub_secrets(self) -> None:
+        """Forget the stored hub secrets (and the saved copy) so the hub can send fresh ones."""
+        # Clear the secrets in memory and in storage.
         self.hub_secrets = []
         try:
             self.on_hub_secret("")
@@ -1203,6 +1342,9 @@ class HubAgentClient:
             logger.warning("Could not clear stale hub secret: %s", e)
 
     async def _connect_and_serve(self):
+        """Open one hub connection, complete the authentication handshake, then serve messages
+        until it closes.
+        """
         # max_size: the hub's GET_LOGS response aggregates every spoke's logs
         # and can exceed the default 1 MiB frame ceiling, which closed us with
         # code 1009 "message too big". Match the hub's 16 MiB ceiling so the
@@ -1218,6 +1360,7 @@ class HubAgentClient:
         # still detecting a truly dead socket within ~2 min.
         async with websockets.connect(self.hub_ws_url, max_size=16 * 1024 * 1024,
                                       ping_interval=30, ping_timeout=90, ssl=_ssl) as websocket:
+            # Remember the live socket.
             self._ws = websocket
             # The wss handshake completed. If we presented the client cert, the hub
             # ACCEPTED it — remember that, so a later transient network drop doesn't
@@ -1257,6 +1400,8 @@ class HubAgentClient:
                 await websocket.close(1008, "Mutual authentication failed")
                 raise RuntimeError(f"unexpected hub proof: {hub_proof.get('status')}")
 
+            # Gather what we can use to verify the hub: secret signatures, recovery PSK, verified
+            # TLS.
             challenge = hub_proof.get("challenge", "")
             signature = hub_proof.get("signature", "")
             hub_ok = {"status": "HUB_OK"}
@@ -1266,6 +1411,7 @@ class HubAgentClient:
             recovery_verified = self._recovery_psk_verifies(
                 challenge, hub_proof.get("recovery_signature"))
             verified_tls = self._connection_has_verified_tls(websocket)
+            # With stored hub secrets: check the challenge against them.
             if self.hub_secrets:
                 verified, matched_index = self._verify_hub_challenge(
                     challenge, signature, hub_proof.get("signatures"))
@@ -1302,16 +1448,19 @@ class HubAgentClient:
                     raise RuntimeError(
                         "hub identity verification failed (stale hub secret, TLS verify off "
                         "and no recovery PSK) — set LM_HUB_TLS_VERIFY=1 or re-provision HUB_SECRET")
+            # No hub secrets but a recovery PSK: it must verify.
             elif recovery_psk_configured:
                 if not recovery_verified:
                     await websocket.close(1008, "Hub identity unverified (recovery PSK failed)")
                     raise RuntimeError(
                         "hub identity verification failed (no hub secret and recovery PSK "
                         "did not verify)")
+            # Nothing to verify with: continue, but warn.
             else:
                 logger.warning(
                     "No hub secret or recovery PSK configured — skipping Hub identity "
                     "verification (insecure).")
+            # Tell the hub we accept it.
             await websocket.send(json.dumps(hub_ok, separators=(",", ":")))
 
             # We presented a stored secret and the hub sent HUB_VERIFIED without
@@ -1329,6 +1478,8 @@ class HubAgentClient:
 
             # 3. Heartbeat task (unsigned while pending so the Hub accepts it).
             async def heartbeat():
+                """Send a HEARTBEAT every interval; if a send fails, close the socket to force a reconnect."""
+                # Build and send a heartbeat (signed once we have a secret).
                 while True:
                     try:
                         ts = round(time.time(), 6)
@@ -1356,13 +1507,16 @@ class HubAgentClient:
                         except Exception:  # noqa: BLE001 — already tearing down
                             pass
                         return
+                    # Wait until the next one.
                     await asyncio.sleep(_HEARTBEAT_INTERVAL)
 
+            # Start the heartbeat task.
             hb_task = asyncio.create_task(heartbeat())
             # Drain buffered logs (startup + reconnect gap) to the hub and keep
             # streaming while connected. Started per-connection; the capturing
             # handler (added in __init__) persists so nothing is lost between.
             lr_task = asyncio.create_task(self._log_relay_task(websocket))
+            # Read messages until the socket closes.
             try:
                 async for message in websocket:
                     # Wire form <sig>.<body>: verify the RECEIVED body bytes
@@ -1382,6 +1536,7 @@ class HubAgentClient:
                         self._dispatch_slow(msg)
                     else:
                         await self._handle_message(msg)
+            # On exit, stop the background tasks and forget the socket.
             finally:
                 hb_task.cancel()
                 lr_task.cancel()
@@ -1395,11 +1550,13 @@ class HubAgentClient:
         bytes (<sig>.<body> format) before dispatch — the parsed dict no longer
         carries a "signature" field, so re-verifying it here would always fail.
         Kept as an always-true hook for existing call sites."""
+        # Always true; see the docstring.
         return True
 
     def _read_version(self) -> str:
         """Read this agent's VERSION file (beside this module) for get_version
         replies. Falls back to ``"unknown"`` if unreadable."""
+        # Read VERSION from this module's directory.
         try:
             p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
             with open(p) as f:
@@ -1426,6 +1583,7 @@ class HubAgentClient:
         retry. A mailbox-pushed command is unaffected: the same reply clears its
         pending_ack entry and the hub redelivers on its own schedule.
         """
+        # Command type, for logging.
         cmd = (msg.get("payload") or {}).get("type")
         if len(self._inflight) >= _MAX_INFLIGHT_HANDLERS:
             # WARNING, not ERROR: this is designed backpressure with a definite
@@ -1436,6 +1594,7 @@ class HubAgentClient:
                 "FAILED so the caller retries; the receive loop stays responsive.",
                 cmd, len(self._inflight), _MAX_INFLIGHT_HANDLERS)
             async def _busy_reply():
+                """Reply FAILED ("agent busy") to the hub for the shed command."""
                 # Wrapped so a send failure is reported here rather than
                 # surfacing as an unhandled task exception on the event loop.
                 try:
@@ -1446,15 +1605,19 @@ class HubAgentClient:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("busy-reply for %s failed to send: %s", cmd, e)
 
+            # Schedule the busy reply and return without running the handler.
             try:
                 asyncio.get_event_loop().create_task(_busy_reply())
             except Exception as e:  # noqa: BLE001
                 logger.warning("busy-reply for %s could not be scheduled: %s", cmd, e)
             return
+        # Run the handler as its own task and keep a reference to it.
         task = asyncio.create_task(self._handle_message(msg))
         self._inflight.add(task)
 
         def _done(t: "asyncio.Task") -> None:
+            """Remove the finished task and log any exception it raised."""
+            # Forget the finished task; log any failure.
             self._inflight.discard(t)
             if t.cancelled():
                 return
@@ -1462,11 +1625,13 @@ class HubAgentClient:
             if exc is not None:
                 logger.warning("Handler for %s failed: %s", cmd, exc)
 
+        # Run the cleanup when the task finishes.
         task.add_done_callback(_done)
 
     async def _send_command_result(self, msg: dict, cmd_type: str, rdata: dict) -> None:
         """Reply a COMMAND_RESULT correlated to the inbound message_id (the key
         the hub's request_response waits on)."""
+        # Build the signed reply.
         reply = {
             "correlation_id": msg.get("header", {}).get("message_id"),
             "header": {
@@ -1477,20 +1642,27 @@ class HubAgentClient:
             },
             "payload": {"type": "COMMAND_RESULT", "data": rdata},
         }
+        # Send it; a failure is only logged.
         try:
             await self._ws.send(encode_frame(self.signer, reply))
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to send %s reply: %s", cmd_type, e)
 
     async def _handle_message(self, msg: dict) -> None:
+        """Handle one message from the hub: onboarding/approval, certificates, log level, requests,
+        and commands delegated to AppBuilder.
+        """
+        # Drop messages that fail verification.
         if not self._verify(msg):
             logger.warning("Invalid signature on inbound message; dropping.")
             return
 
+        # Command type and data.
         payload = msg.get("payload", {})
         cmd_type = payload.get("type")
         data = payload.get("data", {}) or {}
 
+        # Hub says we still need admin approval.
         if cmd_type == "APPROVAL_REQUIRED":
             self._approved = False
             self.on_status("pending", "pending admin approval — approve in Hub WebUI (Setup → Spoke Approvals)")
@@ -1507,6 +1679,7 @@ class HubAgentClient:
                 self.on_status("pending", "approved — awaiting session key")
             return
 
+        # Hub sent a new session key: save it and start signing with it.
         if cmd_type == "SPOKE_UPDATE_SESSION_KEY":
             new_secret = data.get("secret")
             if new_secret:
@@ -1518,6 +1691,7 @@ class HubAgentClient:
                 logger.info("Session key received from Hub for %s", self.spoke_id)
             return
 
+        # Certificate commands are handled by dedicated methods.
         if cmd_type == "INSTALL_CERT":
             await self._handle_install_cert(msg, data)
             return
@@ -1535,6 +1709,7 @@ class HubAgentClient:
             return
 
         if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
+            # A CA bundle is required.
             # AB keeps its own SAN-pinned client cert, so never adopt the
             # wildcard client cert/key. The CA bundle is still required for hub
             # verification and for the mTLS readiness card, so persist that.
@@ -1542,6 +1717,7 @@ class HubAgentClient:
             if not ca_bundle:
                 await self._ack(msg, "ERROR", "missing ca_bundle")
                 return
+            # Save it and acknowledge.
             try:
                 changed = self._persist_hub_ca_bundle(ca_bundle)
                 await self._ack(
@@ -1557,6 +1733,7 @@ class HubAgentClient:
                 logger.warning("SPOKE_SET_MTLS_MATERIALS CA install failed: %s", e)
             return
 
+        # New hub secret: keep it first, plus up to two older ones for rotation.
         if cmd_type == "SPOKE_SET_HUB_SECRET":
             new_hub_secret = data.get("hub_secret")
             if new_hub_secret:
@@ -1566,6 +1743,7 @@ class HubAgentClient:
                 logger.info("Hub secret stored for %s", self.spoke_id)
             return
 
+        # New recovery PSK: save it if it changed and acknowledge.
         if cmd_type == "SPOKE_SET_RECOVERY_PSK":
             new_psk = data.get("recovery_psk")
             if new_psk:
@@ -1578,6 +1756,7 @@ class HubAgentClient:
                 await self._ack(msg, "ERROR", "missing recovery_psk")
             return
 
+        # Log analysis and escalation are delegated to their handlers.
         if cmd_type == "ANALYZE_LOGS":
             await self._handle_analyze_logs(msg, data)
             return
@@ -1594,6 +1773,7 @@ class HubAgentClient:
                 await self._distribute_console_credentials(accounts)
             return
 
+        # Reply to one of our requests: resolve the waiting future.
         if cmd_type == "HUB_RESPONSE":
             corr_id = data.get("correlation_id")
             result = data.get("result")
@@ -1604,6 +1784,7 @@ class HubAgentClient:
                 logger.debug("HUB_RESPONSE with unknown correlation_id: %s", corr_id)
             return
 
+        # Approval revoked.
         if cmd_type == "DENIED":
             self._approved = False
             self.on_status("error", "approval revoked by admin")
@@ -1619,6 +1800,7 @@ class HubAgentClient:
             # message_id; the hub's request_response keys on it).
             if self._ws is None:
                 return
+            # Message id to reply to; imports are deferred because main imports this module.
             corr = msg.get("header", {}).get("message_id")
             try:
                 from main import call_llm  # lazy: main imports this module
@@ -1688,6 +1870,7 @@ class HubAgentClient:
                 result = await asyncio.to_thread(
                     call_llm, "", system_prompt=system, messages=msgs, tools=tools,
                     requirements=_help_ask_reqs)
+                # Return the text and any tool calls (string results have none).
                 if isinstance(result, dict):
                     rdata = {"status": "SUCCESS", "assistant": {
                         "content": result.get("text") or "",
@@ -1697,9 +1880,11 @@ class HubAgentClient:
                     rdata = {"status": "SUCCESS", "assistant": {
                         "content": str(result or ""), "tool_calls": [],
                     }}
+            # On failure, return the error.
             except Exception as e:  # noqa: BLE001
                 logger.warning("HELP_ASK failed: %s", e)
                 rdata = {"status": "ERROR", "message": str(e)}
+            # Reply, linked to the request's message id.
             reply = {
                 "correlation_id": corr,
                 "header": {
@@ -1730,6 +1915,7 @@ class HubAgentClient:
             # COMMAND_RESULT reply shape as HELP_ASK.
             if self._ws is None:
                 return
+            # Request sessions and simulation sessions share one interface; run in a worker thread.
             if cmd_type.startswith("REQ_"):
                 import request_session as _sessions  # lazy: imports main
             else:
@@ -1743,6 +1929,7 @@ class HubAgentClient:
             # Hub OS Updates panel. Apply/reboot run via the watchdog — see os_updates_ab.py.
             if self._ws is None:
                 return
+            # Run the OS update command in a worker thread and reply.
             import os_updates_ab
             try:
                 rdata = await asyncio.to_thread(os_updates_ab.handle_command, cmd_type, data)
@@ -1760,6 +1947,7 @@ class HubAgentClient:
             # inbound message_id (the Hub's ack path keys on it).
             if self._ws is None:
                 return
+            # Reply with our version, linked to the request's message id.
             reply = {
                 "correlation_id": msg.get("header", {}).get("message_id"),
                 "header": {
@@ -1790,6 +1978,7 @@ class HubAgentClient:
             logger.info("Log level set to %s", logging.getLevelName(level))
             return
 
+        # Anything else is ignored.
         logger.debug("Unhandled Hub message type: %s", cmd_type)
 
     # ------------------------------------------------------------------- console
@@ -1806,9 +1995,11 @@ class HubAgentClient:
         simply won't use any credentials (fail open to profile without login).
         """
         logger.info("Distributing %d console accounts to %d spoke(s)", len(accounts), len(self._console_spokes))
+        # No connection: skip.
         if not self._ws or not self.signer:
             logger.debug("No hub connection; skipping console credential distribution")
             return
+        # Send each console spoke the account names (passwords are not sent).
         for spoke_id in self._console_spokes:
             try:
                 msg = {
@@ -1839,12 +2030,15 @@ class HubAgentClient:
         selection is already persisted in config and is re-pushed on the next
         save, so a dropped relay is never data loss.
         """
+        # Only when connected and approved.
         loop = self.loop
         if loop is None or self._ws is None or self.signer is None or not self._approved:
             logger.debug("Hub agent not ready; console accounts not relayed")
             return
 
         async def _send():
+            """Send the signed CONSOLE_SET_ACCOUNTS; failures are only logged at debug."""
+            # Build and send the message.
             try:
                 msg = {"header": {"message_id": str(uuid.uuid4()),
                                   "timestamp": round(time.time(), 6),
@@ -1856,6 +2050,7 @@ class HubAgentClient:
             except Exception as e:  # noqa: BLE001
                 logger.debug("CONSOLE_SET_ACCOUNTS send failed: %s", e)
 
+        # Schedule the send on the agent's loop without waiting.
         try:
             asyncio.run_coroutine_threadsafe(_send(), loop)
         except Exception:  # noqa: BLE001 — never fail the save over a relay
@@ -1874,12 +2069,15 @@ def start_agent_from_config(config: dict, on_status=None, on_secret=None, on_hub
     HUB_WS_URL is not configured.
     """
     global hub_agent_client
+    # No hub URL configured: don't start.
     hub_ws_url = (config.get("HUB_WS_URL") or "").strip()
     if not hub_ws_url:
         return None
+    # Our identity and saved secrets.
     spoke_id = (config.get("HUB_AGENT_ID") or "ab").strip() or "ab"
     secret = (config.get("HUB_AGENT_SECRET") or "").strip()
     hub_secret = (config.get("HUB_SECRET") or "").strip()
+    # Create the client, store it as the module singleton, and start it.
     client = HubAgentClient(
         hub_ws_url=hub_ws_url,
         spoke_id=spoke_id,

@@ -13,6 +13,7 @@ import json
 import os
 import time
 
+# How many samples to keep, how long they count, and the file format version.
 PERF_WINDOW = 50            # samples kept per model, newest last (deque-like trim)
 PERF_MAX_AGE_S = 7 * 86400  # age-out horizon: a model slow 6 months ago isn't condemned forever
 STORE_VERSION = 2
@@ -20,11 +21,14 @@ STORE_VERSION = 2
 
 def _key_str(key):
     """ModelKey (provider, base_url, model) 3-tuple -> a JSON-object-safe string."""
+    # Join the three parts with "|".
     provider, base_url, model = key
     return "|".join((provider or "", base_url or "", model or ""))
 
 
 def _key_from_str(s):
+    """Inverse of _key_str: parse "provider|base_url|model" back to a tuple, or None if malformed."""
+    # Split into at most three parts; anything else is invalid.
     parts = (s or "").split("|", 2)
     if len(parts) != 3:
         return None
@@ -32,6 +36,7 @@ def _key_from_str(s):
 
 
 def new_store():
+    """Return a new, empty performance store."""
     return {}
 
 
@@ -42,20 +47,26 @@ def record(store, key, latency_ms_wire, tps=None, source="api", error=False, now
     provider whose usage payload didn't parse this call is still a valid
     latency sample). On error, only the error counter/last_seen advance —
     a failed call has no latency signal worth ranking on."""
+    # Get or create this model's entry and update when it was last seen.
     now = time.time() if now is None else now
     entry = store.setdefault(key, {"samples": [], "last_seen": now, "errors": 0})
     entry["last_seen"] = now
+    # Errors only bump the counter.
     if error:
         entry["errors"] += 1
         return
+    # Add the sample and keep only the newest PERF_WINDOW.
     entry["samples"].append((now, latency_ms_wire, tps, source))
     if len(entry["samples"]) > PERF_WINDOW:
         del entry["samples"][:-PERF_WINDOW]
 
 
 def _median(values):
+    """Middle value of a list (upper middle for even lengths), or None if empty."""
+    # No values: no median.
     if not values:
         return None
+    # Sort and take the middle.
     s = sorted(values)
     return s[len(s) // 2]
 
@@ -65,6 +76,7 @@ def snapshot(store, now=None, max_age_s=PERF_MAX_AGE_S):
     exactly the shape model_selection.select_model()'s `perf` param expects.
     Samples older than max_age_s are excluded at read time (no store mutation
     needed for an in-memory store to age out live between save/load cycles)."""
+    # Summarise each model using only recent samples.
     now = time.time() if now is None else now
     out = {}
     for key, entry in (store or {}).items():
@@ -82,15 +94,18 @@ def load(path):
     model-name keys can't be safely mapped to a ModelKey (see the migration
     plan), so silent discard-and-start-fresh is the intended behavior here,
     not a bug swallowed by accident."""
+    # Read the file; a missing or corrupt file gives an empty store.
     try:
         with open(path) as f:
             raw = json.load(f)
     except (OSError, ValueError):
         return new_store()
 
+    # Wrong format or version: start fresh.
     if not isinstance(raw, dict) or raw.get("version") != STORE_VERSION:
         return new_store()
 
+    # Rebuild each model's entry, skipping malformed keys and samples.
     store = {}
     for key_str, entry in (raw.get("samples") or {}).items():
         key = _key_from_str(key_str)
@@ -102,6 +117,7 @@ def load(path):
                 continue
             ts, lat, tps, source = smp
             samples.append((ts, lat, tps, source))
+        # Keep the newest samples and the counters.
         store[key] = {
             "samples": samples[-PERF_WINDOW:],
             "last_seen": entry.get("last_seen", 0),
@@ -113,6 +129,7 @@ def load(path):
 def save(path, store):
     """Atomic write (tmp + os.replace) so a crash mid-write never corrupts
     the store a running process is about to load() on next start."""
+    # Build the JSON payload with string keys.
     payload = {
         "version": STORE_VERSION,
         "samples": {
@@ -124,6 +141,7 @@ def save(path, store):
             for key, entry in (store or {}).items()
         },
     }
+    # Write to a temp file, then replace the real one.
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w") as f:
         json.dump(payload, f)

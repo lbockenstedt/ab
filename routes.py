@@ -1,4 +1,5 @@
 """FastAPI HTTP routes exposed via an APIRouter, included by main.app (extracted from main.py)."""
+# Standard modules, FastAPI, GitHub and AppBuilder PR/branch helpers.
 import asyncio, fnmatch, git, json, os, re, shutil, subprocess, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -11,8 +12,10 @@ from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
 from fastapi import APIRouter
 
+# Router that main.app includes.
 router = APIRouter()
 
+# Shared config, state, helpers and workers re-exported by main.
 from main import (
     CHAT_CONFIG_DEFAULTS,
     CONFIG_DIR,
@@ -81,6 +84,7 @@ from main import (
 @router.get("/api/hub-agent/status")
 async def hub_agent_status():
     """Current Hub agent connection/approval status + config (for the Settings UI badge)."""
+    # Build the status from state and config.
     cfg = load_config()
     return JSONResponse({
         "status": state.get("hub_agent_status", "not_registered"),
@@ -103,6 +107,7 @@ async def hub_agent_reregister():
     flow. Returns immediately; the agent reconnects zero-touch in the background.
     """
     try:
+        # Clear the secret and stop the running client.
         _persist_config_key("HUB_AGENT_SECRET", "")
         client = _get_hub_agent_client()
         if client:
@@ -114,6 +119,7 @@ async def hub_agent_reregister():
         time.sleep(1)
         _start_hub_agent()
         return JSONResponse({"status": "restarted", "message": "Hub agent re-registering (approve ab in the Hub WebUI)"})
+    # Report any failure.
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
@@ -125,11 +131,16 @@ async def hub_agent_reregister():
 
 @router.get("/login")
 async def login_page(request: Request, next: str = "", error: str = ""):
+    """Show the login page (or setup, or go straight in if already signed in)."""
+    # Imported here to avoid an import cycle with main.
     import auth as _a
+    # No accounts yet: go to first-run setup.
     if not _a.any_users():
         return RedirectResponse("/setup-admin", status_code=303)
+    # Already signed in: go on.
     if _a.verify_session(request.cookies.get(_a.SESSION_COOKIE) or ""):
         return RedirectResponse(next or "/", status_code=303)
+    # Show the login form.
     return templates.TemplateResponse(request=request, name="login.html", context={
         "setup_mode": False, "error": error, "next_url": next,
         "min_len": _a.MIN_PASSWORD_LEN})
@@ -137,7 +148,10 @@ async def login_page(request: Request, next: str = "", error: str = ""):
 
 @router.post("/login")
 async def login_submit(request: Request):
+    """Check the login form; on success set the session cookie and redirect."""
+    # Imported here to avoid an import cycle with main.
     import auth as _a
+    # Read the submitted form.
     form = await request.form()
     username = (form.get("username") or "").strip()
     password = form.get("password") or ""
@@ -146,7 +160,9 @@ async def login_submit(request: Request):
     # would turn the login form into an open redirect.
     if not nxt.startswith("/") or nxt.startswith("//"):
         nxt = "/"
+    # Where the request came from, for the logs.
     src = (request.client.host if request.client else "?")
+    # Wrong user or password: log it, report it, and show the form again.
     if not _a.verify_credentials(username, password):
         logger.warning("auth: failed login for %r from %s", username, src)
         # Relay to the hub's threat monitor so repeat attempts against THIS
@@ -162,6 +178,7 @@ async def login_submit(request: Request):
             request=request, name="login.html", status_code=401,
             context={"setup_mode": False, "error": "Invalid username or password.",
                      "next_url": nxt, "min_len": _a.MIN_PASSWORD_LEN})
+    # Success: set the session cookie and redirect.
     logger.info("auth: %r signed in from %s", username, src)
     resp = RedirectResponse(nxt, status_code=303)
     resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
@@ -172,6 +189,7 @@ async def login_submit(request: Request):
 
 @router.get("/logout")
 async def logout(request: Request):
+    """Clear the session cookie and go back to the login page."""
     resp = RedirectResponse("/login", status_code=303)
     import auth as _a
     resp.delete_cookie(_a.SESSION_COOKIE, path="/")
@@ -182,9 +200,12 @@ async def logout(request: Request):
 async def setup_admin_page(request: Request, error: str = ""):
     """First-run account creation. 404s once ANY account exists, so it is a
     one-shot bootstrap rather than a permanent unauthenticated endpoint."""
+    # Imported here to avoid an import cycle with main.
     import auth as _a
+    # Only available before the first account exists.
     if _a.any_users():
         raise HTTPException(status_code=404, detail="Setup already completed")
+    # Show the form in setup mode.
     return templates.TemplateResponse(request=request, name="login.html", context={
         "setup_mode": True, "error": error, "next_url": "",
         "min_len": _a.MIN_PASSWORD_LEN})
@@ -192,24 +213,31 @@ async def setup_admin_page(request: Request, error: str = ""):
 
 @router.post("/setup-admin")
 async def setup_admin_submit(request: Request):
+    """Create the first admin account from the setup form."""
+    # Imported here to avoid an import cycle with main.
     import auth as _a
+    # Only available before the first account exists.
     if _a.any_users():
         raise HTTPException(status_code=404, detail="Setup already completed")
+    # Read the submitted form.
     form = await request.form()
     username = (form.get("username") or "").strip()
     p1, p2 = form.get("password") or "", form.get("password2") or ""
 
     def _again(msg):
+        """Show the setup form again with an error."""
         return templates.TemplateResponse(
             request=request, name="login.html", status_code=400,
             context={"setup_mode": True, "error": msg, "next_url": "",
                      "min_len": _a.MIN_PASSWORD_LEN})
 
+    # Passwords must match and the account must be valid.
     if p1 != p2:
         return _again("Passwords do not match.")
     ok, msg = _a.create_user(username, p1)
     if not ok:
         return _again(msg)
+    # Log the new account, then sign the user in.
     logger.warning("auth: FIRST ACCOUNT %r created from %s — setup is now closed.",
                    username, request.client.host if request.client else "?")
     resp = RedirectResponse("/", status_code=303)
@@ -226,8 +254,10 @@ async def setup_admin_submit(request: Request):
 def _sso_error_page(message: str, status: int = 400):
     """A styled HTML page for an SSO failure (browsers land here mid-redirect,
     so a JSON body would be unreadable)."""
+    # Escape the message so it cannot inject HTML.
     from fastapi.responses import HTMLResponse
     safe = (message or "Single sign-on failed.").replace("<", "&lt;").replace(">", "&gt;")
+    # A simple page with the error and a link back to login.
     html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sign-in failed — AppBuilder</title><script src="https://cdn.tailwindcss.com"></script>
@@ -246,6 +276,7 @@ box-shadow:0 20px 45px rgba(0,0,0,.35)}}.btn{{background:#01A982}}.btn:hover{{ba
 async def oidc_enabled():
     """Cheap probe the login page uses to decide whether to show the Microsoft
     button. ``ready`` means enough is configured for a login to succeed."""
+    # Report whether SSO is on and fully configured.
     import oidc as _o
     cfg = _o.get_oidc_config()
     return {"enabled": bool(cfg.enabled and cfg.ready)}
@@ -255,10 +286,13 @@ async def oidc_enabled():
 async def oidc_login(request: Request):
     """Mint PKCE + state + nonce, stash them in a signed cookie, and redirect the
     browser to Entra's authorize endpoint."""
+    # Imported here to keep oidc optional.
     import oidc as _o
     cfg = _o.get_oidc_config()
+    # SSO must be on and configured.
     if not (cfg.enabled and cfg.ready):
         return _sso_error_page("Microsoft sign-in is not configured on this server.")
+    # Look up Entra's endpoints and build the sign-in URL with new PKCE values.
     try:
         doc = await _o.discover(cfg)
         state, nonce, verifier, challenge = _o.new_pkce()
@@ -266,6 +300,7 @@ async def oidc_login(request: Request):
     except Exception as e:  # noqa: BLE001
         logger.exception("oidc: could not start login")
         return _sso_error_page(f"Could not start Microsoft sign-in: {e}", status=502)
+    # Save the PKCE values in a signed cookie and redirect.
     resp = RedirectResponse(url, status_code=303)
     resp.set_cookie(_o.STATE_COOKIE, _o.sign_state_cookie(state, nonce, verifier),
                     max_age=_o._STATE_TTL_S, httponly=True, samesite="lax",
@@ -278,12 +313,15 @@ async def oidc_callback(request: Request, code: str = "", state: str = "",
                         error: str = "", error_description: str = ""):
     """Validate the state cookie, exchange the code, verify the id-token, enforce
     the optional group gate, provision the user, and open a session."""
+    # Imported here to keep oidc optional; Entra may report an error directly.
     import oidc as _o
     if error:
         return _sso_error_page(f"Microsoft returned an error: {error_description or error}")
+    # SSO must be on and configured.
     cfg = _o.get_oidc_config()
     if not (cfg.enabled and cfg.ready):
         return _sso_error_page("Microsoft sign-in is not configured on this server.")
+    # The state cookie must be valid and match the returned state.
     cookie = request.cookies.get(_o.STATE_COOKIE) or ""
     parsed = _o.verify_state_cookie(cookie)
     if not parsed:
@@ -292,6 +330,7 @@ async def oidc_callback(request: Request, code: str = "", state: str = "",
     exp_state, nonce, verifier = parsed
     if not code or not _o.hmac_eq(state, exp_state):
         return _sso_error_page("State mismatch — sign-in cannot be trusted. Please try again.")
+    # Exchange the code, verify the id-token, check the group, and get the user.
     try:
         doc = await _o.discover(cfg)
         tokens = await _o.exchange_code(cfg, doc, code, verifier)
@@ -308,6 +347,7 @@ async def oidc_callback(request: Request, code: str = "", state: str = "",
     except Exception as e:  # noqa: BLE001
         logger.exception("oidc: callback failed")
         return _sso_error_page(f"Microsoft sign-in failed: {e}", status=502)
+    # Open a session and clear the state cookie.
     import auth as _a
     src = (request.client.host if request.client else "?")
     logger.info("auth: %r signed in via Entra from %s", username, src)
@@ -322,6 +362,7 @@ async def oidc_callback(request: Request, code: str = "", state: str = "",
 @router.get("/setup/oidc-config")
 async def oidc_config_get():
     """Return the stored OIDC config (secret redacted) for the Settings UI."""
+    # Load the stored settings, hide the secret, and add the ready flag.
     import oidc as _o
     cfg = _o.get_oidc_config()
     try:
@@ -344,6 +385,7 @@ async def oidc_groups_list():
     Degrades to ``{groups: [], warning}`` rather than erroring so the UI can
     fall back to manual entry. Behind the normal session gate (``/setup/*`` is
     not in the auth-exempt list)."""
+    # Need tenant, client and a credential before calling Graph.
     import oidc as _o
     cfg = _o.get_oidc_config()
     if not (cfg.tenant_id and cfg.client_id):
@@ -354,6 +396,7 @@ async def oidc_groups_list():
                 "warning": "Set a client secret or certificate first, then save."}
 
     def _friendly(msg: str) -> str:
+        """Turn a Graph error into a helpful hint for the admin."""
         low = msg.lower()
         if ("authorization_requestdenied" in low or "insufficient privileges" in low
                 or " 403" in low):
@@ -368,6 +411,7 @@ async def oidc_groups_list():
                     "matches. (raw: " + msg[:160] + ")")
         return msg
 
+    # Fetch the groups sorted by name; errors become a warning.
     try:
         groups = await _o.fetch_directory_groups(cfg)
         groups.sort(key=lambda g: (g.get("displayName") or "").lower())
@@ -382,11 +426,13 @@ async def oidc_groups_list():
 @router.post("/setup/oidc-config")
 async def oidc_config_set(request: Request):
     """Persist the operator-editable OIDC config from the Settings UI."""
+    # Read the JSON body (empty if invalid).
     import oidc as _o
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
         body = {}
+    # Save it and return the stored copy.
     try:
         stored = _o.save_oidc_config(body or {})
     except Exception as e:  # noqa: BLE001
@@ -399,12 +445,14 @@ async def oidc_config_set(request: Request):
 
 @router.get("/api/auth/users")
 async def auth_list_users():
+    """List the accounts."""
     import auth as _a
     return {"users": _a.list_users()}
 
 
 @router.post("/api/auth/users")
 async def auth_create_user(request: Request):
+    """Create an account from the JSON body."""
     import auth as _a
     data = await request.json()
     ok, msg = _a.create_user((data.get("username") or "").strip(), data.get("password") or "")
@@ -413,6 +461,7 @@ async def auth_create_user(request: Request):
 
 @router.post("/api/auth/password")
 async def auth_set_password(request: Request):
+    """Change an account's password."""
     import auth as _a
     data = await request.json()
     ok, msg = _a.set_password((data.get("username") or "").strip(), data.get("password") or "")
@@ -421,7 +470,9 @@ async def auth_set_password(request: Request):
 
 @router.post("/api/auth/users/delete")
 async def auth_delete_user(request: Request):
+    """Delete an account (but not your own)."""
     import auth as _a
+    # Read the user to delete and who is asking.
     data = await request.json()
     username = (data.get("username") or "").strip()
     me = getattr(request.state, "user", None)
@@ -429,6 +480,7 @@ async def auth_delete_user(request: Request):
         # Deleting the account you are signed in as would log you out mid-action
         # and is almost never what was meant.
         return {"status": "error", "message": "You cannot delete the account you are signed in as."}
+    # Delete it.
     ok, msg = _a.delete_user(username)
     return {"status": "ok" if ok else "error", "message": msg}
 
@@ -458,6 +510,7 @@ async def llm_diag_run(request: Request):
     Free and fast (the picker is pure), but still run off-thread since
     _enumerate_candidates reads config/live env.
     """
+    # Read the optional preset and overrides from the body.
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001 — body is optional
@@ -465,6 +518,7 @@ async def llm_diag_run(request: Request):
     body = body or {}
     preset = body.get("preset") or None
     overrides = body.get("overrides") if isinstance(body.get("overrides"), dict) else None
+    # Run the dry-run off the event loop and summarise how many presets resolved.
     try:
         from main import llm_diag  # re-exported from llm_client
         started = time.time()
@@ -486,6 +540,7 @@ async def llm_diag_run(request: Request):
 
 @router.post("/api/toggle-pause")
 async def toggle_pause():
+    """Pause or resume AppBuilder's automatic work."""
     state["paused"] = not state["paused"]
     logger.info(f"AppBuilder autonomous operations {'PAUSED' if state['paused'] else 'RESUMED'}")
     return {"status": "success", "paused": state["paused"]}
@@ -493,6 +548,7 @@ async def toggle_pause():
 
 @router.post("/api/toggle-blackout")
 async def toggle_blackout():
+    """Turn blackout (triage-only) mode on or off."""
     state["blackout"] = not state.get("blackout", False)
     logger.info(f"AppBuilder blackout mode {'ON (triage only)' if state['blackout'] else 'OFF (fixes resumed)'}")
     return {"status": "success", "blackout": state["blackout"]}
@@ -506,12 +562,14 @@ async def pr_review_approve(request: Request):
     the ONLY other caller of approve_pr is feature auto-drive's own narrow,
     opt-in auto-merge exception (pr_review._maybe_auto_merge — see that
     module's docstring), which never touches human-authored PRs."""
+    # Read the repo and PR number.
     try:
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
         number = int(data.get("number"))
     except Exception:
         return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    # Need a GitHub token.
     config = load_config()
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
@@ -521,8 +579,10 @@ async def pr_review_approve(request: Request):
         # Shared with feature auto-drive's auto-merge path (pr_review.py) —
         # see pr_actions.py's module docstring for why there is exactly one
         # approve implementation, not two.
+        """Approve the PR on GitHub."""
         approve_pr(Github(token), repo_name, number, actor="human")
 
+    # Approve off the event loop, then record and log it.
     try:
         # PyGithub is synchronous — every call in _do_approve is a blocking
         # HTTP request to the GitHub API. Running it inline on this coroutine
@@ -535,6 +595,7 @@ async def pr_review_approve(request: Request):
         mark_pr_approved(repo_name, number, True)
         logger.info("pr_review: %s #%s APPROVED via UI", repo_name, number)
         return {"status": "success", "repo": repo_name, "number": number}
+    # Report any failure.
     except Exception as e:  # noqa: BLE001
         logger.error("pr_review approve failed for %s#%s: %s", repo_name, number, e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
@@ -549,12 +610,14 @@ async def pr_review_merge(request: Request):
     docstring), which never touches human-authored PRs and still goes
     through this SAME "must be Approved first" guard, not around it. Returns
     the GitHub error if the PR isn't mergeable (conflicts / required checks)."""
+    # Read the repo and PR number.
     try:
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
         number = int(data.get("number"))
     except Exception:
         return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    # Need a GitHub token.
     config = load_config()
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
@@ -562,14 +625,17 @@ async def pr_review_merge(request: Request):
 
     def _do_merge():
         # Shared with feature auto-drive's auto-merge path — see pr_actions.py.
+        """Merge the PR on GitHub and return (status code, result)."""
         return merge_pr(Github(token), repo_name, number)
 
+    # Merge off the event loop and pass GitHub's answer back.
     try:
         # See pr_review_approve's identical note: PyGithub is synchronous, so
         # every call inside _do_merge blocks — offload it so a slow GitHub
         # response can't stall the whole app.
         status_code, content = await asyncio.get_event_loop().run_in_executor(None, _do_merge)
         return content if status_code == 200 else JSONResponse(status_code=status_code, content=content)
+    # Report any failure.
     except Exception as e:  # noqa: BLE001
         logger.error("pr_review merge failed for %s#%s: %s", repo_name, number, e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
@@ -580,21 +646,26 @@ async def pr_review_deny(request: Request):
     """Human 'Deny' for a reviewed PR — closes it on GitHub (no merge) + labels it
     'ab-denied' + a comment, and flags it DENIED in the list (kept, badged).
     Only a human denies; AppBuilder never does."""
+    # Read the repo and PR number.
     try:
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
         number = int(data.get("number"))
     except Exception:
         return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    # Need a GitHub token.
     config = load_config()
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
         return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
 
     def _do_deny():
+        """Label, comment on and close the PR."""
+        # Fetch the PR.
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         pr = repo.get_pull(number)
+        # Make sure the denied label exists, then add it.
         label = "ab-denied"
         try:
             repo.get_label(label)
@@ -607,13 +678,16 @@ async def pr_review_deny(request: Request):
             pr.add_to_labels(label)
         except Exception:
             pass
+        # Leave a comment saying why.
         try:
             pr.create_issue_comment("⛔ **Denied** via AppBuilder (human review) — closing without merge.")
         except Exception:
             pass
+        # Close it if still open.
         if not pr.merged and pr.state == "open":
             pr.edit(state="closed")
 
+    # Deny off the event loop, then record and log it.
     try:
         # See pr_review_approve's identical note: PyGithub is synchronous, so
         # every call inside _do_deny blocks — offload it so a slow GitHub
@@ -622,6 +696,7 @@ async def pr_review_deny(request: Request):
         update_pr_review(repo_name, number, denied=True)
         logger.info("pr_review: %s #%s DENIED via UI", repo_name, number)
         return {"status": "success", "repo": repo_name, "number": number}
+    # Report any failure.
     except Exception as e:  # noqa: BLE001
         logger.error("pr_review deny failed for %s#%s: %s", repo_name, number, e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
@@ -662,8 +737,10 @@ def _promotable_repos(cfg):
     the list a fan-out dispatches to; two copies of this would drift and the
     'All' button would silently cover a different set than the dropdown showed.
     """
+    # Monitored repos, cleaned and sorted.
     from github_ops import get_monitored_repos
     repos = sorted({clean_repo_name(r) for r in (get_monitored_repos(cfg) or []) if r})
+    # Add AppBuilder's own repo if known.
     try:
         from main import resolve_self_diagnosis_repo
         self_repo = clean_repo_name(resolve_self_diagnosis_repo(cfg) or "")
@@ -682,11 +759,13 @@ async def promote_repos():
     The default is the "all repos" sentinel — promotions are normally run
     across the whole platform, and defaulting to a single repo made the common
     case a per-repo chore that is easy to do half of."""
+    # Return the repos with "all" as the default.
     try:
         cfg = load_config()
         repos, self_repo = _promotable_repos(cfg)
         return {"status": "success", "repos": repos, "self_repo": self_repo,
                 "all_value": PROMOTE_ALL, "default": PROMOTE_ALL}
+    # Report any failure.
     except Exception as e:  # noqa: BLE001
         logger.error("promote: could not list repos: %s", e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
@@ -701,6 +780,7 @@ async def promote_branch(request: Request):
     PROMOTE_ROUTES are accepted; anything else is a 400 rather than a dispatch,
     so this endpoint can never be used to aim an arbitrary branch at main.
     """
+    # Read the repo, source and target.
     try:
         data = await request.json()
         raw_repo = (data.get("repo") or "").strip()
@@ -710,9 +790,11 @@ async def promote_branch(request: Request):
         return JSONResponse(status_code=400,
                             content={"status": "error", "message": "repo + source + target required"})
 
+    # "all" means every promotable repo.
     is_all = raw_repo == PROMOTE_ALL
     repo_name = "" if is_all else clean_repo_name(raw_repo)
 
+    # Need a repo, and the route must be on the allowlist.
     if not is_all and not repo_name:
         return JSONResponse(status_code=400, content={"status": "error", "message": "No repository selected"})
     if (source, target) not in PROMOTE_ROUTES:
@@ -721,13 +803,16 @@ async def promote_branch(request: Request):
             "status": "error",
             "message": f"'{source} -> {target}' is not a permitted promotion route (allowed: {allowed})"})
 
+    # Is this the qa-skipping override?
     is_override = PROMOTE_ROUTES[(source, target)]
 
+    # Need a GitHub token.
     config = load_config()
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
         return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
 
+    # The repos to dispatch to.
     if is_all:
         targets, _ = _promotable_repos(config)
         if not targets:
@@ -737,6 +822,8 @@ async def promote_branch(request: Request):
         targets = [repo_name]
 
     def _do_dispatch(repo_name):
+        """Start promote.yml on one repo and return the workflow's URL."""
+        # Find the promote workflow.
         repo = Github(token).get_repo(repo_name)
         wf = repo.get_workflow("promote.yml")
         # workflow_dispatch always runs the workflow file as it exists on the
@@ -773,8 +860,10 @@ async def promote_branch(request: Request):
     async def _dispatch(name):
         # PyGithub is synchronous — see pr_review_approve's note; offload so a
         # slow GitHub response can't stall the whole single-event-loop app.
+        """Run the dispatch off the event loop."""
         return await asyncio.get_event_loop().run_in_executor(None, _do_dispatch, name)
 
+    # Single repo: dispatch and report.
     if not is_all:
         try:
             url = await _dispatch(repo_name)
@@ -802,12 +891,14 @@ async def promote_branch(request: Request):
             logger.error("promote failed for %s (%s -> %s): %s", name, source, target, e)
             results.append({"repo": name, "ok": False, "error": str(e)})
 
+    # Split the results and log the totals.
     done = [r for r in results if r["ok"]]
     failed = [r for r in results if not r["ok"]]
     logger.warning("promote: %s -> %s dispatched via UI for %d/%d repos%s",
                    source, target, len(done), len(results),
                    " (OVERRIDE, skips qa)" if is_override else "")
 
+    # Overall status: all failed, some failed, or all started.
     if not done:
         status, msg = "error", (
             f"Promotion {source} → {target} failed for all {len(failed)} repositories.")
@@ -821,6 +912,7 @@ async def promote_branch(request: Request):
             f"Promotion {source} → {target} started for all {len(done)} repositories. "
             f"It opens pull requests; it does not merge.")
 
+    # Return the per-repo results (500 if everything failed).
     content = {"status": status, "repo": PROMOTE_ALL, "all": True, "source": source,
                "target": target, "override": is_override, "results": results,
                "succeeded": len(done), "failed": len(failed), "total": len(results),
@@ -837,18 +929,21 @@ async def pr_review_reprocess(request: Request):
     cadence doesn't mean waiting up to an hour. Refuses on an already-merged
     PR — nothing to reprocess, the code is final. Runs off-thread (an LLM
     panel pass can take a while) so the request returns immediately."""
+    # Read the repo and PR number.
     try:
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
         number = int(data.get("number"))
     except Exception:
         return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    # Refuse a merged PR.
     rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, number)) or {}
     if rec.get("merged"):
         return JSONResponse(status_code=409, content={"status": "error",
             "message": f"PR #{number} is already merged — nothing to reprocess."})
 
     def run_reprocess():
+        """Re-review the PR, logging any failure."""
         try:
             from pr_review import reprocess_one_pr
             reprocess_one_pr(repo_name, number)
@@ -856,6 +951,7 @@ async def pr_review_reprocess(request: Request):
         except Exception as e:  # noqa: BLE001
             logger.error("pr_review reprocess failed for %s#%s: %s", repo_name, number, e)
 
+    # Run it in the background and return straight away.
     threading.Thread(target=run_reprocess, daemon=True).start()
     return {"status": "triggered", "message": f"Reprocessing {repo_name}#{number}…"}
 
@@ -870,18 +966,21 @@ async def pr_review_fix(request: Request):
     Runs off-thread (LLM fix + review + QA verify can take a while); result is
     posted as a PR comment and the review is reprocessed automatically, so the
     UI picks it up on the next refresh."""
+    # Read the repo and PR number.
     try:
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
         number = int(data.get("number"))
     except Exception:
         return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    # Refuse a merged PR.
     rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, number)) or {}
     if rec.get("merged"):
         return JSONResponse(status_code=409, content={"status": "error",
             "message": f"PR #{number} is already merged — nothing to fix."})
 
     def run_fix():
+        """Try to fix the PR, logging the outcome."""
         try:
             from pr_review import fix_one_pr
             ok, message = fix_one_pr(repo_name, number)
@@ -890,12 +989,15 @@ async def pr_review_fix(request: Request):
         except Exception as e:  # noqa: BLE001
             logger.error("pr_review fix failed for %s#%s: %s", repo_name, number, e)
 
+    # Run it in the background and return straight away.
     threading.Thread(target=run_fix, daemon=True).start()
     return {"status": "triggered", "message": f"Generating a fix for {repo_name}#{number}…"}
 
 
 @router.get("/")
 async def dashboard(request: Request):
+    """Show the dashboard with recent issues and the sorted PR reviews."""
+    # Keep issues processed in the last 7 days (or with a bad timestamp).
     recent_processed = {}
     if state["processed"]:
         now = datetime.now()
@@ -913,6 +1015,7 @@ async def dashboard(request: Request):
     pr_items.sort(key=lambda x: x[1].get("reviewed_at", ""), reverse=True)
 
     def get_priority(item):
+        """Not approved first, then approved, then merged or denied."""
         pr = item[1]
         if pr.get("merged") or pr.get("denied"):
             return 2
@@ -920,6 +1023,7 @@ async def dashboard(request: Request):
             return 0
         return 1
 
+    # Group by priority (newest first within each group).
     pr_items.sort(key=get_priority)
 
     # Whether a local Claude CLI provider slot is configured — the per-issue
@@ -931,6 +1035,7 @@ async def dashboard(request: Request):
     except Exception:
         claude_enabled = False
 
+    # Render the dashboard.
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "status",
         "state": {**state, "processed": recent_processed},
@@ -940,6 +1045,7 @@ async def dashboard(request: Request):
 
 
 def _duration_str(seconds):
+    """Format seconds as "Xh Ym Zs"."""
     seconds = max(0, int(seconds))
     return f"{seconds // 3600}h {(seconds % 3600) // 60}m {seconds % 60}s"
 
@@ -948,6 +1054,7 @@ def _current_step(stream):
     """Last non-blank line of a task's streamed reasoning, trimmed for display.
     Lets the Active Tasks list show a one-line 'what is it doing right now'
     without the caller having to poll/parse the full (often multi-KB) stream."""
+    # Return the last non-empty line, cut to 160 characters.
     if not stream:
         return ""
     for line in reversed(stream.strip().splitlines()):
@@ -959,16 +1066,20 @@ def _current_step(stream):
 
 @router.get("/api/task-details")
 async def get_task_details(task_id: str = None):
+    """Return one task's full details, or a short summary of every active task."""
+    # One task: 404 if it has finished.
     if task_id:
         if task_id not in state["active_tasks"]:
             return JSONResponse(status_code=404, content={"error": "Task not found or no longer active"})
 
+        # Its run time so far.
         task = state["active_tasks"][task_id]
         duration = datetime.now() - task["start_time"]
         # task["step"] is the explicit "doing X right now" line (set_task_step);
         # the streamed-reasoning tail is only the fallback for LLM-only stages.
         current_step = task.get("step") or _current_step(task.get("stream"))
 
+        # Return the task's details with its full stream.
         return {
             "status": state["status"],
             "task": task["name"],
@@ -984,6 +1095,7 @@ async def get_task_details(task_id: str = None):
     # every few seconds without the payload growing with reasoning length.
     now = datetime.now()
     tasks = {}
+    # Short entry per task.
     for tid, task in state["active_tasks"].items():
         start_time = task.get("start_time") or now
         # phase_start tracks the CURRENT sub-step; start_time spans the whole job.
@@ -1001,6 +1113,7 @@ async def get_task_details(task_id: str = None):
             "current_step": current_step,
         }
 
+    # Return the list and count.
     return {
         "active_tasks": tasks,
         "count": len(tasks)
@@ -1010,6 +1123,7 @@ async def get_task_details(task_id: str = None):
 @router.get("/api/models")
 async def get_models():
     """Fetches available models from both configured LLM providers."""
+    # Slot 1 (local) and slot 2 (cloud) settings.
     config = load_config()
     p1_provider, p1_key, _, p1_url = _get_provider_config(1, config)
     p2_provider, p2_key, _, p2_url = _get_provider_config(2, config)
@@ -1023,6 +1137,7 @@ async def get_models():
         asyncio.to_thread(_fetch_models_for_provider, p1_provider, p1_key, p1_url),
         asyncio.to_thread(_fetch_models_for_provider, p2_provider, p2_key, p2_url),
     )
+    # Return both lists, their errors and the enabled models.
     return {
         "local_models": p1["models"],
         "cloud_models": p2["models"],
@@ -1039,6 +1154,7 @@ async def fetch_models_live(request: Request):
     Accepts explicit api_key/base_url (for live testing), or just provider name
     to look up credentials already saved in the vault.
     """
+    # Read the provider, key and URL.
     try:
         data = await request.json()
         provider = (data.get("provider") or "openai").strip()
@@ -1057,6 +1173,7 @@ async def fetch_models_live(request: Request):
         # "TypeError: Load failed" when enabling an LLM in Settings).
         result = await asyncio.to_thread(_fetch_models_for_provider, provider, api_key, base_url)
         return {"models": result["models"], "error": result["error"]}
+    # Report any failure.
     except Exception as e:
         logger.error(f"fetch-models error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e), "models": []})
@@ -1064,6 +1181,7 @@ async def fetch_models_live(request: Request):
 
 @router.get("/api/scheduler/status")
 async def scheduler_status():
+    """Return the scheduler's current status."""
     config = load_config()
     return _schedule_check(config)
 
@@ -1072,6 +1190,7 @@ def _hub_connection_diag():
     """Hub-connection + mTLS cert state from the running HubAgentClient (module
     global), so the Diagnostics page can show whether log/update access works and
     whether the WebUI is still self-signed — the cert data we otherwise SSH for."""
+    # Ask the running hub client; never fail.
     try:
         import hub_agent
         client = hub_agent.hub_agent_client
@@ -1091,6 +1210,7 @@ def _endpoint_perf_rows(config):
     joined against the live candidate enumeration, so credit/rate/dead-model
     exhaustion shows up as an explicit column instead of a silent skip. Never
     raises — a stats field must never 500 the page."""
+    # Load the candidate endpoints and perf stats; on error return nothing.
     try:
         import llm_client
         import model_registry
@@ -1098,6 +1218,7 @@ def _endpoint_perf_rows(config):
         perf = llm_client.get_llm_perf_snapshot()  # {(provider, base_url, model): {n, tps, latency_ms}}
     except Exception:
         return []
+    # One row per endpoint with its perf and availability.
     rows = []
     for c in cands:
         p = perf.get(c.get("key")) or {}
@@ -1130,6 +1251,7 @@ def _llm_tps_table():
     generation appear -- an entry with no samples would imply a measurement that
     never happened.
     """
+    # One row per model with samples: average, min, max and count, fastest first.
     try:
         import main
         rows = []
@@ -1156,6 +1278,7 @@ def _llm_tps_avg(model):
     rather than a misleading 0 -- "no data" and "zero throughput" are different
     states and conflating them would make a healthy idle box look broken.
     """
+    # Average the samples; none means no data.
     try:
         import main
         samples = (main.state.get("llm_tps") or {}).get(str(model or ""), [])
@@ -1170,12 +1293,16 @@ def _system_stats():
     """Live host + process + LLM telemetry for the Diagnostics page. Never raises —
     every field degrades to None/[] so the panel can render partial data. psutil is
     used when present; load average + core count fall back to os primitives."""
+    # Imported locally under the same name.
     import time
+    # Empty result sections to fill in.
     out = {"cpu": {}, "memory": {}, "disk": {}, "processes": [], "llm": {}, "uptime": {}}
+    # Core count.
     try:
         out["cpu"]["cores"] = os.cpu_count()
     except Exception:
         pass
+    # Load average and load as a percent of cores.
     try:
         la = os.getloadavg()  # 1/5/15 min; unavailable on some platforms
         out["cpu"]["load_avg"] = [round(x, 2) for x in la]
@@ -1184,11 +1311,13 @@ def _system_stats():
     except Exception:
         pass
 
+    # psutil is optional.
     try:
         import psutil
     except Exception:
         psutil = None
 
+    # With psutil: CPU percent, memory, disk and processes.
     if psutil is not None:
         try:
             out["cpu"]["percent"] = psutil.cpu_percent(interval=0.15)
@@ -1204,6 +1333,7 @@ def _system_stats():
             }
         except Exception:
             pass
+        # Disk usage for the working directory.
         try:
             du = psutil.disk_usage(os.getcwd())
             out["disk"] = {
@@ -1214,6 +1344,7 @@ def _system_stats():
             }
         except Exception:
             pass
+        # Host uptime.
         try:
             boot = psutil.boot_time()
             out["uptime"]["host_seconds"] = int(time.time() - boot)
@@ -1308,10 +1439,12 @@ def module_repo_map_suggest():
     Existing entries are reported separately and never overwritten; the operator's
     own mapping always wins.
     """
+    # The default repo for each module type.
     try:
         from main import MODULE_TYPE_REPO  # re-exported from log_scan
     except Exception as e:  # noqa: BLE001
         return {"error": f"module type map unavailable: {e}", "suggested": {}}
+    # Monitored repos, indexed by lower-case basename.
     cfg = load_config()
     # Imported here rather than at module scope to match _promotable_repos, the
     # only other caller. Without it this name resolves to a module global that
@@ -1322,11 +1455,13 @@ def module_repo_map_suggest():
     for r in monitored:
         by_base.setdefault(str(r).split("/")[-1].lower(), r)
 
+    # The operator's existing map entries.
     existing = cfg.get("module_repo_map") or {}
     if not isinstance(existing, dict):
         existing = {}
     existing_keys = {str(k).strip().lower() for k in existing}
 
+    # Sort each module type into kept, redundant, suggested or unmapped.
     suggested, kept, redundant, unmapped = {}, {}, [], []
     for mtype, default_repo in sorted(MODULE_TYPE_REPO.items()):
         base = str(default_repo).split("/")[-1].lower()
@@ -1344,6 +1479,7 @@ def module_repo_map_suggest():
         else:
             unmapped.append({"module_type": mtype, "needs_repo": default_repo})
 
+    # Show the existing map with the suggestions added, as text.
     merged = dict(existing)
     merged.update(suggested)
     as_text = ", ".join(f"{k}={v}" for k, v in sorted(merged.items()))
@@ -1368,6 +1504,7 @@ async def diagnostics():
     """Surfaces running-vs-disk-vs-origin versions, stale-code state, per-provider
     status (including the previously-silent skip reasons), and update/restart state,
     so the user can see what is wrong from the UI instead of reading CLI logs."""
+    # Load the config.
     config = load_config()
 
     # Startup stamp — which commit this process booted on.
@@ -1392,8 +1529,10 @@ async def diagnostics():
     except Exception:
         pass
 
+    # Origin's HEAD.
     origin_commit = _diag_origin_head()
 
+    # Update state and whether an update is pending.
     update_state = load_update_state()
     update_pending_exists = os.path.exists(os.path.join(CONFIG_DIR, "update_pending"))
 
@@ -1407,8 +1546,10 @@ async def diagnostics():
         except Exception:
             lkg_version = None
 
+    # Per-endpoint provider rows.
     providers = _endpoint_perf_rows(config)
 
+    # Return everything grouped for the page.
     return {
         "versions": {
             "running": running_commit,
@@ -1445,6 +1586,7 @@ async def diagnostics():
     }
 
 
+# Files the host-side Claude CLI installer reads and writes.
 CLAUDE_INSTALL_REQUEST = os.path.join(CONFIG_DIR, "claude_install_request.json")
 CLAUDE_INSTALL_STATUS = os.path.join(CONFIG_DIR, "claude_install_status.json")
 
@@ -1458,6 +1600,7 @@ def _request_claude_install():
     session auth — a root-owned install would resolve on PATH and still never
     authenticate for the account that runs it.
     """
+    # Write the request file for the watchdog.
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         with open(CLAUDE_INSTALL_REQUEST, "w") as f:
@@ -1472,8 +1615,10 @@ def _request_claude_install():
 @router.post("/api/claude-cli/install")
 def claude_cli_install():
     """Trigger the Claude Code CLI install (delegated to the privileged watchdog)."""
+    # Already installed?
     if _claude_bin_rt() != "claude":
         return {"status": "already_installed", "detail": f"claude is already at {_claude_bin_rt()}"}
+    # Queue the install.
     if not _request_claude_install():
         return {"status": "error", "detail": "could not queue the install request"}
     return {"status": "queued",
@@ -1483,6 +1628,7 @@ def claude_cli_install():
 @router.get("/api/claude-cli/install-status")
 def claude_cli_install_status():
     """Progress of a delegated Claude Code install (written by the watchdog)."""
+    # Read the watchdog's status file.
     try:
         with open(CLAUDE_INSTALL_STATUS, "r") as f:
             return json.load(f)
@@ -1497,6 +1643,7 @@ def _claude_bin_rt():
     FileNotFoundError and the existing not_found handlers report it — the UI
     message then names the override rather than just saying "not in PATH".
     """
+    # Ask main for the resolved path.
     try:
         from main import claude_bin  # re-exported from llm_client
         return claude_bin() or "claude"
@@ -1504,6 +1651,7 @@ def _claude_bin_rt():
         return "claude"
 
 
+# Help text shown when the claude binary cannot be found.
 _CLAUDE_NOT_FOUND = ("'claude' binary not found. The service runs as its own user with "
                      "systemd's minimal PATH, so a binary that works in your shell can still "
                      "be invisible here. Set 'claude_binary' in Settings to the absolute path "
@@ -1515,14 +1663,17 @@ def claude_cli_status():
     """Check whether the local claude CLI is installed and authenticated.
     Runs as a sync handler so FastAPI threads it — avoids blocking the event loop.
     """
+    # Imported here because only this route needs it.
     import subprocess
     try:
+        # Send a test prompt and read the JSON reply.
         probe = subprocess.run(
             [_claude_bin_rt(), "--output-format", "json"],
             input="ping", capture_output=True, text=True, timeout=15,
         )
         output = probe.stdout.strip()
         try:
+            # Not logged in, an error, or ready.
             data = json.loads(output)
             result_text = data.get("result", "")
             if "Not logged in" in result_text or "/login" in result_text:
@@ -1532,6 +1683,7 @@ def claude_cli_status():
                 return {"status": "error", "detail": result_text[:300]}
             return {"status": "authenticated", "detail": "Claude CLI authenticated and ready."}
         except (json.JSONDecodeError, KeyError):
+            # No JSON: fall back to checking the version.
             r = subprocess.run([_claude_bin_rt(), "--version"], capture_output=True, text=True, timeout=5)
             if r.returncode == 0:
                 return {"status": "ok", "version": r.stdout.strip() or r.stderr.strip()}
@@ -1552,6 +1704,7 @@ def claude_cli_auth_start():
     AND printed to claude's stderr — two independent capture paths.  The process
     stays alive (stdin=PIPE) so the approval code can be piped back later.
     """
+    # Imported here because only this route needs them.
     import subprocess, select as _select, tempfile, stat
 
     # Pre-flight: there is nothing to log into if the CLI isn't installed. Queue
@@ -1569,6 +1722,7 @@ def claude_cli_auth_start():
                            "queued. Check that ab-watchdog is running.")}
 
     # Kill any existing auth process first.
+    # Stop any running login and clear the old login state.
     old = state.get("claude_auth_proc")
     if old and old.poll() is None:
         try:
@@ -1594,6 +1748,7 @@ def claude_cli_auth_start():
         except Exception:
             browser_script = "/bin/echo"   # fallback to original approach
 
+        # Run claude with our script as the browser and no display.
         env = os.environ.copy()
         env["BROWSER"] = browser_script
         # Some distributions also check BROWSER_OPENER / OPENER
@@ -1602,6 +1757,7 @@ def claude_cli_auth_start():
         env.pop("DISPLAY", None)
         env.pop("WAYLAND_DISPLAY", None)
 
+        # Start the login process and remember it.
         proc = subprocess.Popen(
             [_claude_bin_rt(), "auth", "login"],
             stdin=subprocess.PIPE,
@@ -1623,6 +1779,7 @@ def claude_cli_auth_start():
 
         # Read stdout+stderr for up to 25 s, scanning every half-second for a URL.
         # Also poll the temp file as a second capture path.
+        # Look for the login URL in the output and the URL file for up to 25 seconds.
         lines = []
         url_found = ""
         deadline = time.time() + 25
@@ -1652,6 +1809,7 @@ def claude_cli_auth_start():
                 break
 
         # Final pass: scan everything captured for any URL (less targeted)
+        # Join the output.
         combined = "".join(lines)
         if not url_found:
             for u in re.findall(r'https?://\S+', combined):
@@ -1669,12 +1827,15 @@ def claude_cli_auth_start():
             except Exception:
                 pass
 
+        # Save the URL.
         state["claude_auth_url"] = url_found
 
+        # Finished already means logged in.
         if proc.poll() == 0:
             state["claude_auth_done"] = True
             return {"status": "authenticated", "url": "", "output": combined[:3000]}
 
+        # Otherwise wait for the user.
         return {
             "status": "pending",
             "url": url_found,
@@ -1690,9 +1851,11 @@ def claude_cli_auth_start():
 @router.get("/api/claude-cli/auth/poll")
 def claude_cli_auth_poll():
     """Check whether the background auth process has completed."""
+    # The login process and its URL.
     proc = state.get("claude_auth_proc")
     url = state.get("claude_auth_url", "")
 
+    # Already logged in.
     if state.get("claude_auth_done"):
         return {"status": "authenticated", "url": url}
 
@@ -1714,6 +1877,7 @@ def claude_cli_auth_poll():
             pass
         return {"status": "no_process", "url": ""}
 
+    # Has the login process finished?
     rc = proc.poll()
     if rc is None:
         # Still running — drain any new output and look for a URL.
@@ -1730,6 +1894,7 @@ def claude_cli_auth_poll():
                         extra.append(line)
         except Exception:
             pass
+        # Look for the URL in the new output.
         combined = "".join(extra)
         if not url:
             for u in re.findall(r'https?://\S+', combined):
@@ -1767,6 +1932,7 @@ def claude_cli_auth_poll():
         remaining, _ = proc.communicate(timeout=2)
     except Exception:
         remaining = ""
+    # Forget the process and report the error.
     state["claude_auth_proc"] = None
     return {"status": "error", "detail": f"auth login exited {rc}: {remaining[:300]}", "url": url}
 
@@ -1780,16 +1946,19 @@ async def claude_cli_auth_submit_code(request: Request):
     Blocking subprocess I/O runs in a thread via asyncio.to_thread so the
     event loop is never blocked.
     """
+    # Read the code.
     data = await request.json()
     code = (data.get("code") or "").strip()
     if not code:
         return {"status": "error", "detail": "No code provided."}
 
+    # Need a running login process.
     proc = state.get("claude_auth_proc")
     if proc is None or proc.poll() is not None:
         return {"status": "error", "detail": "No active auth process — click 'Start Login Flow' first."}
 
     def _blocking_submit(proc, code):
+        """Send the code, read the output for up to 8 seconds and return the result."""
         import select as _select
         try:
             proc.stdin.write(code + "\n")
@@ -1797,6 +1966,7 @@ async def claude_cli_auth_submit_code(request: Request):
         except Exception as e:
             return {"status": "error", "detail": f"Failed to send code to auth process: {e}"}
 
+        # Read the output until the process ends or 8 seconds pass.
         lines = []
         deadline = time.time() + 8
         while time.time() < deadline:
@@ -1811,6 +1981,7 @@ async def claude_cli_auth_submit_code(request: Request):
             if proc.poll() is not None:
                 break
 
+        # Exit code 0 means logged in; any other exit is an error.
         rc = proc.poll()
         output = "".join(lines)
         if rc == 0:
@@ -1823,6 +1994,7 @@ async def claude_cli_auth_submit_code(request: Request):
         return {"status": "pending", "output": output,
                 "message": "Code submitted — authentication in progress. Click 'Check Status' in a moment."}
 
+    # Run it in a thread.
     return await asyncio.to_thread(_blocking_submit, proc, code)
 
 
@@ -1830,6 +2002,7 @@ async def claude_cli_auth_submit_code(request: Request):
 async def toggle_model(request: Request):
     """Toggles a model's enabled status in the configuration."""
     try:
+        # Read the model and its new state.
         data = await request.json()
         model_name = data.get("model")
         enabled = data.get("enabled")
@@ -1837,6 +2010,7 @@ async def toggle_model(request: Request):
         if not model_name or enabled is None:
             return JSONResponse(status_code=400, content={"error": "Missing model or enabled status"})
 
+        # Add or remove it from the enabled list.
         config = load_config()
         enabled_list = config.get("enabled_models", [])
 
@@ -1845,6 +2019,7 @@ async def toggle_model(request: Request):
         elif not enabled and model_name in enabled_list:
             enabled_list.remove(model_name)
 
+        # Save.
         config["enabled_models"] = enabled_list
         save_config(config)
 
@@ -1856,8 +2031,10 @@ async def toggle_model(request: Request):
 
 @router.get("/logs")
 async def get_logs(request: Request):
+    """Show the last 100 lines of AppBuilder's own log, newest first."""
     logs = ""
     log_rows = []
+    # Read the log's last 100 lines.
     try:
         current_log = get_log_path()
         with open(current_log, "r") as f:
@@ -1877,6 +2054,7 @@ async def get_logs(request: Request):
     except Exception as e:
         logs = f"Error reading logs from {get_log_path()}: {e}"
         log_rows = [{"module": "", "log": logs}]
+    # Render the logs view.
     return templates.TemplateResponse(request=request, name="index.html",
                                       context={"view": "logs", "logs": logs,
                                                "log_rows": log_rows, "state": state})
@@ -1892,6 +2070,8 @@ HUB_LOGS_PAGE_LIMIT = 500
 
 @router.get("/hub-logs")
 async def get_hub_logs_page(request: Request):
+    """Show the Hub logs page from the local mirror."""
+    # Hub URL for display.
     config = load_config()
     hub_url = (config.get("HUB_QUERY_URL") or "").strip()
     fetch_error = None
@@ -1917,6 +2097,7 @@ async def get_hub_logs_page(request: Request):
     loop = asyncio.get_event_loop()
     all_logs = await loop.run_in_executor(None, get_hub_logs, HUB_LOGS_PAGE_LIMIT)
     total_logs = await loop.run_in_executor(None, hub_log_line_count)
+    # Keep the newest rows, or explain why there are none.
     logs = all_logs[:HUB_LOGS_PAGE_LIMIT]
     if logs:
         fetch_status = 200
@@ -1924,6 +2105,7 @@ async def get_hub_logs_page(request: Request):
         fetch_error = ("No synced logs yet — waiting for the first scan cycle. "
                        "If this persists, confirm ab is approved+connected "
                        "in the Hub WebUI (Setup → Spokes).")
+    # Render the page.
     fetch_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return templates.TemplateResponse(
         request=request, name="index.html",
@@ -1937,6 +2119,7 @@ async def get_hub_logs_page(request: Request):
 @router.get("/api/hub-logs/raw")
 async def hub_logs_raw():
     """Return the raw Hub logs (via the authenticated agent) for debugging."""
+    # Need the hub agent.
     client = _get_hub_agent_client()
     if not client:
         return JSONResponse({"error": "Hub agent not configured"}, status_code=400)
@@ -1953,8 +2136,10 @@ async def hub_logs_raw():
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
         None, lambda: client.request_sync("GET_LOGS", {}, timeout=20))
+    # No dict back means the agent isn't connected.
     if not isinstance(result, dict):
         return JSONResponse({"error": "Hub agent not approved/connected"}, status_code=503)
+    # Return a preview of the reply plus the log rows.
     return JSONResponse({
         "status_code": 200,
         "content_type": "application/json",
@@ -1964,6 +2149,7 @@ async def hub_logs_raw():
     })
 
 
+# One analysis at a time, its task id, the text size limit and the default window.
 _LOG_ANALYSIS_LOCK = threading.Lock()
 _LOG_ANALYSIS_TASK = "LogAnalysis"
 _LOG_ANALYSIS_MAX_CHARS = 16000
@@ -1974,6 +2160,7 @@ def _log_analysis_window_min():
     """Configured log-analysis window / precompute interval in minutes (Settings →
     log_analysis_interval_min; default 30). Governs both how far back the LLM looks AND
     how often the idle precompute runs."""
+    # Read the setting; use the default if it is bad.
     try:
         return max(1, int(load_config().get("log_analysis_interval_min", _LOG_ANALYSIS_WINDOW_DEFAULT)))
     except (TypeError, ValueError):
@@ -1983,6 +2170,7 @@ def _log_analysis_window_min():
 def _parse_log_ts(line):
     """Parse the leading 'YYYY-MM-DD HH:MM:SS' of a log line, or None."""
     try:
+        # Read the first 19 characters as a timestamp.
         return datetime.strptime((line or "")[:19], "%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
@@ -1993,9 +2181,12 @@ def _window_lines_since(lines, minutes, get_text=lambda x: x, newest_first=False
     (via get_text). Chronological (oldest-first) by default; set newest_first for
     a top-down list (e.g. hub rows). Continuation lines with no timestamp inherit
     the current keep state. Empty result → caller should fall back to a line tail."""
+    # Imported here because only this function needs it.
     from datetime import timedelta
+    # Lines older than this are dropped.
     cutoff = datetime.now() - timedelta(minutes=minutes)
     out = []
+    # Newest first: stop at the first old line, then put the rest in time order.
     if newest_first:
         for item in lines:
             ts = _parse_log_ts(get_text(item))
@@ -2004,6 +2195,7 @@ def _window_lines_since(lines, minutes, get_text=lambda x: x, newest_first=False
             out.append(item)
         out.reverse()
     else:
+        # Oldest first: keep lines from the first recent timestamp onward.
         keeping = False
         for item in lines:
             ts = _parse_log_ts(get_text(item))
@@ -2018,6 +2210,7 @@ def _collect_logs_for_analysis(source, window_minutes=None):
     """Return (title, text) of recent logs for `source` ('self' | 'hub'). With
     window_minutes, restrict to that trailing time window (falling back to a line
     tail if too little is in-window); else the last lines. Char-capped for the LLM."""
+    # Hub: the mirrored rows, windowed or cut, then joined as text.
     if source == "hub":
         rows = get_hub_logs(CHAT_HUB_LOG_LINES_PER_MODULE) or []
         if window_minutes:
@@ -2031,6 +2224,7 @@ def _collect_logs_for_analysis(source, window_minutes=None):
         text = "\n".join(lines)
         title = f"Hub logs (last {window_minutes} min)" if window_minutes else "Hub logs (mirrored)"
     else:
+        # Self: AppBuilder's own log, windowed or cut.
         try:
             with open(get_log_path(), "r") as f:
                 all_lines = f.readlines()
@@ -2043,6 +2237,7 @@ def _collect_logs_for_analysis(source, window_minutes=None):
             all_lines = all_lines[-400:]
         text = "".join(all_lines)
         title = f"AppBuilder service logs (last {window_minutes} min)" if window_minutes else "AppBuilder service logs"
+    # Keep the newest characters within the limit.
     if len(text) > _LOG_ANALYSIS_MAX_CHARS:
         text = text[-_LOG_ANALYSIS_MAX_CHARS:]
     return title, text
@@ -2052,11 +2247,14 @@ def _run_log_analysis(source, window_minutes=None, precomputed=False):
     """Read the current logs and ask AppBuilder's own LLM whether anything is wrong,
     what it means, and what to check. Streams into the LogAnalysis task (live
     'thought process') and stores the final answer in state['log_analysis']."""
+    # Imported here to avoid a circular import.
     from main import analyze_logs, parse_log_verdict, is_llm_cooldown_error  # re-exported from llm_client
     from model_selection import LlmRequirements
+    # Collect the logs and start the task.
     title, log_text = _collect_logs_for_analysis(source, window_minutes=window_minutes)
     update_task_state(task_id=_LOG_ANALYSIS_TASK, task_name=f"Analyzing {title}", action="start")
     try:
+        # Ask a quick, cloud-first LLM for a verdict and store it.
         reqs = LlmRequirements(complexity="small", latency_sensitive=True,
                                deprioritize_local=True,
                                min_context_tokens=len(log_text) // 4)
@@ -2069,6 +2267,7 @@ def _run_log_analysis(source, window_minutes=None, precomputed=False):
             "result": result, "error": None, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
     except Exception as e:  # noqa: BLE001
+        # On failure, store the error.
         msg = str(e)
         if is_llm_cooldown_error(e):
             msg = f"All LLM providers are cooling down / unavailable: {e}"
@@ -2084,6 +2283,7 @@ def _run_log_analysis(source, window_minutes=None, precomputed=False):
 def _log_analysis_busy():
     """True if the system is doing LLM-heavy work (a fix build/review/triage/chat) —
     the idle pre-compute must not compete with that for the single LLM slot."""
+    # Any active task whose name sounds LLM-heavy?
     for t in (state.get("active_tasks") or {}).values():
         name = (t.get("name") or "").lower()
         if any(k in name for k in ("build", "review", "triag", "fix attempt", "verif", "chat", "identify")):
@@ -2097,12 +2297,16 @@ def log_health_worker():
     the single LLM slot (skips while a fix/chat is running), and refreshes at most every
     N minutes — N = log_analysis_interval_min (Settings, default 30). The user's Refresh
     button (runLogAnalysis) always overrides with a live run."""
+    # Imported here to avoid a circular import.
     import time as _t
     from main import _startup_grace_remaining  # re-exported from workers
+    # Last run time.
     last = 0.0
     while True:
         try:
+            # Check once a minute.
             _t.sleep(60)
+            # Skip while paused, starting up, recently run, busy or already running.
             if state.get("paused") or state.get("blackout"):
                 continue
             if _startup_grace_remaining():
@@ -2114,6 +2318,7 @@ def log_health_worker():
                 continue
             if not _LOG_ANALYSIS_LOCK.acquire(blocking=False):
                 continue
+            # Mark it running, analyse, and record the time.
             try:
                 state["log_analysis"] = {"running": True, "source": "self", "title": None,
                                          "result": "", "error": None, "at": None, "precomputed": True}
@@ -2121,6 +2326,7 @@ def log_health_worker():
                 last = _t.time()
             finally:
                 _LOG_ANALYSIS_LOCK.release()
+        # Log any error and wait a bit.
         except Exception as e:  # noqa: BLE001
             logger.debug(f"log_health_worker cycle error: {e}")
             _t.sleep(30)
@@ -2130,10 +2336,12 @@ def log_health_worker():
 async def log_analysis_run(request: Request):
     """Kick off an LLM analysis of the current logs. Body: {"source": "self"|"hub"}.
     Non-blocking — the UI polls /api/log-analysis for progress + the final result."""
+    # Read the body.
     try:
         body = await request.json()
     except Exception:
         body = {}
+    # Pick the source; only one analysis at a time.
     source = "hub" if str((body or {}).get("source")) == "hub" else "self"
     if not _LOG_ANALYSIS_LOCK.acquire(blocking=False):
         return JSONResponse({"ok": False, "error": "An analysis is already running."}, status_code=409)
@@ -2143,6 +2351,7 @@ async def log_analysis_run(request: Request):
                                  "result": "", "error": None, "at": None}
 
         def _worker():
+            """Run the analysis and release the lock."""
             try:
                 # Analyze only the recent window (same as the idle precompute), so the
                 # LLM sees just the last-N-min of activity, not the whole tail.
@@ -2150,8 +2359,10 @@ async def log_analysis_run(request: Request):
             finally:
                 _LOG_ANALYSIS_LOCK.release()
 
+        # Run it in the background.
         threading.Thread(target=_worker, name="log-analysis", daemon=True).start()
     except Exception as e:  # noqa: BLE001
+        # On error, release the lock and report.
         _LOG_ANALYSIS_LOCK.release()
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
     return {"ok": True, "task_id": _LOG_ANALYSIS_TASK}
@@ -2161,6 +2372,7 @@ async def log_analysis_run(request: Request):
 async def log_analysis_status():
     """Current log-analysis state: running flag, the live partial (LLM tokens streamed
     so far), and the final result/error once done."""
+    # Copy the current state.
     la = dict(state.get("log_analysis") or {"running": False, "result": "", "error": None})
     # While running, surface the live streamed tokens as the partial.
     if la.get("running"):
@@ -2169,6 +2381,7 @@ async def log_analysis_status():
     return la
 
 
+# Default config values for a new install.
 DEFAULT_ENV = {
     "GITHUB_TOKEN": "",
     "LLM_PROVIDER_1": "openai",
@@ -2238,9 +2451,11 @@ def _fetch_github_repos_sync(token: str) -> list:
     (``owner/repo``). Filters to non-archived repos the user can push to (where
     AppBuilder could actually file/fix issues), sorted by name, capped at 200 so
     the settings page stays snappy. Returns ``[]`` on any failure."""
+    # No token, no repos.
     if not token:
         return []
     try:
+        # Collect pushable, non-archived repos, up to 200.
         gh = Github(token)
         repos = []
         for r in gh.get_user().get_repos(affiliation="owner,organization_member"):
@@ -2256,6 +2471,7 @@ def _fetch_github_repos_sync(token: str) -> list:
                 continue
             if len(repos) >= 200:
                 break
+        # Sort by name.
         repos.sort(key=lambda s: s.lower())
         return repos
     except Exception as e:
@@ -2268,6 +2484,7 @@ def ensure_config_defaults(config):
     # Local import: pr_remediate pulls in fix_engine, and routes.py is imported
     # very early in app start-up — keep it off the module-level import chain.
     from pr_remediate import DEFAULT_TARGET_SCORE as PR_REMEDIATE_DEFAULT_TARGET
+    # PR auto-fix on, up to 3 tries.
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
     # Premium escalation: one extra remediation turn, past the ordinary
@@ -2294,6 +2511,7 @@ def ensure_config_defaults(config):
     # is NOT sufficient — the branch must also appear in
     # feature_automerge_target_branches.
     config.setdefault("feature_automerge_allow_release_branch", False)
+    # Skip docs-only PRs by default.
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
     # Promotion PRs (promote/*, backmerge/*) are skipped by default: a fix
     # committed onto a promotion branch reaches qa/main without ever having been
@@ -2305,17 +2523,22 @@ def ensure_config_defaults(config):
     # the previous one failed (parse reason / panel critique / verification
     # error). Capped at 5 in pr_review.fix_one_pr.
     config.setdefault("pr_fix_max_attempts", 3)
+    # Return the same dict.
     return config
 
 
 @router.get("/settings")
 async def settings_page(request: Request):
+    """Show the settings page with current values and defaults filled in."""
+    # Imported here to keep it off the start-up import chain.
     from pr_remediate import DEFAULT_TARGET_SCORE as PR_REMEDIATE_DEFAULT_TARGET
+    # Start from the defaults, overridden by .env values.
     load_dotenv(override=True)
     settings = DEFAULT_ENV.copy()
     for k in DEFAULT_ENV:
         val = os.getenv(k)
         if val: settings[k] = val
+    # Load the config and fill in its defaults.
     config = load_config()
     ensure_config_defaults(config)
     # Self-log scan defaults ON (self-diagnosis) until explicitly turned off
@@ -2324,6 +2547,7 @@ async def settings_page(request: Request):
     # claude_binary lives in config (not DEFAULT_ENV), so expose it on `settings`
     # for the Settings form field to round-trip its saved value.
     settings["claude_binary"] = config.get("claude_binary", "")
+    # Ollama preload settings.
     settings["ollama_preload_timeout_s"] = config.get("ollama_preload_timeout_s", 3600)
     settings["gate_scans_on_model_preload"] = config.get("gate_scans_on_model_preload", True)
     settings["model_gate_max_wait_s"] = config.get("model_gate_max_wait_s", 3600)
@@ -2331,6 +2555,7 @@ async def settings_page(request: Request):
     # to a list on save (feature_boundaries itself, not this string, is the
     # value everything else reads).
     settings["feature_boundaries_json"] = json.dumps(config.get("feature_boundaries") or [], indent=2)
+    # Self-log scan on by default.
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
@@ -2339,6 +2564,7 @@ async def settings_page(request: Request):
     # Narrow state-logic/control-flow panel on PR pre-review (advisory) — a SECOND,
     # independent opt-in sub-option (see pr_review._state_logic_review).
     config.setdefault("pr_review_state_logic_enabled", False)
+    # Same PR defaults as ensure_config_defaults.
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
     config.setdefault("pr_remediate_premium_attempts", 1)
@@ -2349,6 +2575,7 @@ async def settings_page(request: Request):
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
     config.setdefault("pr_auto_remediate_skip_promotion", True)
     config.setdefault("pr_fix_max_attempts", 3)
+    # Batch API off, prompt caching on.
     config.setdefault("batch_enabled", False)
     config.setdefault("prompt_caching_enabled", True)
     # Already-resolved verification: when a fix run produces no accepted change,
@@ -2384,6 +2611,7 @@ async def settings_page(request: Request):
     config.setdefault("feature_drive_max_per_cycle", 1)
     config.setdefault("feature_build_timeout_s", 1800)
     config.setdefault("feature_require_docs", True)
+    # Seed the feature boundaries.
     if "feature_boundaries" not in config:
         from feature_boundary import DEFAULT_BOUNDARIES
         config["feature_boundaries"] = DEFAULT_BOUNDARIES
@@ -2423,11 +2651,13 @@ async def settings_page(request: Request):
     config.setdefault("CHAT_AZURE_ALLOW_MUTATION", False)
     config.setdefault("AZURE_LM_RESOURCE_GROUP", "LM")
     config.setdefault("AZURE_LOGIN_HELPER", "/usr/local/bin/lm-az-login")
+    # No per-module log filing until chosen.
     config.setdefault("enabled_log_modules", [])
     # Module list for the per-module log-filing grid = the operator's module→repo
     # map keys (a module must map to a repo before its logs can be filed).
     _mrm = config.get("module_repo_map") or {}
     log_module_options = sorted(_mrm.keys()) if isinstance(_mrm, dict) else []
+    # Per-repo test commands as text.
     repo_tests = config.get("repo_tests", {})
     repo_tests_str = ", ".join([f"{k}:{v}" for k, v in repo_tests.items()])
     # NEVER put the PAT itself in the render context. type="password" only masks
@@ -2447,7 +2677,9 @@ async def settings_page(request: Request):
         config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", ""))
     settings["GITHUB_TOKEN_from_env"] = bool(
         not config.get("GITHUB_TOKEN") and os.getenv("GITHUB_TOKEN", ""))
+    # LLM timeout: config first, then the env setting.
     settings["LLM_TIMEOUT"] = config.get("LLM_TIMEOUT") or settings.get("LLM_TIMEOUT", "900")
+    # Monitored labels as text.
     labels = config.get("monitored_labels", ["automated-fix"])
     settings["monitored_labels_str"] = ", ".join(labels)
 
@@ -2456,6 +2688,7 @@ async def settings_page(request: Request):
     # fetched list (e.g. a fork the token can't enumerate) still shows as a
     # pre-checked checkbox the user can toggle off.
     cache = state.get("github_repos_cache") or {}
+    # Use the cached list if fresh, else fetch it in a thread.
     now = time.time()
     if cache and (now - cache.get("ts", 0)) < _GITHUB_REPOS_TTL:
         github_repos = cache.get("repos", []) or []
@@ -2463,6 +2696,7 @@ async def settings_page(request: Request):
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
         github_repos = await asyncio.to_thread(_fetch_github_repos_sync, token) if token else []
         state["github_repos_cache"] = {"ts": now, "repos": github_repos}
+    # Monitored repo options.
     monitored = list(config.get("monitored_repos") or [])
     monitored_set = set(monitored)
     extra_monitored = [r for r in monitored if r not in set(github_repos)]
@@ -2495,6 +2729,7 @@ async def settings_page(request: Request):
     # Release branches are deliberately EXCLUDED from the options: pr_review
     # refuses main/master/default_branch structurally, so offering them as a
     # tickable box would advertise a choice that can never take effect.
+    # Branches in the promotion chain, plus the dev branch.
     _am_release = {"main", "master", (config.get("default_branch") or "main")}
     _am_chain = []
     for _pr_src, _pr_dst in PROMOTE_ROUTES:
@@ -2504,6 +2739,7 @@ async def settings_page(request: Request):
     _am_dev = config.get("dev_branch") or "dev"
     if _am_dev not in _am_chain:
         _am_chain.append(_am_dev)
+    # Offer release branches only if allowed.
     _am_allow_release = bool(config.get("feature_automerge_allow_release_branch", False))
     if _am_allow_release:
         # The opt-out is on, so main/master CAN now take effect — offer them
@@ -2511,6 +2747,7 @@ async def settings_page(request: Request):
         feature_automerge_branch_options = list(_am_chain)
     else:
         feature_automerge_branch_options = [b for b in _am_chain if b not in _am_release]
+    # The chosen target branches.
     feature_automerge_target_branches = parse_branch_names(
         config.get("feature_automerge_target_branches"))
     # Keep any already-configured branch visible even if it isn't in the chain,
@@ -2519,6 +2756,7 @@ async def settings_page(request: Request):
         if _am_b not in feature_automerge_branch_options and (
                 _am_allow_release or _am_b not in _am_release):
             feature_automerge_branch_options.append(_am_b)
+    # As a set, for ticking boxes.
     feature_automerge_target_branches_set = set(feature_automerge_target_branches)
 
     # ── Premium escalation models ────────────────────────────────────────
@@ -2536,7 +2774,9 @@ async def settings_page(request: Request):
     # the cost-first picker spend the most expensive models on routine work --
     # exactly the failure this tier exists to prevent.
     from fix_engine import _premium_allowlist as _prem_patterns  # local: heavy import chain
+    # Current premium patterns.
     _premium_patterns = list(_prem_patterns(config))
+    # Configured model names, and which of them are premium.
     premium_model_options = sorted({
         (e.get("model") or "").strip()
         for e in (config.get("llm_entries") or [])
@@ -2576,6 +2816,7 @@ async def settings_page(request: Request):
     # all (lm#452/#469/#444 found stuck on a permanently-broken entry with
     # no visible signal in the UI).
     import llm_client as _llm_client
+    # Shared credentials, used to find each entry's URL.
     _llm_creds = config.get("llm_credentials") or {}
     _safe_llm_entries = [
         {**e, "api_key": "", "has_key": bool(e.get("api_key")),
@@ -2591,6 +2832,7 @@ async def settings_page(request: Request):
     # auto-discovered stubs), and the unclassified auto stubs an operator
     # should promote to curated. See Phase 7c / plan §8.
     import model_registry as _registry
+    # Curated rules from config, or the defaults.
     _curated = config.get("model_registry") or _registry.DEFAULT_MODEL_RULES
     # Lazy top-up: an existing config frozen before ollama2 (or any local/free
     # provider) gained a DEFAULT rule gets the missing rule appended here so it
@@ -2607,8 +2849,11 @@ async def settings_page(request: Request):
     _curated, _mr_cp_tools = _registry.enable_copilot_tools(_curated)
     _curated, _mr_ranks = _registry.backfill_capability_ranks(_curated)
     _curated, _mr_speeds = _registry.backfill_speed_tiers(_curated)
+    # The rules as JSON for the editor.
     _registry_rules_json = json.dumps(_curated, indent=2)
+    # Auto-discovered rules.
     _auto = config.get("model_registry_auto") or []
+    # Preview: curated rules, then auto ones.
     _registry_preview = (
         [{"provider": r.get("provider"), "match": r.get("match"),
           "cost_tier": r.get("cost_tier"), "max_complexity": r.get("max_complexity"),
@@ -2633,11 +2878,13 @@ async def settings_page(request: Request):
           "source": "auto", "enabled": True}
          for r in _auto]
     )
+    # Auto rules that have no cost tier yet.
     _registry_unclassified = [
         {"provider": r.get("provider"), "model": r.get("model")}
         for r in _auto if (r.get("cost_tier") or "unknown") == "unknown"
     ]
 
+    # Render the page, with all keys blanked.
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "settings",
         "settings": {**settings, **config, "repo_tests_str": repo_tests_str, "monitored_labels_str": settings["monitored_labels_str"],
@@ -2704,11 +2951,14 @@ async def release_management_page(request: Request):
 
 @router.post("/save_settings")
 async def save_settings(request: Request):
+    """Save the settings form into the config."""
+    # Read the form and the current config.
     form_data = await request.form()
     data = dict(form_data)
 
     config_data = load_config()
 
+    # Labels: any, none, or the chosen ones.
     labels_mode = data.get("label_mode", "SPECIFIC")
     if labels_mode == "ANY":
         labels = ["ANY"]
@@ -2742,16 +2992,19 @@ async def save_settings(request: Request):
             else:
                 labels_list = []
 
+        # Add any typed-in labels.
         custom_labels_raw = data.get("custom_labels", "")
         if custom_labels_raw:
             custom_labels = [x.strip() for x in custom_labels_raw.split(",") if x.strip()]
             labels_list.extend(custom_labels)
 
+        # Use the default label if none were chosen.
         if not labels_list:
             labels = ["automated-fix"]
         else:
             labels = list(set(labels_list))
 
+    # Save the labels if the form sent them.
     if "label_mode" in data or "monitored_labels" in form_data or "custom_labels" in data:
         config_data["monitored_labels"] = labels
 
@@ -2764,6 +3017,7 @@ async def save_settings(request: Request):
         checked_repos = form_data.getlist("monitored_repos")
     else:
         checked_repos = [data["monitored_repos"]] if data.get("monitored_repos") else []
+    # Merge in the typed-in repos and remove duplicates.
     extra_raw = data.get("monitored_repos_extra", "") or ""
     extra_repos = [clean_repo_name(x.strip()) for x in extra_raw.replace("\\n", ",").split(",") if x.strip()]
     monitored_repos = [clean_repo_name(x) for x in checked_repos if x and str(x).strip()]
@@ -2777,6 +3031,7 @@ async def save_settings(request: Request):
         checked_trusted = form_data.getlist("trusted_repos")
     else:
         checked_trusted = [data["trusted_repos"]] if data.get("trusted_repos") else []
+    # Merge in the typed-in trusted repos and remove duplicates.
     extra_trusted_raw = data.get("trusted_repos_extra", "") or ""
     extra_trusted = [clean_repo_name(x.strip()) for x in extra_trusted_raw.replace("\\n", ",").split(",") if x.strip()]
     trusted_repos = [clean_repo_name(x) for x in checked_trusted if x and str(x).strip()]
@@ -2785,6 +3040,7 @@ async def save_settings(request: Request):
             trusted_repos.append(r)
     config_data["trusted_repos"] = list(dict.fromkeys(trusted_repos))
 
+    # Settings copied from the form, each with a clean-up function.
     updates = {
         "default_branch": lambda v: v,
         "dev_branch": lambda v: v,
@@ -2875,6 +3131,7 @@ async def save_settings(request: Request):
     }
 
 
+    # Apply each setting the form sent; a blank repo list becomes empty.
     for key, transform in updates.items():
         if key in data:
             val = data[key]
@@ -2895,6 +3152,7 @@ async def save_settings(request: Request):
         elif _submitted_token:
             config_data["GITHUB_TOKEN"] = _submitted_token
 
+    # Checkbox settings: "on" means enabled.
     config_data["direct_push_enabled"] = data.get("direct_push_enabled") == "on"
     # Scheduled-promotion master switch (default OFF). When on, the
     # promote_scheduler_worker opens dev->qa (and, if its cadence > 0, qa->main)
@@ -2938,6 +3196,7 @@ async def save_settings(request: Request):
     # check_test_regressions.py for why this is a different risk/cost class
     # from the other, pure-static Tier-1 checks).
     config_data["pr_test_regression_enabled"] = data.get("pr_test_regression_enabled") == "on"
+    # Batch API and prompt caching.
     config_data["batch_enabled"] = data.get("batch_enabled") == "on"
     config_data["prompt_caching_enabled"] = data.get("prompt_caching_enabled") == "on"
     # Mark already-fixed issues RESOLVED instead of "failed" when a run produces no
@@ -2946,6 +3205,7 @@ async def save_settings(request: Request):
     config_data["precheck_landed_fix"] = data.get("precheck_landed_fix") == "on"
     # File-a-Bug toggle (defaults on so the footer button works out of the box).
     config_data["bug_report_enabled"] = data.get("bug_report_enabled") != "off"
+    # QA and review options.
     config_data["qa_enabled"] = data.get("qa_enabled") == "on"
     config_data["skip_review"] = data.get("skip_review") == "on"
     # Log Analysis window / idle-precompute interval in minutes (default 30). Governs
@@ -3003,6 +3263,7 @@ async def save_settings(request: Request):
     # Keep ollama models resident (keep_alive; -1 = forever) + preload them at startup so
     # the ensemble doesn't reload big models from disk on every switch.
     config_data["ollama_keep_alive"] = (str(data.get("ollama_keep_alive") or "").strip() or "-1")
+    # Preload models unless turned off.
     config_data["ollama_preload_models"] = data.get("ollama_preload_models") != "off"
     # OLLAMA_MAX_LOADED_MODELS — how many models the ollama SERVER keeps resident at once.
     # Written to ollama's systemd env by Local LLM Setup (set >= ensemble size to hold all
@@ -3026,6 +3287,7 @@ async def save_settings(request: Request):
     # the != "off" idiom used just above, which needs a hidden "off" companion
     # input that doesn't exist for this field, so it's read the unambiguous way.
     config_data["skills_enabled"] = data.get("skills_enabled") == "on"
+    # Where to load skills from, and how long to cache them.
     config_data["skills_repo"] = (data.get("skills_repo") or "lbockenstedt/lm").strip()
     config_data["skills_path"] = (data.get("skills_path") or ".claude/skills").strip()
     _skills_ttl = str(data.get("skills_ttl_s") or "").strip()
@@ -3033,6 +3295,7 @@ async def save_settings(request: Request):
 
     # ── Feature auto-drive (Phase 1: classify only) ─────────────────────────
     _save_warnings = []
+    # Feature drive switches and per-cycle limit.
     config_data["feature_drive_enabled"] = data.get("feature_drive_enabled") == "on"
     config_data["feature_drive_label"] = (data.get("feature_drive_label") or "enhancement").strip()
     config_data["feature_drive_require_marker"] = data.get("feature_drive_require_marker") == "on"
@@ -3046,6 +3309,7 @@ async def save_settings(request: Request):
     else:
         _v = data.get("feature_drive_repos")
         _fd_checked = [_v] if _v else []
+    # Merge in the typed-in repos and remove duplicates.
     _fd_extra_raw = data.get("feature_drive_repos_extra", "") or ""
     _fd_extra = [clean_repo_name(x.strip()) for x in _fd_extra_raw.replace("\n", ",").split(",") if x.strip()]
     _fd_repos = [clean_repo_name(x) for x in _fd_checked if x and str(x).strip()]
@@ -3123,6 +3387,7 @@ async def save_settings(request: Request):
             config_data["model_registry"], _ = _registry_save.backfill_speed_tiers(
                 config_data["model_registry"])
 
+    # Feature build time limit and the docs requirement.
     config_data["feature_build_timeout_s"] = int(data.get("feature_build_timeout_s")) \
         if str(data.get("feature_build_timeout_s") or "").strip().isdigit() else 1800
     config_data["feature_require_docs"] = data.get("feature_require_docs") == "on"
@@ -3143,6 +3408,7 @@ async def save_settings(request: Request):
     # stray edit can put main back in scope.
     config_data["feature_automerge_allow_release_branch"] = \
         data.get("feature_automerge_allow_release_branch") == "on"
+    # Minimum confidence, kept between 0 and 1.
     _amc = str(data.get("feature_automerge_min_confidence") or "").strip()
     try:
         config_data["feature_automerge_min_confidence"] = max(0.0, min(1.0, float(_amc))) if _amc else 1.0
@@ -3156,6 +3422,7 @@ async def save_settings(request: Request):
     else:
         _v2 = data.get("feature_automerge_repos")
         _am_checked = [_v2] if _v2 else []
+    # Merge in the typed-in repos and remove duplicates.
     _am_extra_raw = data.get("feature_automerge_repos_extra", "") or ""
     _am_extra = [clean_repo_name(x.strip()) for x in _am_extra_raw.replace("\n", ",").split(",") if x.strip()]
     _am_repos = [clean_repo_name(x) for x in _am_checked if x and str(x).strip()]
@@ -3175,6 +3442,7 @@ async def save_settings(request: Request):
         _v3 = data.get("feature_automerge_target_branches")
         _v3 = [_v3] if isinstance(_v3, str) else (_v3 or [])
         _am_b_checked = list(_v3)
+    # Add any typed-in branch names.
     _am_branches_raw = data.get("feature_automerge_target_branches_extra", "") or ""
     _am_branches = [b.strip() for b in _am_b_checked if b and str(b).strip()]
     for _b3 in parse_branch_names(_am_branches_raw):
@@ -3186,6 +3454,7 @@ async def save_settings(request: Request):
     if not config_data.get("feature_automerge_allow_release_branch"):
         _am_release_save = {"main", "master", (config_data.get("default_branch") or "main")}
         _am_branches = [b for b in _am_branches if b not in _am_release_save]
+    # Save the branches without duplicates.
     config_data["feature_automerge_target_branches"] = list(dict.fromkeys(_am_branches))
 
     # ── Premium escalation tier ──────────────────────────────────────────
@@ -3207,6 +3476,7 @@ async def save_settings(request: Request):
         _v4 = data.get("premium_models")
         _v4 = [_v4] if isinstance(_v4, str) else (_v4 or [])
         _prem_checked = list(_v4)
+    # Merge in the typed-in names, lower-cased.
     _prem_extra_raw = data.get("premium_models_extra", "") or ""
     _prem = [str(m).strip().lower() for m in _prem_checked if m and str(m).strip()]
     for _p4 in _prem_extra_raw.replace("\n", ",").split(","):
@@ -3235,6 +3505,7 @@ async def save_settings(request: Request):
     # as GitHub issues in self_diagnosis_repo. On by default (self-diagnosis);
     # turn OFF to stop AppBuilder from monitoring/filing its own logs.
     config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
+    # Chat tools on or off.
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
     # Multi-agent orchestration (default off): a chat request is planned into a
     # sub-task DAG whose independent parts run in parallel across distinct
@@ -3250,10 +3521,12 @@ async def save_settings(request: Request):
     # chat_pin: a hard ModelKey pin (provider|base_url|model) for chat, or ""
     # for the auto picker. Replaces the old int chat_slot; stored verbatim.
     config_data["chat_pin"] = str(data.get("chat_pin") or "").strip()
+    # Scheduler and triage-only switches.
     config_data["SCHEDULER_ENABLED"] = data.get("SCHEDULER_ENABLED") == "on"
     config_data["SCHEDULER_WEEKEND_FULL"] = data.get("SCHEDULER_WEEKEND_FULL") == "on"
     config_data["TRIAGE_ONLY_MODE"] = data.get("TRIAGE_ONLY_MODE") == "on"
 
+    # Per-repo test commands from "repo:command" pairs.
     repo_tests_raw = data.get("repo_tests", "")
     if repo_tests_raw:
         new_tests = {}
@@ -3263,8 +3536,10 @@ async def save_settings(request: Request):
                 new_tests[repo.strip()] = cmd.strip()
         config_data["repo_tests"] = new_tests
 
+    # Save the config.
     save_config(config_data)
 
+    # Read the current .env file.
     env_vars = {}
     if os.path.exists(ENV_FILE):
         with open(ENV_FILE, "r") as f:
@@ -3273,6 +3548,7 @@ async def save_settings(request: Request):
                     k, v = line.strip().split("=", 1)
                     env_vars[k] = v
 
+    # Update the form's .env settings and write the file back.
     for k, v in data.items():
         if k in updates:
             env_vars[k] = v
@@ -3281,6 +3557,7 @@ async def save_settings(request: Request):
         for k, v in env_vars.items():
             f.write(f"{k}={v}\n")
 
+    # Rebuild the LLM limiter and re-check the LLM settings.
     _reset_llm_semaphore()
 
     try:
@@ -3290,6 +3567,7 @@ async def save_settings(request: Request):
 
     # AJAX saves (Settings tabs) request JSON + a toast instead of a full
     # redirect/reload. Honor that when the client signals Accept: application/json.
+    # Reply with JSON for AJAX saves, otherwise redirect.
     _save_msg = "Settings saved"
     if _save_warnings:
         _save_msg += " (" + "; ".join(_save_warnings) + ")"
@@ -3301,10 +3579,12 @@ async def save_settings(request: Request):
 @router.post("/api/llm/credentials")
 async def save_llm_credential(request: Request):
     """Save or update a provider credential in the vault."""
+    # Read the provider.
     data = await request.json()
     provider = (data.get("provider") or "").lower().strip()
     if not provider:
         return JSONResponse(status_code=400, content={"error": "provider required"})
+    # Load the stored credentials.
     config = load_config()
     creds = config.setdefault("llm_credentials", {})
     existing = creds.get(provider) or {}
@@ -3318,6 +3598,7 @@ async def save_llm_credential(request: Request):
         "api_key": (data.get("api_key") if "api_key" in data else existing.get("api_key")) or "",
         "base_url": (data.get("base_url") or "").strip(),
     }
+    # Save.
     save_config(config)
     return {"status": "ok", "provider": provider}
 
@@ -3329,6 +3610,7 @@ async def delete_llm_credential(request: Request):
     intact (they may still work via a per-entry key/url) — the response reports
     how many still point at it so the operator can decide whether to clean them
     up."""
+    # Read the provider.
     try:
         data = await request.json()
     except Exception:
@@ -3336,6 +3618,7 @@ async def delete_llm_credential(request: Request):
     provider = (data.get("provider") or "").lower().strip()
     if not provider:
         return JSONResponse(status_code=400, content={"error": "provider required"})
+    # Remove its credential.
     config = load_config()
     creds = config.get("llm_credentials") or {}
     removed = provider in creds
@@ -3347,6 +3630,7 @@ async def delete_llm_credential(request: Request):
         config.pop("copilot_device", None)
         state.pop("copilot_auth", None)
         state.pop("copilot_device", None)
+    # Save and count the entries still using it.
     save_config(config)
     entries_using = sum(1 for e in (config.get("llm_entries") or [])
                         if (e.get("provider") or "").lower().strip() == provider)
@@ -3359,14 +3643,19 @@ def _copilot_poll_loop(device_code, interval, provider):
     """SERVER-SIDE device-flow poll: after the user authorizes in GitHub, poll for the
     token here (independent of the browser, so a page reload/restart can't strand it),
     store it as the copilot credential, and report progress via state['copilot_auth']."""
+    # Imported here to avoid a circular import.
     import requests as _rq, time as _t
     from urllib.parse import parse_qs
     from main import COPILOT_CLIENT_ID, GITHUB_OAUTH_TOKEN_URL
+    # Poll interval and a 15-minute deadline.
     poll = max(5, int(interval or 5))
     deadline = _t.time() + 900  # GitHub device codes live ~15 min
+    # Tell the UI we are waiting.
     state["copilot_auth"] = {"status": "pending", "message": "Waiting for you to authorize in GitHub…"}
+    # Poll until authorised, failed or expired.
     while _t.time() < deadline:
         _t.sleep(poll)
+        # Ask GitHub for the token; the reply may be JSON or form data.
         try:
             r = _rq.post(GITHUB_OAUTH_TOKEN_URL, headers={"Accept": "application/json"},
                          data={"client_id": COPILOT_CLIENT_ID, "device_code": device_code,
@@ -3378,6 +3667,7 @@ def _copilot_poll_loop(device_code, interval, provider):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Copilot poll request error: {e}")
             continue
+        # Got a token: save it and finish.
         if d.get("access_token"):
             cfg = load_config()
             cfg.setdefault("llm_credentials", {})[provider] = {"api_key": d["access_token"], "base_url": ""}
@@ -3386,17 +3676,20 @@ def _copilot_poll_loop(device_code, interval, provider):
             state["copilot_auth"] = {"status": "authorized", "message": "Copilot connected."}
             logger.info(f"Copilot device flow: authorized + stored credential for '{provider}'.")
             return
+        # Still waiting, or asked to slow down.
         err = d.get("error")
         if err == "authorization_pending":
             continue
         if err == "slow_down":
             poll += 5
             continue
+        # Any other error ends the flow.
         logger.warning(f"Copilot poll: GitHub error={err!r} desc={d.get('error_description')!r}")
         state["copilot_auth"] = {"status": "error",
                                  "message": (f"{err}: {d.get('error_description') or ''}".strip(": ")
                                              or "authorization failed")}
         return
+    # Timed out.
     state["copilot_auth"] = {"status": "error", "message": "Device code expired — click Sign in again."}
 
 
@@ -3404,17 +3697,21 @@ def _copilot_poll_loop(device_code, interval, provider):
 async def copilot_device_start():
     """Begin GitHub Copilot OAuth device flow: get a device+user code and kick off a
     SERVER-SIDE poll loop that completes the auth once the user authorizes in GitHub."""
+    # Imported here to avoid a circular import.
     import requests as _rq
     from main import COPILOT_CLIENT_ID, GITHUB_DEVICE_CODE_URL
+    # Ask GitHub for a device code.
     try:
         r = _rq.post(GITHUB_DEVICE_CODE_URL, headers={"Accept": "application/json"},
                      data={"client_id": COPILOT_CLIENT_ID, "scope": "read:user"}, timeout=20)
         d = r.json()
     except Exception as e:  # noqa: BLE001
         return JSONResponse(status_code=502, content={"error": str(e)})
+    # Need a device code back.
     if not d.get("device_code"):
         return JSONResponse(status_code=502,
                             content={"error": d.get("error_description") or "device code request failed"})
+    # Start polling in the background and return the codes.
     interval = int(d.get("interval", 5))
     logger.info("Copilot device flow: issued user code %s (verify at %s)",
                 d.get("user_code"), d.get("verification_uri"))
@@ -3434,11 +3731,13 @@ async def copilot_status():
 async def copilot_signout(request: Request):
     """Clear a stored Copilot authorization: drop the credential (GitHub token) + any
     in-flight device code, and evict the cached Copilot API token."""
+    # Read the provider.
     try:
         body = await request.json()
     except Exception:
         body = {}
     provider = (body.get("provider") or "copilot").lower().strip() or "copilot"
+    # Remove its credential and any pending device code.
     config = load_config()
     creds = config.get("llm_credentials") or {}
     gh = (creds.get(provider) or {}).get("api_key")
@@ -3446,8 +3745,10 @@ async def copilot_signout(request: Request):
     config["llm_credentials"] = creds
     config.pop("copilot_device", None)
     save_config(config)
+    # Clear the auth state.
     state.pop("copilot_auth", None)
     state.pop("copilot_device", None)
+    # Drop the cached Copilot API token.
     try:
         from main import _COPILOT_TOKEN_CACHE
         if gh:
@@ -3461,8 +3762,10 @@ async def copilot_signout(request: Request):
 @router.get("/api/copilot/models")
 async def copilot_models(provider: str = "copilot"):
     """List models available to this Copilot subscription (for the model dropdown)."""
+    # Imported here to avoid a circular import.
     import requests as _rq
     from main import _copilot_api_token, _copilot_headers, COPILOT_API_BASE
+    # Need a stored GitHub token.
     cred = (load_config().get("llm_credentials") or {}).get((provider or "copilot").lower()) or {}
     gh = cred.get("api_key")
     if not gh:
@@ -3471,10 +3774,12 @@ async def copilot_models(provider: str = "copilot"):
         # _copilot_api_token + the models GET are blocking HTTP (up to 20s) —
         # offload so a slow Copilot response can't freeze the event loop.
         def _fetch():
+            """Get a Copilot token and return the sorted model ids."""
             tok = _copilot_api_token(gh)
             r = _rq.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=20)
             data = r.json()
             return sorted({m.get("id") for m in (data.get("data") or []) if m.get("id")})
+        # Fetch in a thread.
         models = await asyncio.to_thread(_fetch)
         return {"models": models}
     except Exception as e:  # noqa: BLE001
@@ -3491,6 +3796,7 @@ def _refresh_llm_endpoints():
     close an import cycle. Best-effort: never let a refresh failure break the
     save that triggered it.
     """
+    # Imported here to avoid an import cycle.
     try:
         from workers import refresh_llm_endpoints_async
         refresh_llm_endpoints_async()
@@ -3501,6 +3807,7 @@ def _refresh_llm_endpoints():
 @router.post("/api/llm/entries")
 async def create_llm_entry(request: Request):
     """Create a new named provider/model entry."""
+    # Build the new entry from the body.
     data = await request.json()
     entry = {
         "id": str(uuid.uuid4())[:12],
@@ -3518,8 +3825,10 @@ async def create_llm_entry(request: Request):
         # enabled (the default for a freshly added endpoint).
         "enabled": bool(data.get("enabled", True)),
     }
+    # Need a model.
     if not entry["model"]:
         return JSONResponse(status_code=400, content={"error": "model required"})
+    # Add it, save and re-probe.
     config = load_config()
     config.setdefault("llm_entries", []).append(entry)
     save_config(config)
@@ -3530,9 +3839,11 @@ async def create_llm_entry(request: Request):
 @router.put("/api/llm/entries/{entry_id}")
 async def update_llm_entry(entry_id: str, request: Request):
     """Update an existing named provider/model entry."""
+    # Read the changes and load the entries.
     data = await request.json()
     config = load_config()
     entries = config.get("llm_entries") or []
+    # Update the matching entry, save and re-probe.
     for e in entries:
         if e.get("id") == entry_id:
             e["label"] = (data.get("label") or e.get("label") or "").strip()
@@ -3558,12 +3869,14 @@ async def update_llm_entry(entry_id: str, request: Request):
             save_config(config)
             _refresh_llm_endpoints()
             return {"status": "ok", "entry": e}
+    # No such entry.
     return JSONResponse(status_code=404, content={"error": "entry not found"})
 
 
 @router.delete("/api/llm/entries/{entry_id}")
 async def delete_llm_entry(entry_id: str):
     """Delete a named endpoint entry."""
+    # Remove it, save and re-probe.
     config = load_config()
     config["llm_entries"] = [e for e in (config.get("llm_entries") or []) if e.get("id") != entry_id]
     save_config(config)
@@ -3571,6 +3884,7 @@ async def delete_llm_entry(entry_id: str):
     return {"status": "ok"}
 
 
+# Test prompt with a fixed expected reply.
 _TEST_ENTRY_PROMPT = [{"role": "user", "content":
     "Reply with exactly this line and nothing else: AppBuilder model test OK"}]
 
@@ -3593,13 +3907,16 @@ async def test_llm_entry(entry_id: str):
     would currently select it — and reuses the same wire-latency + tok/s
     telemetry _call_provider_timed already records for every real call, so a
     manual test also refreshes the perf numbers shown elsewhere in Settings."""
+    # Imported here because only this route needs it.
     import llm_client
+    # Find the enabled entry by id.
     config = load_config()
     match = next(((eid, provider, api_key, model, base_url)
                   for eid, provider, api_key, model, base_url, _rpm in llm_client._iter_configured_endpoints(config)
                   if eid == entry_id), None)
     if match is None:
         return JSONResponse(status_code=404, content={"error": "entry not found or disabled"})
+    # Need a model and, for most providers, a key.
     _eid, provider, api_key, model, base_url = match
     no_key_needed = (llm_client._is_ollama(provider) or llm_client._is_lmstudio(provider)
                      or (provider or "").lower().strip() == "claude_cli")
@@ -3607,6 +3924,7 @@ async def test_llm_entry(entry_id: str):
         return JSONResponse(status_code=400, content={"error": "entry is missing a model or credential"})
 
     def _run():
+        """Send the prompt and return the result, latency and speed."""
         t0 = time.monotonic()
         try:
             text = llm_client._call_provider_timed(
@@ -3619,12 +3937,14 @@ async def test_llm_entry(entry_id: str):
         except Exception as e:  # noqa: BLE001 — reported to the caller, not raised
             return {"ok": False, "error": str(e)[:500], "latency_ms": round((time.monotonic() - t0) * 1000.0)}
 
+    # Run it in a thread.
     return await asyncio.to_thread(_run)
 
 
 @router.get("/api/llm/config")
 async def get_llm_config():
     """Return current vault credentials (keys redacted) and entries (keys redacted)."""
+    # Load credentials; show only whether each has a key.
     config = load_config()
     creds = config.get("llm_credentials") or {}
     safe_creds = {p: {"configured": bool(v.get("api_key")), "base_url": v.get("base_url", "")}
@@ -3633,6 +3953,7 @@ async def get_llm_config():
     # return it. Mirrors safe_creds' configured-flag treatment above.
     safe_entries = [{**e, "api_key": "", "has_key": bool(e.get("api_key"))}
                     for e in (config.get("llm_entries") or [])]
+    # Return both.
     return {
         "credentials": safe_creds,
         "entries": safe_entries,
@@ -3642,6 +3963,7 @@ async def get_llm_config():
 @router.get("/api/console/accounts")
 async def get_console_accounts():
     """Get available usernames from vault and current console account selection."""
+    # Imported here because only this route needs it.
     import auth as _a
     config = load_config()
 
@@ -3651,6 +3973,7 @@ async def get_console_accounts():
     # Get current selection
     selected = (config.get("console_accounts") or []).copy()
 
+    # Return both lists.
     return {
         "available": users,
         "selected": selected,
@@ -3660,6 +3983,7 @@ async def get_console_accounts():
 @router.post("/api/console/accounts")
 async def save_console_accounts(request: Request):
     """Save selected console account usernames and push to LM hub."""
+    # Read the chosen usernames.
     try:
         data = await request.json()
     except Exception:
@@ -3701,6 +4025,7 @@ async def local_llm_setup(request: Request):
     registered as an enabled endpoint (routing is capability/cost-aware now — no
     slot to assign). Returns immediately with the task_id the UI polls.
     """
+    # Read the body; every field has a default.
     try:
         data = await request.json()
     except Exception:
@@ -3714,8 +4039,10 @@ async def local_llm_setup(request: Request):
         cores = int(data.get("cores") or state.get("cpu_count") or os.cpu_count() or 4)
     except (TypeError, ValueError):
         cores = os.cpu_count() or 4
+    # One setup at a time.
     if "LocalLLMSetup" in state.get("active_tasks", {}):
         return JSONResponse(status_code=409, content={"status": "busy", "message": "A local LLM setup is already running."})
+    # Run it in the background.
     threading.Thread(target=run_local_llm_setup, args=(model, num_ctx, cores), daemon=True).start()
     return {"status": "started", "task_id": "LocalLLMSetup"}
 
@@ -3734,6 +4061,7 @@ async def local_llm_status():
 async def local_llm_models(base_url: str = ""):
     """List the models on an ollama endpoint (defaults to the local server).
     Pass ?base_url=http://<host>:11434 to manage a remote instance (e.g. the M4)."""
+    # Use the given URL or the local server.
     url = (base_url or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
     # _ollama_models_detailed makes a blocking HTTP call — offload it so a slow
     # or unreachable ollama endpoint can't stall the whole event loop.
@@ -3745,6 +4073,7 @@ async def local_llm_models(base_url: str = ""):
 async def local_llm_pull(request: Request):
     """Pull a model in the background. Body: {model, base_url?}. Poll progress via
     /api/task-details?task_id=LocalLLMPull."""
+    # Read the model and endpoint.
     try:
         data = await request.json()
     except Exception:
@@ -3753,8 +4082,10 @@ async def local_llm_pull(request: Request):
     if not model:
         return JSONResponse(status_code=400, content={"message": "model required"})
     base_url = (data.get("base_url") or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
+    # One pull at a time.
     if "LocalLLMPull" in state.get("active_tasks", {}):
         return JSONResponse(status_code=409, content={"message": "A model pull is already running."})
+    # Run it in the background.
     threading.Thread(target=run_local_llm_pull, args=(model, base_url), daemon=True).start()
     return {"status": "started", "task_id": "LocalLLMPull"}
 
@@ -3762,6 +4093,7 @@ async def local_llm_pull(request: Request):
 @router.post("/api/local-llm/delete")
 async def local_llm_delete(request: Request):
     """Delete a model. Body: {model, base_url?}."""
+    # Read the model and endpoint.
     try:
         data = await request.json()
     except Exception:
@@ -3770,6 +4102,7 @@ async def local_llm_delete(request: Request):
     if not model:
         return JSONResponse(status_code=400, content={"message": "model required"})
     base_url = (data.get("base_url") or OLLAMA_BASE_URL).strip() or OLLAMA_BASE_URL
+    # Delete it and report.
     ok, msg = _ollama_delete(model, base_url)
     if not ok:
         return JSONResponse(status_code=502, content={"message": f"Delete failed: {msg}"})
@@ -3779,9 +4112,11 @@ async def local_llm_delete(request: Request):
 @router.post("/clear_history")
 async def clear_history():
     """Clears all processed issues and resets success/failure counters."""
+    # Changes the shared state.
     global state
     logger.info("Clearing all issue history and resetting counters.")
 
+    # Empty the history and reset the counters.
     state["processed"] = {}
     save_processed({})
     recompute_issue_counters({})
@@ -3794,14 +4129,17 @@ def _close_issue_on_github(issue_id: str):
     explanatory comment. Returns (ok, message). Best-effort per step — label
     create/apply and the comment never raise. Shared by the single-issue
     delete and the bulk delete-all sweep so the close logic isn't duplicated."""
+    # Split "owner/repo:number".
     if ":" not in issue_id:
         raise ValueError("Invalid issue_id")
     repo_name, issue_num_str = issue_id.rsplit(":", 1)
     issue_num = int(issue_num_str)
+    # Need a GitHub token.
     config = load_config()
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
         raise ValueError("No GitHub token configured")
+    # Find the issue.
     gh = Github(token)
     repo = gh.get_repo(repo_name)
     issue = repo.get_issue(issue_num)
@@ -3816,10 +4154,12 @@ def _close_issue_on_github(issue_id: str):
                               "Marked by AppBuilder as not a real issue — will not be reopened")
         except Exception as le:
             logger.warning(f"Could not create label '{label_name}': {le}")
+    # Label it.
     try:
         issue.add_to_labels(label_name)
     except Exception as le:
         logger.warning(f"Could not apply label '{label_name}' to #{issue_num}: {le}")
+    # Leave a comment.
     try:
         issue.create_comment(
             "🤖 **AppBuilder**: This issue has been marked as **not a real issue** and dismissed. "
@@ -3827,12 +4167,14 @@ def _close_issue_on_github(issue_id: str):
         )
     except Exception:
         pass
+    # Close it if still open.
     if issue.state != "closed":
         issue.edit(state="closed")
         return True, f"Issue #{issue_num} labelled '{label_name}' and closed on GitHub."
     return True, f"Issue #{issue_num} labelled '{label_name}' (was already closed)."
 
 
+# How many times to try closing an issue.
 _DISMISS_MAX_RETRIES = 5
 
 
@@ -3841,8 +4183,10 @@ def _close_issue_on_github_with_retry(issue_id: str):
     (short exponential backoff between tries), recording the outcome in
     state["dismiss_jobs"][issue_id] so the WebUI can poll for completion and
     toast the result instead of blocking the request on the GitHub round trip."""
+    # Changes the shared state.
     global state
     last_err = None
+    # Try up to the limit, waiting longer each time; record success.
     for attempt in range(1, _DISMISS_MAX_RETRIES + 1):
         try:
             ok, msg = _close_issue_on_github(issue_id)
@@ -3854,6 +4198,7 @@ def _close_issue_on_github_with_retry(issue_id: str):
             logger.warning(f"Dismiss {issue_id}: GitHub close attempt {attempt}/{_DISMISS_MAX_RETRIES} failed: {e}")
             if attempt < _DISMISS_MAX_RETRIES:
                 time.sleep(min(2 ** (attempt - 1), 10))
+    # All tries failed: record the error.
     state["dismiss_jobs"][issue_id] = {
         "status": "error",
         "message": f"GitHub close failed after {_DISMISS_MAX_RETRIES} attempts: {last_err}",
@@ -3867,12 +4212,15 @@ async def delete_issue(request: Request):
     background thread (retried up to _DISMISS_MAX_RETRIES times) so the button
     doesn't block on the GitHub round trip. The WebUI polls /dismiss_status/
     to toast the real outcome once the background job finishes."""
+    # Changes the shared state.
     global state
+    # Read and check the issue id.
     data = await request.json()
     issue_id = data.get("issue_id", "").strip()
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
 
+    # The number must be numeric.
     repo_name, issue_num_str = issue_id.rsplit(":", 1)
     try:
         issue_num = int(issue_num_str)
@@ -3888,9 +4236,11 @@ async def delete_issue(request: Request):
         save_processed(processed)
         recompute_issue_counters(processed)
 
+    # Close it on GitHub in the background.
     state["dismiss_jobs"][issue_id] = {"status": "pending", "message": ""}
     threading.Thread(target=_close_issue_on_github_with_retry, args=(issue_id,), daemon=True).start()
 
+    # Reply straight away.
     return {
         "status": "success",
         "message": f"{'Removed from history. ' if was_in_history else ''}Closing on GitHub in the background…",
@@ -3899,6 +4249,7 @@ async def delete_issue(request: Request):
     }
 
 
+# Statuses of a parked feature request.
 _REEVALUATE_FEATURE_STATUSES = {"feature_flagged", "feature_failed", "feature_classify_retry"}
 
 
@@ -3910,11 +4261,14 @@ async def reevaluate_feature(request: Request):
     it clears a stale ab-needs-human label if the new verdict isn't a flag and
     re-posts the boundary comment if it is. Nothing is built here — the
     request goes back through the same classify -> build -> PR review path."""
+    # Changes the shared state.
     global state
+    # Read and check the issue id.
     data = await request.json()
     issue_id = (data.get("issue_id") or "").strip()
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
+    # Find its record.
     processed = load_processed()
     rec = processed.get(issue_id)
     # A feature request handed off to the fix pipeline (feature_build's
@@ -3922,10 +4276,12 @@ async def reevaluate_feature(request: Request):
     # that pipeline is done with it.
     handed_off = bool(rec) and rec.get("pipeline") == "fix_engine" and rec.get("status") not in (
         "processing", "awaiting_review")
+    # Only parked or handed-off feature requests.
     if not rec or (rec.get("status") not in _REEVALUATE_FEATURE_STATUSES and not handed_off):
         return JSONResponse(status_code=409, content={
             "status": "error",
             "message": f"{issue_id} is not a parked feature request (status: {(rec or {}).get('status') or 'none'})."})
+    # Mark it for re-classification and save.
     processed[issue_id] = {
         "status": "feature_classify_retry",
         "reason": "Re-evaluation requested from the AppBuilder UI.",
@@ -3948,6 +4304,7 @@ async def dismiss_status(issue_id: str):
     GitHub close (with retry) has finished, so it can toast the real result.
     issue_id (e.g. "owner/repo:123") comes in as a query param, not a path
     segment, since it contains a "/" that path routing would mangle."""
+    # Unknown if no job was started.
     job = state["dismiss_jobs"].get(issue_id)
     if job is None:
         return {"status": "unknown"}
@@ -3962,7 +4319,9 @@ async def delete_all_issues(request: Request):
     can't time out the request. Mirrors the retry_all_failed background
     pattern. Each issue is closed best-effort — one failure doesn't abort
     the sweep."""
+    # Changes the shared state.
     global state
+    # Snapshot the ids to close.
     processed = load_processed()
     to_close = list(processed.keys())
     if not to_close:
@@ -3975,6 +4334,7 @@ async def delete_all_issues(request: Request):
     recompute_issue_counters({})
 
     def _bulk_close():
+        """Close each issue on GitHub, counting successes and failures."""
         closed = failed = 0
         for issue_id in to_close:
             try:
@@ -3988,6 +4348,7 @@ async def delete_all_issues(request: Request):
                 logger.warning(f"delete_all: could not close {issue_id} on GitHub: {e}")
         logger.info(f"delete_all_issues: closed {closed}/{len(to_close)} on GitHub, {failed} failed.")
 
+    # Run it in the background and reply straight away.
     threading.Thread(target=_bulk_close, daemon=True).start()
     return {
         "status": "success",
@@ -3998,12 +4359,15 @@ async def delete_all_issues(request: Request):
 @router.post("/resolve_issue")
 async def resolve_issue(request: Request):
     """Mark an issue as resolved: close it on GitHub and set its local status to fixed."""
+    # Changes the shared state.
     global state
+    # Read and check the issue id.
     data = await request.json()
     issue_id = data.get("issue_id", "").strip()
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
 
+    # The number must be numeric.
     repo_name, issue_num_str = issue_id.rsplit(":", 1)
     try:
         issue_num = int(issue_num_str)
@@ -4023,10 +4387,13 @@ async def resolve_issue(request: Request):
         })
 
     def _do_resolve():
+        """Comment on and close the issue, tell the hub, label it, return a message."""
+        # Find the issue.
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         issue = repo.get_issue(issue_num)
 
+        # Leave a comment.
         try:
             issue.create_comment(
                 "🤖 **AppBuilder**: This issue has been marked as **resolved** and is now closed. "
@@ -4035,6 +4402,7 @@ async def resolve_issue(request: Request):
         except Exception:
             pass
 
+        # Close it if still open.
         if issue.state != "closed":
             issue.edit(state="closed")
             msg = f"Issue #{issue_num} closed on GitHub."
@@ -4090,6 +4458,7 @@ async def resolve_issue(request: Request):
 
 @router.post("/update_now")
 async def update_now():
+    """Check for an AppBuilder update now."""
     updated, msg = check_for_updates()
     logger.info(f"Manual update check: {msg}")
     return {"status": "success", "message": msg}
@@ -4098,8 +4467,10 @@ async def update_now():
 @router.post("/api/clear-credit-cooldown/{n}")
 async def clear_credit_cooldown(n: int):
     """Manually clear the 1-hour credit-exhaustion cooldown for provider n (1/2/3)."""
+    # Only providers 1-4.
     if n not in (1, 2, 3, 4):
         return JSONResponse(status_code=400, content={"error": "n must be 1, 2, 3, or 4"})
+    # Clear its cooldown under the lock and refresh the shown state.
     with _PROVIDER_CREDIT_CB_LOCK:
         _PROVIDER_CREDIT_CB[n]["cooldown_until"] = 0.0
         _PROVIDER_CREDIT_CB[n]["tripped_at"] = None
@@ -4111,55 +4482,69 @@ async def clear_credit_cooldown(n: int):
 
 @router.post("/trigger_fix")
 async def trigger_fix(request: Request):
+    """Start a fix for one issue in the background."""
+    # Read the repo, issue and preferred LLM.
     data = await request.json()
     repo_name = data.get("repo_name")
     issue_num = data.get("issue_num")
     llm_pref = data.get("llm_preference")
 
+    # Need both repo and issue.
     if not repo_name or not issue_num:
         return JSONResponse(status_code=400, content={"message": "Missing repo_name or issue_num"})
 
     logger.info(f"Manual trigger: Fixing {repo_name}:{issue_num} with preference {llm_pref}")
 
     def run_fix():
+        """Fix the issue and log the result."""
         success, msg = process_single_issue(repo_name, int(issue_num), llm_preference=llm_pref)
         if success:
             logger.info(f"Manual fix successful for {repo_name}:{issue_num}")
         else:
             logger.error(f"Manual fix failed for {repo_name}:{issue_num}: {msg}")
 
+    # Run it in the background.
     threading.Thread(target=run_fix, daemon=True).start()
     return {"status": "triggered", "message": f"Fix process started for {repo_name}:{issue_num}"}
 
 
 @router.post("/scan_now")
 async def scan_now():
+    """Start a scan cycle in the background."""
     def trigger():
+        """Mark the status and run a scan."""
         state["status"] = "Manual Scan"
         run_scan_cycle()
+    # Run it in the background.
     threading.Thread(target=trigger, daemon=True).start()
     return {"status": "triggered", "message": "Manual scan cycle started in background."}
 
 
 @router.post("/retry_issue")
 async def retry_issue(request: Request):
+    """Retry the fix for one issue in the background."""
+    # Read the issue id.
     data = await request.json()
     issue_id = data.get("issue_id")
 
+    # It must look like "repo:number".
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
 
+    # Split it.
     repo_name, issue_num = issue_id.split(":")
 
     logger.info(f"Manual retry: {issue_id}")
 
     def run_fix():
+        """Fix the issue and log the result."""
         success, msg = process_single_issue(repo_name, int(issue_num))
         if success:
             logger.info(f"Manual retry successful for {issue_id}")
         else:
             logger.error(f"Manual retry failed for {issue_id}: {msg}")
 
+    # Run it in the background.
     threading.Thread(target=run_fix, daemon=True).start()
     return {"status": "triggered", "message": f"Retry started for {issue_id}"}
 
@@ -4176,6 +4561,7 @@ def _issue_is_deleted(exc):
     then cannot fix, because there is nothing wrong with it.
 
     Duck-typed on purpose -- routes.py imports Github but not GithubException."""
+    # Check the status code and the message.
     status = getattr(exc, "status", None)
     data = getattr(exc, "data", None)
     msg = str(data.get("message", "")) if isinstance(data, dict) else str(data)
@@ -4189,30 +4575,38 @@ async def reopen_issue(request: Request):
     verified in its sandbox but the push never landed). Reopens the issue, strips
     the ``ab-closed`` / ``ab-dismissed`` labels that suppress
     re-processing, clears its stored processed state, and kicks off a fresh fix."""
+    # Read and check the issue id.
     data = await request.json()
     issue_id = data.get("issue_id")
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
+    # The number must be numeric.
     repo_name, issue_num_str = issue_id.rsplit(":", 1)
     try:
         issue_num = int(issue_num_str)
     except ValueError:
         return JSONResponse(status_code=400, content={"message": "Invalid issue number"})
+    # Need a GitHub token.
     config = load_config()
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
     if not token:
         return JSONResponse(status_code=400, content={"message": "No GitHub token configured"})
     def _do_reopen():
+        """Remove the closed labels, reopen the issue and leave a comment."""
+        # Find the issue.
         gh = Github(token)
         repo = gh.get_repo(repo_name)
         issue = repo.get_issue(issue_num)
+        # Remove the labels that stop reprocessing.
         for lbl in ("ab-closed", "ab-dismissed"):
             try:
                 issue.remove_from_labels(lbl)
             except Exception:  # noqa: BLE001 — label may not be present
                 pass
+        # Reopen it.
         if issue.state != "open":
             issue.edit(state="open")
+        # Explain why.
         try:
             issue.create_comment(
                 "🔁 **AppBuilder**: Reopened by the operator — the previous fix did not "
@@ -4245,6 +4639,7 @@ async def reopen_issue(request: Request):
                 "deleted": True,
                 "message": f"{issue_id} was deleted on GitHub and cannot be reopened. "
                            f"Removed it from AppBuilder's records."})
+        # Any other error.
         logger.error(f"Reopen failed for {issue_id}: {e}")
         return JSONResponse(status_code=500, content={"message": f"Reopen failed: {e}"})
     # Mark the issue "reopened" (rather than deleting its record) so: (a) the base
@@ -4270,12 +4665,15 @@ async def reopen_issue(request: Request):
         state["processed"] = processed
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Reopen: could not update processed state for {issue_id}: {e}")
+    # Log the reopen.
     logger.info(f"Manual reopen: {issue_id}")
 
     def run_fix():
+        """Fix the issue again and log the result."""
         success, msg = process_single_issue(repo_name, issue_num)
         logger.info(f"Reopen re-fix {'ok' if success else 'FAILED'} for {issue_id}: {msg}")
 
+    # Run it in the background.
     threading.Thread(target=run_fix, daemon=True).start()
     return {"status": "triggered", "message": f"Reopened + re-queued {issue_id}"}
 
@@ -4283,9 +4681,11 @@ async def reopen_issue(request: Request):
 @router.post("/retry_all_failed")
 async def retry_all_failed(request: Request):
     """Retries all issues that currently have a 'failed' or 'non-actionable' status with a given LLM preference."""
+    # Read the preferred LLM.
     data = await request.json()
     llm_pref = data.get("llm_preference")
 
+    # Failed and non-actionable issues.
     processed = load_processed()
     to_retry = [issue_id for issue_id, info in processed.items()
                 if info.get("status") in ["failed", "non-actionable"]]
@@ -4296,6 +4696,8 @@ async def retry_all_failed(request: Request):
     logger.info(f"Bulk retry triggered for {len(to_retry)} issues with preference {llm_pref}: {to_retry}")
 
     def bulk_run():
+        """Retry each issue in a thread pool, skipping new ones once paused."""
+        # Pool size from the config.
         config = load_config()
         max_w = int(config.get("MAX_CONCURRENT_FIXES", 2))
         with ThreadPoolExecutor(max_workers=max_w) as ex:
@@ -4304,12 +4706,14 @@ async def retry_all_failed(request: Request):
                 for issue_id in to_retry
                 if not state.get("paused")
             ]
+            # Wait for each and log any error.
             for f in futs:
                 try:
                     f.result()
                 except Exception as e:
                     logger.error(f"Bulk retry error: {e}")
 
+    # Run it in the background.
     threading.Thread(target=bulk_run, daemon=True).start()
     return {"status": "triggered", "message": f"Bulk retry started for {len(to_retry)} issues using {llm_pref} LLM."}
 
@@ -4319,6 +4723,7 @@ async def restart_service():
     """Manual restart: flag the dedicated restart_worker instead of fire-and-forget
     sudo, so the restart goes through the same verified, detached, grace-windowed path
     as automatic self-updates."""
+    # Flag the restart worker and log the event.
     logger.info("Manual restart requested — flagging restart_worker.")
     state["restart_pending"] = True
     _log_restart_event("manual_restart", "manual restart requested", ok=True)
@@ -4335,6 +4740,7 @@ async def trigger_hub_update():
     (never a hub-update trigger) and the hub never honored those static-token
     HTTP calls, so the button silently no-op'd.
     """
+    # Ask the hub to update and check the reply.
     result = _trigger_spoke_updates(load_config())
     msg = result if isinstance(result, str) else "Hub update triggered"
     ok = msg.lower().startswith("hub update triggered")
@@ -4344,12 +4750,15 @@ async def trigger_hub_update():
 @router.get("/chat")
 async def chat_page(request: Request, chat_id: str = None):
     """Server-rendered Chat view; renders the sidebar + the active conversation."""
+    # Switch chat if asked.
     store = load_chats()
     if chat_id and set_active_chat(chat_id):
         store = load_chats()
+    # The active chat and the list of chats.
     active_id = store["active_id"]
     conv = get_conversation(store, active_id) or store["conversations"][0]
     chats_list = [{"id": c["id"], "title": c.get("title", "")} for c in store["conversations"]]
+    # Render the chat page.
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -4367,6 +4776,7 @@ async def chat_page(request: Request, chat_id: str = None):
 @router.post("/api/chat/new")
 async def chat_new():
     """Creates a new empty conversation and makes it active."""
+    # Create it and return its id.
     cid = create_conversation()
     return {"chat_id": cid}
 
@@ -4374,6 +4784,7 @@ async def chat_new():
 @router.post("/api/chat")
 async def chat_send(request: Request):
     """Accepts a user message for a conversation, persists it, kicks off a reply."""
+    # Read and check the message.
     try:
         data = await request.json()
     except Exception:
@@ -4381,10 +4792,12 @@ async def chat_send(request: Request):
     message = (data.get("message") or "").strip() if isinstance(data, dict) else ""
     if not message:
         return JSONResponse(status_code=400, content={"message": "Message is required"})
+    # Use the active chat if none was given.
     chat_id = (data.get("chat_id") or "").strip() if isinstance(data, dict) else ""
     if not chat_id:
         chat_id = load_chats()["active_id"]
 
+    # Save the user's message.
     appended = append_chat_message(chat_id, {
         "role": "user",
         "content": message,
@@ -4393,10 +4806,12 @@ async def chat_send(request: Request):
     if appended is None:
         return JSONResponse(status_code=404, content={"message": "Conversation not found"})
 
+    # Reset the stream and start the task.
     with _chat_lock:
         state["chat_streams"][chat_id] = {"stream": "", "done": False, "error": None}
     update_task_state(chat_id, "Chat", action="start")
 
+    # Write the reply in the background.
     threading.Thread(target=run_chat_reply, args=(chat_id,), daemon=True).start()
     return {"chat_id": chat_id}
 
@@ -4404,6 +4819,7 @@ async def chat_send(request: Request):
 @router.get("/api/chat/stream")
 async def chat_stream(chat_id: str):
     """Polls the live assistant stream and completion state for a conversation."""
+    # Read the stream under the lock.
     with _chat_lock:
         entry = state["chat_streams"].get(chat_id)
         if entry is None:
@@ -4422,6 +4838,7 @@ async def chat_stream(chat_id: str):
 @router.post("/api/chat/rename")
 async def chat_rename(request: Request):
     """Renames a conversation."""
+    # Read and check the chat id and title.
     try:
         data = await request.json()
     except Exception:
@@ -4430,6 +4847,7 @@ async def chat_rename(request: Request):
     title = (data.get("title") or "").strip() if isinstance(data, dict) else ""
     if not chat_id:
         return JSONResponse(status_code=400, content={"message": "chat_id is required"})
+    # Rename it.
     ok = rename_conversation(chat_id, title)
     return {"ok": ok}
 
@@ -4437,6 +4855,7 @@ async def chat_rename(request: Request):
 @router.post("/api/chat/delete")
 async def chat_delete(request: Request):
     """Deletes a conversation and selects a new active one."""
+    # Read and check the chat id.
     try:
         data = await request.json()
     except Exception:
@@ -4444,6 +4863,7 @@ async def chat_delete(request: Request):
     chat_id = (data.get("chat_id") or "").strip() if isinstance(data, dict) else ""
     if not chat_id:
         return JSONResponse(status_code=400, content={"message": "chat_id is required"})
+    # Delete it and drop its stream.
     new_active = delete_conversation(chat_id)
     with _chat_lock:
         state["chat_streams"].pop(chat_id, None)
@@ -4453,6 +4873,7 @@ async def chat_delete(request: Request):
 @router.post("/api/chat/clear")
 async def chat_clear():
     """Clears the active conversation's messages (keeps the conversation shell)."""
+    # Empty the active chat and drop its stream.
     with _chat_lock:
         store = load_chats()
         conv = get_conversation(store, store["active_id"])
@@ -4477,6 +4898,7 @@ async def chat_confirm_fix(request: Request):
     the request). Returns the pipeline's own issue_id task_id so the UI can watch
     progress via /api/task-details. Never returns any API key.
     """
+    # Read and check the token.
     try:
         data = await request.json()
     except Exception:
@@ -4485,6 +4907,7 @@ async def chat_confirm_fix(request: Request):
     if not token:
         return JSONResponse(status_code=400, content={"message": "Missing token"})
 
+    # Use the proposal once; it must be unused and not expired.
     config = load_config()
     ttl = int(config.get("CHAT_FIX_PROPOSAL_TTL", 600) or 600)
     with _chat_lock:
@@ -4494,6 +4917,7 @@ async def chat_confirm_fix(request: Request):
     if time.time() - float(prop.get("created", 0)) > ttl:
         return JSONResponse(status_code=410, content={"message": "Proposal expired"})
 
+    # The proposal must name a repo and issue.
     repo_name = prop.get("repo")
     issue_num = prop.get("number")
     pref = prop.get("llm_preference")
@@ -4505,16 +4929,19 @@ async def chat_confirm_fix(request: Request):
     task_id = f"{repo_name}:{issue_num}"
 
     def _run():
+        """Run the fix and log the result."""
         try:
             ok, msg = process_single_issue(repo_name, issue_num, llm_preference=pref)
             logger.info(f"Chat-triggered fix {repo_name}:{issue_num} -> ok={ok} msg={msg}")
         except Exception as e:
             logger.error(f"Chat-triggered fix {repo_name}:{issue_num} failed: {e}\n{traceback.format_exc()}")
 
+    # Run it in the background.
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "triggered", "task_id": task_id, "repo": repo_name, "number": issue_num}
 
 
+# Names this module exports.
 __all__ = [
     'hub_agent_status',
     'hub_agent_reregister',

@@ -64,12 +64,14 @@ TODO: the pair rules below duplicate the dual-copy-guard skill's reference. Once
 proven, load them from `.claude/skills/dual-copy-guard/reference.md` (or a shared
 machine-readable pairs file) so there is a single source of truth.
 """
+# Standard modules for logging, hashing, files, regexes and dates.
 import logging
 import hashlib
 import os
 import re
 from datetime import timedelta
 
+# AppBuilder helpers: repos, shared state, guardrails, PR actions and the deterministic checks.
 from github_ops import get_monitored_repos
 from app_state import update_task_state, set_task_step, record_pr_review, update_pr_review, mark_pr_approved, state
 import feature_boundary
@@ -88,15 +90,19 @@ from attr_definition_lookup import (
 from pr_review_retry import is_queued_for_retry_stale, MAX_AUTO_QUEUE_RETRIES
 from config_store import load_config
 
+# Module logger.
 logger = logging.getLogger(__name__)
 
+# Hidden marker for our summary comment, and the commit-status name.
 PR_REVIEW_MARKER = "<!-- ab-pr-review -->"
 STATUS_CONTEXT = "ab/review"
+# Finding levels in sort order, and the icon for each.
 _LEVEL_ORDER = {"error": 0, "warning": 1, "advisory": 2}
 _LEVEL_ICON = {"error": "\U0001F534", "warning": "\U0001F7E0", "advisory": "\U0001F535"}
 
 
 def _basename(path):
+    """Return the file name part of a path."""
     return path.rsplit("/", 1)[-1]
 
 
@@ -106,6 +112,7 @@ def check_parity(repo_full_name, changed):
     ``changed`` = repo-root-relative paths in the PR. Returns a list of
     {level, title, detail} dicts (level: error | warning | advisory).
     """
+    # Work out which repo this PR is in.
     findings = []
     changed = set(changed)
     repo = (repo_full_name or "").lower()
@@ -126,6 +133,7 @@ def check_parity(repo_full_name, changed):
                           "`clients/linux/common.sh` is not. Regenerate it: "
                           "`cp clients/lib/common.sh clients/linux/common.sh` (verify with `cmp`).",
             })
+        # The generated copy changed without its source.
         if "clients/linux/common.sh" in changed and "clients/lib/common.sh" not in changed:
             findings.append({
                 "level": "error",
@@ -136,9 +144,11 @@ def check_parity(repo_full_name, changed):
         # linux <-> windows client parity (basename .sh <-> .ps1). Some scripts
         # are intentionally single-platform — exclude them so we don't nag.
         _LINUX_ONLY = {"agent", "recovery"}                      # no Windows twin by design
+        # Platform-only scripts, then the changed linux and windows script names.
         _WINDOWS_ONLY = {"launch-terminals", "sim_log_monitor", "sys_log_monitor"}
         lin = {_basename(p)[:-3] for p in changed if p.startswith("clients/linux/") and p.endswith(".sh")} - _LINUX_ONLY
         win = {_basename(p)[:-4] for p in changed if p.startswith("clients/windows/") and p.endswith(".ps1")} - _WINDOWS_ONLY
+        # A linux script changed without its windows twin, and the other way round.
         for base in sorted(lin - win):
             findings.append({
                 "level": "warning",
@@ -156,6 +166,7 @@ def check_parity(repo_full_name, changed):
             })
         # dns_fail.txt triple copy
         dns_copies = ["configs/dns_fail.txt", "clients/linux/dns_fail.txt", "clients/windows/dns_fail.txt"]
+        # Some but not all dns_fail.txt copies changed.
         present = [p for p in dns_copies if p in changed]
         if present and len(present) < len(dns_copies):
             missing = [p for p in dns_copies if p not in changed]
@@ -177,6 +188,7 @@ def check_parity(repo_full_name, changed):
                           "the **lm** repo (separate PR). Ensure a matching lm PR keeps the two in lockstep.",
                 "twin": {"repo": "%s/lm" % owner, "path": "WebUI/sim-views.js"},
             })
+        # sim_quota.py also has a twin in lm.
         if "lm-spoke/src/sim_quota.py" in changed:
             findings.append({
                 "level": "advisory",
@@ -197,6 +209,7 @@ def check_parity(repo_full_name, changed):
                           "the **cs** repo. Ensure a matching cs PR.",
                 "twin": {"repo": "%s/cs" % owner, "path": "lm-spoke/static/sim-views.js"},
             })
+        # sim_quota.py also has a twin in cs.
         if "core/src/simulations/sim_quota.py" in changed:
             findings.append({
                 "level": "advisory",
@@ -213,8 +226,10 @@ def check_parity(repo_full_name, changed):
     # PRs get no advisory, and a code change to a retired repo is flagged so it
     # gets re-made against the live copy instead of silently never deploying.
     def _is_module_payload(rel):
+        """True for files that would deploy as module code."""
         return rel == "requirements.txt" or rel.startswith("src/")
 
+    # Warn when a retired dns or dhcp repo gets a code change.
     for _retired, _flag in (("dns", is_dns), ("dhcp", is_dhcp)):
         if not _flag:
             continue
@@ -231,6 +246,7 @@ def check_parity(repo_full_name, changed):
     return findings
 
 
+# Summary section header and limits on files, patch size and prompt size.
 _SUMMARY_HEADER = "### \U0001F4DD What changed"      # NB: kept in sync with _extract_summary's regex
 _SUMMARY_MAX_FILES = 30
 _SUMMARY_PATCH_CHARS = 1500
@@ -252,13 +268,16 @@ def _summarize_changes(pr, files, config, repo=None):
     queued, or genuinely no LLM available) just means THIS scan's comment
     posts without a summary section, same as any other best-effort miss.
     """
+    # Off in settings: no summary.
     if not config.get("pr_review_summary_enabled", True):
         return ""
+    # The LLM helpers are optional.
     try:
         from llm_client import call_llm
         from model_selection import LlmRequirements
     except Exception:  # noqa: BLE001
         return ""
+    # Build a digest of each file's change (patches trimmed), capped in size.
     parts = []
     for f in list(files)[:_SUMMARY_MAX_FILES]:
         fn = getattr(f, "filename", "?")
@@ -274,8 +293,10 @@ def _summarize_changes(pr, files, config, repo=None):
     if n_files > _SUMMARY_MAX_FILES:
         digest += "\n\n… (+%d more file(s))" % (n_files - _SUMMARY_MAX_FILES)
     digest = digest[:_SUMMARY_PROMPT_CHARS]
+    # Nothing to summarise.
     if not digest.strip():
         return ""
+    # Prompt: short factual bullets grouped by area.
     system = ("You are a senior engineer writing a concise, factual summary of a pull "
               "request's changes for a human reviewer. Output 2-6 short markdown bullets "
               "grouped by area/feature (e.g. 'DNS server list expanded to add more "
@@ -284,20 +305,25 @@ def _summarize_changes(pr, files, config, repo=None):
               "speculate, do not just list file names, no preamble or sign-off.")
     prompt = ("Summarize what this pull request changes, for the reviewer.\n\n"
               "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest))
+    # A cheap, batchable request sized to the prompt.
     reqs = LlmRequirements(complexity="trivial", batch_ok=True,
                            deprioritize_local=True,
                            min_context_tokens=len(prompt) // 4)
+    # Batch context so a late batch result can find this PR.
     batch_context = None
     if repo is not None:
         batch_context = {"repo": repo.full_name, "pr": pr.number, "head_sha": pr.head.sha}
+    # Call the LLM; any failure just skips the summary.
     try:
         out = call_llm(prompt, system_prompt=system, requirements=reqs,
                        batch_kind="pr_summary", batch_context=batch_context)
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: change-summary skipped (%s)", e)
         return ""
+    # Make sure we have a string.
     if not isinstance(out, str):
         out = str(out or "")
+    # Return it trimmed.
     return out.strip()
 
 
@@ -315,6 +341,7 @@ def _summarize_changes(pr, files, config, repo=None):
 # repository is an ordinary code-fix finding and must not be routed here.
 _DESC_NOUN_RE = re.compile(
     r"\b(?:descriptions?|PR body|PR-body|pull[- ]request body|summary)\b", re.I)
+# Words that, near one of those nouns, mean the text is wrong.
 _DESC_COMPLAINT_RE = re.compile(
     r"\b(?:contradict(?:s|ing|ion|ions)?"
     r"|does\s+not\s+(?:state|mention|match|say|reflect)"
@@ -341,13 +368,16 @@ def _panel_objects_to_description(critique):
     Such a finding is real — the description is a review input — but it is not
     repairable by editing files, so it needs its own path (fix_pr_description).
     """
+    # Nothing to check without a critique.
     if not critique:
         return False
     if not isinstance(critique, str):
         critique = str(critique)
+    # Need at least one description noun.
     nouns = list(_DESC_NOUN_RE.finditer(critique))
     if not nouns:
         return False
+    # True if any noun and complaint are within the window.
     complaints = list(_DESC_COMPLAINT_RE.finditer(critique))
     for n in nouns:
         for c in complaints:
@@ -366,16 +396,20 @@ def _regenerate_pr_description(pr, files, critique, config, repo=None):
     disabled, unavailable, or the model yields nothing, in which case the
     caller simply leaves the description alone.
     """
+    # Off or nothing to fix: do nothing.
     if not critique or not config.get("pr_review_desc_fix_enabled", True):
         return ""
+    # The LLM helpers are optional.
     try:
         from llm_client import call_llm
         from model_selection import LlmRequirements
     except Exception:  # noqa: BLE001
         return ""
+    # Use the critique as text, capped in length.
     if not isinstance(critique, str):
         critique = str(critique)
     critique = critique[:4000]
+    # Build a digest of each file's change (patches trimmed), capped in size.
     parts = []
     for f in list(files)[:_SUMMARY_MAX_FILES]:
         fn = getattr(f, "filename", "?")
@@ -389,6 +423,7 @@ def _regenerate_pr_description(pr, files, critique, config, repo=None):
     digest = "\n\n".join(parts)[:_SUMMARY_PROMPT_CHARS]
     if not digest.strip():
         return ""
+    # Prompt: fix only what is wrong; the diff is right.
     system = (
         "You are a senior engineer correcting a pull request's DESCRIPTION so that it "
         "accurately describes the diff. A reviewer panel has rejected this PR because "
@@ -406,6 +441,7 @@ def _regenerate_pr_description(pr, files, critique, config, repo=None):
               "=== CURRENT DESCRIPTION ===\n%s\n\n"
               "=== REVIEWER PANEL'S OBJECTION ===\n%s\n\n"
               "=== DIFF ===\n%s\n" % (pr.title or "", pr.body or "", critique, digest))
+    # A medium request sized to the prompt; any failure skips the fix.
     reqs = LlmRequirements(complexity="medium", deprioritize_local=True,
                            min_context_tokens=len(prompt) // 4)
     try:
@@ -413,6 +449,7 @@ def _regenerate_pr_description(pr, files, critique, config, repo=None):
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: description fix skipped (%s)", e)
         return ""
+    # Make sure we have a trimmed string.
     if not isinstance(out, str):
         out = str(out or "")
     out = out.strip()
@@ -439,6 +476,7 @@ def _apply_batched_pr_summary(context, text):
     same as if the LLM call had failed outright.
     """
     try:
+        # Need text plus the repo and PR it belongs to.
         text = (text or "").strip()
         if not text or not context:
             return
@@ -447,10 +485,12 @@ def _apply_batched_pr_summary(context, text):
         head_sha = context.get("head_sha")
         if not repo_full_name or not number:
             return
+        # Need a GitHub token.
         config = load_config()
         token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
         if not token:
             return
+        # Fetch the PR fresh.
         from github import Github
         gh = Github(token)
         repo = gh.get_repo(repo_full_name)
@@ -462,27 +502,33 @@ def _apply_batched_pr_summary(context, text):
             logger.info("pr_review: discarding stale batched summary for %s#%s (head changed)",
                        repo_full_name, number)
             return
+        # Need our existing review comment.
         existing = _find_marker_comment(pr)
         if not existing:
             return
+        # Stop if it already has a summary.
         body = existing.body or ""
         if _SUMMARY_HEADER in body:
             return  # a synchronous re-scan already posted one — don't duplicate
         # Insert right where _render always places it, so a later synchronous
         # re-scan's _extract_summary() finds it in the same spot.
         anchor = "this bot never approves, denies, or edits the branch._\n\n"
+        # Find the anchor; give up if missing.
         idx = body.find(anchor)
         if idx == -1:
             return
+        # Insert the summary after the anchor and save the comment.
         insert_at = idx + len(anchor)
         new_body = body[:insert_at] + _SUMMARY_HEADER + "\n\n" + text + "\n\n" + body[insert_at:]
         existing.edit(new_body)
         logger.info("pr_review: applied batched change-summary to %s#%s", repo_full_name, number)
+    # Any failure: skip quietly.
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: batched summary handler skipped (%s)", e)
 
 
 try:
+    # Register the batch handler for summaries, if batch is available.
     from batch import register_handler as _register_batch_handler
     _register_batch_handler("pr_summary", _apply_batched_pr_summary)
 except Exception:  # noqa: BLE001 - batch.py is optional/best-effort, per its own docstring
@@ -493,13 +539,16 @@ def _extract_summary(body):
     """Recover a previously-generated 'What changed' summary from an existing
     review comment (so a cached re-scan / post-restart keeps it without a new LLM
     call). Returns '' if absent."""
+    # No body: no summary.
     if not body:
         return ""
+    # Take the text under the summary header, up to the next heading.
     m = re.search(re.escape(_SUMMARY_HEADER) + r"\s*(.*?)(?:\n#{2,3} |\Z)", body, re.S)
     return m.group(1).strip() if m else ""
 
 
 _PANEL_HEADER = "### \U0001F9E0 Skeptical review (panel)"   # 🧠 — kept in sync w/ _render
+# Max files to include in the panel diff.
 _PANEL_MAX_FILES = 40
 # Raised from 4000/24000 after cs#65: a single legitimately-large-but-normal
 # file diff (a ~34KB dual-copy-guard port, one file) got sliced to ~12% of its
@@ -519,6 +568,7 @@ def _pr_diff_text(files):
     """Assemble a unified-diff-ish text from a PR's changed files for the review
     panel — a `--- <filename>` header + patch per file, capped so a huge PR can't
     blow the provider limit (review_fix caps again at 20k internally)."""
+    # Add each file's patch (trimmed), then cap the total.
     from fix_engine import _truncate_diff   # lazy: fix_engine imports the app at load time
     parts = []
     for f in list(files)[:_PANEL_MAX_FILES]:
@@ -552,16 +602,19 @@ def _merge_only_context(pr):
     (promote/dev-to-qa carries the feature commits themselves), which must keep
     the full intent-vs-diff critique.
     """
+    # Read the PR's commits (up to 30); on error give no context.
     try:
         commits = list(pr.get_commits()[:30])
     except Exception as e:  # noqa: BLE001 — context only; never block a review over it
         logger.info("pr_review: merge-commit context skipped (%s)", e)
         return ""
+    # Any non-merge commit means the PR authors real changes.
     if not commits:
         return ""
     for c in commits:
         if len(getattr(c, "parents", []) or []) < 2:
             return ""
+    # All merges: tell the reviewers what the diff really is.
     return (
         "\nMERGE-ONLY PR: every one of this PR's %d commit(s) is a MERGE commit. "
         "This PR authors no change of its own. The diff you are shown is "
@@ -598,11 +651,14 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
     shape (`getattr(deploy, "proxmox_states", {})`, `getattr(cp,
     "connected_agents", {})`) as unverifiable and landed on a 58% advisory
     reject over doubts a human later confirmed were both unfounded."""
+    # Off by default.
     if not config.get("pr_review_llm_enabled", False):
         return None
+    # Need a diff to review.
     diff = _pr_diff_text(files)
     if not diff.strip():
         return None
+    # The review panel lives in fix_engine.
     try:
         from fix_engine import review_fix
     except Exception as e:  # noqa: BLE001
@@ -631,6 +687,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: intent extraction skipped (%s)", e)
         _intent_block = ""
+    # Review input: title, description, intent, merge note and the merge-safety checklist.
     issue_body = (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
         % (pr.title or "", (pr.body or "").strip()[:4000])
@@ -648,6 +705,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
         "3) Undefined names, obvious logic errors, security issues.\n"
         "4) INTENT vs DIFF FIDELITY — Extract the PR's stated INTENT from the description and compare it against the actual DIFF: Does the diff faithfully and completely implement the stated intent? Does the diff introduce unstated side effects, scope creep, or contradict the stated intent? If the PR description lacks a clear intent statement, or if the code deviates from the stated intent, flag it and lower confidence.\n"
         "Reject (lower confidence) if any such defect is present.")
+    # Add where getattr'd names are really defined in the repo.
     try:
         attr_names = extract_getattr_names(files)
         wiring_defs = find_attr_definitions(
@@ -662,6 +720,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
         issue_body += format_undefined_name_context(undefined_verified)
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: undefined-name context skipped (%s)", e)
+    # Run the panel; any error skips the review.
     try:
         # builder_n=0 → no builder to exclude, so EVERY configured provider reviews
         # the human's diff (there is no bot author to leave out). repo+head_sha
@@ -672,6 +731,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
     except Exception as e:  # noqa: BLE001
         logger.warning("pr_review: panel skipped (review_fix error: %s)", e, exc_info=True)
         return None
+    # Only a dict counts as a result.
     return review if isinstance(review, dict) else None
 
 
@@ -694,16 +754,20 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     run the general panel without paying for this one, or vice versa. Same
     advisory-only contract as _skeptical_review: never blocks, never
     approves/denies. Best-effort: None when disabled, no diff, or on error."""
+    # Off by default.
     if not config.get("pr_review_state_logic_enabled", False):
         return None
+    # Need a diff to review.
     diff = _pr_diff_text(files)
     if not diff.strip():
         return None
+    # The review panel lives in fix_engine.
     try:
         from fix_engine import review_fix
     except Exception as e:  # noqa: BLE001
         logger.warning("pr_review: state-logic panel skipped (fix_engine import failed: %s)", e)
         return None
+    # Review input: title, description and the two defect shapes to look for.
     issue_body = (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
         % (pr.title or "", (pr.body or "").strip()[:4000])
@@ -732,12 +796,14 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
         "variable/line and which states/paths are conflated or unreachable. If you "
         "find neither, say so plainly — do not manufacture a finding to have "
         "something to report.")
+    # Run the panel; any error skips the review.
     try:
         review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
                             repo=repo, head_sha=head_sha)
     except Exception as e:  # noqa: BLE001
         logger.warning("pr_review: state-logic panel skipped (review_fix error: %s)", e, exc_info=True)
         return None
+    # Only a dict counts as a result.
     return review if isinstance(review, dict) else None
 
 
@@ -756,17 +822,21 @@ _REVIEWER_SPLIT_RE = re.compile(r"\s+\|\s+(?=\[[^\]]{1,60}\]\s)")
 #: whitespace-collapsed blob renders as one unbroken paragraph.
 _ENUM_MARK_RE = re.compile(r"(?:(?<=^)|(?<=\s))(?:\(?\d{1,2}[\).:]|[-*\u2022])\s+")
 
+# Splits text into sentences.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z(\"'`])")
 
 
 def _norm_conf_pct(value):
     """Confidence as a "58%" string, or None when it isn't a usable number."""
+    # Use fix_engine's normaliser, or a local copy if it cannot be imported.
     try:
         from fix_engine import _norm_confidence
     except Exception:  # noqa: BLE001 — never let comment rendering fail on this
         def _norm_confidence(v):
+            """Scale a confidence to 0-1 (percent values are divided by 100)."""
             c = float(v)
             return max(0.0, min(1.0, c / 100.0 if c > 1.0 else c))
+    # Format as a whole percent; bad values give None.
     try:
         return "%.0f%%" % (_norm_confidence(value) * 100)
     except (TypeError, ValueError):
@@ -781,6 +851,7 @@ def _reviewer_blocks(review):
     before that change — and any other producer of this shape — still render
     per-reviewer rather than as one blob.
     """
+    # Use the structured per-reviewer list when present.
     structured = review.get("reviews")
     if isinstance(structured, list) and structured:
         out = []
@@ -791,6 +862,7 @@ def _reviewer_blocks(review):
         if out:
             return out
 
+    # Else split the joined critique text by reviewer tag.
     text = str(review.get("critique") or "").strip()
     if not text:
         return []
@@ -817,10 +889,12 @@ def _structure_critique(text):
     it isn't, sentences are grouped into short paragraphs instead of guessing
     at topics — a wrong split reads worse than no split.
     """
+    # Collapse whitespace; empty text has no parts.
     text = " ".join((text or "").split())
     if not text:
         return "", []
 
+    # Two or more list markers: split on them.
     marks = [m for m in _ENUM_MARK_RE.finditer(text)]
     if len(marks) >= 2:
         preamble = text[:marks[0].start()].strip(" :;,-")
@@ -832,6 +906,7 @@ def _structure_critique(text):
                 points.append(point)
         return preamble, points
 
+    # Else split into sentences; short text stays whole.
     sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
     if len(sentences) <= 2:
         return text, []
@@ -849,6 +924,7 @@ def _render_review_body(review, header, blurb):
     verdict, never by keyword-sniffing their prose, so it cannot invent a
     concern that no reviewer raised or miss one phrased unusually.
     """
+    # No review: nothing to show; a status means the panel was offline.
     if not review:
         return []
     if review.get("status"):
@@ -856,6 +932,7 @@ def _render_review_body(review, header, blurb):
                 "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
                 ""]
 
+    # Overall verdict, confidence, and which reviewers objected.
     verdict = str(review.get("verdict") or "—")
     approved = verdict == "Approve"
     conf_str = _norm_conf_pct(review.get("confidence")) or "n/a"
@@ -863,6 +940,7 @@ def _render_review_body(review, header, blurb):
     dissenting = [b for b in blocks if b[1] and b[1] != "Approve"]
     known_verdicts = [b for b in blocks if b[1]]
 
+    # Header, blurb and the recommendation line.
     out = [
         header, "",
         blurb, "",
@@ -872,6 +950,7 @@ def _render_review_body(review, header, blurb):
             conf_str),
         "",
     ]
+    # Note when only one reviewer was available.
     if review.get("panel_size") == 1:
         _models = review.get("panel_models") or []
         out += ["_Single-reviewer panel: only 1 of 2 required frontier models was available (%s)._"
@@ -890,6 +969,7 @@ def _render_review_body(review, header, blurb):
             out.append("- \U0001F534 **%s**%s — %s" % (
                 name or "reviewer", " (%s)" % pct if pct else "", headline))
         out.append("")
+    # Everyone approved.
     elif known_verdicts:
         out += ["#### \u2705 No objections", "",
                 "All %d reviewer(s) approved. Detail below." % len(known_verdicts), ""]
@@ -931,6 +1011,7 @@ def _render_state_panel(review):
     """Render the state-logic panel section (empty list when no review) — same
     shape as _render_panel, distinct header/framing so the two advisory panels
     are never confused for one combined verdict."""
+    # Use the shared renderer with the state-logic header.
     return _render_review_body(
         review, _STATE_PANEL_HEADER,
         "_Narrow-scope panel: state/status coverage + control-flow reachability "
@@ -940,6 +1021,7 @@ def _render_state_panel(review):
 
 def _render_panel(review):
     """Render the advisory skeptical-panel section (empty list when no review)."""
+    # Use the shared renderer with the panel header.
     return _render_review_body(
         review, _PANEL_HEADER,
         "_Cross-provider skeptical panel (same engine as the bot-fix reviewer) — "
@@ -956,12 +1038,15 @@ def _render_route(base_ref, head_ref, default_branch=""):
     most important thing about it. Protected targets are called out explicitly
     so a PR aimed at main is never mistaken for a routine one.
     """
+    # No base branch: no line.
     base = str(base_ref or "").strip()
     if not base:
         return []
+    # Main, master or the default branch counts as protected.
     head = str(head_ref or "").strip()
     protected = base.lower() in ("main", "master") or (
         default_branch and base == default_branch)
+    # Build the line: target, source, and a protected warning.
     line = "\U0001F500 **Merging into `%s`**" % base          # 🔀
     if head:
         line += " \u2190 `%s`" % head                          # ←
@@ -975,6 +1060,7 @@ def _desc_digest(pr):
     DESCRIPTION against the diff (it will reject a PR whose body contradicts
     its own changes), so the description is a genuine review input and must
     take part in the cache key alongside the head SHA."""
+    # Hash title and body and keep the first 12 hex digits.
     raw = (getattr(pr, "title", "") or "") + "\x00" + (getattr(pr, "body", "") or "")
     return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
 
@@ -985,6 +1071,7 @@ def _desc_is_current(body, digest):
     A comment written before this marker existed carries no `<!-- desc: -->`
     line at all; treat those as current so deploying this change does not
     re-run the LLM panel on every open PR in the fleet at once."""
+    # Old comments with no digest count as current.
     body = body or ""
     if "<!-- desc: " not in body:
         return True
@@ -993,12 +1080,15 @@ def _desc_is_current(body, digest):
 
 def _render(findings, head_sha, summary="", review=None, state_review=None,
             base_ref="", head_ref="", default_branch="", desc_digest=""):
+    """Build the full review comment: markers, route, summary, findings and panels."""
+    # Hidden markers for the head commit and description digest.
     lines = [
         PR_REVIEW_MARKER,
         "<!-- head: %s -->" % head_sha,
     ]
     if desc_digest:
         lines.append("<!-- desc: %s -->" % desc_digest)
+    # Title, route and the informational-only note.
     lines += [
         "## \U0001F916 AppBuilder PR pre-review",
         "",
@@ -1009,8 +1099,10 @@ def _render(findings, head_sha, summary="", review=None, state_review=None,
         "this bot never approves, denies, or edits the branch._",
         "",
     ]
+    # Change summary, if any.
     if summary:
         lines += [_SUMMARY_HEADER, "", summary, ""]
+    # Tier-1 result: a pass line, or each finding sorted by level.
     if not findings:
         lines += [
             "### Tier-1 checks",
@@ -1025,18 +1117,21 @@ def _render(findings, head_sha, summary="", review=None, state_review=None,
         for f in sorted(findings, key=lambda x: _LEVEL_ORDER.get(x["level"], 9)):
             icon = _LEVEL_ICON.get(f["level"], "•")
             lines += ["%s **%s — %s**" % (icon, f["level"].upper(), f["title"]), "", f["detail"], ""]
+    # The panel sections.
     lines += _render_panel(review)
     lines += _render_state_panel(state_review)
     return "\n".join(lines)
 
 
 def _find_marker_comment(pr):
+    """Return our existing review comment on the PR, or None."""
     for c in pr.get_issue_comments():
         if PR_REVIEW_MARKER in (c.body or ""):
             return c
     return None
 
 
+# How many recently closed twin PRs to check.
 _TWIN_MERGED_SCAN_LIMIT = 20   # bounded: newest-updated-first, so a real merge is near the front
 
 
@@ -1055,11 +1150,13 @@ def _twin_open_pr_touches(gh, twin_repo, twin_path, since=None):
     Returns True/False, or None if the twin repo can't be reached (so the
     caller keeps the advisory rather than falsely clearing OR falsely
     warning)."""
+    # Open the twin repo; unreachable means unknown.
     try:
         r = gh.get_repo(twin_repo)
     except Exception as e:  # noqa: BLE001
         logger.debug("pr_review twin-check: repo %s unreachable: %s", twin_repo, e)
         return None
+    # True if any open PR there changes the twin file.
     try:
         for tpr in r.get_pulls(state="open"):
             try:
@@ -1077,6 +1174,7 @@ def _twin_open_pr_touches(gh, twin_repo, twin_path, since=None):
             # silently kills the whole twin check via the outer except.
             since_naive = since.replace(tzinfo=None) if since.tzinfo else since
             cutoff = since_naive - timedelta(days=1)
+            # Check recent merged PRs after the cutoff for the same file.
             checked = 0
             for tpr in r.get_pulls(state="closed", sort="updated", direction="desc"):
                 if checked >= _TWIN_MERGED_SCAN_LIMIT:
@@ -1093,9 +1191,11 @@ def _twin_open_pr_touches(gh, twin_repo, twin_path, since=None):
                             return True
                 except Exception:
                     continue
+    # Listing failed: unknown.
     except Exception as e:  # noqa: BLE001
         logger.debug("pr_review twin-check: listing PRs for %s failed: %s", twin_repo, e)
         return None
+    # Nobody touched it.
     return False
 
 
@@ -1105,8 +1205,10 @@ def _twin_path_exists(gh, twin_repo, twin_path):
     The dual-copy shapes are not file-for-file identical, so a twin advisory
     can name a path that simply has no counterpart. Escalating those to
     "twin NOT updated" produces a WARNING no PR can ever satisfy."""
+    # Nothing to check: unknown.
     if not twin_repo or not twin_path:
         return None
+    # Fetch the file; 404 means it does not exist, other errors are unknown.
     try:
         gh.get_repo(twin_repo).get_contents(twin_path)
         return True
@@ -1126,13 +1228,16 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
     update. If the twin repo can't be checked → leave the advisory as-is.
     Findings without a `twin` key pass through untouched; the key is stripped
     so the render/record layers never see it."""
+    # Results, plus a cache of twin-file existence checks.
     out = []
     exists_cache = {}
+    # Check each finding; those without a twin pass through.
     for f in (findings or []):
         twin = (f or {}).get("twin")
         if not twin:
             out.append(f)
             continue
+        # Copy the finding and drop the twin key.
         f = dict(f)
         f.pop("twin", None)
         # A path with no counterpart cannot be "not updated in lockstep", and
@@ -1150,10 +1255,12 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
                            % (key[1], key[0])) + f.get("detail", "")
             out.append(f)
             continue
+        # Look for a matching PR in the twin repo.
         verdict = _twin_open_pr_touches(gh, twin.get("repo", ""), twin.get("path", ""), since=since)
         if verdict is True:
             # Twin is being updated in a matching PR — no warning needed.
             continue
+        # No matching PR: raise it to a warning.
         if verdict is False:
             f["level"] = "warning"
             f["title"] = "twin NOT updated — " + f.get("title", "")
@@ -1170,10 +1277,12 @@ def _resolve_cross_repo_twins(gh, findings, since=None):
             # in-repo remediable work. See should_remediate.
             f["external"] = True
         # verdict is None → unreachable: keep the original advisory unchanged.
+        # Keep the finding.
         out.append(f)
     return out
 
 
+# Marker that links a PR to the feature-drive issue it builds.
 _FEATURE_DRIVE_MARKER_RE = re.compile(r"<!--\s*ab-feature-drive:\s*([^\s>]+)#(\d+)\s*-->")
 
 
@@ -1234,9 +1343,11 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
               THIS commit, not a stale/empty record — see PR #261 review)}.
     state_flags: {"paused": bool, "blackout": bool}.
     """
+    # Default the optional inputs.
     state_flags = state_flags or {}
     pr_meta = pr_meta or {}
 
+    # Both kill switches must be on, and the repo must be opted in.
     if not config.get("feature_drive_enabled", False):
         return False, "feature_drive_enabled is off"
     if not config.get("feature_automerge_enabled", False):
@@ -1283,10 +1394,12 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
                         "(opt-in, defaults to none) — main (or any unlisted branch) is "
                         "never eligible, regardless of author or confidence" % _base_ref)
 
+    # Already merged: nothing to do.
     if rec.get("merged") or rec.get("auto_merged"):
         # Keep the literal (must equal _IDEMPOTENT_MERGED_REASON): test_feature_automerge_gate
         # execs this function standalone, so it cannot reference module constants.
         return False, "already merged (idempotent no-op)"
+    # The PR must be ready, open and mergeable, and AppBuilder running normally.
     if pr_meta.get("draft"):
         return False, "PR is a draft"
     if (pr_meta.get("state") or "open") != "open":
@@ -1394,6 +1507,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         except Exception:  # noqa: BLE001 — must fail CLOSED, like every gate here
             promotion_bypass = False
 
+    # Unless docs-only, both panels must have run and approved.
     if not docs_bypass:
         if rec.get("panel_status"):
             return False, "panel 1 (skeptical review) could not run"
@@ -1404,6 +1518,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         if rec.get("panel2_verdict") != "Approve":
             return False, "panel 2 (state-logic review) did not Approve"
 
+    # Confidence threshold from config, default 1.0, kept within 0-1.
     threshold = config.get("feature_automerge_min_confidence")
     try:
         threshold = float(threshold) if threshold is not None else 1.0
@@ -1411,6 +1526,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         threshold = 1.0
     threshold = max(0.0, min(1.0, threshold))
 
+    # Both panel confidences must meet it unless a bypass applies.
     conf1 = rec.get("panel_confidence")
     conf2 = rec.get("panel2_confidence")
     if not docs_bypass and not promotion_bypass:
@@ -1419,10 +1535,12 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         if conf2 is None or conf2 < threshold:
             return False, f"panel 2 confidence {conf2} is below the threshold {threshold:.2f}"
 
+    # Tier-1 errors or warnings block the merge.
     if config.get("feature_automerge_require_clean", True):
         if (rec.get("errors") or 0) > 0 or (rec.get("warnings") or 0) > 0:
             return False, "Tier-1 findings present (errors or warnings) — advisories alone are fine"
 
+    # The diff must not touch a protected boundary path.
     hits = feature_boundary.boundary_hits(changed_paths or [], config.get("feature_boundaries") or [])
     if hits:
         ids = ", ".join(h.get("id", "?") for h in hits)
@@ -1442,6 +1560,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         if not verdict.get("auto_approvable"):
             return False, "not on additive auto-approve allowlist: " + verdict.get("reason", "")
 
+    # Docs-only: cleared, noting whether the panels ran.
     if docs_bypass:
         # PR #261 review finding (broad panel): don't claim "reviewed" when the
         # panel(s) could not actually run for this diff — surfaced in the merge
@@ -1456,6 +1575,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
                       "(panel verdict/confidence not required for docs), no boundary touched"
                       % _panel_note)
 
+    # Promotion bypass: cleared, explaining any confidence shortfall.
     if promotion_bypass:
         # Deliberately NOT `min(conf1, conf2)` unguarded: the bypass does not
         # require a confidence to be present, and min(None, 0.88) is a TypeError
@@ -1468,6 +1588,7 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         if not _c:
             return True, ("cleared: promotion PR — both panels Approve with no filed "
                           "finding; no panel confidence was reported")
+        # Lowest reported confidence.
         _min = min(_c)
         if _min < threshold:
             # %.2f can round a genuinely-below score up to the threshold's own
@@ -1492,10 +1613,12 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         return True, ("cleared: promotion PR — both panels Approve with no filed "
                       "finding; min confidence %.2f >= threshold %.2f" % (_min, threshold))
 
+    # Normal case: cleared at or above the threshold.
     score = min(conf1, conf2)
     return True, f"cleared: both panels Approve, min confidence {score:.2f} >= threshold {threshold:.2f}, no boundary touched"
 
 
+# Hidden marker for the auto-merge line, and the "already merged" reason text.
 _AUTOMERGE_NOTE_MARKER = "<!-- ab-automerge -->"
 _IDEMPOTENT_MERGED_REASON = "already merged (idempotent no-op)"
 
@@ -1504,6 +1627,7 @@ def _automerge_note(reason, cleared):
     """The single markdown line telling a reader of the PR comment what the
     auto-merge gate decided, prefixed by a hidden marker so a later decision can
     find and replace it in place."""
+    # Make the reason one line, then add the marker and icon.
     reason = " ".join(str(reason or "").split())   # one line: the replace is line-based
     head = "✅ **Auto-merge:**" if cleared else "\U0001F512 **Auto-merge held:**"   # ✅ / 🔒
     return "%s %s %s" % (_AUTOMERGE_NOTE_MARKER, head, reason)
@@ -1515,12 +1639,15 @@ def _update_automerge_comment(pr, key, note):
     other line (which the already-current check and _extract_summary read) stay
     byte-identical. No-op when there is no comment or it already says this."""
     try:
+        # Need our review comment.
         comment = _find_marker_comment(pr)
         if comment is None:
             return
+        # Already says this: nothing to do.
         body = comment.body or ""
         if note in body.splitlines():
             return
+        # Replace the old auto-merge line, or append a new one, and save.
         if _AUTOMERGE_NOTE_MARKER in body:
             new_body = re.sub(r"^" + re.escape(_AUTOMERGE_NOTE_MARKER) + r".*$",
                               lambda _m: note, body, count=1, flags=re.M)
@@ -1542,11 +1669,13 @@ def _maybe_auto_merge(gh, repo, pr, config):
     where a normal reviewed-but-not-yet-approved PR would be, safe for a
     human to pick up."""
     try:
+        # Load the saved review record and the PR's changed files.
         key = "%s#%s" % (repo.full_name, pr.number)
         rec = (state.get("pr_reviews") or {}).get(key) or {}
         pr_files = list(pr.get_files())
         changed_paths = [f.filename for f in pr_files]
         changed_files = feature_allowlist.files_from_pr_files(pr_files)
+        # Is this a feature-drive PR?
         marker_match = _FEATURE_DRIVE_MARKER_RE.search(pr.body or "")
         # GitHub computes mergeability ASYNCHRONOUSLY. Right after a PR opens (or
         # after any push — including one of our own remediation commits) the first
@@ -1560,6 +1689,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
                 mergeable = _wait_mergeable(pr, timeout=10.0)
             except Exception:  # noqa: BLE001 — best effort; stay fail-closed
                 mergeable = getattr(pr, "mergeable", None)
+        # Facts about the PR for the decision.
         pr_meta = {
             "repo": repo.full_name,
             "base_ref": getattr(getattr(pr, "base", None), "ref", None),
@@ -1571,6 +1701,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
             # head-freshness check in _automerge_decision) — PR #261 review finding.
             "head_sha": getattr(getattr(pr, "head", None), "sha", None),
         }
+        # Paused/blackout flags, then the gate's decision.
         state_flags = {"paused": bool(state.get("paused")), "blackout": bool(state.get("blackout"))}
         should_merge, reason = _automerge_decision(rec, changed_paths, config, pr_meta, state_flags, changed_files)
         # "As close to 100% as possible BEFORE merging": _automerge_decision only
@@ -1603,12 +1734,14 @@ def _maybe_auto_merge(gh, repo, pr, config):
             except Exception as e:  # noqa: BLE001 — never let this break a merge
                 logger.warning("pr_review: CI check skipped for %s: %s", key, e)
                 _ci_state, _ci_details = "unknown", ""
+            # Failing CI: hold the merge and ask for a human.
             if _ci_state == "failure":
                 should_merge = False
                 reason = ("CI is failing on head %s (%s) — needs human review: fix the "
                           "build (or click Fix); the merge resumes once checks pass"
                           % ((pr_meta.get("head_sha") or "?")[:8],
                              _ci_details or "see checks"))
+        # Hold while AppBuilder is still improving the PR.
         if should_merge:
             try:
                 import pr_remediate
@@ -1633,6 +1766,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
         # this must survive across polls to suppress a repeated refusal, and it
         # is deliberately a separate field for that reason.
         prior_refusal = rec.get("auto_merge_refusal")
+        # Cleared: approve the PR, record it, and note it on the comment.
         logger.info("pr_review: auto-merging %s — %s", key, reason)
         approve_pr(gh, repo.full_name, pr.number, actor="ab-auto")
         mark_pr_approved(repo.full_name, pr.number, True)
@@ -1640,6 +1774,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
             rec.get("panel_confidence") or 0.0, rec.get("panel2_confidence") or 0.0),
             auto_merge_reason=reason, auto_merge_blocked_reason=None)
         _update_automerge_comment(pr, key, _automerge_note(reason, True))
+        # Merge, then record the result.
         status_code, result = merge_pr(gh, repo.full_name, pr.number)
         if status_code == 200 and result.get("status") == "success":
             update_pr_review(repo.full_name, pr.number, auto_merged=True,
@@ -1663,9 +1798,11 @@ def _maybe_auto_merge(gh, repo, pr, config):
             update_pr_review(repo.full_name, pr.number, auto_merge_refusal=why)
             if why != prior_refusal:
                 logger.warning("pr_review: auto-merge refused for %s — %s", key, why)
+        # Any other failure is only logged.
         else:
             logger.warning("pr_review: auto-merge's own merge_pr call did not succeed for %s: %s",
                            key, result)
+    # Unexpected error: log it; the PR stays for a human.
     except Exception as e:
         logger.exception("pr_review: auto-merge attempt failed for %s#%s: %s", repo.full_name, pr.number, e)
 
@@ -1674,9 +1811,11 @@ def _maybe_auto_remediate(gh, repo, pr, config):
     """Best-effort; returns True only when a remediation commit was actually
     pushed (which moves the head and invalidates everything computed above)."""
     try:
+        # Hand off to pr_remediate.
         import pr_remediate
         pushed, _reason = pr_remediate.maybe_auto_remediate(gh, repo, pr, config)
         return bool(pushed)
+    # Errors mean nothing was pushed.
     except Exception as e:
         logger.exception("pr_review: auto-remediate failed for %s#%s: %s", repo.full_name, pr.number, e)
         return False
@@ -1688,6 +1827,7 @@ def _review_one(gh, repo, pr, config, force=False):
     hasn't changed since the last scan — for when the underlying code (a repo
     twin, a route the panel couldn't see) changed without this PR's own head
     moving, or the operator just doesn't want to wait for the next poll cycle."""
+    # Skip drafts.
     if getattr(pr, "draft", False):
         return  # skip WIP drafts
     # Skip AppBuilder's OWN AI-fix PRs — they were already vetted by the fix panel
@@ -1707,18 +1847,21 @@ def _review_one(gh, repo, pr, config, force=False):
     if _title.startswith("AI Fix #") or _head_ref.startswith(AUTO_BRANCH_PREFIXES_BY_KIND["bug"]):
         logger.info("pr_review: skipping AppBuilder's own fix PR %s #%s", repo.full_name, pr.number)
         return
+    # The commit under review.
     head_sha = pr.head.sha
     # Each stage announces itself so the Active Tasks card shows real progress
     # instead of one opaque "scanning open PRs" line for the whole cycle. The
     # task_id is constant ("PRReview"); set_task_step is a no-op when the review
     # is invoked outside the scan loop (Reprocess/Fix buttons).
     def _step(what):
+        """Show the current review stage on the Active Tasks card."""
         set_task_step("PRReview", "%s #%s — %s" % (repo.full_name, pr.number, what))
     # Compute findings every scan (cheap, deterministic, no LLM) so the UI
     # 'PRs Reviewed' list stays populated even after a restart. The COMMENT +
     # status are only (re)posted when the head SHA changed — dedup keeps us from
     # spamming, but we still RECORD the review below regardless.
     _step("fetching changed files")
+    # Run the deterministic Tier-1 checks on the changed files.
     files = list(pr.get_files())
     changed = [f.filename for f in files]
     _step("checking twin/repo parity across %d file(s)" % len(changed))
@@ -1733,6 +1876,7 @@ def _review_one(gh, repo, pr, config, force=False):
     findings += _undef_findings
     _step("checking for unattended mutation")
     findings += check_unattended_mutation(files)
+    # Find our comment and decide whether it is already up to date.
     existing = _find_marker_comment(pr)
     _desc = _desc_digest(pr)
     _prior_review = (state.get("pr_reviews") or {}).get("%s#%s" % (repo.full_name, pr.number)) or {}
@@ -1745,6 +1889,7 @@ def _review_one(gh, repo, pr, config, force=False):
         logger.info("pr_review: %s PR #%s re-reviewing — head unchanged but the PR "
                     "description was edited (the panel judges description vs diff)",
                     repo.full_name, pr.number)
+    # Log why we are retrying, or that retries are used up.
     if _prior_queued and not force:
         logger.info("pr_review: %s PR #%s retrying — prior scan queued for retry (panel unavailable)",
                     repo.full_name, pr.number)
@@ -1762,11 +1907,13 @@ def _review_one(gh, repo, pr, config, force=False):
             "unavailable' (%s/%s); awaiting human Approve or Reprocess.",
             repo.full_name, pr.number,
             _prior_review.get("queue_retry_count") or 0, MAX_AUTO_QUEUE_RETRIES)
+    # Up to date: reuse the summary and panel results from last time.
     if already_current:
         # Recover the previously-generated summary from the comment — no LLM call
         # on a cached re-scan / post-restart.
         _step("unchanged since last review — reusing cached result")
         summary = _extract_summary(existing.body if existing else "")
+        # Mark it as a cache hit.
         action = "cached"
         # Recover the last persisted panel result(s) rather than leaving `review`/
         # `state_review` unset. NOTE: `review` used to be referenced UNCONDITIONALLY
@@ -1801,6 +1948,7 @@ def _review_one(gh, repo, pr, config, force=False):
         token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
         _step("running test-regression check")
         findings += check_test_regressions(repo, pr, config, token)
+        # LLM change summary and both review panels.
         _step("summarising the change (LLM)")
         summary = _summarize_changes(pr, files, config, repo=repo)
         _step("running the skeptical reviewer panel (LLM)")
@@ -1808,12 +1956,14 @@ def _review_one(gh, repo, pr, config, force=False):
                                    undefined_verified=_undef_verified)
         _step("running the state-logic reviewer panel (LLM)")
         state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
+        # Build the comment text.
         _step("rendering and posting the review comment")
         body = _render(findings, head_sha, summary, review=review, state_review=state_review,
                        base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
                        head_ref=_head_ref,
                        default_branch=getattr(repo, "default_branch", "") or "",
                        desc_digest=_desc)
+        # Update our comment, or post a new one.
         if existing:
             try:
                 existing.edit(body)
@@ -1855,6 +2005,7 @@ def _review_one(gh, repo, pr, config, force=False):
                      summary=summary, review=review, review2=state_review,
                      base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
                      head_ref=_head_ref)
+    # Log the outcome unless it was a cache hit.
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
                     repo.full_name, pr.number, len(findings), action)
@@ -1886,6 +2037,7 @@ def _review_one(gh, repo, pr, config, force=False):
         logger.info("pr_review: %s #%s — remediation pushed a fix; deferring the auto-merge "
                     "decision to the re-review of the new head", repo.full_name, pr.number)
         return
+    # Nothing pushed: consider merging.
     _maybe_auto_merge(gh, repo, pr, config)
 
 
@@ -1903,10 +2055,12 @@ def reprocess_one_pr(repo_full_name, number, config=None):
     explicit operator action, not the background poll, so it should work even
     if the operator hasn't (or doesn't want to) turn on the automatic scan.
     """
+    # Need a GitHub token.
     config = config or load_config()
     token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
     if not token:
         raise RuntimeError("No GitHub token configured")
+    # Fetch the PR and review it now, ignoring the cache.
     from github import Github
     gh = Github(token)
     repo = gh.get_repo(repo_full_name)
@@ -1931,26 +2085,31 @@ def fix_pr_description(repo_full_name, number, config=None):
     refusal is a return value, not an exception. Raises only on setup failure
     (bad token/repo/PR number), matching reprocess_one_pr's contract.
     """
+    # Imported here to avoid import cycles.
     from github import Github
     from fix_engine import _claim_issue, _release_issue
 
+    # Need a GitHub token.
     config = config or load_config()
     token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
     if not token:
         raise RuntimeError("No GitHub token configured")
 
+    # Fetch the PR; it must be open.
     gh = Github(token)
     repo = gh.get_repo(repo_full_name)
     pr = repo.get_pull(int(number))
     if pr.merged or pr.state != "open":
         return False, "PR #%s is not open." % number
 
+    # The saved panel critique must be about the description.
     key = "%s#%s" % (repo_full_name, number)
     rec = (state.get("pr_reviews") or {}).get(key) or {}
     critique = rec.get("panel_critique") or ""
     if not _panel_objects_to_description(critique):
         return False, "The panel's objection is not about the PR description."
 
+    # Stop once this head has used its rewrite budget.
     head_sha = pr.head.sha
     budget = dict(rec.get("desc_fixes") or {})
     done = int(budget.get(head_sha, 0) or 0)
@@ -1964,9 +2123,11 @@ def fix_pr_description(repo_full_name, number, config=None):
     if not _claim_issue(lock_id):
         return False, "A description fix is already in progress for this PR."
     try:
+        # Ask the LLM for a corrected description.
         files = list(pr.get_files())
         new_body = _regenerate_pr_description(pr, files, critique, config, repo=repo)
 
+        # Reject an empty, too-short or unchanged result.
         if not new_body or len(new_body.strip()) < 200:
             return False, "The regenerated description was empty or implausibly short."
         if new_body.strip() == (pr.body or "").strip():
@@ -1978,6 +2139,7 @@ def fix_pr_description(repo_full_name, number, config=None):
             return False, ("The regenerated description dropped the required "
                            "Intent & Problem Statement section.")
 
+        # Save the new description and count it against this head's budget.
         pr.edit(body=new_body)
         budget[head_sha] = done + 1
         try:
@@ -1989,6 +2151,7 @@ def fix_pr_description(repo_full_name, number, config=None):
                     "(%d/%d for this head)", repo_full_name, number,
                     done + 1, _MAX_DESC_FIXES)
         return True, "Description updated to match the diff."
+    # Always release the lock.
     finally:
         _release_issue(lock_id)
 
@@ -2021,6 +2184,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
     rejection (surfaced to the UI, not an error). Raises only on setup failure
     (bad token/repo/PR number), same contract as reprocess_one_pr.
     """
+    # Imported here because they are only needed for a fix (and to avoid cycles).
     import git
     import tempfile
     import pr_remediate   # lazy: circular import via pr_remediate -> pr_review
@@ -2032,6 +2196,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         is_verification_infra_failure,
     )
 
+    # Need a GitHub token.
     config = config or load_config()
     token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
     if not token:
@@ -2047,6 +2212,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             _ok, _msg = fix_pr_description(repo_full_name, number, config=config)
         except Exception as e:  # noqa: BLE001
             _ok, _msg = False, "description fix failed: %s" % e
+        # Rewritten: re-review the PR now and stop here.
         if _ok:
             try:
                 _gh = Github(token)
@@ -2060,10 +2226,12 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     "not rewritten (%s); continuing with the code fix",
                     repo_full_name, number, _msg)
 
+    # Only one fix per PR at a time.
     lock_id = "pr-fix:%s#%s" % (repo_full_name, number)
     if not _claim_issue(lock_id):
         return False, fix_failures.CONTENDED_LOCK
     try:
+        # Fetch the PR; it must still be open.
         gh = Github(token)
         repo = gh.get_repo(repo_full_name)
         pr = repo.get_pull(int(number))
@@ -2072,6 +2240,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         if (pr.state or "").lower() == "closed":
             return False, "PR #%s is closed — nothing to fix." % number
 
+        # The commit and branch to fix.
         head_sha = pr.head.sha
         branch = pr.head.ref
 
@@ -2108,6 +2277,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 "and the resulting drift breaks the next promotion. Fix the problem on "
                 "'dev' and let it promote forward." % (number, branch))
 
+        # Recompute the Tier-1 findings for the PR's files.
         files = list(pr.get_files())
         changed = [f.filename for f in files]
 
@@ -2117,6 +2287,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         findings += find_missing_tooltips_in_files(files)
         findings += check_undefined_names(repo, files, head_sha)
 
+        # The saved critiques from both panels.
         rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}
         panel_critique = (rec.get("panel_critique") or "").strip()
         # The SECOND (state-logic / control-flow) panel's critique used to be
@@ -2149,10 +2320,12 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             logger.debug("fix_one_pr: CI lookup skipped for %s#%s: %s",
                          repo_full_name, number, e)
 
+        # Nothing to fix: stop.
         if (not findings and not panel_critique and not panel2_critique and not score_feedback
                 and _ci_state != "failure"):
             return False, "No findings to fix — this PR has a clean pre-review."
 
+        # Build the fix prompt: PR text, objective, findings, critiques and score feedback.
         lines = ["PR #%s: %s" % (pr.number, pr.title or "")]
         if pr.body:
             lines.append((pr.body or "").strip()[:2000])
@@ -2180,6 +2353,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             lines.append("\n" + score_feedback)
         fix_body = "\n".join(lines)
 
+        # Clone the PR branch into a temp folder (token only used for the clone).
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = os.path.join(tmp_dir, "repo")
             url = repo.clone_url.replace("https://", "https://%s@" % token)
@@ -2204,6 +2378,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 max_attempts = int(config.get("pr_fix_max_attempts", 3) or 1)
             except (TypeError, ValueError):
                 max_attempts = 3
+            # Allow 1 to 5 attempts.
             max_attempts = max(1, min(max_attempts, 5))
 
             # A retry that produced NO PARSEABLE OUTPUT tested no hypothesis. An
@@ -2220,8 +2395,10 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 max_barren = int(config.get("pr_fix_max_barren_retries", 2) or 0)
             except (TypeError, ValueError):
                 max_barren = 2
+            # Allow 0 to 3 empty-output retries.
             max_barren = max(0, min(max_barren, 3))
 
+            # Feedback for the next attempt.
             error_context = None
             # Seed the FIRST attempt with the CI verdict for this head.
             #
@@ -2249,11 +2426,13 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             except Exception as e:  # noqa: BLE001 — diagnostics must never break the fix
                 logger.debug("fix_one_pr: CI lookup skipped for %s#%s: %s",
                              repo_full_name, number, e)
+            # Per-attempt results.
             last_failure = "Fix generation failed."
             fixes, confidence, review_conf = None, 0.0, 0.0
             attempt_succeeded = False
             barren = 0
 
+            # Try up to the attempt limit, feeding each failure back to the model.
             attempt = 0
             while attempt < max_attempts:
                 attempt += 1
@@ -2272,6 +2451,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                                 repo_full_name, number, attempt, max_attempts,
                                 (error_context or "")[:200])
 
+                # Ask the model for a fix.
                 try:
                     fix_code = apply_ai_fix(path, fix_body, error_context, files_override=changed,
                                             task_id=lock_id, requirements=requirements,
@@ -2287,10 +2467,12 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                             "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
                             "budget: %s", repo_full_name, number, barren, max_barren, last_failure)
                         continue
+                    # Out of attempts: give up.
                     if is_last:
                         return False, last_failure
                     continue
 
+                # Apply the edits to the checkout.
                 success_applied, fixes, confidence = parse_and_apply(fix_code, path)
                 if not success_applied:
                     # Classify WHY, exactly as the issue loop does. Telling a
@@ -2333,15 +2515,18 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         return False, last_failure
                     continue
 
+                # Have the review panel judge the fix; an offline panel stops here.
                 review = review_fix(path, fix_body, fixes, task_id=lock_id, builder_n=0, repo=repo, head_sha=head_sha)
                 if isinstance(review, dict) and review.get("status") == "queue_for_retry":
                     _q_reason = review.get("reason") or "reviewers unavailable"
                     # The panel being DOWN is not the fix's fault — regenerating
                     # would burn tokens against the same outage.
                     return False, f"Reviewer panel could not run ({_q_reason}) — click Fix again shortly."
+                # Read the panel's confidence, verdict and critique.
                 review_conf = review.get("confidence", 0.0) if isinstance(review, dict) else 0.0
                 review_verdict = review.get("verdict", "Reject") if isinstance(review, dict) else "Reject"
                 critique = review.get("critique", "") if isinstance(review, dict) else ""
+                # Rejected: feed the critique back; on the last attempt comment on the PR and stop.
                 if review_verdict != "Approve":
                     logger.warning("fix_one_pr: panel REJECTED fix for %s#%s (attempt %s/%s): %s",
                                    repo_full_name, number, attempt, max_attempts, critique)
@@ -2360,6 +2545,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         return False, last_failure
                     continue
 
+                # If QA is on, run the tests on the fix.
                 if config.get("qa_enabled", True):
                     before_verify = _worktree_state(path)
                     try:
@@ -2382,6 +2568,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         logger.error("fix_one_pr: %s#%s — cannot verify: %s",
                                      repo_full_name, pr.number, failure_msg)
                         return False, "Fix not pushed: %s" % failure_msg
+                    # Tests failed: feed that back; on the last attempt comment on the PR and stop.
                     if not verified:
                         last_failure = "Fix failed verification: %s" % failure_msg
                         error_context = ("Your previous fix was approved by review but FAILED "
@@ -2397,12 +2584,15 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                             return False, last_failure
                         continue
 
+                # This attempt passed.
                 attempt_succeeded = True
                 break
 
+            # Every attempt failed.
             if not attempt_succeeded:
                 return False, last_failure
 
+            # Commit the fix and push it to the PR branch.
             final_confidence = (confidence + review_conf) / 2
             files_list = ", ".join(fixes.keys())
             commit_msg = "AppBuilder: fix PR #%s review findings" % pr.number
@@ -2411,6 +2601,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             with _authenticated_remote(repo_git.remotes.origin, repo.clone_url, token):
                 push_or_raise(repo_git.remotes.origin, "HEAD:%s" % branch)
 
+            # Tell the PR about the fix (best-effort).
             try:
                 pr.create_issue_comment(
                     "\U0001F916 **AppBuilder — Fix applied**\n\nPushed a fix commit for the findings "
@@ -2419,12 +2610,14 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             except Exception:  # noqa: BLE001
                 pass
 
+            # Re-review the PR straight away.
             try:
                 _review_one(gh, repo, repo.get_pull(int(number)), config, force=True)
             except Exception as e:  # noqa: BLE001
                 logger.warning("fix_one_pr: post-fix reprocess failed for %s#%s: %s", repo_full_name, number, e)
 
             return True, "Fix pushed to %s (%s)" % (branch, files_list)
+    # Always release the lock.
     finally:
         _release_issue(lock_id)
 
@@ -2435,8 +2628,10 @@ def scan_open_prs(gh, config):
     Gated behind ``pr_review_enabled`` (default False) so it is inert until turned
     on. Never raises out — one bad repo/PR must not break the scan cycle.
     """
+    # Off by default.
     if not config.get("pr_review_enabled", False):
         return
+    # The repos to scan; none means nothing to do.
     try:
         repos = get_monitored_repos(config)
     except Exception as e:  # noqa: BLE001
@@ -2448,8 +2643,10 @@ def scan_open_prs(gh, config):
     # from bug scans/fixes (see templates/index.html Active Tasks).
     update_task_state("PRReview", "PR pre-review — scanning %d repo(s)" % len(repos),
                       "start", kind="pr")
+    # Open PRs seen this scan, and how many were reviewed.
     seen_open = set()
     reviewed = 0
+    # Review every open PR in every repo; one failure must not stop the rest.
     try:
         for i, repo_name in enumerate(repos, 1):
             try:
@@ -2484,6 +2681,7 @@ def scan_open_prs(gh, config):
         set_task_step("PRReview", "reconciling PRs that are no longer open")
         _reconcile_closed_prs(gh, seen_open)
         set_task_step("PRReview", "done — reviewed %d open PR(s)" % reviewed)
+    # Always close the task.
     finally:
         update_task_state("PRReview", action="end")
 
@@ -2506,14 +2704,17 @@ def _backfill_pr_review_refs(gh, limit=_REFS_BACKFILL_PER_CYCLE):
     fields. Never raises out — a backfill is cosmetic and must not break a scan.
 
     Returns the number of records updated (for tests/logging)."""
+    # Copy the records; on error do nothing.
     try:
         reviews = dict(state.get("pr_reviews") or {})
     except Exception:  # noqa: BLE001
         return 0
+    # Records still missing their branch names.
     pending = [(k, r) for k, r in reviews.items()
                if r and not r.get("base_ref") and r.get("repo") and r.get("number")]
     if not pending:
         return 0
+    # Fetch each PR (up to the limit) and save its branch names.
     filled = 0
     for _key, rec in pending[:max(0, int(limit or 0))]:
         repo_name, number = rec.get("repo"), rec.get("number")
@@ -2529,6 +2730,7 @@ def _backfill_pr_review_refs(gh, limit=_REFS_BACKFILL_PER_CYCLE):
         if update_pr_review(repo_name, number,
                             base_ref=str(base_ref)[:120], head_ref=str(head_ref)[:120]):
             filled += 1
+    # Log what was filled in.
     if filled:
         logger.info("pr_review: backfilled target branch on %d record(s); %d still missing",
                     filled, max(0, len(pending) - filled))
@@ -2545,9 +2747,11 @@ def _reconcile_closed_prs(gh, seen_open):
     superseded it with another PR) → CLOSED. Reopened PRs get picked up as open
     again on the normal review pass, which rebuilds a fresh (non-terminal) record."""
     try:
+        # Copy the records; on error do nothing.
         reviews = dict(state.get("pr_reviews") or {})
     except Exception:
         return
+    # Check each listed PR not seen open this scan.
     for key, rec in reviews.items():
         if not rec or key in seen_open:
             continue
@@ -2556,11 +2760,13 @@ def _reconcile_closed_prs(gh, seen_open):
         repo_name, number = rec.get("repo"), rec.get("number")
         if not repo_name or not number:
             continue
+        # Fetch the PR from GitHub.
         try:
             pr = gh.get_repo(repo_name).get_pull(int(number))
         except Exception as e:  # noqa: BLE001
             logger.debug("pr_review reconcile: %s#%s fetch failed: %s", repo_name, number, e)
             continue
+        # Mark it merged or closed as GitHub says.
         try:
             if pr.merged:
                 update_pr_review(repo_name, number, merged=True)

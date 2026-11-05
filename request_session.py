@@ -26,21 +26,27 @@ gate before submit), pointed at a different job:
 The simulation scope rules are untouched: this is a sibling manager with its
 own prompt, spec shape, gate, sessions directory, workspace and audit log.
 """
+# Standard modules for JSON, files, regex, locking and timestamps.
 import json
 import os
 import re
 import threading
 import time
 
+# The simulation assistant this module reuses (sessions, Copilot CLI wiring).
 import sim_session as _sim
 
+# Name of the fenced block the agent ends every reply with, and a regex to find it.
 SPEC_FENCE = "request-spec"
 _SPEC_RE = re.compile(r"```" + SPEC_FENCE + r"[ \t]*\n(.*?)```", re.DOTALL)
 
+# Allowed intents and severity/priority levels.
 INTENTS = ("bug", "feature")
 LEVELS = ("low", "medium", "high", "critical")
+# Caps on the stored report length and the console excerpt shown to the agent.
 EXPLANATION_MAX = 30000
 CONSOLE_HINT_MAX = 4000
+# Page-context keys the WebUI may send; anything else is dropped.
 CONTEXT_KEYS = ("type", "currentView", "currentSubView", "currentTenant", "url",
                 "hubVersion", "webuiVersion", "userAgent")
 
@@ -59,6 +65,7 @@ FEATURE_REQUIRED = (("problem", "problem / goal"), ("users", "who uses it"),
                     ("out_of_scope", "out of scope"),
                     ("priority", "priority (low/medium/high/critical)"))
 
+# System prompt for the first turn; {repo_lines} and {context_block} are filled in later.
 _INSTRUCTIONS = """You are AppBuilder's Request Assistant, talking to a Lab Manager (LM) user who
 pressed "🐞 Bug/Feature Request" in the LM WebUI. Your job is to INTERVIEW them and
 turn what they report into a complete, precise bug report or feature request that
@@ -148,6 +155,7 @@ leave the other intent's fields empty). Set "intent" as soon as it is clear. Set
 left in "open_questions".
 """
 
+# Short reminder sent with every later turn to keep the agent on task.
 _REMINDER = ("(Reminder: you only capture an LM bug report or feature request and explain "
              "the relevant code — never write fixes, patches or commands, and decline anything "
              "else in one sentence. Ask at most one focused question with suggested answers, "
@@ -157,18 +165,22 @@ _REMINDER = ("(Reminder: you only capture an LM bug report or feature request an
 # ── pure helpers (unit-tested) ──────────────────────────────────────────────
 
 def _s(v, n=4000):
+    """Return v as a stripped string cut to n characters (None becomes "")."""
     return str(v if v is not None else "").strip()[:n]
 
 
 def _list(v):
+    """Return v as a list: lists as-is, empty values as [], anything else wrapped."""
     return v if isinstance(v, list) else ([] if v in (None, "") else [v])
 
 
 def _strs(v, n=1000, cap=30):
+    """Return v as a list of non-empty strings, each cut to n chars, at most cap items."""
     return [_s(x, n) for x in _list(v) if _s(x)][:cap]
 
 
 def _level(v):
+    """Return v as a valid severity level, or "" if it is not one."""
     v = _s(v, 20).lower()
     return v if v in LEVELS else ""
 
@@ -176,6 +188,7 @@ def _level(v):
 def normalize_request_spec(obj):
     """Coerce an agent-produced request spec into the canonical shape. Unknown
     keys (a "patch", "diff", "fix" …) are dropped: the spec only describes."""
+    # Copy each known field, cleaning and capping it; the suspected files are added below.
     intent = _s(obj.get("intent"), 20).lower()
     spec = {
         "intent": intent if intent in INTENTS else "",
@@ -201,13 +214,16 @@ def normalize_request_spec(obj):
         "open_questions": _strs(obj.get("open_questions")),
         "ready": bool(obj.get("ready")),
     }
+    # Add up to 20 suspected files; entries without a path are skipped.
     for f in _list(obj.get("suspected_files"))[:20]:
         if not isinstance(f, dict) or not _s(f.get("path")):
             continue
+        # Normalise the path: forward slashes, no leading "./".
         repo = _s(f.get("repo"), 40).lower()
         path = _s(f.get("path"), 300).replace("\\", "/")
         while path.startswith("./"):
             path = path[2:]
+        # If the repo is missing, take it from the path; if the path repeats the repo, drop it.
         head = path.split("/", 1)[0].lower()
         if not repo and "/" in path:
             repo = head
@@ -220,10 +236,12 @@ def normalize_request_spec(obj):
 def extract_request_spec(text):
     """(display_text, spec_or_None, choices) — the LAST request-spec block wins;
     an unparseable block yields None so the previous spec is kept."""
+    # Find all spec blocks; none means the reply is plain text.
     text = text or ""
     matches = list(_SPEC_RE.finditer(text))
     if not matches:
         return text.strip(), None, []
+    # Remove the blocks from the shown text and parse the last one.
     display = _SPEC_RE.sub("", text).strip()
     try:
         obj = json.loads(matches[-1].group(1).strip())
@@ -231,22 +249,27 @@ def extract_request_spec(text):
         return display, None, []
     if not isinstance(obj, dict):
         return display, None, []
+    # Keep up to 6 suggested answers, each cut to 200 chars.
     choices = [str(c)[:200] for c in (obj.get("choices") or []) if str(c).strip()][:6]
     return display, normalize_request_spec(obj), choices
 
 
 def missing_fields(spec):
     """Labels of the required fields the spec does not have yet."""
+    # No spec yet: nothing to report.
     if not spec:
         return []
     intent = spec.get("intent")
     out = []
+    # The intent and a title are always required.
     if intent not in INTENTS:
         out.append("whether this is a bug or a feature request")
     if not spec.get("title"):
         out.append("a short title")
+    # A feature needs some affected module or screen.
     if intent == "feature" and not spec.get("module") and not spec.get("affected"):
         out.append("module/page affected")
+    # Then check the required fields for the intent.
     req = BUG_REQUIRED if intent == "bug" else FEATURE_REQUIRED if intent == "feature" else ()
     for key, label in req:
         if not spec.get(key):
@@ -256,9 +279,11 @@ def missing_fields(spec):
 
 def scope_problems(spec, repos=None):
     """Guardrail findings that are not just missing answers."""
+    # No spec yet: nothing to report.
     if not spec:
         return []
     problems = []
+    # Each suspected file must be a safe relative path inside a known workspace repo.
     for f in spec.get("suspected_files") or []:
         repo, path = f.get("repo") or "", f.get("path") or ""
         if not path or path.startswith("/") or ".." in path.split("/") or "\x00" in path:
@@ -271,12 +296,14 @@ def scope_problems(spec, repos=None):
 
 def request_problems(spec, repos=None):
     """Everything that blocks File report: scope findings + missing required fields."""
+    # No spec yet: nothing blocks.
     if not spec:
         return []
     return scope_problems(spec, repos) + [f"Still needed: {m}." for m in missing_fields(spec)]
 
 
 def request_is_ready(spec, problems=None):
+    """True when the spec says it is ready, has no open questions, and nothing is missing."""
     if not spec or problems:
         return False
     return bool(spec.get("ready") and not spec.get("open_questions")
@@ -286,11 +313,15 @@ def request_is_ready(spec, problems=None):
 def sanitize_context(context):
     """Keep only the known page-context keys (short strings) plus a capped
     console-error excerpt. Everything here is shown to the agent as DATA."""
+    # Not a dict: ignore it.
     if not isinstance(context, dict):
         return {}
+    # Keep the known keys with non-empty values, each cut to 400 chars.
     out = {k: _s(context.get(k), 400) for k in CONTEXT_KEYS if _s(context.get(k))}
+    # Drop the ticked type if it is not a valid intent.
     if out.get("type") not in INTENTS:
         out.pop("type", None)
+    # Keep only the last part of the console errors.
     con = _s(context.get("console_errors"), CONSOLE_HINT_MAX * 2)
     if con:
         out["console_errors"] = con[-CONSOLE_HINT_MAX:]
@@ -298,8 +329,11 @@ def sanitize_context(context):
 
 
 def render_context_block(context):
+    """Format the captured page context as indented lines for the prompt."""
+    # Nothing captured: say so.
     if not context:
         return "  (nothing captured)"
+    # One line per field, then the ticked type and the console errors if present.
     lines = [f"  {k}: {v}" for k, v in context.items() if k != "console_errors"]
     if context.get("type"):
         lines.append(f"  (the user ticked: {context['type']})")
@@ -310,6 +344,7 @@ def render_context_block(context):
 
 
 def _bullets(items, numbered=False):
+    """Format items as a bulleted (or numbered) list, or "- (none)" if empty."""
     if not items:
         return "- (none)"
     return "\n".join((f"{i}. " if numbered else "- ") + x for i, x in enumerate(items, 1))
@@ -319,11 +354,13 @@ def render_explanation(sess):
     """The report text stored through /api/bug-report. The first line is the
     title; the trace block follows immediately so it sits at the TOP of the
     GitHub issue body (pr_template.from_issue quotes only the first 1500 chars)."""
+    # Gather the spec, the requester, the submitter and the session id.
     spec = sess.get("spec") or {}
     owner = sess.get("owner") or {}
     sub = sess.get("submitted_by") or {}
     bug = spec.get("intent") == "bug"
     sid = sess.get("id")
+    # Header: title, then the trace block (who asked, who submitted, which session).
     lines = [
         spec.get("title") or ("Bug report" if bug else "Feature request"),
         "",
@@ -340,6 +377,7 @@ def render_explanation(sess):
         f"## {'Bug report' if bug else 'Feature request'}",
         f"**Module / page:** {spec.get('module') or ', '.join(spec.get('affected') or []) or '?'}  ",
     ]
+    # Bug sections: severity, summary, steps, expected vs actual, evidence, suspected files.
     if bug:
         lines += [f"**Severity:** {spec.get('severity') or '?'}", "",
                   "### Summary", spec.get("summary") or "", "",
@@ -354,6 +392,7 @@ def render_explanation(sess):
                   "### Suspected area (from the assistant's read-only review of the code)",
                   _bullets([f"{f['repo']}: `{f['path']}` — {f.get('why', '')}"
                             for f in spec.get("suspected_files") or []]), ""]
+    # Feature sections: priority, summary, problem, users, behaviour, criteria, scope.
     else:
         lines += [f"**Priority:** {spec.get('priority') or '?'}", "",
                   "### Summary", spec.get("summary") or "", "",
@@ -364,15 +403,18 @@ def render_explanation(sess):
                   "\n".join(f"- [ ] {c}" for c in spec.get("acceptance_criteria") or []) or "- (none)", "",
                   "### Affected screens / modules / repos", _bullets(spec.get("affected")), "",
                   "### Out of scope", _bullets(spec.get("out_of_scope")), ""]
+    # The full spec as collapsible JSON.
     lines += ["<details><summary>Full spec (JSON)</summary>", "", "```json",
               json.dumps(spec, indent=2), "```", "</details>", ""]
     head = "\n".join(lines)
+    # Build the conversation transcript from the user and assistant events.
     transcript = []
     for e in sess.get("events") or []:
         if e.get("kind") == "user":
             transcript.append(f"**User:** {e.get('text', '')}")
         elif e.get("kind") == "assistant":
             transcript.append(f"**Assistant:** {e.get('text', '')}")
+    # Keep the newest part of the transcript within the length cap.
     room = max(0, EXPLANATION_MAX - len(head) - 200)
     tx = "\n\n".join(transcript)
     if len(tx) > room:
@@ -391,10 +433,12 @@ class RequestSessionManager(_sim.SimSessionManager):
     def resolve_repos(config):
         """{short: full} — `request_assistant_repos`, else every configured repo
         (feature_drive_repos + monitored_repos + bug_report_repo)."""
+        # Use the explicit repo list, or every configured repo.
         explicit = config.get("request_assistant_repos") or []
         names = list(explicit) or (list(config.get("feature_drive_repos") or [])
                                    + list(config.get("monitored_repos") or [])
                                    + ([config["bug_report_repo"]] if config.get("bug_report_repo") else []))
+        # Map short name to full name for each valid "owner/name".
         out = {}
         for n in names:
             full = str(n).strip().strip("/")
@@ -403,7 +447,9 @@ class RequestSessionManager(_sim.SimSessionManager):
         return out
 
     def status(self):
+        """Report whether the request assistant can run, and why not if it cannot."""
         config = self._cfg()
+        # Collect every reason the assistant cannot run.
         reasons = []
         if not config.get("request_assistant_sessions_enabled", True):
             reasons.append("disabled (request_assistant_sessions_enabled=false)")
@@ -420,12 +466,15 @@ class RequestSessionManager(_sim.SimSessionManager):
     def _materialize_skills(self):
         # Requests never build, so the build recipes are not part of this
         # workspace; the empty dir only marks the workspace as synced.
+        """Create an empty skills dir; requests need no build recipes."""
         os.makedirs(os.path.join(self.workspace, "skills"), exist_ok=True)
 
     def known_simulations(self):
+        """Requests are not tied to simulations, so there is no list to check against."""
         return None
 
     def problems_for(self, spec, config=None):
+        """Return everything that stops this spec being filed."""
         if not spec:
             return []
         config = config if config is not None else self._cfg()
@@ -434,6 +483,7 @@ class RequestSessionManager(_sim.SimSessionManager):
     def _agent_feedback(self, spec):
         # Missing answers are the interview's job; only nag about them once the
         # agent claims the report is complete.
+        """Scope problems always, missing fields only once the agent says it is done."""
         if not spec:
             return []
         repos = set(self.resolve_repos(self._cfg()))
@@ -443,30 +493,39 @@ class RequestSessionManager(_sim.SimSessionManager):
         return out
 
     def _is_ready(self, spec, problems=None):
+        """Use the request readiness rules."""
         return request_is_ready(spec, problems)
 
     def _extract(self, text):
+        """Parse the request-spec block from a reply."""
         return extract_request_spec(text)
 
     def _reminder(self):
+        """Return the per-turn reminder for request sessions."""
         return _REMINDER
 
     def _sync_status_text(self):
+        """Status text shown while the repos sync."""
         return "Syncing the LM repos (read-only)…"
 
     def first_turn_prompt(self, config, message, sess=None):
+        """Build the first-turn prompt: instructions, repos, page context and the message."""
+        # List each workspace repo with its full name and branch.
         repos = self.resolve_repos(config)
         branch = config.get("sim_assistant_branch") or "dev"
         repo_lines = "\n".join(f"  {s}/{' ' * max(1, 13 - len(s))}{full} (branch {branch})"
                                for s, full in repos.items()) or "  (none)"
+        # Render the captured context and fill in the template.
         ctx = render_context_block((sess or {}).get("context") or {})
         return (_INSTRUCTIONS.format(repo_lines=repo_lines, context_block=ctx)
                 + "\n\n## The user's first message\n\n" + message)
 
     def start(self, owner, message, context=None):
+        """Start a session, keeping only the sanitized page context."""
         return super().start(owner, message, sanitize_context(context) or None)
 
     def summary(self, sess):
+        """Base session summary plus missing fields, scope blockers and the filed report id."""
         out = super().summary(sess)
         out["missing"] = missing_fields(sess.get("spec"))
         out["blocked"] = scope_problems(sess.get("spec"), set(self.resolve_repos(self._cfg())))
@@ -475,15 +534,19 @@ class RequestSessionManager(_sim.SimSessionManager):
         return out
 
     def build_status(self, sess):
+        """Requests never build, so there is no build status."""
         return []
 
     def _audit(self, sess):
+        """Append one line per filed report to the audit log and the service log."""
+        # Build the audit record: who, what, and the report id.
         spec = sess.get("spec") or {}
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "session": sess.get("id"),
                "requested_by": sess.get("owner") or {}, "submitted_by": sess.get("submitted_by") or {},
                "intent": spec.get("intent"), "title": spec.get("title"),
                "severity": spec.get("severity") or spec.get("priority"),
                "report_id": ((sess.get("submitted") or [{}])[0]).get("report_id") or ""}
+        # Append to audit.jsonl; a write failure is only a warning.
         try:
             with open(os.path.join(self.base_dir, "audit.jsonl"), "a") as fh:
                 fh.write(json.dumps(rec) + "\n")
@@ -497,10 +560,12 @@ class RequestSessionManager(_sim.SimSessionManager):
         filed on GitHub here. Idempotent until the hub confirms storage
         (mark_filed), so a failed hub-side store can be retried."""
         with self._lock:
+            # Load the caller's session; already filed means nothing more to do.
             sess = self._get_owned(sid, owner)
             sub = sess.get("submitted") or []
             if sub and sub[0].get("report_id"):
                 return self.summary(sess)
+            # First submit: refuse while the agent is still replying or anything is missing.
             if not sub:
                 if sess.get("state") in ("running", "preparing"):
                     raise RuntimeError("wait for the assistant to finish its reply")
@@ -510,6 +575,7 @@ class RequestSessionManager(_sim.SimSessionManager):
                     raise RuntimeError("not ready to file: " + "; ".join(problems))
                 if not self._is_ready(spec):
                     raise RuntimeError("the report is not complete yet — answer the open questions first")
+                # Record who submitted and when, and mark the session as submitted.
                 sess["submitted_by"] = {
                     "user": str((owner or {}).get("user") or ""),
                     "tenant": str((owner or {}).get("tenant") or ""),
@@ -521,6 +587,7 @@ class RequestSessionManager(_sim.SimSessionManager):
                 sess["submitted"] = [{"report_id": ""}]
                 sess["state"] = "submitted"
                 self._save(sess)
+            # Return the summary plus the rendered report for the hub to store.
             spec = sess.get("spec") or {}
             out = self.summary(sess)
             out["report"] = {
@@ -536,16 +603,20 @@ class RequestSessionManager(_sim.SimSessionManager):
             return out
 
     def mark_filed(self, owner, sid, report_id):
+        """Record the hub's report id on a submitted session and tell the user it was filed."""
+        # The report id must be a short safe token.
         report_id = str(report_id or "").strip()
         if not re.match(r"^[0-9A-Za-z_-]{1,64}$", report_id):
             raise ValueError("report_id is required")
         with self._lock:
+            # Load the session; it must have been submitted, and an existing id wins.
             sess = self._get_owned(sid, owner)
             sub = sess.get("submitted") or []
             if not sub:
                 raise RuntimeError("this session has not been submitted")
             if sub[0].get("report_id"):
                 return self.summary(sess)
+            # Save the id and add a message explaining what happens next.
             sub[0]["report_id"] = report_id
             bug = (sess.get("spec") or {}).get("intent") == "bug"
             self._add_event(sess, "submit", (
@@ -554,6 +625,7 @@ class RequestSessionManager(_sim.SimSessionManager):
                 f"Filed as feature request {report_id} — pending Global Admin approval in "
                 "Setup → Feature Requests; AppBuilder builds it once approved."))
             self._save(sess)
+        # Write the audit record and log it.
         self._audit(sess)
         self._info(f"request_session {sid}: filed as report {report_id}")
         return self.summary(sess)
@@ -561,17 +633,21 @@ class RequestSessionManager(_sim.SimSessionManager):
 
 # ── hub command entry point ─────────────────────────────────────────────────
 
+# The single shared manager, created on first use.
 _MANAGER = None
 _MANAGER_LOCK = threading.Lock()
 
+# Hub commands handled by this module.
 COMMANDS = ("REQ_SESSION_PING", "REQ_SESSION_START", "REQ_SESSION_REPLY", "REQ_SESSION_POLL",
             "REQ_SESSION_CANCEL", "REQ_SESSION_SUBMIT", "REQ_SESSION_FILED")
 
 
 def get_manager():
+    """Return the shared manager, creating it on first use."""
     global _MANAGER
     with _MANAGER_LOCK:
         if _MANAGER is None:
+            # Imported lazily to avoid a circular import with main.
             from main import CONFIG_DIR, load_config, logger
             base = (load_config() or {}).get("request_assistant_dir") or os.path.join(
                 CONFIG_DIR, "request_sessions")
@@ -581,11 +657,13 @@ def get_manager():
 
 def handle_command(cmd_type, data, manager=None):
     """Dispatch one REQ_SESSION_* hub command → COMMAND_RESULT data dict."""
+    # Read the caller and session id from the command data.
     data = data or {}
     try:
         mgr = manager or get_manager()
         owner = data.get("owner") or {}
         sid = data.get("session_id")
+        # Run the matching manager call and wrap its result.
         if cmd_type == "REQ_SESSION_PING":
             return {"status": "SUCCESS", "protocol": 1, **mgr.status()}
         if cmd_type == "REQ_SESSION_START":
@@ -601,6 +679,7 @@ def handle_command(cmd_type, data, manager=None):
         if cmd_type == "REQ_SESSION_FILED":
             return {"status": "SUCCESS", **mgr.mark_filed(owner, sid, data.get("report_id"))}
         return {"status": "ERROR", "message": f"unknown command {cmd_type}"}
+    # Map errors to an ERROR result for the hub.
     except LookupError as e:
         return {"status": "ERROR", "code": "not_found", "message": str(e)}
     except (ValueError, RuntimeError) as e:

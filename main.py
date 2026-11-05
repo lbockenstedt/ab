@@ -1,3 +1,13 @@
+"""AppBuilder service entry point.
+
+Sets up logging, config, the FastAPI app and its middleware (login, request
+logging, error handling, scanner detection), then imports the feature modules
+(workers, routes, chat, fix engine, ...) and re-exports their names so
+`from main import X` keeps working. Starts the background workers (only in the
+process that wins the single-instance lock) and, when run as a script, serves
+the web UI with uvicorn over HTTPS when a certificate is present.
+"""
+# os and sys are needed by the bytecode self-heal below, before any other import.
 import os
 import sys
 
@@ -20,6 +30,8 @@ import sys
 # Deliberately does NOT silence the underlying problem: it logs, once, with the
 # exact command to fix it properly.
 def _bf_bytecode_self_heal():
+    """Disable .pyc writing when the venv's site-packages is not writable, and log the fix."""
+    # Find the venv's site-packages directory; nothing to check if it does not exist.
     try:
         import sysconfig
         target = sysconfig.get_paths().get("purelib")
@@ -27,13 +39,16 @@ def _bf_bytecode_self_heal():
             return
         if os.access(target, os.W_OK):
             return          # healthy: keep bytecode caching
+        # Unwritable: stop Python from trying to write .pyc files there.
         sys.dont_write_bytecode = True
+        # Look up who owns the directory, purely to make the message more useful.
         owner = ""
         try:
             import pwd
             owner = pwd.getpwuid(os.stat(target).st_uid).pw_name
         except Exception:  # noqa: BLE001
             pass
+        # Tell the operator (once, on stderr) and give the exact command to repair ownership.
         print(
             f"[ab] {target} is not writable by this user"
             + (f" (owned by {owner})" if owner else "")
@@ -44,8 +59,10 @@ def _bf_bytecode_self_heal():
         pass
 
 
+# Run the self-heal immediately, before the imports below can trip over it.
 _bf_bytecode_self_heal()
 
+# Standard library modules used throughout the service.
 import asyncio
 import contextlib
 import os, json, time, tempfile, threading, requests, logging, traceback, py_compile, random, re, uuid, collections
@@ -65,6 +82,7 @@ from dedup import (
     MODULE_ALIASES,
     strip_boilerplate,
 )
+# Third-party: .env loading, the web framework, templates, GitHub API, git and retries.
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -85,21 +103,25 @@ except ImportError:
         from core.src.logging_setup import configure_logging
     except ImportError:
         import logging as _logging
+        # Fallback log format and date format.
         _FMT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         _DFMT = '%Y-%m-%d %H:%M:%S'
         def configure_logging(default_level=_logging.INFO, *, log_file=None, **_):
+            """Minimal stand-in for logging_setup.configure_logging (file + console output)."""
             handlers = ([_logging.FileHandler(log_file, mode='a'), _logging.StreamHandler()]
                         if log_file else None)
             _logging.basicConfig(level=default_level, force=True,
                                  format=_FMT, datefmt=_DFMT, handlers=handlers)
 
 def get_log_path():
+    """Return the log file path, falling back to ./ab.log if its folder is not writable."""
     path = os.getenv("LOG_FILE_PATH", "/var/log/ab.log")
     log_dir = os.path.dirname(path) or "."
     if not os.access(log_dir, os.W_OK):
         return os.path.join(os.getcwd(), "ab.log")
     return path
 
+# Decide where to log.
 log_file = get_log_path()
 
 # Ensure log directory exists
@@ -110,6 +132,7 @@ if not os.path.exists(log_dir):
     except Exception as e:
         print(f"Error creating log directory {log_dir}: {e}")
 
+# Configure logging and announce where it goes.
 _resolved_level = configure_logging(log_file=log_file)
 logger = logging.getLogger("AppBuilder")
 logger.info(f"AppBuilder started. Logging level: {logging.getLevelName(_resolved_level)}. Logging to: {log_file}")
@@ -141,6 +164,7 @@ from config_store import *  # noqa: E402,F401,F403
 # ============================================================================
 from llm_client import *  # noqa: E402,F401,F403
 
+# Load secrets/settings from the .env file, then create the web app.
 load_dotenv(ENV_FILE)
 app = FastAPI()
 
@@ -156,6 +180,7 @@ SSL_CERT = (os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem") or "").strip()
 SSL_KEY  = (os.environ.get("AB_SSL_KEY", "/etc/ab/key.pem") or "").strip()
 
 def _tls_enabled() -> bool:
+    """True when both the certificate and key files exist, so HTTPS can be served."""
     return bool(SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY))
 
 
@@ -167,12 +192,14 @@ def _sync_webui_cert_from_mtls():
     GitHub webhooks). INSTALL_CERT writes both going forward; this heals a
     deployment whose WebUI cert was left self-signed by an older handler. Runs at
     startup, before uvicorn binds. Never clobbers an already-CA-issued WebUI cert."""
+    # Where the hub mTLS cert and key live; nothing to do unless all four files exist.
     client_cert = os.environ.get("AB_HUB_CLIENT_CERT", "/etc/ab/hub-client-cert.pem")
     client_key = os.environ.get("AB_HUB_CLIENT_KEY", "/etc/ab/hub-client-key.pem")
     if not (SSL_CERT and SSL_KEY and os.path.exists(client_cert) and os.path.exists(client_key)):
         return
 
     def _self_signed(path):
+        """True if the cert at path is self-signed, False if CA-issued, None if unreadable."""
         try:
             from cryptography import x509
             with open(path, "rb") as f:
@@ -181,6 +208,7 @@ def _sync_webui_cert_from_mtls():
         except Exception:  # noqa: BLE001
             return None
 
+    # Only a CA-issued mTLS cert is worth promoting.
     if _self_signed(client_cert) is not False:
         return  # mTLS cert isn't a CA-issued cert — nothing to promote
     # The hub mTLS client cert is now ALWAYS a Hub-Local-CA clientAuth cert
@@ -189,6 +217,7 @@ def _sync_webui_cert_from_mtls():
     # / GitHub webhooks wouldn't trust the private CA). The WebUI cert comes straight
     # from INSTALL_CERT (LE) instead.
     def _issued_by_hub_mtls_ca(path):
+        """True if the cert at path was issued by the hub's private mTLS CA."""
         try:
             from cryptography import x509
             with open(path, "rb") as f:
@@ -196,11 +225,14 @@ def _sync_webui_cert_from_mtls():
             return "mtls" in c.issuer.rfc4514_string().lower()
         except Exception:  # noqa: BLE001
             return False
+    # Never promote a hub-CA cert; browsers would not trust it.
     if _issued_by_hub_mtls_ca(client_cert):
         return
+    # Keep a WebUI cert that is already CA-issued.
     web_self_signed = _self_signed(SSL_CERT) if os.path.exists(SSL_CERT) else True
     if web_self_signed is False:
         return  # WebUI already has a CA-issued cert — don't clobber it
+    # Copy the cert and key over the WebUI ones and lock down the key's permissions.
     try:
         import shutil
         shutil.copyfile(client_cert, SSL_CERT)
@@ -215,9 +247,11 @@ def _sync_webui_cert_from_mtls():
         logger.warning("WebUI cert sync from mTLS cert failed: %s", e)
 
 def _local_health_url() -> str:
+    """Return the local health-check URL, matching the server's scheme and port."""
     scheme = "https" if _tls_enabled() else "http"
     return f"{scheme}://127.0.0.1:{SERVER_PORT}/api/health"
 
+# HTML templates for the web UI.
 template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
 
@@ -227,14 +261,18 @@ templates = Jinja2Templates(directory=template_path)
 # after hub/spoke updates fire, so transient "service offline" errors that
 # occur during restarts don't flood GitHub with spurious issues.
 # ---------------------------------------------------------------------------
+# Lock and end time (epoch seconds) of the post-update cooldown.
 _UPDATE_COOLDOWN_LOCK = threading.Lock()
 _update_cooldown_until: float = 0.0
 
 
 def _set_update_cooldown(config):
+    """Start the post-update cooldown (POST_UPDATE_COOLDOWN_MINUTES, default 10)."""
+    # Work out when the cooldown ends.
     global _update_cooldown_until
     minutes = float(config.get("POST_UPDATE_COOLDOWN_MINUTES") or 10)
     deadline = time.time() + minutes * 60
+    # Store it under the lock, then log it.
     with _UPDATE_COOLDOWN_LOCK:
         _update_cooldown_until = deadline
     logger.info(
@@ -245,6 +283,7 @@ def _set_update_cooldown(config):
 
 def _in_update_cooldown():
     """Return (in_cooldown: bool, remaining_seconds: float)."""
+    # Read the remaining time under the lock.
     with _UPDATE_COOLDOWN_LOCK:
         remaining = _update_cooldown_until - time.time()
     if remaining > 0:
@@ -264,26 +303,34 @@ import auth as _auth  # noqa: E402 — after logger/app so its logging is config
 #:  /api/health is load-bearing: ab-watchdog polls it at 127.0.0.1 to verify
 #:  a restart succeeded, and restart_worker does the same. Gate it and every
 #:  restart looks like a failed start, which triggers the watchdog's ROLLBACK.
+# Exact paths that need no login.
 _AUTH_EXEMPT_EXACT = {"/api/health", "/login", "/logout", "/setup-admin",
                       "/auth/oidc/enabled", "/auth/oidc/login", "/auth/oidc/callback",
                       "/favicon.ico", "/apple-touch-icon.png",
                       "/apple-touch-icon-precomposed.png"}
+# Path prefixes that need no login (static files and the /v1 proxy, which has its own auth).
 _AUTH_EXEMPT_PREFIX = ("/static/", "/assets/", "/v1/")
 
 
 def _auth_exempt(path: str) -> bool:
+    """True when the path can be reached without logging in."""
     return path in _AUTH_EXEMPT_EXACT or path.startswith(_AUTH_EXEMPT_PREFIX)
 
 
 def _wants_json(request: Request) -> bool:
     """API callers get 401 JSON; browsers get a redirect to the login page."""
+    # Anything under /api/ is an API call.
     if request.url.path.startswith("/api/"):
         return True
+    # Otherwise go by the Accept header.
     return "application/json" in (request.headers.get("accept") or "")
 
 
+# Registered as HTTP middleware: runs for every request.
 @app.middleware("http")
 async def require_login(request: Request, call_next):
+    """Require a logged-in user for every non-exempt path."""
+    # Exempt paths go straight through.
     path = request.url.path
     if _auth_exempt(path):
         return await call_next(request)
@@ -295,20 +342,26 @@ async def require_login(request: Request, call_next):
                                 content={"error": "setup_required",
                                          "message": "No accounts exist. Open /setup-admin."})
         return RedirectResponse("/setup-admin", status_code=303)
+    # Check the session cookie.
     user = _auth.verify_session(request.cookies.get(_auth.SESSION_COOKIE) or "")
+    # Not logged in: API gets a 401, browsers go to login and come back afterwards.
     if not user:
         if _wants_json(request):
             return JSONResponse(status_code=401,
                                 content={"error": "unauthenticated", "message": "Log in first."})
         nxt = request.url.path + (("?" + request.url.query) if request.url.query else "")
         return RedirectResponse(f"/login?next={_urlquote(nxt, safe='')}", status_code=303)
+    # Logged in: make the user available to handlers and continue.
     request.state.user = user
     return await call_next(request)
 
 
+# Registered as HTTP middleware: logs each request at debug level.
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    """Log each request and its response status; log failures except malformed bodies."""
     logger.debug(f"Incoming request: {request.method} {request.url}")
+    # Pass the request on and log the response status.
     try:
         response = await call_next(request)
         logger.debug(f"Response status: {response.status_code} for {request.url}")
@@ -325,13 +378,16 @@ async def log_requests(request: Request, call_next):
             logger.exception(f"Request failed: {e}")
         raise e
 
+# Exception types that mean the client sent a broken body (built below if available).
 _MALFORMED_BODY_EXC = tuple()
+# Broken multipart bodies.
 try:
     from starlette.formparsers import MultiPartException
     _MALFORMED_BODY_EXC += (MultiPartException,)
 except Exception:  # noqa: BLE001
     pass
 
+# Clients that hung up mid-request.
 try:
     from starlette.requests import ClientDisconnect
     _MALFORMED_BODY_EXC += (ClientDisconnect,)
@@ -356,12 +412,15 @@ def _is_malformed_request_body(exc):
     Returns:
         bool: True if the request body was malformed, False otherwise.
     """
+    # Known exception types answer immediately.
     if _MALFORMED_BODY_EXC and isinstance(exc, _MALFORMED_BODY_EXC):
         return True
 
+    # No exception: not malformed.
     if exc is None:
         return False
 
+    # Otherwise look for known phrases in the message.
     msg = str(exc).lower()
     substrings = [
         "did not find cr at end of boundary",
@@ -374,8 +433,10 @@ def _is_malformed_request_body(exc):
     return any(sub in msg for sub in substrings)
 
 
+# Registered as HTTP middleware: catches anything the handlers did not.
 @app.middleware("http")
 async def catch_exceptions_mid(request: Request, call_next):
+    """Turn uncaught exceptions into JSON errors: 400 for bad bodies, 500 otherwise."""
     try:
         return await call_next(request)
     except Exception as e:
@@ -390,6 +451,7 @@ async def catch_exceptions_mid(request: Request, call_next):
                 status_code=400,
                 content={"message": "Malformed request body.", "error": str(e)}
             )
+        # Real server fault: log the full traceback and return 500.
         tb = traceback.format_exc()
         logger.error(f"UNCAUGHT EXCEPTION: {e}\n{tb}")
         return JSONResponse(
@@ -398,17 +460,20 @@ async def catch_exceptions_mid(request: Request, call_next):
         )
 
 
+# Classifies request paths that only scanners ask for.
 from probe_signatures import looks_like_probe  # noqa: E402 — edge scanner classifier
 
 
 def _probe_client_ip(request: Request) -> str:
     """Best-effort real client IP for a scanner report. If a front proxy stamped
     X-Forwarded-For, the leftmost entry is the origin; else the direct peer."""
+    # Use the first X-Forwarded-For entry if a proxy set one.
     xff = request.headers.get("x-forwarded-for", "")
     if xff:
         first = xff.split(",")[0].strip()
         if first:
             return first
+    # Otherwise use the direct peer address.
     return (request.client.host if request.client else "") or ""
 
 
@@ -421,6 +486,7 @@ def _probe_detection_enabled() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+# Registered as HTTP middleware (last, so it runs first).
 @app.middleware("http")
 async def detect_https_probe(request: Request, call_next):
     # HTTPS-port scanner detection at the AppBuilder edge. A request for a path we
@@ -431,6 +497,7 @@ async def detect_https_probe(request: Request, call_next):
     # middleware (runs BEFORE require_login) — a scanner is caught pre-auth and
     # never sees a login redirect. Shares the hub's scanner signatures
     # (probe_signatures.looks_like_probe), so real in-app routes never trip it.
+    """Report scanner requests to the hub and answer them with a bare 404."""
     if _probe_detection_enabled() and looks_like_probe(request.url.path):
         try:
             from workers import _get_hub_agent_client
@@ -453,6 +520,7 @@ from app_state import *  # noqa: E402,F401,F403
 # can detect stale-running code and the Diagnostics panel can show running vs disk versions.
 write_startup_stamp()
 
+# Upgrade the stored LLM config to the current schema, saving it if it changed.
 try:
     import llm_migrate
     _cfg, _migrated = llm_migrate.migrate(load_config())
@@ -473,6 +541,7 @@ try:
 except Exception as me:
     logger.warning(f"LLM config migration skipped (non-fatal): {me}")
 
+# Check the LLM config at startup; problems are logged, not fatal.
 try:
     validate_llm_config_on_startup()
 except Exception as ve:
@@ -665,20 +734,25 @@ app.include_router(_llm_proxy_router)
 # The loser is NOT killed: it still serves whatever it can and, more importantly,
 # exiting here would fight systemd's Restart=always and produce a restart loop.
 # It just stays silent instead of doubling the work.
+# Lock file that only one ab process may hold while running the scan workers.
 _WORKER_LOCK_PATH = os.path.join(CONFIG_DIR, "ab.workers.lock")
 _worker_lock_fh = None   # module-global: holds the flock for the process lifetime
 
 
 def _acquire_worker_singleton():
     """True if this process may run the scan workers (i.e. it won the flock)."""
+    # Imported lazily; only needed here.
     global _worker_lock_fh
     try:
         import fcntl
+        # Open (or create) the lock file.
         os.makedirs(CONFIG_DIR, exist_ok=True)
         fh = open(_WORKER_LOCK_PATH, "a+")
+        # Try to take the lock without waiting.
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (OSError, IOError):
+            # Someone else holds it: read their PID for the log message and give up.
             try:
                 fh.seek(0)
                 holder = (fh.read() or "").strip() or "unknown"
@@ -690,6 +764,7 @@ def _acquire_worker_singleton():
                 "%s. Running two sets would double every scan, LLM call and GitHub request. "
                 "This process will serve requests only.", holder, _WORKER_LOCK_PATH)
             return False
+        # Got the lock: record our PID in the file.
         fh.seek(0)
         fh.truncate()
         fh.write(str(os.getpid()))
@@ -704,7 +779,9 @@ def _acquire_worker_singleton():
         return True
 
 
+# Only the lock holder starts the background workers.
 if _acquire_worker_singleton():
+    # Start each background worker as a daemon thread.
     threading.Thread(target=connectivity_worker, daemon=True).start()
     threading.Thread(target=heartbeat_worker, daemon=True).start()
     threading.Thread(target=poller_worker, daemon=True).start()
@@ -732,15 +809,19 @@ def _access_log_filter(record):
     """Drop routine uvicorn access lines. Successful UI polling and 404
     internet-scanner probes (/.env, /wp-json, ...) were about half of ab.log;
     other 4xx (auth failures) and 5xx are kept."""
+    # The status code is the last log argument; if it cannot be read, keep the line.
     try:
         status = int(record.args[-1])
     except Exception:
         return True
+    # Keep errors except 404s.
     return status >= 400 and status != 404
 
 
 if __name__ == "__main__":
+    # Imported only when serving.
     import uvicorn
+    # Hide routine access-log lines.
     logging.getLogger("uvicorn.access").addFilter(_access_log_filter)
     # Promote the deployed LE/mTLS cert to the WebUI cert if the WebUI is still
     # self-signed (before uvicorn reads SSL_CERT/SSL_KEY).
@@ -748,10 +829,12 @@ if __name__ == "__main__":
         _sync_webui_cert_from_mtls()
     except Exception as _e:  # noqa: BLE001
         logger.warning("WebUI cert sync skipped: %s", _e)
+    # Serve HTTPS when a cert is present ...
     if _tls_enabled():
         logger.info("Serving AppBuilder UI on https://%s:%s (TLS)", SERVER_HOST, SERVER_PORT)
         uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT,
                     ssl_certfile=SSL_CERT, ssl_keyfile=SSL_KEY)
+    # ... otherwise plain HTTP on the same port.
     else:
         logger.warning("No TLS cert at %s / %s — serving PLAIN HTTP on :%s "
                        "(re-run install.sh to generate a self-signed cert).",
