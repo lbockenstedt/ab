@@ -17,6 +17,7 @@ those siblings are imported after workers, workers references them lazily as
 ``main.<fn>`` (resolved at call time). ``state`` is imported directly because
 app_state is re-exported into main before workers.
 """
+# Standard and third-party modules for git, JSON, files, HTTP, processes, threads and time.
 import git
 import json
 import os
@@ -26,12 +27,15 @@ import subprocess
 import sys
 import threading
 import time
+# Thread pool, timestamps, .env loading and the GitHub API.
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from dotenv import load_dotenv
 from github import Github, GithubException
 
+# main itself, for sibling functions that are only available after this module loads.
 import main  # lazy access to sibling functions imported after workers (main.scan_hub_logs, ...)
+# Shared config, state, provider helpers and logging re-exported by main.
 from main import (
     ANTHROPIC_API_VERSION,
     ANTHROPIC_BASE_URL,
@@ -72,13 +76,16 @@ def _ollama_model_present(resp, model):
     model is missing. So a plain server ping falsely reports the provider healthy.
     This narrows the check to the configured model. Lenient (True) when the body
     can't be parsed, so a transient/odd response never false-flags the provider."""
+    # No model configured: nothing more to check.
     want = (model or "").strip()
     if not want:
         return True
+    # Read the model names from the response.
     try:
         names = [(m.get("name") or "") for m in (resp.json().get("models") or [])]
     except Exception:
         return True  # unparseable — don't mark offline on a parse hiccup
+    # Accept an exact match or the same name with ":latest".
     base_want = want.split(":")[0]
     for nm in names:
         if nm == want or nm == f"{want}:latest":
@@ -86,11 +93,13 @@ def _ollama_model_present(resp, model):
         # Tolerate the implicit :latest tag: a bare "llama3" matches pulled "llama3:latest".
         if ":" not in want and nm.split(":")[0] == base_want:
             return True
+    # Model not pulled.
     return None
 
 
 def _check_provider_online(n, config):
     """Ping legacy provider slot n and return True if reachable."""
+    # Look up the slot's provider settings and probe them.
     provider, api_key, model, base_url = _get_provider_config(n, config)
     return _probe_endpoint_online(provider, api_key, model, base_url, label=f"Provider {n}")
 
@@ -104,6 +113,7 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
     endpoints the capability/cost picker actually routes over (llm_entries) —
     not the retired 8 fixed provider slots.
     """
+    # Normalise the provider name (default openai).
     p = (provider or "openai").lower().strip()
     # claude_cli authenticates via Claude Code session — just check the binary exists.
     if p == "claude_cli":
@@ -158,6 +168,7 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
     if p.startswith("copilot"):
         # Copilot: the stored api_key is a GitHub OAuth token; it must be exchanged
         # for a short-lived Copilot API token, and the models call needs editor headers.
+        # No token: cannot check.
         if not api_key:
             return None
         try:
@@ -171,8 +182,10 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
         except Exception as e:  # noqa: BLE001
             logger.debug(f"{label} (copilot) connectivity check error: {e}")
             return None
+    # Every other provider needs both a key and a model.
     if not api_key or not model:
         return None
+    # Call the provider's model-list endpoint with its own auth style.
     try:
         if p == "anthropic":
             base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
@@ -206,13 +219,16 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
             url = f"{base}/models"
             headers = {"Authorization": f"Bearer {api_key}"}
             resp = requests.get(url, headers=headers, timeout=10)
+        # 401 (bad key) and 429 (rate-limited) are logged and reported as unknown.
         if resp.status_code == 401:
             logger.warning(f"{label} ({provider}) connectivity check: 401 — API key invalid or missing.")
             return None
         if resp.status_code == 429:
             logger.warning(f"{label} ({provider}) connectivity check: 429 — rate-limited (not tripping CB).")
             return None
+        # Any 2xx means online.
         return resp.status_code < 300
+    # Network errors: unknown.
     except Exception as e:
         logger.debug(f"{label} ({provider}) connectivity check error: {e}")
         return None
@@ -229,6 +245,7 @@ def _check_entries_online(config):
     real routable set instead. Each probe is wrapped so one unreachable endpoint
     can't abort the whole sweep. Deduplicated by (provider, base_url, model).
     """
+    # Load the endpoint helpers; without them there is nothing to list.
     try:
         from llm_client import _iter_configured_endpoints, _model_key, get_llm_perf_snapshot
     except Exception as e:  # noqa: BLE001
@@ -242,8 +259,10 @@ def _check_entries_online(config):
         perf = get_llm_perf_snapshot() or {}
     except Exception:  # noqa: BLE001
         perf = {}
+    # The model currently serving, so it counts as "used" even with no samples yet.
     active_model = (state.get("active_llm") or "").strip()
     active_provider = state.get("active_llm_provider")
+    # Probe each endpoint once, skipping duplicates.
     out, seen = [], set()
     for entry_id, provider, api_key, model, base_url, rpm in _iter_configured_endpoints(config):
         key = ((provider or "").lower().strip(), (base_url or "").strip(), (model or "").strip())
@@ -251,18 +270,22 @@ def _check_entries_online(config):
             continue
         seen.add(key)
         label = f"{provider}:{model}" if model else (provider or "endpoint")
+        # A failing probe counts as offline rather than stopping the sweep.
         try:
             online = _probe_endpoint_online(provider, api_key, model, base_url, label=label)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"_check_entries_online probe failed for {label}: {e}")
             online = None
+        # How many calls this endpoint has served.
         try:
             runs = int((perf.get(_model_key(provider, base_url, model)) or {}).get("n") or 0)
         except Exception:  # noqa: BLE001
             runs = 0
+        # Is this the model serving right now?
         is_active = bool(active_model) and (model or "").strip() == active_model and (
             active_provider is None
             or (provider or "").lower().strip() == (active_provider or "").lower().strip())
+        # Add the endpoint's status to the list.
         out.append({"id": entry_id, "provider": provider, "model": model,
                     "base_url": base_url, "online": bool(online),
                     "used": bool(runs > 0 or is_active), "runs": runs})
@@ -283,6 +306,7 @@ def refresh_llm_endpoints_async():
     successful save into an error.
     """
     def _run():
+        """Probe all endpoints and store the result in state."""
         try:
             config = load_config()
             endpoints = _check_entries_online(config)
@@ -291,11 +315,13 @@ def refresh_llm_endpoints_async():
         except Exception as e:  # noqa: BLE001
             logger.debug(f"refresh_llm_endpoints_async failed: {e}")
 
+    # Run the probe in the background so the save is not delayed.
     threading.Thread(target=_run, daemon=True).start()
 
 
 def connectivity_worker():
     """Periodic check to verify all configured LLM providers are reachable."""
+    # Every 15 minutes, probe the legacy slots and every endpoint and store the results.
     while True:
         try:
             config = load_config()
@@ -321,14 +347,17 @@ def connectivity_worker():
 
 
 def heartbeat_worker():
+    """Every 5 seconds, record which providers are configured and which model is active."""
     while True:
         try:
+            # Read the four legacy slot settings.
             config = load_config()
             p1_provider, p1_key, p1_model, _ = _get_provider_config(1, config)
             p2_provider, p2_key, p2_model, _ = _get_provider_config(2, config)
             p3_provider, p3_key, p3_model, _ = _get_provider_config(3, config)
             p4_provider, p4_key, p4_model, _ = _get_provider_config(4, config)
 
+            # Note which slots are fully configured.
             p1_configured = _provider_configured(p1_provider, p1_key, p1_model)
             p2_configured = _provider_configured(p2_provider, p2_key, p2_model)
             p3_configured = _provider_configured(p3_provider, p3_key, p3_model)
@@ -341,6 +370,7 @@ def heartbeat_worker():
             state["llm_circuit_breaker"] = _llm_cb_snapshot()
             state["provider_credit_cb"] = _provider_credit_cb_snapshot()
 
+            # The active model is slot 1, else slot 2, else the first configured entry.
             if p1_configured:
                 state["active_llm"] = p1_model
             elif p2_configured:
@@ -393,11 +423,13 @@ def _trigger_spoke_updates(config):
     (the "Hub Update" action) can surface the outcome. Post-fix callers may ignore
     the return value.
     """
+    # No hub agent: just start the cooldown and report.
     client = _get_hub_agent_client()
     if not client:
         logger.debug("_trigger_spoke_updates: Hub agent not configured/approved, skipping")
         _set_update_cooldown(config)
         return "Hub agent not connected — update not triggered"
+    # Ask the hub to update itself, its spokes and its agents.
     result = client.request_sync("TRIGGER_ALL_UPDATES", {}, timeout=60)
     if not isinstance(result, dict):
         logger.warning("Hub agent not approved/connected — skipping update trigger")
@@ -415,6 +447,7 @@ def _trigger_spoke_updates(config):
         # Do NOT start the restart cooldown — nothing is restarting, and
         # suppressing issue filing would hide real errors.
         return f"Hub update NOT triggered: {msg}"
+    # Summarise each part of the result and log it.
     hub = result.get("hub") or {}
     spokes = result.get("spokes") or {}
     agents = result.get("agents") or {}
@@ -430,8 +463,10 @@ def _trigger_spoke_updates(config):
 
 def _upd_summary(d):
     """Compact one-line summary of a Hub update-method result dict."""
+    # Not a dict: show it as-is.
     if not isinstance(d, dict):
         return str(d)
+    # Status message plus any triggered names.
     msg = d.get("message") or d.get("status") or ""
     trig = d.get("triggered") or []
     if isinstance(trig, list) and trig:
@@ -453,6 +488,7 @@ def _derive_ws_url(http_url):
     is gone. So derive ``wss://<host>:443/ws/spoke`` (hub_agent._normalize_hub_ws_url
     would fill the same defaults). TLS is unverified by default (self-signed hub).
     """
+    # Build the wss URL from the hub's host name; empty if it cannot be parsed.
     try:
         from urllib.parse import urlparse
         parsed = urlparse((http_url or "").strip())
@@ -466,6 +502,7 @@ def _derive_ws_url(http_url):
 
 def _hub_agent_on_status(status, message):
     """Callback: the agent client updated its connection/approval status."""
+    # Store the new status, message and time seen.
     state["hub_agent_status"] = status
     state["hub_agent_message"] = message or ""
     state["hub_agent_last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -481,6 +518,7 @@ def _hub_agent_on_connection(connected):
     """Callback: the LIVE hub socket came up (True) or dropped (False). Distinct
     from approval status — lets the header dot show green only while actually
     connected, so a flapping agent no longer reads as steady-green."""
+    # Store whether connected; note when it dropped.
     state["hub_agent_connected"] = bool(connected)
     if not connected:
         state["hub_agent_last_disconnect"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -488,6 +526,7 @@ def _hub_agent_on_connection(connected):
 
 def _persist_config_key(key, value):
     """Callback helper: upsert a single key into config.json (agent-managed secrets)."""
+    # Load, update and save the config; a failure is only a warning.
     try:
         cfg = load_config()
         cfg[key] = value
@@ -498,21 +537,25 @@ def _persist_config_key(key, value):
 
 def _hub_agent_on_secret(secret):
     """Callback: the Hub pushed a (possibly empty) session secret."""
+    # Save the secret to the config.
     _persist_config_key("HUB_AGENT_SECRET", secret or "")
 
 
 def _hub_agent_on_hub_secret(hub_secret):
     """Callback: the Hub pushed its (rotated) identity secret for mutual auth."""
+    # Save the hub secret to the config.
     _persist_config_key("HUB_SECRET", hub_secret or "")
 
 
 def _hub_agent_on_recovery_psk(psk):
     """Callback: the Hub pushed its durable recovery PSK (survives secret rotations)."""
+    # Save the recovery PSK to the config.
     _persist_config_key("HUB_RECOVERY_PSK", psk or "")
 
 
 def _get_hub_agent_client():
     """Return the running Hub agent singleton, or None if not started."""
+    # Return the client if hub_agent can be imported.
     try:
         import hub_agent
         return hub_agent.hub_agent_client
@@ -528,6 +571,7 @@ def _start_hub_agent():
     state reports "not_registered" — AppBuilder runs fine without Hub integration.
     """
     try:
+        # Use HUB_WS_URL, else derive it from HUB_QUERY_URL.
         import hub_agent
         cfg = load_config()
         ws_url = (cfg.get("HUB_WS_URL") or "").strip()
@@ -535,6 +579,7 @@ def _start_hub_agent():
             hq = (cfg.get("HUB_QUERY_URL") or "").strip()
             if hq and "your-netbox" not in hq:
                 ws_url = _derive_ws_url(hq)
+        # No URL: run without the hub.
         if not ws_url:
             state["hub_agent_status"] = "not_registered"
             state["hub_agent_message"] = "HUB_WS_URL not configured"
@@ -550,6 +595,7 @@ def _start_hub_agent():
             on_connection=_hub_agent_on_connection,
             on_recovery_psk=_hub_agent_on_recovery_psk,
         )
+    # Start-up failure: record it in state and carry on.
     except Exception as e:
         logger.warning(f"Could not start Hub agent: {e}")
         state["hub_agent_status"] = "error"
@@ -569,10 +615,12 @@ def _wait_for_spokes_online(config, min_count=1, timeout=90):
     unit restarts (~10–20 s). Returns the list of connected spoke IDs, or an
     empty list on timeout.
     """
+    # Need either the hub URL or an agent client.
     hub_url = (config.get("HUB_QUERY_URL") or "").rstrip("/")
     client = _get_hub_agent_client()
     if not hub_url and not client:
         return []
+    # Check every 5 seconds until the deadline.
     deadline = time.time() + timeout
     logger.info(f"Waiting for ≥{min_count} spoke(s) to reconnect (timeout {timeout}s)…")
     while time.time() < deadline:
@@ -590,10 +638,12 @@ def _wait_for_spokes_online(config, min_count=1, timeout=90):
                     conns = r.json().get("active_connections", [])
             except Exception:
                 conns = None
+        # Enough spokes: return them.
         if isinstance(conns, list) and len(conns) >= min_count:
             logger.info(f"Spokes online: {conns}")
             return conns
         time.sleep(5)
+    # Timed out.
     logger.warning(f"Timed out after {timeout}s waiting for spokes to come back online")
     return []
 
@@ -604,6 +654,7 @@ def _wait_for_spokes_online(config, min_count=1, timeout=90):
 def check_for_updates():
     """Checks GitHub for new versions, performs pre-flight syntax checks, and signals a restart if safe."""
     try:
+        # Remember the current commit as the last known good one.
         self_repo = git.Repo(os.getcwd())
         old_commit = self_repo.head.commit.hexsha
 
@@ -647,12 +698,15 @@ def check_for_updates():
                 self_repo.remotes.origin.pull()
         else:
             self_repo.remotes.origin.pull()
+        # Note the commit we ended up on.
         new_commit = self_repo.head.commit.hexsha
 
+        # New code: check it before restarting.
         if old_commit != new_commit:
             cur_version = get_version()
             logger.info(f"New version detected ({cur_version})! {old_commit[:7]} -> {new_commit[:7]}. Validating...")
 
+            # Compile every .py file; stop at the first syntax error.
             syntax_error = False
             for root, _, files in os.walk(os.getcwd()):
                 for file in files:
@@ -666,6 +720,7 @@ def check_for_updates():
                             break
                 if syntax_error: break
 
+            # Syntax error: roll back and blocklist the commit.
             if syntax_error:
                 logger.error(f"Syntax check failed for commit {new_commit[:7]}. Rolling back to {old_commit[:7]}...")
                 self_repo.git.reset("--hard", old_commit)
@@ -696,6 +751,7 @@ def check_for_updates():
                     self_repo.git.reset("--hard", old_commit)
                     return None, f"Update failed: dependency install failed ({pip_msg}). Rolled back to {old_commit[:7]}."
 
+            # Write the update_pending marker with the new commit.
             try:
                 with open(os.path.join(CONFIG_DIR, "update_pending"), "w") as f:
                     f.write(new_commit)
@@ -710,7 +766,9 @@ def check_for_updates():
             logger.info("Restart scheduled — restart_worker will apply it shortly.")
             return True, f"Update found: {cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
 
+        # Already up to date.
         return None, "No updates available."
+    # Any other failure: report it.
     except Exception as e:
         logger.warning(f"Self-update check failed: {e}")
         return None, f"Update check failed: {e}"
@@ -720,6 +778,7 @@ def _requirements_changed(self_repo, old_commit, new_commit):
     on any git error assume it DID change, so a dependency sync is attempted
     rather than silently skipped)."""
     try:
+        # List the changed files and look for requirements.txt.
         changed = self_repo.git.diff("--name-only", old_commit, new_commit)
         return any(line.strip().endswith("requirements.txt")
                    for line in (changed or "").splitlines())
@@ -736,10 +795,12 @@ def _sync_dependencies(timeout=600):
     unit runs with a minimal PATH that excludes the venv's bin dir).
     Returns (ok, message).
     """
+    # No requirements file: nothing to install.
     req = os.path.join(os.getcwd(), "requirements.txt")
     if not os.path.isfile(req):
         return True, "no requirements.txt"
     logger.info("Self-update: requirements.txt changed — syncing dependencies...")
+    # Run pip with this interpreter; timeouts and launch errors are failures.
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-r", req, "-q"],
@@ -749,6 +810,7 @@ def _sync_dependencies(timeout=600):
         return False, "pip install timed out"
     except Exception as e:  # noqa: BLE001
         return False, f"pip install could not run: {e}"
+    # pip failed: return its last few output lines.
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return False, "; ".join(detail[-3:]) or f"pip exited {proc.returncode}"
@@ -756,6 +818,7 @@ def _sync_dependencies(timeout=600):
     return True, "ok"
 
 
+# How often the updater checks for new code.
 UPDATER_INTERVAL_SECONDS = 300  # 5 minutes — was 3600 (hourly), which let the
                                  # fleet drift stale on `main` for up to an hour
                                  # after a merge before anyone noticed.
@@ -763,6 +826,7 @@ UPDATER_INTERVAL_SECONDS = 300  # 5 minutes — was 3600 (hourly), which let the
 # Repo labels only feed the Settings label picker, so re-listing them (one
 # GitHub call per repo) every poll cycle is wasted API quota.
 LABEL_DISCOVERY_TTL_S = 6 * 3600
+# Cached repo labels and when they were fetched.
 _label_cache = {"at": 0.0, "repos": None}
 
 def updater_worker():
@@ -773,6 +837,7 @@ def updater_worker():
     an uncaught exception here would otherwise silently stop checks forever
     with no external signal.
     """
+    # Check for updates forever, logging the outcome of each check.
     while True:
         try:
             logger.info("Checking for self-updates...")
@@ -780,6 +845,7 @@ def updater_worker():
             _log_restart_event("auto_update", msg, ok=bool(updated))
         except Exception as e:
             logger.error(f"Updater worker error: {e}")
+        # Always record the check time so the watchdog can see the thread is alive.
         finally:
             try:
                 update_state = load_update_state()
@@ -791,6 +857,7 @@ def updater_worker():
 
 def _log_restart_event(kind, message, ok=True):
     """Append a bounded entry to state["restart_log"] for the Diagnostics panel."""
+    # Build the log entry and append it to the restart log.
     try:
         entry = {"at": datetime.now().isoformat(), "kind": kind,
                  "result": "ok" if ok else "failed", "message": str(message)[:200]}
@@ -802,6 +869,7 @@ def _log_restart_event(kind, message, ok=True):
     except Exception:
         pass
 
+# File the watchdog reads to restart the service for us.
 RESTART_REQUEST_FILE = os.path.join(CONFIG_DIR, "restart_request")
 
 
@@ -809,6 +877,7 @@ def _watchdog_active():
     """True if ab-watchdog.service is active (so a delegated restart request
     will actually be consumed). None/False on error → caller falls back to a
     hard exit. Mirrors ollama_setup._watchdog_active."""
+    # Ask systemd whether the watchdog is running.
     import subprocess as _sp
     try:
         r = _sp.run(["systemctl", "is-active", "--quiet", "ab-watchdog"], timeout=5)
@@ -823,8 +892,10 @@ def _request_watchdog_restart():
     an ACTIVE watchdog; False otherwise (caller hard-exits instead). Mirrors the
     ollama-setup delegation — ab.service is cap-locked and can't restart
     itself, but the watchdog can."""
+    # A stopped watchdog would never see the request.
     if _watchdog_active() is False:
         return None
+    # Write the request file.
     try:
         with open(RESTART_REQUEST_FILE, "w") as f:
             json.dump({"requested_at": time.time()}, f)
@@ -848,6 +919,7 @@ def _spawn_restart():
     If the watchdog isn't active to pick it up, hard-exit so systemd Restart=always
     revives us regardless (the manual Restart button can never silently no-op)."""
     import subprocess as _sp
+    # Root: restart the service directly, hard-exiting if that fails.
     if os.geteuid() == 0:
         try:
             _sp.Popen(["systemctl", "restart", "ab"], start_new_session=True,
@@ -871,6 +943,7 @@ def _exit_for_systemd_restart():
     Restart=always / RestartSec=10, so systemd revives the process — no sudo, no
     cgroup race. Used when the detached restart path fails so the manual Restart
     button (and cert-install restarts) can never silently no-op."""
+    # Flush every log handler, ignoring errors, then exit.
     try:
         import logging as _l
         for _h in _l.getLogger().handlers:
@@ -892,13 +965,16 @@ def restart_worker():
     post-restart and retries the spawn once. The authoritative post-restart verification
     is the watchdog's restart-then-verify flow; this worker is the fast path and the
     on-disk update_pending file is the durable backstop."""
+    # Wait time, health-check limits and the local health URL.
     GRACE_SECONDS = 15
     VERIFY_TIMEOUT = 60
     VERIFY_INTERVAL = 3
     HEALTH_URL = _local_health_url()
+    # Check every 2 seconds for a pending restart.
     while True:
         try:
             if state.get("restart_pending"):
+                # Clear the flag, wait the grace period, then restart.
                 state["restart_pending"] = False
                 logger.info(f"restart_worker: applying restart (grace window {GRACE_SECONDS}s).")
                 time.sleep(GRACE_SECONDS)
@@ -906,6 +982,7 @@ def restart_worker():
                 _log_restart_event("restart", "restart spawned", ok=True)
                 # The current process will receive SIGTERM from systemd within ~1s. If by
                 # some reason we are still alive after VERIFY_TIMEOUT, retry the spawn once.
+                # Poll the health URL until it answers ok or the time runs out.
                 t0 = time.time()
                 healthy = False
                 while time.time() - t0 < VERIFY_TIMEOUT:
@@ -917,12 +994,14 @@ def restart_worker():
                     except Exception:
                         pass
                     time.sleep(VERIFY_INTERVAL)
+                # Still not healthy: log it and try once more.
                 if not healthy:
                     logger.error("restart_worker: post-restart health not observed; retrying spawn.")
                     _log_restart_event("restart", "post-restart health failed; retrying", ok=False)
                     _spawn_restart()
             else:
                 time.sleep(2)
+        # Errors: log and wait before checking again.
         except Exception as e:
             logger.error(f"restart_worker error: {e}")
             time.sleep(5)
@@ -948,16 +1027,19 @@ def restart_worker():
 def scan_repo_issues(gh_current, config, processed):
     """Phase: Scan monitored repos for issues and attempt fixes concurrently."""
     global state
+    # Our bot account, the repos to scan and the fix concurrency limit.
     bot_user = gh_current.get_user().login
 
     monitored_repos = main.get_monitored_repos(config)
     max_workers = int(config.get("MAX_CONCURRENT_FIXES", 5))
 
+    # Scan each monitored repo in turn.
     try:
         for repo_name in monitored_repos:
             update_task_state(task_id="RepoScan", task_name=f"Checking {repo_name}", action="start")
             logger.info(f"Scanning repository: {repo_name}")
             try:
+                # Fetch the open issues with the monitored labels ("NONE" skips, "ANY" means all).
                 repo_obj = gh_current.get_repo(repo_name)
                 is_owner = repo_obj.owner.login == bot_user
                 labels = config.get("monitored_labels", ["automated-fix"])
@@ -968,9 +1050,11 @@ def scan_repo_issues(gh_current, config, processed):
                 else:
                     issues = repo_obj.get_issues(labels=labels, state="open")
 
+                # Is the scheduler window open, and which label marks critical issues?
                 sched = _schedule_check(config)
                 critical_label = (config.get("SCHEDULER_CRITICAL_LABEL") or "").strip()
 
+                # Sort the issues into critical, bug and normal lists.
                 to_fix = []           # log-detected / generic automated-fix issues
                 critical_to_fix = []  # SCHEDULER_CRITICAL_LABEL — always run, first, uncapped
                 bug_to_fix = []       # bug-label (human-filed Bug) — run before log-detected
@@ -978,8 +1062,10 @@ def scan_repo_issues(gh_current, config, processed):
                                       # the next allowed slot). Subject to the per-cycle cap,
                                       # but takes cap slots ahead of log-detected.
                 bug_label = (config.get("SCHEDULER_BUG_LABEL") or "bug").strip()
+                # Triage each open issue; one bad issue must not stop the rest.
                 for issue in issues:
                     try:
+                        # Skip closed issues and pull requests.
                         if issue.state != 'open' or issue.pull_request:
                             continue
 
@@ -998,6 +1084,7 @@ def scan_repo_issues(gh_current, config, processed):
                         if "<!-- report-type: feature -->" in (issue.body or ""):
                             continue
 
+                        # Skip issues already finished (awaiting_review may resume).
                         issue_id = f"{repo_name}:{issue.number}"
                         if issue_id in processed:
                             status = processed[issue_id].get("status")
@@ -1026,6 +1113,7 @@ def scan_repo_issues(gh_current, config, processed):
                             # stops churning on log-scraped issues. Critical + Bug
                             # (incl. LM bug reports) always fix.
                             to_fix.append((repo_name, issue.number))
+                    # Log triage errors and carry on.
                     except Exception as e:
                         logger.exception(f"Failed to triage issue {issue_id}: {e}")
 
@@ -1047,8 +1135,10 @@ def scan_repo_issues(gh_current, config, processed):
                         f"Bug-label override: processing {len(bug_to_fix)} bug(s) in {repo_name} "
                         f"regardless of schedule (bugs bypass the scheduler)."
                     )
+                # Critical first, then bugs, then normal issues.
                 all_to_fix = critical_to_fix + bug_to_fix + to_fix
 
+                # Fix them if any LLM provider is free.
                 if all_to_fix:
                     available, soonest_s = _any_provider_available(config)
                     if not available:
@@ -1059,6 +1149,7 @@ def scan_repo_issues(gh_current, config, processed):
                             f"Will retry on next scan cycle."
                         )
                     else:
+                        # Apply the per-cycle cap, logging how many were deferred.
                         max_per_cycle = int(config.get("MAX_ISSUES_PER_CYCLE") or 15)
                         # Bugs take the per-cycle cap ahead of log-detected (bugs first when
                         # capacity is limited). Critical is outside the cap entirely.
@@ -1074,12 +1165,14 @@ def scan_repo_issues(gh_current, config, processed):
                             )
                         else:
                             logger.info(f"Found {len(all_to_fix)} issues to process in {repo_name} (max workers={max_workers}).")
+                        # Fix the batch in parallel and wait for all of them.
                         batch = critical_to_fix + capped_bugs + capped_normal
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(main.process_single_issue, r, n) for r, n in batch]
                             for future in futures:
                                 future.result()
 
+            # 404: the repo is missing or we lack access; other errors are just logged.
             except GithubException as ge:
                 if ge.status == 404:
                     logger.error(
@@ -1092,6 +1185,7 @@ def scan_repo_issues(gh_current, config, processed):
                 logger.exception(f"Unexpected error while processing {repo_name}: {e}")
     except Exception as e:
         logger.exception(f"scan_repo_issues failed: {e}")
+    # Always mark the scan task as finished.
     finally:
         update_task_state(task_id="RepoScan", action="end")
 
@@ -1107,8 +1201,10 @@ def resolve_self_diagnosis_repo(config):
     instead of attempting to create issues against a hardcoded fallback that may
     not exist (which previously caused 404 errors every scan cycle).
     """
+    # Use the configured repo name first.
     self_repo_name = (config.get("self_diagnosis_repo") or "").strip()
 
+    # Else read it from this checkout's origin remote.
     if not self_repo_name:
         try:
             repo = git.Repo(os.getcwd())
@@ -1120,13 +1216,16 @@ def resolve_self_diagnosis_repo(config):
         except Exception as e:
             logger.debug(f"Could not determine self-repo name from git remote: {e}")
 
+    # No repo found.
     if not self_repo_name:
         return None
 
+    # Return it in owner/repo form.
     return main.clean_repo_name(self_repo_name)
 
 def _file_inode(path):
     """Returns the inode of a file, or None if it cannot be stat'd."""
+    # Stat the file.
     try:
         return os.stat(path).st_ino
     except Exception:
@@ -1134,6 +1233,7 @@ def _file_inode(path):
 
 def load_self_scan_offset():
     """Returns (offset, inode) of the last self-scan read position, or (None, None)."""
+    # Read the saved offset and inode; missing or bad file means none.
     try:
         with open(SELF_SCAN_OFFSET_FILE, "r") as f:
             data = json.load(f)
@@ -1143,6 +1243,7 @@ def load_self_scan_offset():
 
 def save_self_scan_offset(offset, inode):
     """Persists the last-read byte offset and inode for incremental self-scans."""
+    # Save atomically; failures only matter for the next scan.
     try:
         _atomic_write_json(SELF_SCAN_OFFSET_FILE, {"offset": offset, "inode": inode}, indent=None)
     except Exception as e:
@@ -1168,12 +1269,14 @@ def scan_self_logs(gh_current, config):
     than crashing or spamming the logs with 404 errors every cycle.
     """
     global state
+    # Mark the self-scan task as started.
     update_task_state(task_id="SelfScan", task_name="Scanning Self Logs", action="start")
     logger.info("Scanning internal AppBuilder logs for errors...")
 
     # Resolve and validate the target repository for self-diagnosis issues.
     self_repo_name = resolve_self_diagnosis_repo(config)
 
+    # No repo configured: warn and stop.
     if not self_repo_name:
         logger.warning(
             "Self-diagnosis repository is not configured. Set 'self_diagnosis_repo' in the "
@@ -1206,6 +1309,7 @@ def scan_self_logs(gh_current, config):
             )
         update_task_state(task_id="SelfScan", action="end")
         return
+    # Any other access error: log it and stop.
     except Exception as e:
         logger.error(
             f"Cannot access self-diagnosis repository '{self_repo_name}': {e}. "
@@ -1214,6 +1318,7 @@ def scan_self_logs(gh_current, config):
         update_task_state(task_id="SelfScan", action="end")
         return
 
+    # No log file yet: nothing to scan.
     log_path = get_log_path()
     if not os.path.exists(log_path):
         logger.warning(f"AppBuilder log file not found at {log_path}")
@@ -1232,6 +1337,7 @@ def scan_self_logs(gh_current, config):
         current_inode = _file_inode(log_path)
         last_offset, last_inode = load_self_scan_offset()
 
+        # Pick where to start reading this time.
         if last_inode is None or last_offset is None or last_inode != current_inode:
             # First ever scan, or the log was rotated/recreated: start at the
             # current end so we only capture errors logged from now on.
@@ -1242,6 +1348,7 @@ def scan_self_logs(gh_current, config):
         else:
             start_offset = last_offset
 
+        # Read everything new since that point.
         with open(log_path, "r") as f:
             f.seek(start_offset)
             new_text = f.read()
@@ -1274,6 +1381,7 @@ def scan_self_logs(gh_current, config):
             "Hub connection",
         )
 
+        # Keep only new ERROR/CRITICAL lines that are not on the skip list.
         formatted_logs = []
         for line in new_text.splitlines():
             # Match AppBuilder's actual log format ("<ts> - AppBuilder - ERROR - ...")
@@ -1292,12 +1400,14 @@ def scan_self_logs(gh_current, config):
                     "log": line.strip()
                 })
 
+        # Log how much was read and how many errors were found.
         logger.info(
             f"Self-scan read {len(new_text)} new byte(s) from offset {start_offset} "
             f"(file size {current_size}, inode {current_inode}); "
             f"{len(formatted_logs)} new error line(s) this cycle."
         )
 
+        # No new errors: done.
         if not formatted_logs:
             update_task_state(task_id="SelfScan", action="end")
             return
@@ -1310,11 +1420,13 @@ def scan_self_logs(gh_current, config):
             f"Self logs scrubbed: {len(formatted_logs)} -> {len(scrubbed_self_logs)} "
             f"unique error entries for LLM analysis."
         )
+        # Ask the LLM which errors need an issue; stop if none do.
         actionable_errors = main.analyze_logs_for_errors(scrubbed_self_logs)
         if not actionable_errors:
             update_task_state(task_id="SelfScan", action="end")
             return
 
+        # File an issue for each actionable error in the self-diagnosis repo.
         monitored_repos = main.get_monitored_repos(config)
         for error in actionable_errors:
             # Defensive: ensure error is a dict before mutation and access.
@@ -1325,6 +1437,7 @@ def scan_self_logs(gh_current, config):
             if not error.get('body') or not str(error.get('body')).strip():
                 logger.warning(f"Skipping self-diagnosis error with no body specified: {error.get('title')}")
                 continue
+            # File the issue; a 404 means the repo vanished or access was lost.
             try:
                 main.create_automated_issue(gh_current, monitored_repos, repo_obj, error)
                 logger.info(f"Handled self-diagnosis issue for AppBuilder: {error.get('title')}")
@@ -1340,15 +1453,19 @@ def scan_self_logs(gh_current, config):
             except Exception as e:
                 logger.error(f"Failed to create self-diagnosis issue: {e}")
 
+    # Log any scan failure.
     except Exception as e:
         logger.error(f"Error during self-log scan: {e}")
+    # Always mark the self-scan task as finished.
     finally:
         update_task_state(task_id="SelfScan", action="end")
 
 def _is_triage_only():
     """Return True when AppBuilder should analyse issues but not push any fix commits."""
+    # Blackout always means triage only.
     if state.get("blackout"):
         return True
+    # Otherwise follow the config setting.
     config = load_config()
     return bool(config.get("TRIAGE_ONLY_MODE"))
 
@@ -1366,6 +1483,7 @@ def _schedule_check(config):
       daily_cap    – int: effective cap right now (work-cap or full budget)
       daily_budget – int: total daily budget
     """
+    # Scheduler off: always allowed.
     if not config.get("SCHEDULER_ENABLED"):
         return {
             "allowed": True, "mode": "full", "reason": "Scheduler disabled",
@@ -1374,15 +1492,18 @@ def _schedule_check(config):
             "daily_cap": 0, "daily_budget": 0,
         }
 
+    # Is it a weekend, and does the weekend run at full rate?
     now = datetime.now()
     is_weekend = now.weekday() >= 5  # Saturday=5, Sunday=6
     weekend_full = config.get("SCHEDULER_WEEKEND_FULL", True)
 
+    # Work hours (not counted on full weekends).
     work_start = int(config.get("SCHEDULER_WORK_START_HOUR", 7))
     work_end   = int(config.get("SCHEDULER_WORK_END_HOUR", 18))
     # Work-hours restriction is lifted on weekends when weekend_full is on.
     is_work_hours = (work_start <= now.hour < work_end) and not (is_weekend and weekend_full)
 
+    # Daily budget and the smaller work-hours cap.
     daily_budget  = max(1, int(config.get("SCHEDULER_DAILY_BUDGET", 50) or 50))
     work_cap_pct  = max(1, min(100, int(config.get("SCHEDULER_WORK_CAP_PCT", 25) or 25)))
     work_cap      = max(1, int(daily_budget * work_cap_pct / 100))
@@ -1393,9 +1514,11 @@ def _schedule_check(config):
         state["daily_budget_date"] = today_str
         state["daily_fixes_count"] = 0
 
+    # Today's fix count and the cap that applies now.
     daily_used  = state.get("daily_fixes_count", 0)
     current_cap = work_cap if is_work_hours else daily_budget
 
+    # Daily budget used up: pause.
     if daily_used >= daily_budget:
         mode = "paused_budget"
         state["scheduler_mode"] = mode
@@ -1406,6 +1529,7 @@ def _schedule_check(config):
             "daily_used": daily_used, "daily_cap": current_cap, "daily_budget": daily_budget,
         }
 
+    # Work-hours cap used up: pause until after hours.
     if is_work_hours and daily_used >= work_cap:
         mode = "paused_work_cap"
         state["scheduler_mode"] = mode
@@ -1416,6 +1540,7 @@ def _schedule_check(config):
             "daily_used": daily_used, "daily_cap": current_cap, "daily_budget": daily_budget,
         }
 
+    # Otherwise allowed, restricted during work hours.
     mode = "restricted" if is_work_hours else "full"
     state["scheduler_mode"] = mode
     return {
@@ -1428,6 +1553,7 @@ def _schedule_check(config):
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
     global state
+    # Reload .env and config, mark the cycle as started and load processed issues.
     try:
         load_dotenv(override=True)
         config = load_config()
@@ -1436,9 +1562,11 @@ def run_scan_cycle():
         state["status"] = "Scanning"
         processed = load_processed()
 
+        # A GitHub token is required.
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
         if not token:
             raise Exception("Configuration Pending: Please enter your GitHub Token in Settings")
+        # Log in to GitHub; a 401 means the token is bad.
         gh_current = Github(token)
         try:
             logger.info("Attempting to authenticate with GitHub API...")
@@ -1454,10 +1582,12 @@ def run_scan_cycle():
             logger.exception(f"Unexpected error during GitHub authentication: {e}")
             raise e
 
+        # The repos to scan.
         monitored_repos = main.get_monitored_repos(config)
         if not monitored_repos:
             logger.warning("No monitored repositories configured. Skipping scan.")
 
+        # Re-discover repo labels when missing, stale or the repo list changed.
         if (not state.get("available_labels")
                 or _label_cache["repos"] != sorted(monitored_repos)
                 or time.time() - _label_cache["at"] >= LABEL_DISCOVERY_TTL_S):
@@ -1467,6 +1597,7 @@ def run_scan_cycle():
             logger.info(f"Discovered {len(state['available_labels'])} unique labels across monitored repos.")
             update_task_state(task_id="Discovery", action="end")
 
+        # Check whether fixes already shipped work in production.
         main.verify_production_fixes(gh_current, processed)
 
         # Self-log scan is ON by default (self-diagnosis: scan AppBuilder's own
@@ -1485,6 +1616,7 @@ def run_scan_cycle():
         except Exception as _se:  # noqa: BLE001
             logger.debug(f"skills load skipped: {_se}")
 
+        # Scan hub logs, repo issues, open PRs and feature requests in parallel.
         state["status"] = "Scanning"
         from pr_review import scan_open_prs  # PR pre-review — gated by pr_review_enabled (default off)
         from feature_drive import scan_feature_requests  # feature auto-drive — gated by feature_drive_enabled (default off)
@@ -1497,8 +1629,10 @@ def run_scan_cycle():
             ]
             for future in futures:
                 future.result()
+        # Cycle done.
         state["status"] = "Idle"
         state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Failure: log it, show it, and close any task still marked running.
     except Exception as e:
         logger.exception(f"Critical poller error: {e}")
         state["status"] = f"Error: {str(e)}"
@@ -1517,12 +1651,14 @@ def _startup_grace_remaining():
     """Seconds left in the post-boot grace window (0 once elapsed / disabled). During
     it, LLM-dependent work is deferred so ollama + services can finish coming up.
     Configurable via startup_grace_seconds (default 300); 0 disables."""
+    # Read the grace length (default 300s); 0 or less disables it.
     try:
         grace = int(load_config().get("startup_grace_seconds", 300))
     except (TypeError, ValueError):
         grace = 300
     if grace <= 0:
         return 0
+    # Time left since boot.
     remaining = grace - (time.time() - _BOOT_TIME)
     return int(remaining) if remaining > 0 else 0
 
@@ -1530,6 +1666,7 @@ def _startup_grace_remaining():
 def _ollama_answers(base, timeout=4):
     """True if the ollama server responds on /api/tags right now."""
     try:
+        # Any answer under 300 counts as up.
         return requests.get(f"{base}/api/tags", timeout=timeout).status_code < 300
     except Exception:  # noqa: BLE001 — not up yet
         return None
@@ -1541,16 +1678,20 @@ def preload_ollama_models(config):
     Loads the SAME set the ensemble uses (P1 local, min-size filtered) at the configured
     num_ctx. Best-effort. Needs OLLAMA_MAX_LOADED_MODELS>=N on the ollama server for all
     N to stay resident at once."""
+    # Imported here to avoid import cycles at load time.
     from llm_client import _get_provider_config, _is_ollama
     from ollama_setup import _ollama_models_detailed  # lives in ollama_setup, not llm_client
     import model_registry
+    # Only applies when slot 1 is an ollama provider.
     provider, _k, _m, url = _get_provider_config(1, config)
     if not _is_ollama(provider):
         return
+    # The models to preload; none means nothing to do.
     base = _ollama_base_url(provider, url).rstrip("/")
     names = model_registry.local_models_for_preload(_ollama_models_detailed(base), config)
     if not names:
         return
+    # Context size and keep-alive to load them with.
     try:
         num_ctx = int(config.get("ollama_num_ctx", 32768) or 32768)
     except (TypeError, ValueError):
@@ -1566,6 +1707,7 @@ def preload_ollama_models(config):
         load_timeout = max(60, int(config.get("ollama_preload_timeout_s", 3600) or 3600))
     except (TypeError, ValueError):
         load_timeout = 3600
+    # Load each model with one generate call, logging how long it took.
     logger.info(f"Preloading {len(names)} ensemble model(s) into ollama memory "
                 f"(load timeout {load_timeout}s each): {names}")
     for name in names:
@@ -1608,6 +1750,7 @@ def model_preload_worker():
                 break
             time.sleep(5)
     else:
+        # Not ollama: just wait out the grace.
         while _startup_grace_remaining():
             time.sleep(15)
     # No extra sleep here: this used to wait 5s after the grace expired, which
@@ -1632,8 +1775,10 @@ def model_preload_worker():
 
 
 def poller_worker():
+    """Run scan cycles forever, waiting for start-up grace and model preload first."""
     global state
     _gate_t0 = [None]   # first time we started waiting on model residency
+    # Each loop: wait out the grace, then the model gate, then scan and sleep.
     while True:
         cfg = load_config()
         _grace = _startup_grace_remaining()
@@ -1648,11 +1793,13 @@ def poller_worker():
         # work that needed them. Bounded so a preload that can never succeed does
         # not wedge the poller; on timeout we proceed and say so.
         if cfg.get("gate_scans_on_model_preload", True) and not state.get("models_preloaded"):
+            # How long to wait for preload at most.
             try:
                 _cap = max(60, int(cfg.get("model_gate_max_wait_s",
                                            cfg.get("ollama_preload_timeout_s", 3600)) or 3600))
             except (TypeError, ValueError):
                 _cap = 3600
+            # Start the clock on the first wait; keep waiting while under the cap.
             if _gate_t0[0] is None:
                 _gate_t0[0] = time.time()
             _waited = time.time() - _gate_t0[0]
@@ -1661,6 +1808,7 @@ def poller_worker():
                             "(%.0fs elapsed, cap %ds).", _waited, _cap)
                 time.sleep(10)
                 continue
+            # Waited too long: carry on anyway.
             logger.warning("Proceeding WITHOUT confirmed model residency after %.0fs (cap %ds) — "
                            "the first LLM call may pay a cold-load cost.", _waited, _cap)
             state["models_preloaded"] = True   # stop re-warning every cycle
@@ -1673,10 +1821,12 @@ def poller_worker():
             # scan cycle and from state["paused"]), so updates reliably reload the running
             # process even while busy or paused.
             sched = _schedule_check(cfg)
+            # Poll interval: the work-hours setting if set, else the normal one.
             if sched.get("is_work_hours") and cfg.get("SCHEDULER_WORK_POLL_INTERVAL"):
                 interval = int(cfg.get("SCHEDULER_WORK_POLL_INTERVAL") or 3600)
             else:
                 interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 3600))
+        # Paused: skip the scan.
         else:
             logger.debug("Poller worker is paused. Skipping scan cycle.")
             interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 3600))
@@ -1693,7 +1843,9 @@ def promote_scheduler_worker():
     next branch and never merges. AppBuilder's own pre-review then runs on that
     PR, which is the "run the changes through AB" step. See promote_ops for the
     decision logic and the shared dispatch."""
+    # Imported here because only this worker needs timezone-aware times.
     from datetime import datetime, timezone
+    # Each loop: reload config, open any due promotion PRs, then sleep.
     while True:
         try:
             cfg = load_config()
@@ -1701,6 +1853,7 @@ def promote_scheduler_worker():
             logger.error("promote scheduler: could not load config: %s", e)
             time.sleep(1800)
             continue
+        # How often to check, in minutes (at least 1).
         interval_min = max(1, int(cfg.get("promote_schedule_check_interval_min", 30) or 30))
         if cfg.get("promote_schedule_enabled"):
             try:
@@ -1720,6 +1873,7 @@ def _model_fetch_reason(e):
     resp = getattr(e, "response", None)
     if resp is not None and getattr(resp, "status_code", None):
         return f"HTTP {resp.status_code}"
+    # Otherwise classify by the error text.
     name = type(e).__name__
     s = str(e).lower()
     if "refused" in s:
@@ -1742,6 +1896,7 @@ def _fetch_models_for_provider(provider, api_key, base_url):
     models came back instead of a silent empty list. Every failure is logged
     at WARNING with the attempted URL and exception type.
     """
+    # Normalise the provider name (default openai).
     p = (provider or "openai").lower().strip()
     # claude_cli needs no API key — return the current Claude model roster.
     if p == "claude_cli":
@@ -1790,10 +1945,12 @@ def _fetch_models_for_provider(provider, api_key, base_url):
         # when present. Default base_url: ollama.com for the `ollama_cloud` slot,
         # localhost for every self-hosted slot (_ollama_base_url).
         base = _ollama_base_url(p, base_url).rstrip("/")
+        # Send the key as a bearer token if one is set.
         headers = {}
         if api_key:
             clean = api_key.strip().replace("Bearer ", "").strip()
             headers["Authorization"] = f"Bearer {clean}"
+        # List the pulled models, trimming bf16 names and using the family as details.
         attempted = f"{base}/api/tags"
         out = []
         error = ""
@@ -1812,11 +1969,14 @@ def _fetch_models_for_provider(provider, api_key, base_url):
             error = f"{attempted} — {_model_fetch_reason(e)}"
             logger.warning(f"Ollama model fetch failed: {error} [{type(e).__name__}]")
         return {"models": out, "error": error}
+    # Every other provider needs a key.
     if not api_key:
         return {"models": [], "error": ""}
+    # Results, any error, and the URL tried.
     models = []
     error = ""
     attempted = ""
+    # Call the provider's model-list endpoint and keep usable models.
     try:
         if p == "anthropic":
             base = (base_url or ANTHROPIC_BASE_URL).rstrip("/")
@@ -1881,6 +2041,7 @@ def _fetch_models_for_provider(provider, api_key, base_url):
                 mid = m.get("id", "")
                 if any(k in mid for k in ("gpt", "o1", "o3", "o4")):
                     models.append({"name": mid, "details": m.get("owned_by", "")})
+    # Failure: report the reason with the URL tried.
     except Exception as e:
         error = f"{attempted} — {_model_fetch_reason(e)}" if attempted else _model_fetch_reason(e)
         logger.warning(f"Model fetch failed for provider {p!r}: {error} [{type(e).__name__}]")
@@ -1895,12 +2056,14 @@ def _fetch_models_for_provider(provider, api_key, base_url):
 def _diag_origin_head():
     """Best-effort origin HEAD from locally-cached remote refs (no network fetch)."""
     try:
+        # Use the tracked branch name, else main.
         repo = git.Repo(os.getcwd())
         branch = "main"
         try:
             branch = repo.active_branch.tracking_branch().name.split("/")[-1]
         except Exception:
             pass
+        # Read origin's commit from local refs.
         try:
             return repo.commit(f"origin/{branch}").hexsha
         except Exception:
@@ -1918,12 +2081,14 @@ def _diag_origin_version():
     Companion to _diag_origin_head: returns the version string the
     Diagnostics panel shows for "Origin" instead of a commit SHA."""
     try:
+        # Use the tracked branch name, else main.
         repo = git.Repo(os.getcwd())
         branch = "main"
         try:
             branch = repo.active_branch.tracking_branch().name.split("/")[-1]
         except Exception:
             pass
+        # Read VERSION at origin's head from local refs.
         try:
             return repo.git.show(f"origin/{branch}:VERSION").strip() or None
         except Exception:
@@ -1989,4 +2154,5 @@ __EXCLUDE = {"git", "json", "os", "py_compile", "requests", "time",
              "_set_update_cooldown", "get_log_path", "get_version", "load_config",
              "load_processed", "load_update_state", "logger", "save_config",
              "save_update_state", "state", "update_task_state"}
+# Export every name defined here except the ones above.
 __all__ = [__n for __n in dir() if not __n.startswith("__") and __n not in __EXCLUDE]

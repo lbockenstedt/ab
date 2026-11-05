@@ -37,6 +37,7 @@ string literals in different files, held together only by a comment saying
 "keep in step".
 """
 
+# Regular expressions turn free text into branch-name-safe slugs.
 import re
 
 # Names protected regardless of configuration. These are the long-lived
@@ -67,9 +68,13 @@ def slugify_branch_desc(text, max_len=50):
     returning an empty segment, which would otherwise collapse the prefix's
     trailing slash with the issue number into something like "bug/123-" or
     (with no issue number at all) an invalid "bug/" with nothing after it."""
+    # Lower-case and trim the text (None becomes "").
     text = (text or "").lower().strip()
+    # Replace every run of characters git might reject with a single hyphen.
     text = re.sub(r"[^a-z0-9]+", "-", text)
+    # Drop hyphens at either end.
     text = text.strip("-")
+    # Truncate, tidy a trailing hyphen, and never return an empty slug.
     return text[:max_len].rstrip("-") or "untitled"
 
 
@@ -91,19 +96,26 @@ def auto_branch_name(kind, issue=None, description=None):
     Returns e.g. "bug/123-null-pointer-in-parser" with an issue, or
     "bug/null-pointer-in-parser" without one.
     """
+    # Look up the branch prefix for this kind (raises KeyError for unknown kinds).
     prefix = AUTO_BRANCH_PREFIXES_BY_KIND[kind]
+    # Issue number, if an issue was given.
     number = getattr(issue, "number", None) if issue is not None else None
+    # Text to slug: explicit description first, otherwise the issue title.
     title = description if description is not None else getattr(issue, "title", None)
     slug = slugify_branch_desc(title)
+    # Include the issue number when we have one.
     return f"{prefix}{number}-{slug}" if number else f"{prefix}{slug}"
 
 
 def parse_names(value):
     """Accept a list, or a comma/space/newline-separated string, from config."""
+    # Nothing configured means no names.
     if not value:
         return []
+    # A string from the Settings form: split on commas and whitespace.
     if isinstance(value, str):
         return [p.strip() for p in value.replace(",", " ").split() if p.strip()]
+    # Already a list: just clean each entry.
     return [str(p).strip() for p in value if str(p).strip()]
 
 
@@ -114,17 +126,22 @@ def protected_branches(config=None, repo_default_branch=None):
     ``default_branch``/``dev_branch`` (so renaming those in config protects
     them automatically), and any extra ``protected_branches`` from config.
     """
+    # Start from the built-in protected names.
     cfg = config or {}
     names = set(DEFAULT_PROTECTED)
+    # Add the repo's default branch and the configured default/dev branch names.
     for extra in (repo_default_branch, cfg.get("default_branch"), cfg.get("dev_branch")):
         if extra:
             names.add(str(extra).strip())
+    # Add any extra names the operator configured.
     names.update(parse_names(cfg.get("protected_branches")))
+    # Compare case-insensitively, so return lower-case names.
     return {n.lower() for n in names if n}
 
 
 def auto_branch_prefixes(config=None):
     """Prefixes that mark a branch as AppBuilder-created, hence disposable."""
+    # Operator-configured prefixes win; otherwise use the built-in ones.
     cfg = config or {}
     configured = parse_names(cfg.get("auto_branch_prefixes"))
     return tuple(configured) if configured else DEFAULT_AUTO_PREFIXES
@@ -142,20 +159,26 @@ def release_locked_branches(config=None):
     Config key: ``release_locked_branches`` (list, or comma/space/newline
     string from the Settings form).
     """
+    # Lower-case set of locked branch names from config.
     cfg = config or {}
     return {n.lower() for n in parse_names(cfg.get("release_locked_branches")) if n}
 
 
 def is_release_locked(ref, config=None):
     """True if ``ref`` is under a manual release lock (see release_locked_branches)."""
+    # Case-insensitive membership check.
     return str(ref or "").strip().lower() in release_locked_branches(config)
 
 
 def is_protected(ref, config=None, repo_default_branch=None):
+    """True if ref is a branch AppBuilder must never force-push or delete."""
+    # Case-insensitive check against the full protected set.
     return str(ref or "").strip().lower() in protected_branches(config, repo_default_branch)
 
 
 def is_auto_created(ref, config=None):
+    """True if ref starts with one of the prefixes AppBuilder uses for its own branches."""
+    # Empty names never count as AppBuilder-created.
     name = str(ref or "").strip()
     return bool(name) and name.startswith(auto_branch_prefixes(config))
 
@@ -166,17 +189,22 @@ def may_delete(ref, config=None, repo_default_branch=None):
     Reason is always populated so refusals can be logged and understood; a
     branch left behind should never be a silent mystery.
     """
+    # Normalise inputs; a missing name can never be deleted.
     cfg = config or {}
     name = str(ref or "").strip()
     if not name:
         return False, "no branch name"
+    # The operator can switch branch cleanup off entirely.
     if not cfg.get("delete_merged_branches", True):
         return False, "branch cleanup is disabled (delete_merged_branches=false)"
+    # Protected branches are never deleted.
     if is_protected(name, cfg, repo_default_branch):
         return False, f"'{name}' is a protected branch"
+    # Only branches AppBuilder itself created may be deleted (allowlist).
     if not is_auto_created(name, cfg):
         return False, (f"'{name}' was not created by AppBuilder "
                        f"(expected one of: {', '.join(auto_branch_prefixes(cfg))})")
+    # All checks passed.
     return True, f"'{name}' is a merged AppBuilder branch"
 
 
@@ -186,12 +214,15 @@ def may_force_push(ref, config=None, repo_default_branch=None):
     Force-pushing a shared branch discards anything that landed on it since the
     working copy was made, so it is confined to AppBuilder's own branches.
     """
+    # A missing name can never be force-pushed.
     name = str(ref or "").strip()
     if not name:
         return False, "no branch name"
+    # Protected branches are shared, so force-pushing them would lose other people's commits.
     if is_protected(name, config, repo_default_branch):
         return False, (f"'{name}' is a protected branch -- force-pushing it would "
                        f"discard commits made since this working copy was created")
+    # Any other branch is fair game.
     return True, f"'{name}' is not protected"
 
 
@@ -210,18 +241,22 @@ def integration_branch(config=None, repo_obj=None):
     alternative would be to fail outright; that case is reported so it can be
     fixed by creating the branch.
     """
+    # The dev branch name from config, defaulting to "dev".
     cfg = config or {}
     dev = (cfg.get("dev_branch") or "dev").strip() or "dev"
 
+    # When we can ask GitHub, confirm the dev branch actually exists.
     if repo_obj is not None:
         try:
             repo_obj.get_branch(dev)
+        # No dev branch: fall back to the default branch and explain how to fix it.
         except Exception:
             fallback = (cfg.get("default_branch")
                         or getattr(repo_obj, "default_branch", None) or "main")
             return fallback, (f"'{dev}' does not exist in "
                               f"{getattr(repo_obj, 'full_name', 'this repo')} -- falling back to "
                               f"'{fallback}'; create '{dev}' to restore the dev -> qa -> main flow")
+    # dev exists (or could not be checked): integrate into it.
     return dev, f"'{dev}' is the integration branch (dev -> qa -> main)"
 
 
@@ -260,6 +295,7 @@ def may_direct_push(ref, config=None, repo_default_branch=None):
     A refusal is never fatal: callers log the reason and fall back to opening a
     pull request, which is the outcome the promotion flow wants anyway.
     """
+    # A missing name can never be pushed to.
     cfg = config or {}
     name = str(ref or "").strip()
     if not name:
@@ -272,9 +308,11 @@ def may_direct_push(ref, config=None, repo_default_branch=None):
     if name.lower() == str(dev or "").strip().lower():
         return True, f"'{name}' is the integration branch -- the intended target for automated commits"
 
+    # Any other protected branch is reached only by a promotion PR.
     if is_protected(name, cfg, repo_default_branch):
         return False, (f"'{name}' is a protected branch -- automated commits reach it by "
                        f"promotion PR (dev -> qa -> main), never by a direct push; "
                        f"opening a pull request instead")
 
+    # Unprotected branches (AppBuilder's own or topic branches) may be pushed to directly.
     return True, f"'{name}' is not a protected branch"

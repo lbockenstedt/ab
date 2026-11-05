@@ -21,6 +21,7 @@ lesson from the model this module replaces (model_router.py's `_DEFAULT_MODELS
 stale and 404'd every routed call account-wide) — a specific model release
 must never be required for the picker to keep working.
 """
+# fnmatch matches model names against rule globs; re parses names and patterns.
 import fnmatch
 import re
 
@@ -32,18 +33,22 @@ import re
 # lockstep BY HAND with _is_ollama/_is_ollama_cloud/_is_lmstudio/
 # _provider_is_nokey in llm_client.py if those ever change.
 
+# The one ollama* provider that is a paid cloud service and takes an API key.
 OLLAMA_CLOUD_PROVIDER = "ollama_cloud"
 
 
 def _is_ollama(provider):
+    """True for any Ollama provider (local, second local endpoint, or cloud)."""
     return (provider or "").lower().strip().startswith("ollama")
 
 
 def _is_ollama_cloud(provider):
+    """True only for the Ollama Cloud provider."""
     return (provider or "").lower().strip() == OLLAMA_CLOUD_PROVIDER
 
 
 def _is_lmstudio(provider):
+    """True for any LM Studio provider."""
     return (provider or "").lower().strip().startswith("lmstudio")
 
 
@@ -51,13 +56,16 @@ def is_nokey_provider(provider):
     """Mirrors llm_client._provider_is_nokey exactly: true for a provider that
     authenticates without an API key (claude_cli session auth, LM Studio,
     self-hosted Ollama — NOT Ollama Cloud, which does take a key)."""
+    # Normalise the name, then check the no-key provider kinds.
     p = (provider or "").lower().strip()
     return p == "claude_cli" or _is_lmstudio(p) or (_is_ollama(p) and not _is_ollama_cloud(p))
 
 
+# Orderings used for comparing complexity levels and cost tiers (lower first).
 COMPLEXITY_RANK = {"trivial": 0, "small": 1, "medium": 2, "large": 3}
 COST_TIER_RANK = {"free": 0, "cheap": 1, "frontier": 2, "unknown": 3}
 
+# The capability fields copied from a rule into a resolved capability dict.
 _CAP_FIELDS = (
     "cost_tier", "max_complexity", "context_window", "supports_tools",
     "native_agentic_tools", "supports_mutating_agent", "supports_structured_output",
@@ -98,9 +106,11 @@ def speed_tier(caps):
     Falls back to a capability_rank-derived prior when a rule carries no
     explicit value, so an un-annotated registry still orders sensibly instead
     of treating every model as equally fast."""
+    # An explicit, valid speed_tier on the rule wins.
     raw = (caps or {}).get("speed_tier")
     if isinstance(raw, str) and raw.strip().lower() in SPEED_RANK:
         return raw.strip().lower()
+    # Otherwise derive it from the capability rank: the first floor reached decides.
     rank = capability_rank(caps)
     for floor, tier in _SPEED_BY_CAPABILITY_RANK:
         if rank >= floor:
@@ -119,9 +129,11 @@ def capability_rank(caps):
     Falls back to a max_complexity-derived default when the rule carries no
     explicit rank, so a registry written before this field existed keeps its
     previous relative ordering instead of collapsing to zero."""
+    # Missing or non-numeric (bools excluded): use the complexity-based default.
     raw = (caps or {}).get("capability_rank")
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return _CAPABILITY_RANK_BY_COMPLEXITY.get((caps or {}).get("max_complexity"), 0)
+    # Clamp an explicit rank to 0-100.
     return max(0, min(100, int(raw)))
 
 # A model that matches no curated rule at all — sorts LAST on cost (after
@@ -488,12 +500,14 @@ def upgrade_local_free_rules(rules):
     an operator's GPU `ollama2` endpoint gain its `free` rule on upgrade
     instead of being stuck at cost tier `unknown`.
     """
+    # Copy the rules and note which ids and providers are already present.
     rules = list(rules or [])
     existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
     existing_providers = {
         (r.get("provider") or "").lower().strip()
         for r in rules if isinstance(r, dict)
     }
+    # Walk the defaults, keeping only free no-key rules for providers not yet covered.
     added_ids = []
     for default in DEFAULT_MODEL_RULES:
         provider = (default.get("provider") or "").lower().strip()
@@ -505,6 +519,7 @@ def upgrade_local_free_rules(rules):
             continue
         if provider in existing_providers:
             continue
+        # Append a copy and record it so the same provider is not added twice.
         rules.append(dict(default))
         added_ids.append(default.get("id"))
         existing_ids.add(default.get("id"))
@@ -542,12 +557,14 @@ def upgrade_capable_local_rules(rules):
     Append-only, idempotent, never reorders or modifies existing rules. Because
     the appended rules carry a more-specific `match` than the generic `*`, they
     win by specificity for those model families (see resolve()/_specificity)."""
+    # Copy the rules and note the ids and (provider, match) pairs already present.
     rules = list(rules or [])
     existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
     existing_pairs = {
         ((r.get("provider") or "").lower().strip(), (r.get("match") or "").lower().strip())
         for r in rules if isinstance(r, dict)
     }
+    # Walk the defaults, keeping only the capable-local ones not already covered.
     added_ids = []
     for default in DEFAULT_MODEL_RULES:
         if default.get("id") not in _CAPABLE_LOCAL_RULE_IDS:
@@ -558,6 +575,7 @@ def upgrade_capable_local_rules(rules):
                 (default.get("match") or "").lower().strip())
         if pair in existing_pairs:
             continue
+        # Append a copy and record it.
         rules.append(dict(default))
         added_ids.append(default.get("id"))
         existing_ids.add(default.get("id"))
@@ -580,6 +598,7 @@ def reclassify_claude_cli_paid(rules):
     exactly "free" — an operator who deliberately set another tier is left
     alone. Idempotent (a second run finds nothing to change); never reorders,
     adds, or removes rules."""
+    # Copy each rule, bumping any claude_cli rule still marked "free" to "frontier".
     rules = list(rules or [])
     changed = False
     out = []
@@ -612,12 +631,14 @@ def _append_missing_default_rules(rules, wanted_ids):
     a rule for that exact (provider, match), so a hand-tuned registry is never
     overridden. Never reorders or mutates existing rules; the more-specific
     match wins by specificity (see resolve())."""
+    # Copy the rules and note the ids and (provider, match) pairs already present.
     rules = list(rules or [])
     existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
     existing_pairs = {
         ((r.get("provider") or "").lower().strip(), (r.get("match") or "").lower().strip())
         for r in rules if isinstance(r, dict)
     }
+    # Walk the defaults, keeping only wanted ids not already covered.
     added_ids = []
     for default in DEFAULT_MODEL_RULES:
         if default.get("id") not in wanted_ids:
@@ -628,6 +649,7 @@ def _append_missing_default_rules(rules, wanted_ids):
                 (default.get("match") or "").lower().strip())
         if pair in existing_pairs:
             continue
+        # Append a copy and record it.
         rules.append(dict(default))
         added_ids.append(default.get("id"))
         existing_ids.add(default.get("id"))
@@ -719,6 +741,7 @@ def enable_ollama_cloud_tools(rules):
     False. An operator who added their own ollama_cloud rule, or who
     deliberately turned tools off on some other rule, is left alone. Idempotent;
     never reorders, adds, or removes rules."""
+    # Copy each rule, turning tools on for the shipped ollama-cloud rule if still off.
     rules = list(rules or [])
     changed = False
     out = []
@@ -763,10 +786,12 @@ def enable_copilot_tools(rules):
 
     Scoped narrowly like the ollama_cloud repair: only ids AppBuilder ships,
     only where the flag is still False. Idempotent; never reorders or adds."""
+    # Ids of the copilot rules AppBuilder ships.
     shipped = {"copilot", "copilot-opus", "copilot-sonnet", "copilot-sonnet-5.5",
                "copilot-haiku",
                "copilot-gemini-pro", "copilot-gpt5-mini", "copilot-gpt5", "copilot-gpt4",
                "copilot-claude-fable", "copilot-gpt6", "copilot-gpt6-astra"}
+    # Copy each rule, turning tools on for shipped copilot rules where still off.
     out = []
     changed = False
     for r in rules or []:
@@ -801,22 +826,27 @@ def backfill_capability_ranks(rules):
     is one AppBuilder ships, only where the value still matches the stale
     default we are replacing. An operator's own rule, or one they have already
     retuned, is left untouched. Idempotent; never reorders, adds or removes."""
+    # Ranks from the shipped defaults, keyed by rule id.
     shipped_ranks = {r.get("id"): r.get("capability_rank")
                      for r in DEFAULT_MODEL_RULES if r.get("capability_rank") is not None}
     # (rule id -> the stale value we replace) — only corrected if unchanged.
     stale_complexity = {"claude-cli-sonnet": ("medium", "large"),
                         "claude-cli-haiku": ("small", "medium")}
+    # Copy each rule, filling in missing ranks and fixing stale complexity caps.
     out = []
     changed = False
     for r in rules or []:
+        # Non-dict entries are kept as they are.
         if not isinstance(r, dict):
             out.append(r)
             continue
+        # Add the shipped rank if the rule has none.
         rid = r.get("id")
         new = r
         if rid in shipped_ranks and new.get("capability_rank") is None:
             new = {**new, "capability_rank": shipped_ranks[rid]}
             changed = True
+        # Raise the complexity cap only if it still has the old shipped value.
         if rid in stale_complexity:
             was, now = stale_complexity[rid]
             if new.get("max_complexity") == was:
@@ -843,8 +873,10 @@ def backfill_speed_tiers(rules):
     Scoped exactly like backfill_capability_ranks: only rules whose id is one
     AppBuilder ships, only where no explicit value is set. Operator rules and
     retuned values are untouched. Idempotent; never reorders, adds or removes."""
+    # Speed tiers from the shipped defaults, keyed by rule id.
     shipped = {r.get("id"): r.get("speed_tier")
                for r in DEFAULT_MODEL_RULES if r.get("speed_tier")}
+    # Copy each rule, adding the shipped speed tier where none is set.
     out = []
     changed = False
     for r in rules or []:
@@ -875,22 +907,26 @@ def upgrade_openrouter_free_router_rule(rules):
     Append-only + idempotent: skipped when the rule id already exists OR the
     operator already curated a rule for that exact (provider, match). Never
     reorders or mutates existing rules; the more-specific match wins (resolve)."""
+    # Copy the rules and note the ids and (provider, match) pairs already present.
     rules = list(rules or [])
     existing_ids = {r.get("id") for r in rules if isinstance(r, dict)}
     existing_pairs = {
         ((r.get("provider") or "").lower().strip(), (r.get("match") or "").lower().strip())
         for r in rules if isinstance(r, dict)
     }
+    # Find the shipped router rule; nothing to add if it is missing.
     default = next((d for d in DEFAULT_MODEL_RULES
                     if d.get("id") == "openrouter-free-router"), None)
     if default is None:
         return rules, False
+    # Skip it if its id or its (provider, match) is already there.
     if default.get("id") in existing_ids:
         return rules, False
     pair = ((default.get("provider") or "").lower().strip(),
             (default.get("match") or "").lower().strip())
     if pair in existing_pairs:
         return rules, False
+    # Otherwise append a copy.
     rules.append(dict(default))
     return rules, True
 
@@ -901,6 +937,7 @@ def _model_param_b(name):
     fix_engine._model_param_b — moved here since capability derivation is
     this module's job now, kept in fix_engine.py too until Phase 6 deletes
     the ensemble code that also uses it."""
+    # Look for a number followed by "b" (e.g. "14b", "1.5b").
     m = re.search(r'(\d+(?:\.\d+)?)b\b', str(name).lower())
     return float(m.group(1)) if m else None
 
@@ -909,8 +946,10 @@ def _complexity_from_param_b(param_b):
     """<8B -> trivial, 8-20B -> small, >20B -> medium. NEVER 'large' for a
     local model from size alone -- an operator who wants that must add an
     explicit, more-specific override rule."""
+    # Unknown size: assume small.
     if param_b is None:
         return "small"  # unparseable size -- assume modest capability, not zero
+    # Map the size to a complexity level.
     if param_b < 8:
         return "trivial"
     if param_b <= 20:
@@ -925,10 +964,12 @@ def _specificity(pattern):
     caller preserves list order, so an operator's own rules -- typically
     appended after the seeded defaults -- naturally win ties against a
     same-specificity built-in)."""
+    # Count the characters that are not wildcards.
     return len(re.sub(r'[*?\[\]]', '', pattern or ''))
 
 
 def _effective_rules(config):
+    """Return the configured rule list, or the shipped defaults if none is set."""
     rules = (config or {}).get("model_registry")
     if not rules:
         rules = DEFAULT_MODEL_RULES
@@ -939,9 +980,11 @@ def find_matching_rules(provider, model, config):
     """All ENABLED rules whose provider matches exactly and whose `match`
     glob matches the model name (case-insensitive), from config["model_registry"]
     (falling back to DEFAULT_MODEL_RULES if that key is absent)."""
+    # Compare names case-insensitively.
     provider = (provider or "").lower().strip()
     model_l = (model or "").lower().strip()
     out = []
+    # Keep enabled rules for this provider whose glob matches the model.
     for rule in _effective_rules(config):
         if not rule.get("enabled", True):
             continue
@@ -960,15 +1003,18 @@ def resolve(provider, model, config):
     matched, max_complexity is derived from the model's parameter count
     instead of the flat default -- a 7b and a 70b local model should never
     share one capability ceiling."""
+    # No rule matches: the model is unknown.
     matches = find_matching_rules(provider, model, config)
     if not matches:
         return dict(UNKNOWN_CAPS)
 
+    # Use the most specific rule and copy its capability fields, noting where they came from.
     best = max(matches, key=lambda r: _specificity(r.get("match") or ""))
     caps = {k: best.get(k) for k in _CAP_FIELDS}
     caps["_source"] = "curated"
     caps["_matched_rule_id"] = best.get("id")
 
+    # Generic local Ollama rule: derive the complexity from the model's size instead.
     if _is_ollama(provider) and not _is_ollama_cloud(provider) and best.get("id") == "ollama-local":
         caps["max_complexity"] = _complexity_from_param_b(_model_param_b(model))
 
@@ -983,15 +1029,19 @@ def registry_sync(seen, config):
     this never mutates config. Deliberately a SEPARATE list from the curated
     config["model_registry"] (see module docstring) so a background sync can
     never race an operator's open Settings edit."""
+    # Pairs already recorded as auto-discovered.
     existing_auto = {(e.get("provider"), e.get("model")) for e in (config.get("model_registry_auto") or [])}
+    # Collect new stubs, avoiding duplicates within this call.
     new_stubs = []
     added_this_call = set()
     for provider, model in seen:
+        # Normalise the pair and skip ones already recorded.
         key = ((provider or "").lower().strip(), (model or "").strip())
         if key in existing_auto or key in added_this_call:
             continue
         if find_matching_rules(provider, model, config):
             continue  # a curated rule already covers it
+        # Not covered by any rule: add an unknown-capability stub.
         added_this_call.add(key)
         new_stubs.append({"provider": key[0], "model": key[1], **UNKNOWN_CAPS})
     return new_stubs
@@ -1006,6 +1056,7 @@ def local_models_for_preload(installed, config):
     'trivial' (a tiny model isn't worth keeping resident), sorted smallest
     first. Replaces _filter_ensemble_models' role for the preload gate
     (workers.preload_ollama_models) -- the ensemble itself retires in Phase 6."""
+    # Collect (size, name) for each named model that is not trivial.
     scored = []
     for m in installed or []:
         name = m.get("name")
@@ -1015,5 +1066,6 @@ def local_models_for_preload(installed, config):
         if caps.get("max_complexity") == "trivial":
             continue
         scored.append((m.get("size") or 0, name))
+    # Smallest first, then return just the names.
     scored.sort(key=lambda t: t[0])
     return [name for _, name in scored]

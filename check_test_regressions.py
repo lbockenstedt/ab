@@ -35,17 +35,22 @@ Safety / cost:
     opt-in per install rather than firing on every monitored repo from day
     one. Also respects the existing ``qa_enabled`` flag verify_fix uses.
 """
+# logging reports skips; os lists files/joins paths; re finds failing tests in output;
+# tempfile gives throwaway clone directories; time ages the base-result cache.
 import logging
 import os
 import re
 import tempfile
 import time
 
+# Module-level logger.
 logger = logging.getLogger(__name__)
 
 _BASE_CACHE_TTL_S = 3600  # re-run the base suite at most once an hour per (repo, sha)
+# Matches pytest's "FAILED path::test" summary lines and captures the test id.
 _FAILED_LINE_RE = re.compile(r"^FAILED\s+(\S+)", re.MULTILINE)
 
+# Cache of base-branch failure sets so repeated PRs on one base do not re-run the suite.
 # {(repo_full_name, base_sha): (fetched_at, failure_set)}
 _base_cache = {}
 
@@ -62,37 +67,50 @@ def _detect_test_cmd(path, repo_name=None, config=None):
     command and none of the manifest files below (lm, cs and kvm all do). Without
     it this returned None and regression checking was silently skipped on exactly
     the repos someone had bothered to configure."""
+    # First choice: an operator-configured test command for this repo.
     if repo_name:
         repo_tests = (config or {}).get("repo_tests")
         # Never trust the shape of persisted config: a non-dict here must
         # degrade to the heuristic, not raise out of a best-effort check.
         if isinstance(repo_tests, dict):
+            # Look up by full "owner/repo" name, then by the bare repo name.
             cmd = repo_tests.get(repo_name)
             if not cmd and "/" in repo_name:
                 cmd = repo_tests.get(repo_name.split("/")[-1])
             if cmd:
                 return cmd
+    # Otherwise guess from which project files exist; an unreadable path means no command.
     try:
         files = os.listdir(path)
     except OSError:
         return None
+    # Node project.
     if "package.json" in files:
         return "npm test"
+    # Python project.
     if "requirements.txt" in files or "pyproject.toml" in files:
         return "python3 -m pytest -q"
+    # Go module.
     if "go.mod" in files:
         return "go test ./..."
+    # Generic Makefile with a test target.
     if "Makefile" in files:
         return "make test"
+    # No recognisable test setup.
     return None
 
 
 def _clone_and_checkout(clone_url, token, ref, dest):
+    """Clone clone_url into dest (using token if given) and check out ref; returns the repo."""
+    # GitPython, imported lazily so importing this module stays cheap.
     import git
+    # Embed the token in the URL so a private repo can be cloned.
     url = clone_url.replace("https://", "https://%s@" % token) if token else clone_url
+    # Clone into the destination directory.
     repo_git = git.Repo.clone_from(url, dest)
     if token:
         repo_git.remotes.origin.set_url(clone_url)  # strip the token back out immediately
+    # Switch to the requested commit or branch.
     repo_git.git.checkout(ref)
     return repo_git
 
@@ -102,35 +120,47 @@ def _run_suite(path, repo_name=None, config=None):
     run itself couldn't be attempted/completed (no test framework detected,
     Docker unavailable, timeout, ...) — the caller must treat that as
     'skip', never as 'zero failures'."""
+    # Imported lazily so this module does not pull in fix_engine at import time.
     from fix_engine import run_sandboxed_command  # local import — see module docstring
 
+    # Pick a test command; with none, the run cannot happen.
     cmd = _detect_test_cmd(path, repo_name, config)
     if not cmd:
         return False, None, "no recognized test framework in this repo"
+    # Run the tests in the Docker sandbox.
     result = run_sandboxed_command(cmd, path)
+    # Exit code 127 is how the sandbox reports it could not run at all (e.g. no Docker).
     if result.returncode == 127:
         return False, None, "sandbox unavailable (%s)" % (result.stderr or "").strip()[:200]
+    # Collect failing test ids from both stdout and stderr.
     failures = set(_FAILED_LINE_RE.findall((result.stdout or "") + "\n" + (result.stderr or "")))
     return True, failures, None
 
 
 def _base_failures(repo_full_name, clone_url, token, base_sha, config=None):
+    """Return the set of tests failing on the base commit (cached), or None if it can't be run."""
+    # Reuse a cached result for this repo+commit if it is younger than the TTL.
     cached = _base_cache.get((repo_full_name, base_sha))
     if cached and (time.time() - cached[0]) < _BASE_CACHE_TTL_S:
         return cached[1]
+    # Clone into a temporary directory that is deleted afterwards.
     with tempfile.TemporaryDirectory() as tmp:
         dest = os.path.join(tmp, "base")
+        # A clone failure means no baseline.
         try:
             _clone_and_checkout(clone_url, token, base_sha, dest)
         except Exception as e:  # noqa: BLE001
             logger.info("check_test_regressions: base clone failed for %s@%s: %s",
                        repo_full_name, base_sha, e)
             return None
+        # Run the suite on the base checkout.
         ok, failures, note = _run_suite(dest, repo_full_name, config)
+    # The suite could not run, so there is no baseline.
     if not ok:
         logger.info("check_test_regressions: base run skipped for %s@%s: %s",
                    repo_full_name, base_sha, note)
         return None
+    # Cache and return the base failure set.
     _base_cache[(repo_full_name, base_sha)] = (time.time(), failures)
     return failures
 
@@ -144,17 +174,23 @@ def check_test_regressions(repo, pr, config, token):
     Best-effort throughout: any failure to run either side degrades to no
     finding (never a false positive from an inconclusive run), and this
     never raises out to the caller."""
+    # Respect the global QA switch.
     if not config.get("qa_enabled", True):
         return []
+    # This check is opt-in because it executes PR code.
     if not config.get("pr_test_regression_enabled", False):
         return []
+    # Any unexpected error is logged and reported as "no findings".
     try:
+        # Failures already present on the base branch.
         base_sha = pr.base.sha
         base_failures = _base_failures(repo.full_name, repo.clone_url, token, base_sha, config)
         if base_failures is None:
             return []  # couldn't establish a baseline — never flag without one
+        # Clone the PR head into a temporary directory and run the suite there.
         with tempfile.TemporaryDirectory() as tmp:
             dest = os.path.join(tmp, "head")
+            # A clone failure means we cannot judge the PR.
             try:
                 _clone_and_checkout(repo.clone_url, token, pr.head.sha, dest)
             except Exception as e:  # noqa: BLE001
@@ -162,15 +198,19 @@ def check_test_regressions(repo, pr, config, token):
                            repo.full_name, pr.number, e)
                 return []
             ok, head_failures, note = _run_suite(dest, repo.full_name, config)
+        # The head run could not complete, so we report nothing.
         if not ok:
             logger.info("check_test_regressions: head run skipped for %s#%s: %s",
                        repo.full_name, pr.number, note)
             return []
+        # Only tests failing on head but not on base are this PR's fault.
         new_failures = sorted(head_failures - base_failures)
         if not new_failures:
             return []
+        # List at most 15 tests and say how many more there were.
         shown = new_failures[:15]
         more = len(new_failures) - len(shown)
+        # One error-level finding listing the new failures.
         return [{
             "level": "error",
             "title": "%d test(s) newly failing on this PR's branch (not failing on base)" % len(new_failures),

@@ -31,6 +31,8 @@ hub_agent.py); it never holds prompts, tools, or rules.
 Heavy app modules (main, github_ops, skills_loader, feature_boundary) are
 imported lazily so this module and its tests import standalone.
 """
+# Standard modules for encoding, glob matching, JSON, files, regex, processes,
+# locking, timing and session ids.
 import base64
 import fnmatch
 import json
@@ -42,10 +44,13 @@ import threading
 import time
 import uuid
 
+# Name of the fenced spec block, a regex to find it, and the session-id format.
 SPEC_FENCE = "sim-spec"
 _SPEC_RE = re.compile(r"```" + SPEC_FENCE + r"[ \t]*\n(.*?)```", re.S)
 _SESSION_ID_RE = re.compile(r"^[0-9a-f-]{36}$")
 
+# Limits: message size, stored events, sessions per user, session lifetime (30 days),
+# how often repos are refreshed, the per-turn timeout, concurrent turns and issue size.
 MAX_MESSAGE_CHARS = 20000
 MAX_EVENTS = 3000
 MAX_SESSIONS_PER_OWNER = 20
@@ -55,8 +60,10 @@ DEFAULT_TURN_TIMEOUT_S = 900
 DEFAULT_MAX_RUNNING = 2
 ISSUE_BODY_MAX = 60000
 
+# Build states that mean a filed issue has finished building.
 TERMINAL_BUILD_STATUSES = {"feature_built", "feature_flagged", "feature_failed"}
 
+# Every field a spec may carry.
 SPEC_KEYS = ("intent", "target", "duplicate_of", "modify_confirmed", "modify_reason",
              "diagnosis", "verified_broken", "override_reason", "remove_confirmed",
              "remove_reason", "name", "title", "summary", "behavior", "platforms",
@@ -99,6 +106,7 @@ UI_TWINS = (("lm", "WebUI/sim-views.js"), ("cs", "lm-spoke/static/sim-views.js")
 _NON_SIM_SCRIPTS = {"common", "simulation", "network_common", "ini-parser", "install",
                     "uninstall", "update"}
 
+# System prompt for the first turn; the {placeholders} are filled in later.
 _INSTRUCTIONS = """You are AppBuilder's Simulation Build Assistant, talking to a Lab Manager (LM)
 user inside LM → Simulations → Assistant.
 
@@ -239,6 +247,7 @@ when nothing is left in "open_questions" and the spec is detailed enough to
 build without asking anything else.
 """
 
+# Short reminder sent with every later turn to keep the agent on task.
 _REMINDER = ("(Reminder: you only make cosmetic Simulations UI changes (intent ui — never "
              "duplicated, sim-views.js twins + docs only) or create, modify, remove or explain "
              "client simulations — decline anything else in one sentence. Keep investigating the real code as needed, ask "
@@ -253,10 +262,12 @@ def extract_spec(text):
 
     Uses the LAST sim-spec block; an unparseable block yields spec None so the
     caller keeps the previous spec rather than wiping it."""
+    # Find all spec blocks; none means the reply is plain text.
     text = text or ""
     matches = list(_SPEC_RE.finditer(text))
     if not matches:
         return text.strip(), None, []
+    # Remove the blocks from the shown text and parse the last one.
     m = matches[-1]
     display = _SPEC_RE.sub("", text).strip()
     raw = m.group(1).strip()
@@ -266,6 +277,7 @@ def extract_spec(text):
         return display, None, []
     if not isinstance(obj, dict):
         return display, None, []
+    # Keep up to 6 suggested answers, each cut to 200 chars.
     choices = [str(c)[:200] for c in (obj.get("choices") or []) if str(c).strip()][:6]
     return display, normalize_spec(obj), choices
 
@@ -273,11 +285,14 @@ def extract_spec(text):
 def normalize_spec(obj):
     """Coerce an agent-produced spec into the canonical shape."""
     def _s(v, n=8000):
+        """Return v as a stripped string cut to n characters (None becomes "")."""
         return str(v if v is not None else "").strip()[:n]
 
     def _list(v):
+        """Return v as a list: lists as-is, empty values as [], anything else wrapped."""
         return v if isinstance(v, list) else ([] if v in (None, "") else [v])
 
+    # Copy each known field, cleaning and capping it; knobs and touch-points follow.
     intent = _s(obj.get("intent"), 20).lower()
     spec = {
         "intent": intent if intent in INTENTS else "",
@@ -302,11 +317,13 @@ def normalize_spec(obj):
         "open_questions": [_s(q, 1000) for q in _list(obj.get("open_questions")) if _s(q)],
         "ready": bool(obj.get("ready")),
     }
+    # Keep config knobs that have a key.
     for k in _list(obj.get("config_knobs")):
         if isinstance(k, dict) and _s(k.get("key")):
             spec["config_knobs"].append({"key": _s(k.get("key"), 100),
                                          "default": _s(k.get("default"), 200),
                                          "description": _s(k.get("description"), 1000)})
+    # Keep touch-points that have a path, normalising the repo and path.
     for t in _list(obj.get("touchpoints")):
         if isinstance(t, dict) and _s(t.get("path")):
             repo = _s(t.get("repo"), 40).lower()
@@ -325,8 +342,10 @@ def normalize_spec(obj):
 
 def path_allowed(repo, path, allowed_paths):
     """True when repo-relative `path` is inside the simulation build surface."""
+    # Reject absolute paths, ".." and NUL bytes.
     if not path or path.startswith("/") or ".." in path.split("/") or "\x00" in path:
         return False
+    # Then the path must match one of the repo's allowed globs.
     return any(fnmatch.fnmatchcase(path, g) for g in (allowed_paths or {}).get(repo) or [])
 
 
@@ -335,9 +354,11 @@ def spec_problems(spec, repos=None, allowed_paths=None, known_sims=None):
 
     repos: short names that may be built; allowed_paths: {short: [globs]};
     known_sims: names of existing simulations (None = unknown, skip check)."""
+    # No spec yet: nothing to report.
     if not spec:
         return []
     problems = []
+    # Explain sessions are never submittable; other intents must be a build intent.
     intent = spec.get("intent") or ""
     if intent == "explain":
         return ["This is an explain-only conversation — nothing is built. Ask for a UI change "
@@ -345,6 +366,7 @@ def spec_problems(spec, repos=None, allowed_paths=None, known_sims=None):
     if intent not in BUILD_INTENTS:
         problems.append("The spec does not say whether this is a UI change or creates, "
                         "modifies or removes a simulation.")
+    # Remove needs a known target, confirmation and a reason.
     target = (spec.get("target") or "").strip()
     if intent == "remove":
         if not target:
@@ -356,6 +378,7 @@ def spec_problems(spec, repos=None, allowed_paths=None, known_sims=None):
                             "(every client running it loses it).")
         if not (spec.get("remove_reason") or "").strip():
             problems.append("Record the user's reason for removing the simulation.")
+    # Modify needs a known target, confirmation, a diagnosis, and a defect or reason.
     if intent == "modify":
         if not target:
             problems.append("A modify request must name the existing simulation it changes.")
@@ -374,6 +397,7 @@ def spec_problems(spec, repos=None, allowed_paths=None, known_sims=None):
             (spec.get("name") or "").lower() in known_sims:
         problems.append(f"A simulation named '{spec.get('name')}' already exists — "
                         "modify it or pick a new name.")
+    # Every touch-point must be in a sim repo and inside the allowed surface (UI: UI only).
     allowed_paths = DEFAULT_ALLOWED_PATHS if allowed_paths is None else allowed_paths
     tps = spec.get("touchpoints") or []
     for t in tps:
@@ -385,6 +409,7 @@ def spec_problems(spec, repos=None, allowed_paths=None, known_sims=None):
         elif intent == "ui" and not path_allowed(repo, path, UI_ALLOWED_PATHS):
             problems.append(f"Touch-point {repo}:{path} is not part of the Simulations UI — a UI "
                             "change may only touch the sim-views.js twins and docs.")
+    # A UI change must update both sim-views.js copies.
     if intent == "ui" and tps:
         have = {(t.get("repo"), t.get("path")) for t in tps}
         for repo, path in UI_TWINS:
@@ -397,6 +422,7 @@ def spec_problems(spec, repos=None, allowed_paths=None, known_sims=None):
 def spec_is_ready(spec, problems=None):
     """Submit gate: the agent says ready, the spec is complete, it is a build
     intent, and no guardrail problem was found."""
+    # Any problem, or no spec, blocks submit.
     if not spec or problems:
         return False
     return bool(spec.get("ready") and not spec.get("open_questions")
@@ -408,11 +434,14 @@ def spec_is_ready(spec, problems=None):
 def build_copilot_command(binary, prompt, session_id, resume, workspace, model="",
                           reasoning_effort=""):
     """argv for one non-interactive, read-only Copilot CLI turn."""
+    # Base command: JSON output, read-only tools, no prompts or extras, run in the workspace.
     cmd = [binary, "-p", prompt, "--output-format", "json",
            "--allow-all-tools", "--available-tools", "view", "grep", "glob",
            "--no-ask-user", "--no-custom-instructions", "--disable-builtin-mcps",
            "--no-auto-update", "-C", workspace]
+    # Resume an existing CLI session, or start one with our id.
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
+    # Optional model and reasoning effort.
     if model:
         cmd += ["--model", model]
     if reasoning_effort:
@@ -423,11 +452,13 @@ def build_copilot_command(binary, prompt, session_id, resume, workspace, model="
 def _relativize(path, workspace):
     """Show workspace paths repo-relative ("cs/clients/…"); handles symlinked
     workspaces (macOS /tmp -> /private/tmp) and only strips a true prefix."""
+    # Consider both the given path and its resolved real path.
     roots = {workspace.rstrip("/")}
     try:
         roots.add(os.path.realpath(workspace).rstrip("/"))
     except Exception:
         pass
+    # Strip the longest matching root, either at the start or after " in ".
     for root in sorted(roots, key=len, reverse=True):
         if path == root:
             return "."
@@ -442,10 +473,12 @@ def event_from_cli(obj, workspace=""):
     """Map one Copilot CLI JSONL event to a UI event dict (or None to skip).
 
     Returns {"kind": ..., "text": ...} plus "usage" for the final result."""
+    # Skip non-dict and temporary (streaming) events.
     if not isinstance(obj, dict) or obj.get("ephemeral"):
         return None
     t = obj.get("type") or ""
     d = obj.get("data") or {}
+    # A tool call: show the tool and what it looked at (path or pattern).
     if t == "tool.execution_start":
         args = d.get("arguments") or {}
         detail = ""
@@ -457,14 +490,17 @@ def event_from_cli(obj, workspace=""):
             detail = _relativize(detail, workspace)
         title = d.get("toolTitle") or d.get("toolName") or "tool"
         return {"kind": "tool", "text": f"{title}: {detail}" if detail else title}
+    # An assistant message (empty ones skipped).
     if t == "assistant.message":
         content = d.get("content") or ""
         if not content.strip():
             return None
         return {"kind": "assistant_raw", "text": content}
+    # The final result, with exit code and token usage.
     if t == "result":
         return {"kind": "result", "text": "", "exit_code": obj.get("exitCode"),
                 "usage": obj.get("usage") or {}}
+    # Any error event.
     if t.endswith(".error") or t == "error":
         msg = d.get("message") or d.get("error") or json.dumps(d)[:300]
         return {"kind": "error", "text": str(msg)[:1000]}
@@ -474,15 +510,18 @@ def event_from_cli(obj, workspace=""):
 def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
     """The feature-request issue body for one repo. Carries the marker
     feature_drive's intake requires and the session id for traceability."""
+    # The spec, the requester, and the touch-points in this repo versus others.
     spec = sess.get("spec") or {}
     owner = sess.get("owner") or {}
     mine = [t for t in spec.get("touchpoints", []) if t.get("repo") == repo_short]
     others = [t for t in spec.get("touchpoints", []) if t.get("repo") != repo_short]
     sub = sess.get("submitted_by") or {}
+    # Markers the feature intake and session tracking rely on.
     lines = [
         "<!-- report-type: feature -->",
         f"<!-- ab-sim-session: {sess.get('id')} -->",
     ]
+    # Modifying an existing sim: a warning header with the diagnosis and reasons.
     if spec.get("intent") == "modify":
         lines += [
             f"<!-- ab-sim-modify: {spec.get('target')} -->",
@@ -496,6 +535,7 @@ def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
             lines.append("- **User's reason for changing it in place (after being steered to "
                          "duplicate):** " + spec["override_reason"][:400])
         lines.append("")
+    # Removing a sim: a warning header with the confirmation and reason.
     if spec.get("intent") == "remove":
         lines += [
             f"<!-- ab-sim-remove: {spec.get('target')} -->",
@@ -506,6 +546,7 @@ def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
             "- **User's reason for removing it:** " + (spec.get("remove_reason") or "")[:400],
             "",
         ]
+    # Who asked and submitted, which skill to use, and this issue's scope.
     ui = spec.get("intent") == "ui"
     lines += [
         f"**Requested by (LM user):** `{owner.get('user') or '?'}`"
@@ -525,6 +566,7 @@ def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
         "## Summary", spec.get("summary") or "", "",
         "## Behavior", spec.get("behavior") or "", "",
     ]
+    # UI changes name the change; sims list their id, source, platforms and alert.
     if ui:
         lines += [f"**UI change id:** `{spec.get('name')}`", ""]
     else:
@@ -534,11 +576,13 @@ def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
             f"**Platforms:** {', '.join(spec.get('platforms') or []) or 'unspecified'}  ",
             f"**Alert:** {spec.get('alert') or 'none'}", "",
         ]
+    # Config knobs, if any.
     if spec.get("config_knobs"):
         lines.append("## Config knobs")
         for k in spec["config_knobs"]:
             lines.append(f"- `{k['key']}` (default `{k.get('default', '')}`) — {k.get('description', '')}")
         lines.append("")
+    # This repo's touch-points, then other repos' (for context only), then linked issues.
     lines.append(f"## Touch-points in this repo ({repo_short})")
     lines += [f"- `{t['path']}` — {t.get('change', '')}" for t in mine] or ["- (none)"]
     lines.append("")
@@ -550,8 +594,10 @@ def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
         lines.append("## Linked issues")
         lines += [f"- {s}" for s in sibling_links]
         lines.append("")
+    # The full spec as JSON.
     lines += ["## Full spec (JSON)", "```json", json.dumps(spec, indent=2), "```", ""]
     head = "\n".join(lines)
+    # Build the transcript and keep the newest part within the size cap.
     transcript = []
     for e in sess.get("events") or []:
         if e.get("kind") == "user":
@@ -572,35 +618,44 @@ class SimSessionManager:
 
     def __init__(self, base_dir, config_loader, *, gh_factory=None, processed_loader=None,
                  skills_provider=None, boundaries_renderer=None, logger=None):
+        """Set up the folders, injectable helpers (for tests), locks, and load saved sessions."""
+        # Folders for session records, the shared repo workspace, and Copilot's home.
         self.base_dir = base_dir
         self.sessions_dir = os.path.join(base_dir, "sessions")
         self.workspace = os.path.join(base_dir, "workspace")
         self.copilot_home = os.path.join(base_dir, "copilot_home")
+        # Injectable helpers so tests can replace config, GitHub, skills, etc.
         self._config_loader = config_loader
         self._gh_factory = gh_factory
         self._processed_loader = processed_loader
         self._skills_provider = skills_provider
         self._boundaries_renderer = boundaries_renderer
         self._log = logger
+        # Locks: one for sessions, one so only one repo sync runs at a time.
         self._lock = threading.RLock()
         self._repo_lock = threading.Lock()
         self._last_refresh = 0.0
+        # Sessions by id, and running CLI processes by session id.
         self._sessions = {}
         self._procs = {}
+        # Make sure the folders exist, then load saved sessions.
         os.makedirs(self.sessions_dir, exist_ok=True)
         os.makedirs(self.workspace, exist_ok=True)
         self._load_all()
 
     # -- logging / config --
     def _info(self, msg):
+        """Log at info level if a logger was given."""
         if self._log:
             self._log.info(msg)
 
     def _warn(self, msg):
+        """Log a warning if a logger was given."""
         if self._log:
             self._log.warning(msg)
 
     def _cfg(self):
+        """Return the current config, or {} if loading fails."""
         try:
             return self._config_loader() or {}
         except Exception:
@@ -608,9 +663,11 @@ class SimSessionManager:
 
     # -- persistence --
     def _path(self, sid):
+        """Return the record file path for a session id."""
         return os.path.join(self.sessions_dir, sid + ".json")
 
     def _save(self, sess):
+        """Write the session (minus private "_" keys) atomically via a temp file."""
         rec = {k: v for k, v in sess.items() if not k.startswith("_")}
         tmp = self._path(sess["id"]) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -618,6 +675,8 @@ class SimSessionManager:
         os.replace(tmp, self._path(sess["id"]))
 
     def _load_all(self):
+        """Load saved sessions, deleting expired ones and marking interrupted turns."""
+        # Read each .json record; unreadable ones are skipped.
         now = time.time()
         for fn in os.listdir(self.sessions_dir):
             if not fn.endswith(".json"):
@@ -628,12 +687,14 @@ class SimSessionManager:
                     sess = json.load(f)
             except Exception:
                 continue
+            # Too old: delete it.
             if now - float(sess.get("updated", 0)) > SESSION_TTL_S:
                 try:
                     os.remove(p)
                 except OSError:
                     pass
                 continue
+            # A turn was running when AB stopped: tell the user to resend.
             if sess.get("state") in ("running", "preparing"):
                 sess["state"] = "awaiting_user"
                 self._add_event(sess, "error", "This turn was interrupted by an AppBuilder "
@@ -643,6 +704,7 @@ class SimSessionManager:
     # -- events --
     @staticmethod
     def _add_event(sess, kind, text, **extra):
+        """Append an event with the next sequence number, keeping at most MAX_EVENTS."""
         sess["seq"] = int(sess.get("seq", 0)) + 1
         ev = {"seq": sess["seq"], "ts": round(time.time(), 3), "kind": kind, "text": text}
         ev.update(extra)
@@ -654,10 +716,13 @@ class SimSessionManager:
 
     # -- readiness --
     def copilot_binary(self, config=None):
+        """Return the Copilot CLI path: configured, on PATH, or a usual install location."""
+        # A configured path must be an executable file.
         config = config if config is not None else self._cfg()
         b = (config.get("copilot_binary") or "").strip()
         if b:
             return b if os.path.isfile(b) and os.access(b, os.X_OK) else None
+        # Otherwise look on PATH, then in the usual install locations.
         found = shutil.which("copilot")
         if found:
             return found
@@ -668,9 +733,11 @@ class SimSessionManager:
 
     @staticmethod
     def copilot_token(config):
+        """Return the Copilot token: the assistant's own, else any copilot* LLM credential."""
         tok = (config.get("sim_assistant_copilot_token") or "").strip()
         if tok:
             return tok
+        # Check copilot* credentials, the plain "copilot" one first.
         creds = config.get("llm_credentials") or {}
         for key in sorted(creds, key=lambda k: (k != "copilot", k)):
             if str(key).startswith("copilot"):
@@ -682,6 +749,7 @@ class SimSessionManager:
     @staticmethod
     def resolve_repos(config):
         """{short_name: full_name} for the repos the assistant reads."""
+        # Use the explicit repo list, or every configured repo.
         explicit = config.get("sim_assistant_repos") or []
         if explicit:
             names = list(explicit)
@@ -690,6 +758,7 @@ class SimSessionManager:
             names += list(config.get("monitored_repos") or [])
             if config.get("bug_report_repo"):
                 names.append(config["bug_report_repo"])
+        # Map short name to full name; without an explicit list only cs and lm are kept.
         out = {}
         for n in names:
             full = str(n).strip().strip("/")
@@ -701,6 +770,8 @@ class SimSessionManager:
         return out
 
     def status(self):
+        """Report whether the assistant can run, and why not if it cannot."""
+        # Collect every reason the assistant cannot run.
         config = self._cfg()
         reasons = []
         if not config.get("sim_assistant_sessions_enabled", True):
@@ -717,11 +788,14 @@ class SimSessionManager:
 
     # -- ownership --
     def _get_owned(self, sid, owner):
+        """Return the session if the caller owns it (admins see all); otherwise not found."""
+        # A malformed or unknown id is "not found".
         if not isinstance(sid, str) or not _SESSION_ID_RE.match(sid):
             raise LookupError("session not found")
         sess = self._sessions.get(sid)
         if not sess:
             raise LookupError("session not found")
+        # Non-admins must match the session's user and tenant.
         o = sess.get("owner") or {}
         if not (owner or {}).get("admin"):
             if o.get("user") != (owner or {}).get("user") or o.get("tenant") != (owner or {}).get("tenant"):
@@ -730,6 +804,7 @@ class SimSessionManager:
 
     # -- workspace --
     def _git_env(self, token):
+        """Environment for git: minimal PATH, no prompts, and the token as an auth header."""
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.base_dir,
                "GIT_TERMINAL_PROMPT": "0"}
         if token:
@@ -744,21 +819,26 @@ class SimSessionManager:
 
         Shared by all sessions (they are read-only), refreshed at most every
         REPO_REFRESH_S and never while another session's turn is running."""
+        # Only one sync at a time, and not more often than REPO_REFRESH_S unless forced.
         config = self._cfg()
         with self._repo_lock:
             if not force and time.time() - self._last_refresh < REPO_REFRESH_S:
                 return
+            # Never pull while a turn is running (unless nothing was ever synced).
             with self._lock:
                 if any(s.get("state") == "running" for s in self._sessions.values()):
                     if self._last_refresh:
                         return
+            # Token, branch (default dev) and git environment.
             token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN") or ""
             branch = (config.get("sim_assistant_branch") or "dev").strip()
             env = self._git_env(token)
+            # Clone or update each repo.
             for short, full in self.resolve_repos(config).items():
                 dest = os.path.join(self.workspace, short)
                 url = f"https://github.com/{full}.git"
                 try:
+                    # No checkout yet: shallow-clone the branch, falling back to main.
                     if not os.path.isdir(os.path.join(dest, ".git")):
                         if os.path.exists(dest):
                             shutil.rmtree(dest)
@@ -768,6 +848,7 @@ class SimSessionManager:
                         if r.returncode != 0 and branch != "main":
                             cmd[cmd.index(branch)] = "main"
                             r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
+                    # Already cloned: fetch the branch and hard-reset to it.
                     else:
                         r = subprocess.run(["git", "-C", dest, "fetch", "--quiet", "--depth", "1",
                                             "origin", branch], env=env, capture_output=True,
@@ -776,14 +857,18 @@ class SimSessionManager:
                             r = subprocess.run(["git", "-C", dest, "reset", "--quiet", "--hard",
                                                 "FETCH_HEAD"], env=env, capture_output=True,
                                                text=True, timeout=120)
+                    # Log failures; one repo failing does not stop the others.
                     if r.returncode != 0:
                         self._warn(f"sim_session: sync {full} failed: {(r.stderr or '')[-300:]}")
                 except Exception as e:  # noqa: BLE001
                     self._warn(f"sim_session: sync {full} raised: {e}")
+            # Copy the skills in and record the sync time.
             self._materialize_skills()
             self._last_refresh = time.time()
 
     def _materialize_skills(self):
+        """Write each loaded skill's files into workspace/skills for the agent to read."""
+        # Use the given skills provider, or skills_loader if available.
         provider = self._skills_provider
         if provider is None:
             try:
@@ -791,6 +876,7 @@ class SimSessionManager:
                 provider = skills_loader
             except Exception:
                 return
+        # Make the skills folder and list the skill names.
         root = os.path.join(self.workspace, "skills")
         os.makedirs(root, exist_ok=True)
         try:
@@ -798,6 +884,7 @@ class SimSessionManager:
         except Exception:
             names = []
         for name in names:
+            # Skip skills with no files or an unsafe name, then write each file.
             files = provider.skill_files(name) or {}
             if not files or not re.match(r"^[A-Za-z0-9_.-]+$", name):
                 continue
@@ -808,6 +895,8 @@ class SimSessionManager:
                     f.write(content)
 
     def _boundaries_text(self, config):
+        """Return the operator's feature boundaries as prompt text ("(none configured)" if none)."""
+        # Use the injected renderer if given, else feature_boundary's.
         if self._boundaries_renderer:
             return self._boundaries_renderer(config.get("feature_boundaries") or []) or "(none configured)"
         try:
@@ -819,6 +908,7 @@ class SimSessionManager:
 
     @staticmethod
     def allowed_paths(config):
+        """Return the allowed build paths: the configured map, else the defaults."""
         cfg = config.get("sim_assistant_allowed_paths")
         if isinstance(cfg, dict) and cfg:
             return {str(k).lower(): [str(g) for g in (v or [])] for k, v in cfg.items()}
@@ -828,13 +918,16 @@ class SimSessionManager:
         """Existing simulation names, read from the workspace cs checkout
         (client script stems + on/off flags in simulation.conf). None when the
         workspace has not been synced yet (the check is then skipped)."""
+        # Reuse a cached result for up to 60 seconds.
         now = time.time()
         cached = getattr(self, "_known_cache", None)
         if cached and now - cached[0] < 60:
             return cached[1]
+        # No cs checkout yet: cannot tell.
         root = os.path.join(self.workspace, "cs", "clients")
         if not os.path.isdir(root):
             return None
+        # Each client script (minus helpers and connect_*) is a simulation.
         names = set()
         for sub, ext in (("linux", ".sh"), ("windows", ".ps1")):
             try:
@@ -844,6 +937,7 @@ class SimSessionManager:
                         names.add(stem.lower())
             except OSError:
                 pass
+        # So is each on/off flag in simulation.conf.
         try:
             with open(os.path.join(self.workspace, "cs", "configs", "simulation.conf")) as fh:
                 for line in fh:
@@ -852,10 +946,12 @@ class SimSessionManager:
                         names.add(k.strip().lower())
         except OSError:
             pass
+        # Cache and return.
         self._known_cache = (now, names)
         return names
 
     def problems_for(self, spec, config=None):
+        """Return the guardrail problems for a spec in this deployment (none without a spec)."""
         if not spec:
             return []
         config = config if config is not None else self._cfg()
@@ -865,31 +961,40 @@ class SimSessionManager:
     # Hooks a sibling session kind (request_session.py) overrides; the
     # simulation behaviour lives in these defaults.
     def _is_ready(self, spec, problems=None):
+        """Simulation readiness rules; overridden by request sessions."""
         return spec_is_ready(spec, problems)
 
     def _extract(self, text):
+        """Parse the sim-spec block from a reply; overridden by request sessions."""
         return extract_spec(text)
 
     def _reminder(self):
+        """Return the per-turn reminder; overridden by request sessions."""
         return _REMINDER
 
     def _sync_status_text(self):
+        """Status text shown while the workspace syncs."""
         return "Syncing the cs/lm repos and AppBuilder skills…"
 
     def _agent_feedback(self, spec):
         """Guardrail findings fed back to the agent with the user's next message."""
+        # Explain sessions have nothing to check.
         if (spec or {}).get("intent") == "explain":
             return []
         return self.problems_for(spec)
 
     def first_turn_prompt(self, config, message, sess=None):
+        """Build the first-turn prompt: instructions, repos, allowed paths, boundaries, message."""
+        # List each workspace repo with its full name and branch.
         repos = self.resolve_repos(config)
         repo_lines = "\n".join(f"  {s}/{' ' * max(1, 13 - len(s))}{full} (branch "
                                f"{(config.get('sim_assistant_branch') or 'dev')})"
                                for s, full in repos.items())
+        # List the allowed paths per repo.
         allowed = self.allowed_paths(config)
         allowed_lines = "\n".join(f"  {r}: {', '.join(allowed.get(r) or ['(nothing)'])}"
                                   for r in repos) or "  (none)"
+        # Fill in the template and append the user's first message.
         return (_INSTRUCTIONS.format(repo_lines=repo_lines, allowed_lines=allowed_lines,
                                      boundaries=self._boundaries_text(config))
                 + "\n\n## The user's first message\n\n" + message)
@@ -897,6 +1002,7 @@ class SimSessionManager:
     def _audit(self, sess):
         """Append-only trace of every submitted spec: who asked, who submitted,
         what it changes and why (the diagnosis / override for in-place edits)."""
+        # Build the audit record: who, what, why, and the issues filed.
         spec = sess.get("spec") or {}
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "session": sess.get("id"),
                "requested_by": sess.get("owner") or {}, "submitted_by": sess.get("submitted_by") or {},
@@ -908,6 +1014,7 @@ class SimSessionManager:
                "remove_confirmed": spec.get("remove_confirmed"),
                "remove_reason": spec.get("remove_reason"),
                "issues": [x.get("url") for x in sess.get("submitted") or []]}
+        # Append to audit.jsonl (a write failure is only a warning), then log it.
         try:
             with open(os.path.join(self.base_dir, "audit.jsonl"), "a") as fh:
                 fh.write(json.dumps(rec) + "\n")
@@ -917,17 +1024,22 @@ class SimSessionManager:
 
     # -- public API (called from hub_agent) --
     def start(self, owner, message, context=None):
+        """Start a new session with the user's first message and launch its first turn."""
+        # The message must be present and not too long.
         message = (message or "").strip()
         if not message:
             raise ValueError("message is required")
         if len(message) > MAX_MESSAGE_CHARS:
             raise ValueError(f"message too long (max {MAX_MESSAGE_CHARS} chars)")
+        # The assistant must be able to run.
         st = self.status()
         if not st["ready"]:
             raise RuntimeError("; ".join(st["reasons"]))
+        # Keep only the owner's user and tenant.
         owner = {"user": str((owner or {}).get("user") or ""),
                  "tenant": str((owner or {}).get("tenant") or "")}
         with self._lock:
+            # Over the per-user limit: delete the oldest idle sessions.
             mine = sorted((s for s in self._sessions.values()
                            if (s.get("owner") or {}) == owner),
                           key=lambda s: s.get("updated", 0))
@@ -940,6 +1052,7 @@ class SimSessionManager:
                     os.remove(self._path(old["id"]))
                 except OSError:
                     pass
+            # Create, store and save the new session with the user's message.
             sid = str(uuid.uuid4())
             sess = {"id": sid, "owner": owner, "created": time.time(), "updated": time.time(),
                     "state": "preparing", "turns": 0, "seq": 0, "events": [], "spec": None,
@@ -949,27 +1062,33 @@ class SimSessionManager:
             self._sessions[sid] = sess
             self._add_event(sess, "user", message)
             self._save(sess)
+        # Run the first turn in the background and return the summary.
         self._spawn_turn(sid, message, first=True)
         return self.summary(sess)
 
     def reply(self, owner, sid, message):
+        """Add the user's message to a session and launch the next turn."""
+        # The message must be present and not too long.
         message = (message or "").strip()
         if not message:
             raise ValueError("message is required")
         if len(message) > MAX_MESSAGE_CHARS:
             raise ValueError(f"message too long (max {MAX_MESSAGE_CHARS} chars)")
         with self._lock:
+            # The session must be idle and not yet submitted.
             sess = self._get_owned(sid, owner)
             if sess.get("state") in ("running", "preparing"):
                 raise RuntimeError("the assistant is still working on the previous message")
             if sess.get("submitted"):
                 raise RuntimeError("this session was already submitted — start a new conversation")
+            # Mark it busy, record the message, and get guardrail feedback for the agent.
             sess["state"] = "preparing"
             sess["choices"] = []
             sess.pop("_cancelled", None)
             self._add_event(sess, "user", message)
             self._save(sess)
             problems = self._agent_feedback(sess.get("spec"))
+        # Pass any guardrail problems to the agent along with the user's message.
         agent_msg = message
         if problems:
             agent_msg += ("\n\n(AppBuilder guardrail check on your last spec — fix these or "
@@ -979,25 +1098,32 @@ class SimSessionManager:
         return self.summary(sess)
 
     def cancel(self, owner, sid):
+        """Stop the running turn for a session, if any."""
+        # Look up the session and its running process.
         with self._lock:
             sess = self._get_owned(sid, owner)
             proc = self._procs.get(sid)
+        # Kill the process if it is still running.
         if proc and proc.poll() is None:
             try:
                 proc.kill()
             except Exception:
                 pass
+        # Mark the session cancelled so the turn thread knows.
         with self._lock:
             sess["_cancelled"] = True
         return self.summary(sess)
 
     def poll(self, owner, sid, since=0):
+        """Return the session summary plus events newer than `since` and the build status."""
         with self._lock:
             sess = self._get_owned(sid, owner)
+            # A bad `since` means "from the start".
             try:
                 since = int(since or 0)
             except Exception:
                 since = 0
+            # New events, the summary, and the build status.
             events = [e for e in sess.get("events", []) if e.get("seq", 0) > since]
             out = self.summary(sess)
             out["events"] = events
@@ -1005,6 +1131,7 @@ class SimSessionManager:
         return out
 
     def summary(self, sess):
+        """Return the session's state, spec, readiness, problems and counters for the UI."""
         spec = sess.get("spec")
         problems = self.problems_for(spec)
         return {"session_id": sess["id"], "state": sess.get("state"), "seq": sess.get("seq", 0),
@@ -1015,9 +1142,12 @@ class SimSessionManager:
                 "premium_requests": round(float(sess.get("premium_requests") or 0), 2)}
 
     def build_status(self, sess):
+        """Return the build progress of each issue filed for this session."""
+        # Nothing filed yet.
         subs = sess.get("submitted") or []
         if not subs:
             return []
+        # Load the processed-issue records (via main unless a loader was injected).
         processed = {}
         loader = self._processed_loader
         if loader is None:
@@ -1030,6 +1160,7 @@ class SimSessionManager:
                 processed = loader() or {}
             except Exception:
                 processed = {}
+        # One status entry per filed issue.
         out = []
         for s in subs:
             rec = processed.get(f"{s['repo']}:{s['number']}") or {}
@@ -1045,10 +1176,13 @@ class SimSessionManager:
         return out
 
     def submit(self, owner, sid):
+        """File one feature issue per touched repo for AppBuilder to build, and mark the session."""
+        # Load the caller's session; already submitted means nothing more to do.
         with self._lock:
             sess = self._get_owned(sid, owner)
             if sess.get("submitted"):
                 return self.summary(sess)
+            # Refuse while the agent is replying or the spec is blocked or incomplete.
             if sess.get("state") in ("running", "preparing"):
                 raise RuntimeError("wait for the assistant to finish its reply")
             spec = sess.get("spec")
@@ -1057,8 +1191,10 @@ class SimSessionManager:
                 raise RuntimeError("blocked by guardrails: " + "; ".join(problems))
             if not spec_is_ready(spec):
                 raise RuntimeError("the spec is not complete yet — answer the open questions first")
+            # Claim the session so a second submit cannot run at the same time.
             sess["state"] = "submitting"
         try:
+            # Which known repos the touch-points name, in order.
             config = self._cfg()
             repos = self.resolve_repos(config)
             wanted = []
@@ -1069,6 +1205,7 @@ class SimSessionManager:
             if not wanted:
                 raise RuntimeError("the spec's touch-points name no known repo "
                                    f"({', '.join(repos) or 'none configured'})")
+            # GitHub client, labels (plus a modify/remove label) and an issue title per intent.
             gh = self._gh_factory(config) if self._gh_factory else _default_gh(config)
             label = (config.get("feature_drive_label") or "enhancement").strip() or "enhancement"
             intent = spec.get("intent")
@@ -1083,6 +1220,7 @@ class SimSessionManager:
                 title = f"Simulations UI: {spec.get('title') or spec.get('name')}"[:240]
             else:
                 title = f"Simulation: {spec.get('title') or spec.get('name')}"[:240]
+            # Record who submitted and when.
             with self._lock:
                 sess["submitted_by"] = {
                     "user": str((owner or {}).get("user") or ""),
@@ -1092,6 +1230,7 @@ class SimSessionManager:
                     "ip": str((owner or {}).get("ip") or "")[:64],
                     "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 }
+            # Create one issue per repo, making sure the labels exist first.
             created = []
             for short in wanted:
                 repo_obj = gh.get_repo(repos[short])
@@ -1104,6 +1243,7 @@ class SimSessionManager:
                 body = render_issue_body(sess, short, repos[short])
                 issue = repo_obj.create_issue(title=title, body=body, labels=labels)
                 created.append((short, repo_obj, issue))
+            # Several issues: rewrite each body to link to the others.
             if len(created) > 1:
                 links = [f"{repos[s]}#{i.number} ({i.html_url})" for s, _r, i in created]
                 for short, _r, issue in created:
@@ -1111,6 +1251,7 @@ class SimSessionManager:
                         issue.edit(body=render_issue_body(sess, short, repos[short], links))
                     except Exception as e:  # noqa: BLE001
                         self._warn(f"sim_session: could not link siblings on {short}#{issue.number}: {e}")
+            # Save the filed issues, tell the user, and write the audit record.
             with self._lock:
                 sess["submitted"] = [{"repo": repos[s], "number": i.number, "url": i.html_url}
                                      for s, _r, i in created]
@@ -1121,6 +1262,7 @@ class SimSessionManager:
             self._audit(sess)
             self._info(f"sim_session {sid}: submitted {[x['url'] for x in sess['submitted']]}")
             return self.summary(sess)
+        # Failure: return the session to the user so they can try again.
         except Exception:
             with self._lock:
                 if not sess.get("submitted"):
@@ -1130,11 +1272,13 @@ class SimSessionManager:
 
     # -- turn execution --
     def _spawn_turn(self, sid, message, first):
+        """Run a turn in a background thread."""
         th = threading.Thread(target=self._run_turn_safe, args=(sid, message, first),
                               name=f"sim-session-{sid[:8]}", daemon=True)
         th.start()
 
     def _run_turn_safe(self, sid, message, first):
+        """Run a turn, turning any failure into an error event for the user."""
         try:
             self._run_turn(sid, message, first)
         except Exception as e:  # noqa: BLE001
@@ -1147,15 +1291,19 @@ class SimSessionManager:
                     self._save(sess)
 
     def _running_count(self):
+        """Count CLI processes still running."""
         return sum(1 for p in self._procs.values() if p.poll() is None)
 
     def _run_turn(self, sid, message, first):
+        """Run one Copilot CLI turn and turn its output into session events and an updated spec."""
+        # Sync the workspace on the first turn (or if it is missing).
         config = self._cfg()
         sess = self._sessions[sid]
         if first or not os.path.isdir(os.path.join(self.workspace, "skills")):
             with self._lock:
                 self._add_event(sess, "status", self._sync_status_text())
             self.refresh_workspace()
+        # Wait (up to 10 minutes) for a free slot under the concurrent-turn limit.
         max_running = int(config.get("sim_assistant_max_running") or DEFAULT_MAX_RUNNING)
         waited = 0
         while True:
@@ -1169,6 +1317,7 @@ class SimSessionManager:
             waited += 2
             if waited > 600:
                 raise RuntimeError("assistant is busy — try again shortly")
+        # Find the CLI and a credential.
         binary = self.copilot_binary(config)
         token = self.copilot_token(config)
         # sim_assistant_copilot_home: use an existing `copilot login` (run as
@@ -1176,6 +1325,7 @@ class SimSessionManager:
         login_home = (config.get("sim_assistant_copilot_home") or "").strip()
         if not binary or not (token or login_home):
             raise RuntimeError("; ".join(self.status()["reasons"]) or "Copilot CLI unavailable")
+        # First turn gets the full prompt; later turns get the message plus the reminder.
         prompt = (self.first_turn_prompt(config, message, sess) if first
                   else f"{message}\n\n{self._reminder()}")
         cmd = build_copilot_command(binary, prompt, sid, not first, self.workspace,
@@ -1192,7 +1342,9 @@ class SimSessionManager:
             env["HOME"] = os.environ.get("HOME", self.base_dir)
         else:
             env["COPILOT_GITHUB_TOKEN"] = token
+        # Per-turn timeout.
         timeout_s = int(config.get("sim_assistant_turn_timeout_s") or DEFAULT_TURN_TIMEOUT_S)
+        # Stop now if the user cancelled while we waited; otherwise start the CLI.
         with self._lock:
             if sess.get("_cancelled"):
                 sess.pop("_cancelled", None)
@@ -1205,11 +1357,14 @@ class SimSessionManager:
             proc = subprocess.Popen(cmd, cwd=self.workspace, env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, bufsize=1)
             self._procs[sid] = proc
+        # Kill the CLI if it runs past the timeout.
         timer = threading.Timer(timeout_s, lambda: proc.poll() is None and proc.kill())
         timer.start()
+        # Recent non-JSON output (for errors), and what the turn produced.
         tail = []
         last_spec, last_choices, got_reply, exit_code = None, None, False, None
         try:
+            # Read the CLI's JSON events line by line; non-JSON lines go to the tail.
             for line in proc.stdout:
                 line = line.strip()
                 if not line:
@@ -1220,10 +1375,12 @@ class SimSessionManager:
                     tail.append(line[:300])
                     tail[:] = tail[-8:]
                     continue
+                # Turn the event into a UI event; skip ones we do not show.
                 ev = event_from_cli(obj, self.workspace)
                 if not ev:
                     continue
                 with self._lock:
+                    # Assistant text: keep the newest spec and show the text.
                     if ev["kind"] == "assistant_raw":
                         display, spec, choices = self._extract(ev["text"])
                         if spec is not None:
@@ -1231,6 +1388,7 @@ class SimSessionManager:
                         if display:
                             self._add_event(sess, "assistant", display)
                             got_reply = True
+                    # Final result: note the exit code and add up premium requests used.
                     elif ev["kind"] == "result":
                         exit_code = ev.get("exit_code")
                         try:
@@ -1242,11 +1400,14 @@ class SimSessionManager:
                         self._add_event(sess, "error", ev["text"])
                     else:
                         self._add_event(sess, ev["kind"], ev["text"])
+            # Wait for the CLI to exit.
             rc = proc.wait()
         finally:
+            # Always stop the timer and forget the process.
             timer.cancel()
             with self._lock:
                 self._procs.pop(sid, None)
+        # Save the new spec, report how the turn ended, and hand back to the user.
         with self._lock:
             if last_spec is not None:
                 sess["spec"] = last_spec
@@ -1267,6 +1428,7 @@ class SimSessionManager:
 
 
 def _default_gh(config):
+    """Return a GitHub client using the configured token."""
     from github import Github
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
     if not token:
@@ -1276,17 +1438,21 @@ def _default_gh(config):
 
 # ── hub command entry point ─────────────────────────────────────────────────
 
+# The single shared manager, created on first use.
 _MANAGER = None
 _MANAGER_LOCK = threading.Lock()
 
+# Hub commands handled by this module.
 COMMANDS = ("SIM_SESSION_PING", "SIM_SESSION_START", "SIM_SESSION_REPLY",
             "SIM_SESSION_POLL", "SIM_SESSION_CANCEL", "SIM_SESSION_SUBMIT")
 
 
 def get_manager():
+    """Return the shared manager, creating it on first use."""
     global _MANAGER
     with _MANAGER_LOCK:
         if _MANAGER is None:
+            # Imported lazily to avoid a circular import with main.
             from main import load_config, logger, CONFIG_DIR
             base = (load_config() or {}).get("sim_assistant_dir") or os.path.join(CONFIG_DIR, "sim_sessions")
             _MANAGER = SimSessionManager(base, load_config, logger=logger)
@@ -1296,11 +1462,13 @@ def get_manager():
 def handle_command(cmd_type, data, manager=None):
     """Dispatch one SIM_SESSION_* hub command. Always returns a COMMAND_RESULT
     data dict ({"status": "SUCCESS", ...} or {"status": "ERROR", "message"})."""
+    # Read the caller and session id from the command data.
     data = data or {}
     try:
         mgr = manager or get_manager()
         owner = data.get("owner") or {}
         sid = data.get("session_id")
+        # Run the matching manager call and wrap its result.
         if cmd_type == "SIM_SESSION_PING":
             return {"status": "SUCCESS", "protocol": 1, **mgr.status()}
         if cmd_type == "SIM_SESSION_START":
@@ -1314,6 +1482,7 @@ def handle_command(cmd_type, data, manager=None):
         if cmd_type == "SIM_SESSION_SUBMIT":
             return {"status": "SUCCESS", **mgr.submit(owner, sid)}
         return {"status": "ERROR", "message": f"unknown command {cmd_type}"}
+    # Map errors to an ERROR result for the hub.
     except LookupError as e:
         return {"status": "ERROR", "code": "not_found", "message": str(e)}
     except (ValueError, RuntimeError) as e:

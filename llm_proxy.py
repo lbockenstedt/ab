@@ -43,6 +43,7 @@ from llm_client import call_llm
 from model_selection import LlmRequirements
 from config_store import load_config
 
+# Logger and the FastAPI router for the /v1 endpoints.
 logger = logging.getLogger("LlmProxy")
 
 router = APIRouter()
@@ -68,8 +69,10 @@ def _wants_agentic(body: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
     single passthrough. Triggered by the requested model id (contains
     ``ab-agent``, or an operator-configured ``llm_proxy_agent_model_ids``
     entry) or globally via ``llm_proxy_agentic_default``."""
+    # Agentic mode can be turned on for every request.
     if cfg.get("llm_proxy_agentic_default"):
         return True
+    # Otherwise check whether the requested model id is one of the agent ids.
     model = str(body.get("model") or "").strip().lower()
     if not model:
         return False
@@ -91,11 +94,13 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
     diffs forced to a human-reviewed PR (never direct-push). Defaults OFF so an
     proxy never mutates without an explicit operator opt-in (defence in depth:
     the key check already refuses unauthenticated callers)."""
+    # Issue details and the text to show before our message.
     repo = descriptor.get("repo")
     number = descriptor.get("number")
     pref = descriptor.get("llm_preference")
     prefix = (text + "\n\n") if text else ""
 
+    # Look up the issue's title and body when possible.
     # ── Pre-build boundary pre-flight (informational) ──
     preflight = ""
     try:
@@ -109,6 +114,7 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
                 body = iss.body or ""
             except Exception:  # noqa: BLE001 — pre-flight is best-effort
                 pass
+        # Warn if the issue matches boundary rules (hard: PR only; soft: maybe).
         hits = feature_boundary.prefilter(title, body, cfg.get("feature_boundaries") or [])
         hard_hits = (hits or {}).get("hits") or []
         soft_hits = (hits or {}).get("soft_hits") or []
@@ -125,6 +131,7 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
     except Exception:  # noqa: BLE001
         pass
 
+    # Autofix off: tell the caller how to trigger it instead.
     if not cfg.get("llm_proxy_autofix_enabled", False):
         return (prefix + f"🔧 A fix is warranted for {repo}#{number}, but autonomous "
                 "fixing is DISABLED on this router (set llm_proxy_autofix_enabled to "
@@ -136,16 +143,20 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
         from fix_engine import process_single_issue
 
         def _run():
+            """Run the fix pipeline for the issue and log the result."""
+            # Run the fix and log the outcome.
             try:
                 ok, msg = process_single_issue(repo, number, llm_preference=pref)
                 logger.info("Router-triggered fix %s#%s -> ok=%s msg=%s", repo, number, ok, msg)
             except Exception as e:  # noqa: BLE001
                 logger.error("Router-triggered fix %s#%s failed: %s", repo, number, e)
 
+        # Start the fix in a background thread.
         threading.Thread(target=_run, daemon=True).start()
     except Exception as e:  # noqa: BLE001
         return prefix + f"Tried to trigger the fix for {repo}#{number} but couldn't launch it: {e}"
 
+    # Report that the fix was triggered.
     return (prefix + f"✅ Triggered the automated fix pipeline for {repo}#{number} "
             f"(LLM preference: {pref or 'auto'}). It will clone, generate the fix, run "
             "tests, then the review panel gates the merge — direct-push only when a "
@@ -159,17 +170,21 @@ def _run_agentic(system: Any, a_messages: List[Dict[str, Any]],
     return (final_text, model_label). Builds the same context index + system
     prompt the dashboard chat uses so the router agent has repo/issue awareness
     and the CHAT_TOOLS."""
+    # Imports are deferred to keep module load light.
     import chat as _chat
     from github import Github
 
+    # GitHub client, if a token is configured.
     token = cfg.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
     gh = Github(token) if token else None
 
+    # System prompt: base prompt, client prompt and repo/issue index.
     base_system = cfg.get("CHAT_SYSTEM_PROMPT") or "You are a helpful assistant."
     client_system = _system_text(system)
     index_text = _chat.build_chat_context_index(cfg, gh=gh)
     system_prompt = "\n\n".join(p for p in (base_system, client_system, index_text) if p)
 
+    # Convert the client's messages and put our system prompt first.
     internal = _to_internal_messages(None, a_messages)  # our own system is prepended below
     messages = [{"role": "system", "content": system_prompt}] + internal
     # The router agent often reads large source files in several chunked
@@ -177,6 +192,7 @@ def _run_agentic(system: Any, a_messages: List[Dict[str, Any]],
     # before the forced final-answer turn kicks in. Dedicated key so it doesn't
     # inherit a low CHAT_TOOL_MAX_ITERATIONS.
     max_iter = int(cfg.get("llm_proxy_agent_max_iterations") or 10)
+    # Limit tool result size and tag this run.
     max_result_chars = int(cfg.get("CHAT_TOOL_MAX_TOKENS", 12000) or 12000) * 4
     task_id = f"proxy-agent-{uuid.uuid4().hex[:8]}"
 
@@ -197,6 +213,7 @@ def _run_agentic(system: Any, a_messages: List[Dict[str, Any]],
                                  prefer_capable=bool(prefer_capable),
                                  restrict=restrict, pin_key=pin)
 
+    # Run the agent loop and return its final text.
     final_text = _chat.run_agent_loop(
         messages, cfg, gh, task_id=task_id,
         max_iter=max_iter, max_result_chars=max_result_chars,
@@ -223,6 +240,7 @@ def _interactive_config() -> Dict[str, Any]:
     override via LLM_PROXY_* config keys. Read live on every request so a
     settings change needs no restart.
     """
+    # Load config and override timeouts and retries for interactive use.
     cfg = dict(load_config() or {})
     cfg["LLM_TIMEOUT"] = int(cfg.get("LLM_PROXY_TIMEOUT") or 120)
     cfg["LLM_MAX_RETRIES"] = int(cfg.get("LLM_PROXY_MAX_RETRIES") or 0)
@@ -234,14 +252,18 @@ def _proxy_deadline(cfg: Dict[str, Any]) -> float:
     """Hard wall-clock ceiling for the whole routing attempt. asyncio.wait_for
     can't cancel the worker thread, but it stops the CLIENT hanging: a
     pathological chain returns a prompt 504 instead of an open connection."""
+    # Default is 150 seconds.
     return float(cfg.get("LLM_PROXY_DEADLINE") or 150)
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
 def _configured_key() -> str:
+    """The proxy API key: AB_PROXY_KEY env var first, then llm_proxy_api_key in config; "" if none."""
+    # The env var wins.
     env = (os.environ.get("AB_PROXY_KEY") or "").strip()
     if env:
         return env
+    # Otherwise read config; a read error means no key.
     try:
         return str((load_config() or {}).get("llm_proxy_api_key") or "").strip()
     except Exception:  # noqa: BLE001 - config read must never 500 the proxy
@@ -249,9 +271,12 @@ def _configured_key() -> str:
 
 
 def _presented_key(request: Request) -> str:
+    """The key the caller sent, from x-api-key or the Authorization header (Bearer prefix removed)."""
+    # x-api-key header first.
     key = (request.headers.get("x-api-key") or "").strip()
     if key:
         return key
+    # Then Authorization, with any Bearer prefix removed.
     auth = (request.headers.get("authorization") or "").strip()
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
@@ -268,12 +293,14 @@ def _authorized(request: Request) -> bool:
     that can also drive the agentic fix pipeline, so "open by default" was the
     wrong default. With no key configured every request is now REFUSED and the
     operator is told to set one in Settings."""
+    # No key configured: refuse.
     want = _configured_key()
     if not want:
         logger.warning("LLM proxy request REFUSED: no api key configured. Set "
                        "one in Settings > Automation (LLM Router API), or via "
                        "the AB_PROXY_KEY env var / llm_proxy_api_key config.")
         return False
+    # No key sent: refuse.
     presented = _presented_key(request)
     if not presented:
         return False
@@ -285,6 +312,7 @@ def _authorized(request: Request) -> bool:
 # ── Request translation (Anthropic -> internal) ─────────────────────────────
 def _system_text(system: Any) -> str:
     """Anthropic ``system`` is a string or a list of text blocks."""
+    # Plain string, or join the text blocks.
     if isinstance(system, str):
         return system
     if isinstance(system, list):
@@ -295,6 +323,7 @@ def _system_text(system: Any) -> str:
 
 def _stringify_content(content: Any) -> str:
     """A tool_result's ``content`` is a string or a list of text/other blocks."""
+    # Strings pass through; lists are joined, with non-text blocks as JSON.
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -317,11 +346,13 @@ def _to_internal_messages(system: Any,
                           messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Translate an Anthropic request's system+messages into AppBuilder's internal
     message list ({role, content[, tool_calls]} / {role:tool,...})."""
+    # Start with the system prompt, if any.
     out: List[Dict[str, Any]] = []
     sys_txt = _system_text(system)
     if sys_txt:
         out.append({"role": "system", "content": sys_txt})
 
+    # Convert each message.
     for m in messages or []:
         role = m.get("role")
         content = m.get("content")
@@ -330,10 +361,12 @@ def _to_internal_messages(system: Any,
         if isinstance(content, str):
             out.append({"role": role, "content": content})
             continue
+        # Other non-list content becomes a string.
         if not isinstance(content, list):
             out.append({"role": role, "content": "" if content is None else str(content)})
             continue
 
+        # Assistant: join the text and convert tool_use blocks to tool calls.
         if role == "assistant":
             text_parts, tool_calls = [], []
             for b in content:
@@ -374,8 +407,10 @@ def _to_internal_messages(system: Any,
 def _to_internal_tools(tools: Any) -> Optional[List[Dict[str, Any]]]:
     """Anthropic tools ({name, description, input_schema}) -> internal flat spec
     ({name, description, parameters}) that llm_client's converters accept."""
+    # No tools: None.
     if not isinstance(tools, list) or not tools:
         return None
+    # Rename input_schema to parameters.
     return [{"name": t.get("name", ""),
              "description": t.get("description", ""),
              "parameters": t.get("input_schema") or {"type": "object", "properties": {}}}
@@ -385,6 +420,7 @@ def _to_internal_tools(tools: Any) -> Optional[List[Dict[str, Any]]]:
 def _estimate_tokens(system: Any, messages: List[Dict[str, Any]]) -> int:
     """Rough input-token estimate (~4 chars/token) to drive routing (complexity
     tier + minimum context window)."""
+    # Count characters in the system prompt and every message.
     chars = len(_system_text(system))
     for m in (messages or []):
         c = m.get("content")
@@ -394,11 +430,16 @@ def _estimate_tokens(system: Any, messages: List[Dict[str, Any]]) -> int:
             for b in c:
                 if isinstance(b, dict):
                     chars += len(json.dumps(b))
+    # About 4 characters per token.
     return max(1, chars // 4)
 
 
 def _build_requirements(system: Any, messages: List[Dict[str, Any]],
                         has_tools: bool, max_tokens: int) -> LlmRequirements:
+    """Routing requirements for a request: complexity from its estimated size and tool use, plus the
+    minimum context window it needs.
+    """
+    # Pick complexity from the estimated input size (tools need at least medium).
     est_in = _estimate_tokens(system, messages)
     if est_in > 16000:
         complexity = "large"
@@ -417,14 +458,17 @@ def _build_requirements(system: Any, messages: List[Dict[str, Any]],
 def _to_anthropic_content(result: Any) -> Tuple[List[Dict[str, Any]], str]:
     """Turn call_llm's return (a text string, or {"text", "tool_calls"}) into
     Anthropic content blocks + a stop_reason."""
+    # Default to a plain end of turn.
     blocks: List[Dict[str, Any]] = []
     stop_reason = "end_turn"
+    # Dict result: text block plus one tool_use block per tool call.
     if isinstance(result, dict):
         text = result.get("text") or ""
         tool_calls = result.get("tool_calls") or []
         if text:
             blocks.append({"type": "text", "text": text})
         for tc in tool_calls:
+            # Arguments may arrive as a JSON string; parse them.
             fn = tc.get("function") or {}
             args = fn.get("arguments")
             if isinstance(args, str):
@@ -436,10 +480,13 @@ def _to_anthropic_content(result: Any) -> Tuple[List[Dict[str, Any]], str]:
                            "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:8]}",
                            "name": fn.get("name") or "",
                            "input": args or {}})
+        # Tool calls mean the model is waiting for tool results.
         if tool_calls:
             stop_reason = "tool_use"
+    # Plain string result: one text block.
     else:
         blocks.append({"type": "text", "text": result or ""})
+    # Always return at least one block.
     if not blocks:
         blocks.append({"type": "text", "text": ""})
     return blocks, stop_reason
@@ -447,6 +494,8 @@ def _to_anthropic_content(result: Any) -> Tuple[List[Dict[str, Any]], str]:
 
 def _message_envelope(msg_id: str, model: str, blocks: List[Dict[str, Any]],
                       stop_reason: str, in_tok: int, out_tok: int) -> Dict[str, Any]:
+    """Build a non-streaming Anthropic Messages response."""
+    # Standard Anthropic message fields.
     return {
         "id": msg_id,
         "type": "message",
@@ -460,6 +509,8 @@ def _message_envelope(msg_id: str, model: str, blocks: List[Dict[str, Any]],
 
 
 def _sse(event: str, data: Dict[str, Any]) -> str:
+    """Format one server-sent event."""
+    # Event name line, JSON data line and a blank line.
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
@@ -467,16 +518,19 @@ def _stream_events(envelope: Dict[str, Any]):
     """Emit a valid Anthropic SSE sequence for an already-computed message.
     Non-incremental (one delta per block) — the upstream result is complete
     before streaming begins — but protocol-correct for streaming clients."""
+    # Message fields and token counts used in the events.
     msg_id = envelope["id"]
     blocks = envelope["content"]
     in_tok = envelope["usage"]["input_tokens"]
     out_tok = envelope["usage"]["output_tokens"]
 
+    # message_start with empty content and zero output tokens.
     start_msg = {**envelope, "content": [],
                  "stop_reason": None,
                  "usage": {"input_tokens": in_tok, "output_tokens": 0}}
     yield _sse("message_start", {"type": "message_start", "message": start_msg})
 
+    # Each block gets start, one delta and stop events.
     for i, block in enumerate(blocks):
         if block.get("type") == "tool_use":
             yield _sse("content_block_start", {
@@ -496,6 +550,7 @@ def _stream_events(envelope: Dict[str, Any]):
                 "delta": {"type": "text_delta", "text": block.get("text", "")}})
         yield _sse("content_block_stop", {"type": "content_block_stop", "index": i})
 
+    # Final stop reason and usage, then message_stop.
     yield _sse("message_delta", {
         "type": "message_delta",
         "delta": {"stop_reason": envelope["stop_reason"], "stop_sequence": None},
@@ -506,11 +561,16 @@ def _stream_events(envelope: Dict[str, Any]):
 # ── Routes ──────────────────────────────────────────────────────────────────
 @router.post("/v1/messages")
 async def messages(request: Request):
+    """POST /v1/messages: check the API key, then run the agent loop or route one call through
+    call_llm, and return an Anthropic response (JSON or SSE).
+    """
+    # Reject callers without the right key.
     if not _authorized(request):
         return JSONResponse(status_code=401, content={
             "type": "error",
             "error": {"type": "authentication_error",
                       "message": "Missing or invalid api key (x-api-key / Authorization: Bearer)."}})
+    # Parse the JSON body.
     try:
         body = await request.json()
     except Exception:
@@ -518,6 +578,7 @@ async def messages(request: Request):
             "type": "error",
             "error": {"type": "invalid_request_error", "message": "Body is not valid JSON."}})
 
+    # Request fields; max_tokens defaults to 1024.
     system = body.get("system")
     a_messages = body.get("messages") or []
     a_tools = body.get("tools")
@@ -527,6 +588,7 @@ async def messages(request: Request):
     except Exception:
         max_tokens = 1024
 
+    # Config with interactive timeouts.
     icfg = _interactive_config()
 
     # ── Agentic mode ──────────────────────────────────────────────────────
@@ -535,6 +597,7 @@ async def messages(request: Request):
     # the caller gets an agent that can investigate the repo and (with autofix
     # enabled) trigger the real fix pipeline.
     if _wants_agentic(body, icfg):
+        # Run the agent loop in a worker thread, within the deadline.
         try:
             final_text, task_id = await asyncio.wait_for(
                 asyncio.to_thread(_run_agentic, system, a_messages, icfg),
@@ -553,6 +616,7 @@ async def messages(request: Request):
                 "type": "error",
                 "error": {"type": "api_error", "message": f"Agentic routing failed: {e}"}})
 
+        # Wrap the final text in a response, with estimated token counts.
         blocks = [{"type": "text", "text": final_text}]
         in_tok = _estimate_tokens(system, a_messages)
         out_tok = max(1, len(final_text) // 4)
@@ -560,14 +624,17 @@ async def messages(request: Request):
         msg_id = f"msg_{uuid.uuid4().hex}"
         logger.info("LLM proxy: agentic run %s complete (stream=%s)", task_id, want_stream)
         envelope = _message_envelope(msg_id, model_label, blocks, "end_turn", in_tok, out_tok)
+        # Stream it or return JSON.
         if want_stream:
             return StreamingResponse(_stream_events(envelope), media_type="text/event-stream")
         return JSONResponse(content=envelope)
 
+    # Convert the request and work out routing requirements.
     internal_msgs = _to_internal_messages(system, a_messages)
     internal_tools = _to_internal_tools(a_tools)
     reqs = _build_requirements(system, a_messages, bool(internal_tools), max_tokens)
 
+    # Make one call_llm call in a worker thread, within the deadline; used records the model chosen.
     used: Dict[str, Any] = {}
     try:
         result = await asyncio.wait_for(
@@ -576,6 +643,7 @@ async def messages(request: Request):
                 messages=internal_msgs, tools=internal_tools, stream=False,
                 requirements=reqs, used_model_out=used, config=icfg),
             timeout=_proxy_deadline(icfg))
+    # Deadline hit: 504.
     except asyncio.TimeoutError:
         logger.warning("LLM proxy routing exceeded %ss deadline", _proxy_deadline(icfg))
         return JSONResponse(status_code=504, content={
@@ -585,21 +653,25 @@ async def messages(request: Request):
                                   "responded within the interactive deadline. Check "
                                   "that a configured endpoint is reachable and its "
                                   "model is loaded.")}})
+    # Other failures: 502.
     except Exception as e:  # noqa: BLE001 - surface as an API error, never 500-crash
         logger.exception("LLM proxy call_llm failed")
         return JSONResponse(status_code=502, content={
             "type": "error",
             "error": {"type": "api_error", "message": f"Upstream LLM routing failed: {e}"}})
 
+    # Convert the result and estimate token counts.
     blocks, stop_reason = _to_anthropic_content(result)
     in_tok = _estimate_tokens(system, a_messages)
     out_tok = max(1, sum(len(b.get("text", "")) for b in blocks) // 4)
+    # Label the response with the model that answered.
     model_label = (f"{used.get('provider')}/{used.get('model')}"
                    if used.get("model") else _PROXY_MODEL_ID)
     msg_id = f"msg_{uuid.uuid4().hex}"
     logger.info("LLM proxy: routed to %s (stream=%s, tools=%s, stop=%s)",
                 model_label, want_stream, bool(internal_tools), stop_reason)
 
+    # Stream it or return JSON.
     envelope = _message_envelope(msg_id, model_label, blocks, stop_reason, in_tok, out_tok)
     if want_stream:
         return StreamingResponse(_stream_events(envelope), media_type="text/event-stream")
@@ -610,10 +682,12 @@ async def messages(request: Request):
 async def count_tokens(request: Request):
     """Anthropic's token-count endpoint. Claude Code calls it before some
     requests; return a size estimate so those calls don't 404."""
+    # Reject callers without the right key.
     if not _authorized(request):
         return JSONResponse(status_code=401, content={
             "type": "error",
             "error": {"type": "authentication_error", "message": "Missing or invalid api key."}})
+    # Estimate tokens for the body; a bad body counts as empty.
     try:
         body = await request.json()
     except Exception:
@@ -626,10 +700,12 @@ async def count_tokens(request: Request):
 async def models(request: Request):
     """Minimal model list so clients that enumerate models get one coherent id.
     Routing is decided per-request by AppBuilder regardless of the id chosen."""
+    # Reject callers without the right key.
     if not _authorized(request):
         return JSONResponse(status_code=401, content={
             "type": "error",
             "error": {"type": "authentication_error", "message": "Missing or invalid api key."}})
+    # List the single router model.
     now = int(time.time())
     return JSONResponse(content={"data": [
         {"type": "model", "id": _PROXY_MODEL_ID, "display_name": "AppBuilder Router",
