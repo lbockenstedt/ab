@@ -32,26 +32,39 @@ dissents; 1 otherwise (2 on operational error) — so it slots into a CI gate or
 scripted iterate-until-green loop. The CLI depends only on the `gh` CLI (already
 required by this repo); the programmatic API takes a PyGithub PR and needs no gh.
 """
+# argparse builds the command-line interface used by main().
 import argparse
+# json parses `gh` output and prints the --json report.
 import json
+# logging gives this module a named logger like the rest of the app.
 import logging
+# re parses the rendered review comment (headings, verdicts, percentages).
 import re
+# subprocess runs the `gh` CLI for the command-line mode.
 import subprocess
+# sys provides stderr output and the process exit code.
 import sys
+# time drives the --watch polling loop and its deadline.
 import time
 
+# Module logger, named after this module.
 logger = logging.getLogger(__name__)
 
+# Repo the CLI inspects when --repo is not given.
 DEFAULT_REPO = "lbockenstedt/ab"
 # Mirrors pr_review.PR_REVIEW_MARKER — resolved lazily via _marker() to stay in
 # lockstep without a top-level import cycle (pr_review imports this module).
 _MARKER_FALLBACK = "<!-- ab-pr-review -->"
 
 # Anchors kept in sync with pr_review.py's renderer (_render_* / _PANEL_HEADER).
+# Hidden "<!-- head: SHA -->" tag recording which commit the review covered.
 _HEAD_RE = re.compile(r"<!--\s*head:\s*([0-9a-f]{7,40})\s*-->")
+# A "### ... review (panel)" heading that starts each panel section.
 _PANEL_HEADER_RE = re.compile(r"^###\s+.*review \(panel\)\s*$", re.MULTILINE)
+# "**Recommendation: VERDICT** · panel confidence **NN%**" line for a whole panel.
 _RECO_RE = re.compile(
     r"\*\*Recommendation:\s*(?P<verdict>[A-Z]+)\*\*\s*·\s*panel confidence\s*\*\*(?P<pct>\d+)%\*\*")
+# One reviewer line: "**Name** — <icon> Approve/Reject/Deny · confidence NN%".
 _REVIEWER_RE = re.compile(
     r"\*\*(?P<name>[^*]+?)\*\*\s*—\s*\S+\s*(?P<verdict>Approve|Reject|Deny)\s*·\s*confidence\s*(?P<pct>\d+)%",
     re.IGNORECASE)
@@ -59,6 +72,7 @@ _REVIEWER_RE = re.compile(
 
 def _marker():
     """The pre-review marker, sourced from pr_review when importable."""
+    # Prefer the live constant from pr_review so the two never drift apart.
     try:
         from pr_review import PR_REVIEW_MARKER
         return PR_REVIEW_MARKER
@@ -68,14 +82,18 @@ def _marker():
 
 def _gh_json(repo, pr, fields):
     """Return `gh pr view` JSON for the given fields, or raise RuntimeError."""
+    # Run `gh pr view --json <fields>` and capture its stdout as text.
     try:
         out = subprocess.run(
             ["gh", "pr", "view", str(pr), "--repo", repo, "--json", fields],
             capture_output=True, text=True, check=True).stdout
+    # gh is not installed: report it as a clear operational error.
     except FileNotFoundError:
         raise RuntimeError("gh CLI not found on PATH")
+    # gh ran but failed (auth, bad PR number, ...): surface its own error message.
     except subprocess.CalledProcessError as e:
         raise RuntimeError((e.stderr or e.stdout or "gh pr view failed").strip())
+    # Decode the JSON gh printed.
     return json.loads(out)
 
 
@@ -85,8 +103,10 @@ def _latest_review_comment(comments):
     `comments` is an iterable of objects/dicts exposing a comment body — either
     `gh` JSON dicts ({"body": ...}) or PyGithub IssueComment objects (.body).
     """
+    # Find every comment carrying AppBuilder's pre-review marker.
     marker = _marker()
     hits = []
+    # Accept both gh dicts and PyGithub comment objects.
     for c in comments:
         body = c.get("body") if isinstance(c, dict) else getattr(c, "body", None)
         if body and marker in body:
@@ -97,26 +117,36 @@ def _latest_review_comment(comments):
 
 def _section_bounds(body):
     """Yield (title_line, start, end) for each panel section in the comment."""
+    # Character offsets of every panel heading in the comment.
     starts = [m.start() for m in _PANEL_HEADER_RE.finditer(body)]
+    # Each section runs from its heading to the next heading (or the end of the comment).
     for i, s in enumerate(starts):
         end = starts[i + 1] if i + 1 < len(starts) else len(body)
+        # The heading text is the first line of the section, without the leading "#"s.
         title = body[s:body.find("\n", s) if body.find("\n", s) != -1 else len(body)].strip("# ").strip()
         yield title, s, end
 
 
 def parse_review(body):
     """Parse a pre-review comment body into a structured score report."""
+    # Pull out which commit this review was written for, if it was tagged.
     head = None
     m = _HEAD_RE.search(body)
     if m:
         head = m.group(1)
 
+    # One entry per panel section in the comment.
     panels = []
+    # Parse each panel section separately.
     for title, s, e in _section_bounds(body):
+        # Restrict the regex searches to this panel's own text.
         seg = body[s:e]
+        # The panel-level recommendation line (absent when the panel did not run).
         reco = _RECO_RE.search(seg)
+        # Collect every reviewer's verdict and confidence in this panel.
         reviewers = []
         for rm in _REVIEWER_RE.finditer(seg):
+            # Normalise the verdict casing; "Deny" is treated the same as "Reject".
             verdict = rm.group("verdict").title()
             reviewers.append({
                 "name": rm.group("name").strip(),
@@ -138,6 +168,7 @@ def parse_review(body):
             "dissenting": [r for r in reviewers if r["verdict"] != "Approve"],
         })
 
+    # Confidence values of only the panels that actually ran.
     scored = [p["confidence"] for p in panels if p["available"]]
     return {
         "head": head,
@@ -154,21 +185,29 @@ def parse_review(body):
 
 def _concern_snippets(body, panel_title):
     """Pull the dissenting-reviewer critique bullets for a panel (for humans)."""
+    # Find the section for the requested panel.
     for title, s, e in _section_bounds(body):
         if title != panel_title:
             continue
+        # Work only within that panel's text.
         seg = body[s:e]
         # Everything under a "Reviewer (…) — 🔴 Reject" block, first ~600 chars.
         out = []
+        # Look at each reviewer line in the panel.
         for rm in _REVIEWER_RE.finditer(seg):
+            # Only rejecting reviewers have concerns worth quoting.
             if rm.group("verdict").title() in ("Reject", "Deny"):
+                # The critique is the text after this reviewer's line, up to the next reviewer line.
                 tail = seg[rm.end():]
                 nxt = _REVIEWER_RE.search(tail)
                 block = tail[:nxt.start()] if nxt else tail
+                # Trim whitespace and stray list dashes; keep non-empty critiques,
+                # capped at 600 chars.
                 block = block.strip().strip("-").strip()
                 if block:
                     out.append(block[:600].rstrip())
         return out
+    # The panel was not found in the comment.
     return []
 
 
@@ -186,10 +225,14 @@ def read_pr_review(pr):
     the caller can tell "nothing to act on" apart from "could not read". The sole
     internal caller (pr_review.fix_one_pr) already wraps this in try/except.
     """
+    # Fetch all comments on the PR (errors propagate on purpose, see docstring).
     comments = list(pr.get_issue_comments())
+    # Pick AppBuilder's latest pre-review comment, if any.
     body = _latest_review_comment(comments)
+    # AB has not reviewed this PR yet.
     if not body:
         return None, None
+    # Return the parsed report plus the raw markdown.
     return parse_review(body), body
 
 
@@ -205,39 +248,55 @@ def dissent_feedback(report, body, min_pct=90):
     (see pr_review.fix_one_pr), it points the builder at exactly what lowered the
     score. Returns "" when every panel is at/above target with no dissent.
     """
+    # No report means nothing to feed back.
     if not report:
         return ""
+    # Bullet lines making up the guidance text.
     lines = []
+    # Consider each panel in the report.
     for p in report.get("panels", []):
+        # A panel that did not run is not something the fix engine can address.
         if not p.get("available"):
             continue
+        # Is this panel below the confidence target?
         conf = p.get("confidence")
         below = conf is not None and conf < min_pct
+        # Panels at/above target with no dissent need no guidance.
         if not below and not p.get("dissenting"):
             continue
+        # Headline: panel name, its confidence and whether it missed the target.
         head = "%s — panel confidence %s%s" % (
             p.get("panel") or "panel",
             ("%d%%" % conf) if conf is not None else "n/a",
             " (below %d%% target)" % min_pct if below else "")
         lines.append("- " + head)
+        # Quote each dissenting reviewer's critique, flattened to one line and capped.
         for snip in (_concern_snippets(body, p.get("panel")) if body else []):
             first = " ".join(snip.split())
             lines.append("    • " + first[:500])
+    # Every panel was fine: no guidance.
     if not lines:
         return ""
+    # Wrap the bullets in an instruction for the next fix attempt.
     return ("The AppBuilder pre-review scored below target. Address these panel "
             "concerns so the next revision raises the score:\n" + "\n".join(lines))
 
 
 def render_human(report, body, min_pct):
+    """Render a parsed review as plain text for the terminal."""
+    # Output lines, joined at the end.
     lines = []
+    # Composite score and the reviewed head SHA (shortened) as the first line.
     comp = report["composite"]
     comp_s = f"{comp}%" if comp is not None else "n/a"
     head_s = (report["head"] or "?")[:12]
     lines.append(f"Composite (weakest panel): {comp_s}   head={head_s}")
     lines.append("")
+    # One block per panel.
     for p in report["panels"]:
+        # Show the panel's confidence, or "n/a" if it did not run.
         conf = f"{p['confidence']}%" if p["confidence"] is not None else "n/a"
+        # Flag the panel's most important problem: did not run, below threshold, or dissent.
         flag = ""
         if not p.get("available"):
             flag = "  ⚑ panel did not run this pass"
@@ -245,41 +304,58 @@ def render_human(report, body, min_pct):
             flag = "  ⬇ below threshold"
         elif p["dissenting"]:
             flag = "  ⚠ dissent"
+        # Panel summary line.
         lines.append(f"• {p['panel']}: {conf} ({p['verdict'] or '?'}){flag}")
+        # One line per reviewer with a tick or cross.
         for r in p["reviewers"]:
             mark = "✓" if r["verdict"] == "Approve" else "✗"
             lines.append(f"    {mark} {r['name']}: {r['verdict']} {r['confidence']}%")
+        # The first line of each dissenting critique, as a short hint.
         for snip in _concern_snippets(body, p["panel"]):
             first = snip.splitlines()[0]
             lines.append(f"      ↳ {first[:200]}")
+    # Join everything into one printable block.
     return "\n".join(lines)
 
 
 def fetch_report(repo, pr, want_head=None, watch=False, timeout=600, interval=20):
     """Fetch (optionally waiting for a review of `want_head`) and parse the review."""
+    # Give up waiting once the timeout has passed.
     deadline = time.time() + timeout
+    # Poll until a usable review exists (or once only, when not watching).
     while True:
+        # Fetch the PR's comments and its current head commit.
         data = _gh_json(repo, pr, "comments,headRefOid")
         head_oid = data.get("headRefOid")
+        # The commit we want a review for: the caller's choice, else the current head.
         target = want_head or head_oid
+        # Find AppBuilder's latest pre-review.
         body = _latest_review_comment(data.get("comments") or [])
         if body:
+            # Parse it and check whether it was written for the target commit (prefix match in
+            # either direction, since one SHA may be abbreviated).
+            # Without --watch any review will do.
             report = parse_review(body)
             fresh = (not watch) or (report.get("head") and target
                                     and report["head"].startswith(target[:len(report["head"])]) or
                                     (target and report.get("head") and target.startswith(report["head"])))
+            # A review for the wanted commit exists: done.
             if fresh:
                 return report, body, head_oid
+        # Not watching, or out of time: return whatever review exists (possibly none).
         if not watch or time.time() >= deadline:
             if body:
                 return parse_review(body), body, head_oid
             return None, None, head_oid
+        # Tell the user we are still waiting, then sleep before polling again.
         print(f"… waiting for AppBuilder review of {(target or '')[:12]} "
               f"({int(deadline - time.time())}s left)", file=sys.stderr)
         time.sleep(interval)
 
 
 def main(argv=None):
+    """CLI entry point: report the PR's review score and return a gate exit code."""
+    # Define the command-line options.
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("pr", help="PR number")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"owner/name (default {DEFAULT_REPO})")
@@ -288,8 +364,10 @@ def main(argv=None):
     ap.add_argument("--watch", action="store_true",
                     help="wait for a review of the PR's CURRENT head, then report")
     ap.add_argument("--timeout", type=int, default=600, help="--watch timeout seconds (default 600)")
+    # Parse the command line (or the list supplied by a test).
     args = ap.parse_args(argv)
 
+    # Fetch the review via gh; operational failures exit with code 2.
     try:
         report, body, head_oid = fetch_report(
             args.repo, args.pr, watch=args.watch, timeout=args.timeout)
@@ -297,17 +375,21 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 2
 
+    # No pre-review exists on this PR yet: operational error.
     if report is None:
         print(f"error: no AppBuilder pre-review comment found on {args.repo}#{args.pr}",
               file=sys.stderr)
         return 2
 
+    # The review is stale when it was written for a different commit than the PR's head.
     stale = bool(head_oid and report.get("head")
                  and not (head_oid.startswith(report["head"]) or report["head"].startswith(head_oid)))
 
+    # Machine-readable output: the report plus context fields.
     if args.as_json:
         print(json.dumps({**report, "repo": args.repo, "pr": args.pr,
                           "current_head": head_oid, "stale": stale, "min": args.min}, indent=2))
+    # Human-readable output, with notices for incomplete or stale reviews.
     else:
         print(render_human(report, body, args.min))
         if not report.get("complete"):
@@ -331,4 +413,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Run the CLI and use its return value as the process exit code.
     sys.exit(main())

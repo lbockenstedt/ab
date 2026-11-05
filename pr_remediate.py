@@ -5,10 +5,12 @@ skeptical-review-driven model tiering & escalation.
 Deterministic pre-check guardrails, complexity assessment, model
 escalation, and PR remediation orchestration.
 """
+# Standard modules for logging, regex and type hints.
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+# ab's own checks and helpers used by the guardrails and remediation flow.
 import contract_guard
 import feature_allowlist
 import feature_boundary
@@ -19,6 +21,7 @@ import pr_concierge
 import secrets_scan
 import twin_sync
 
+# Optional imports: each falls back to a safe default so this module loads standalone.
 try:
     from model_selection import LlmRequirements
 except Exception:  # pragma: no cover
@@ -35,11 +38,13 @@ except Exception:  # pragma: no cover
     state = {}
 
     def update_pr_review(repo, number, **fields):
+        """Fallback: merge fields into the in-memory PR review record."""
         key = f"{repo}#{number}"
         rec = state.setdefault("pr_reviews", {}).setdefault(key, {})
         rec.update(fields)
         return True
 
+# Logger for this module.
 logger = logging.getLogger("pr_remediate")
 
 # Maps a finding's "level" to the count field that tracks it in the persisted
@@ -81,19 +86,24 @@ def _promotion_evidence_is_actionable(rec) -> bool:
     reviewers, not the diff, and the diff on a promotion branch is by definition
     code that was already reviewed and merged on the source branch.
     """
+    # No review record: nothing to act on.
     if not rec:
         return False
+    # Any reviewer seat that did not approve is a stated objection.
     for verdict in (rec.get("panel_verdict"), rec.get("panel2_verdict")):
         if verdict is not None and str(verdict).strip().lower() != "approve":
             return True
+    # Read the finding counts; unreadable counts mean nothing actionable.
     try:
         errors = int(rec.get("errors") or 0)
         warnings = int(rec.get("warnings") or 0)
         external = int(rec.get("tier1_external") or 0)
     except (TypeError, ValueError):
         return False
+    # In-repo errors, or more warnings than the cross-repo ones, are actionable.
     return errors > 0 or warnings > external
 
+# Boundaries that block automated remediation when the diff really touches them.
 TARGET_GUARDRAIL_BOUNDARIES = {
     "psk-hardcode",
     "transport-scheme",
@@ -103,6 +113,8 @@ TARGET_GUARDRAIL_BOUNDARIES = {
     "self-update",
 }
 
+# Dangerous patterns looked for in added lines: reverse shells, curl|sh, eval of base64,
+# TLS verification turned off, and hardcoded pre-shared keys.
 REVERSE_SHELL_RE = re.compile(
     r"(?i)(?:nc(?:\.traditional)?\s+-[el]|/bin/(?:ba)?sh\s+-i|bash\s+-i\s+>&|pty\.spawn|socket\.connect\s*\(\s*\(\s*['\"][0-9.]+|socat\s+exec:)"
 )
@@ -122,13 +134,16 @@ PSK_HARDCODE_RE = re.compile(
 
 def _extract_added_lines(raw_patch: str) -> str:
     """Extract only added diff lines from unified diff patch, or fallback to raw string."""
+    # Empty patch: nothing added.
     if not raw_patch:
         return ""
+    # A real diff: keep only "+" lines (minus the "+++" header), without the "+".
     lines = raw_patch.splitlines()
     has_diff_markers = any(l.startswith("+") for l in lines if not l.startswith("+++"))
     if has_diff_markers:
         added = [l[1:] for l in lines if l.startswith("+") and not l.startswith("+++")]
         return "\n".join(added)
+    # Not a diff: use the text as-is.
     return raw_patch
 
 
@@ -149,17 +164,20 @@ def _boundary_content_corroborated(boundary, files) -> bool:
     readable patch, no keywords to test), and pr_review._automerge_decision's
     boundary deny-list is deliberately NOT changed by any of this.
     """
+    # Gather the added lines from all files; none readable means fail closed (corroborated).
     added = "\n".join(_extract_added_lines(getattr(f, "patch", None) or "") for f in (files or []))
     if not added.strip():
         return True
     added_cf = added.lower()
 
+    # Boundaries with a precise regex: a hit corroborates.
     bid = (boundary.get("id") or "").strip().lower()
     if bid == "psk-hardcode" and PSK_HARDCODE_RE.search(added):
         return True
     if bid == "transport-scheme" and TLS_VERIFY_BYPASS_RE.search(added):
         return True
 
+    # Otherwise look for the boundary's keywords; no keywords means fail closed.
     keywords = [str(k).strip().lower() for k in (boundary.get("keywords") or []) if str(k).strip()]
     if not keywords:
         return True
@@ -185,6 +203,7 @@ def check_pr_guardrails(
       (True, None) if clean.
       (False, violation_reason) if any guardrail is violated.
     """
+    # Work out the changed paths, from the file list if not given.
     config = config or {}
     paths = list(changed_paths or [])
     if not paths and files:
@@ -196,6 +215,7 @@ def check_pr_guardrails(
         return False, fleet_violation
 
     # 1. Deterministic boundary checks against target DEFAULT_BOUNDARIES
+    # Use the configured boundaries if set, else the shipped defaults, limited to ours.
     all_boundaries = (
         config.get("feature_boundaries")
         if isinstance(config.get("feature_boundaries"), list) and config.get("feature_boundaries")
@@ -218,6 +238,7 @@ def check_pr_guardrails(
             ", ".join(h.get("id", "?") for h in hits))
 
     # 2. Credential checks using secrets_scan.check_secrets(files)
+    # Any error-level secret finding blocks remediation; a scanner failure is only logged.
     if files:
         try:
             findings = secrets_scan.check_secrets(files)
@@ -230,6 +251,7 @@ def check_pr_guardrails(
             logger.warning("check_pr_guardrails: secrets_scan encountered error: %s", e)
 
     # 3. Patch inspection of added diff lines
+    # Check each file's added lines for dangerous patterns.
     for f in (files or []):
         filename = getattr(f, "filename", "") or ""
         raw_patch = getattr(f, "patch", None)
@@ -263,6 +285,7 @@ def check_pr_guardrails(
         if has_sensitive_context and TLS_VERIFY_BYPASS_RE.search(patch):
             return False, f"Security guardrail violation: TLS verification bypass in sensitive path `{filename}`"
 
+    # Every check passed.
     return True, None
 
 
@@ -288,10 +311,12 @@ def assess_fix_complexity(
       "state conflation", "reachability", "refactor", or confidence < 0.60 or explicit
       "reject"/"deny", or > 3 files modified.
     """
+    # Combine the critique and dissent into one lowercase text to search.
     critique_str = critique or ""
     dissent_str = dissent_feedback or ""
     text = f"{critique_str}\n{dissent_str}".lower()
 
+    # No confidence given: try to read one ("confidence: 0.7" or "80%") from the text.
     if confidence is None:
         conf_match = re.search(r"(?i)(?:confidence|score)[:\s]+(0\.\d+|\d+%)", text)
         if conf_match:
@@ -301,6 +326,7 @@ def assess_fix_complexity(
             else:
                 confidence = float(raw_c)
 
+    # How many files the change touches.
     file_count = len(files) if files is not None else 0
 
     # Large / frontier complexity
@@ -376,6 +402,7 @@ def _clears_merge_bar(rec, config):
     explicit bar. `or 1.0` is deliberately NOT used when reading the config: a
     legitimate threshold of 0.0 is falsy and would be silently rewritten to 1.0.
     """
+    # Read the merge threshold (default 1.0 = auto-merge off), clamped to 0-1.
     raw = config.get("feature_automerge_min_confidence")
     try:
         threshold = 1.0 if raw is None else float(raw)
@@ -383,9 +410,11 @@ def _clears_merge_bar(rec, config):
         threshold = 1.0
     threshold = max(0.0, min(1.0, threshold))
 
+    # No review record: nothing clears.
     if not rec:
         return False, threshold
 
+    # Both panels must have run, approved, and met the threshold.
     for status_key, verdict_key, conf_key in (
         ("panel_status", "panel_verdict", "panel_confidence"),
         ("panel2_status", "panel2_verdict", "panel2_confidence"),
@@ -405,6 +434,7 @@ def _clears_merge_bar(rec, config):
         if conf < threshold:
             return False, threshold
 
+    # Both panels clear the bar.
     return True, threshold
 
 
@@ -433,9 +463,11 @@ def should_remediate(rec, config):
     Returns (should: bool, reason: str, deficit: float) where `deficit` is how
     far below target the PR currently sits (0.0 when it already clears).
     """
+    # No review record: nothing to act on.
     if not rec:
         return False, "no review record yet", 0.0
 
+    # Each panel's status (set when it failed to run).
     panel_status = rec.get("panel_status")
     panel2_status = rec.get("panel2_status")
 
@@ -451,6 +483,7 @@ def should_remediate(rec, config):
         (rec.get("panel_verdict"), panel_status, rec.get("panel_confidence")),
         (rec.get("panel2_verdict"), panel2_status, rec.get("panel2_confidence")),
     )
+    # Collect the verdicts (and confidences) of panels that actually ran.
     verdicts = []
     confs = []
     for verdict, status, confidence in panels:
@@ -475,6 +508,7 @@ def should_remediate(rec, config):
             return False, "panel could not run (%s) — nothing to act on" % status, 0.0
         return False, "no panel verdict recorded", 0.0
 
+    # Read the target score (default 0.95), clamped to 0-1.
     try:
         target = float(config.get("pr_remediate_target_score", DEFAULT_TARGET_SCORE))
     except (TypeError, ValueError):
@@ -525,6 +559,7 @@ def should_remediate(rec, config):
     # structurally impossible, so the budget is still intact for the in-repo
     # findings of a LATER head. Mixed records therefore still remediate: the
     # skip applies only when EVERY Tier-1 finding is external.
+    # Cross-repo twin findings counted separately; if they are all there is, skip.
     external = int(rec.get("tier1_external") or 0)
     if errors == 0 and 0 < warnings <= external:
         return (False,
@@ -537,15 +572,19 @@ def should_remediate(rec, config):
         # DENY-plus-findings record (or one with no confidence reported at all)
         # would return the raw, possibly 0.0, deficit and be remediated at the
         # cheapest model tier, collapsing three distinct severities into one.
+        # Start from the confidence deficit, then apply the severity floors below.
         findings_deficit = deficit
+        # Any non-Approve verdict means the full target is missing.
         if any(str(v).strip().lower() != "approve" for v in verdicts):
             findings_deficit = max(findings_deficit, target)
         elif config.get("pr_remediate_address_all_concerns", True):
+            # Dissenting or unrated reviewers count as half the target missing.
             dissents = int(rec.get("panel_dissents") or 0) + int(rec.get("panel2_dissents") or 0)
             unrated = int(rec.get("panel_unrated") or 0) + int(rec.get("panel2_unrated") or 0)
             if dissents or unrated:
                 findings_deficit = max(findings_deficit, round(target / 2.0, 4))
             else:
+                # Otherwise use the lowest individual reviewer confidence, if reported.
                 reviewer_confs = [c for c in (rec.get("panel_min_reviewer_confidence"),
                                               rec.get("panel2_min_reviewer_confidence"))
                                   if c is not None]
@@ -587,6 +626,7 @@ def should_remediate(rec, config):
                     % (v, target * 100),
                     max(deficit, target))
 
+    # Approved but scored below target: remediate.
     if score is not None and score < target:
         return True, "panel score %.2f is below the %.2f target" % (score, target), deficit
 
@@ -598,12 +638,14 @@ def should_remediate(rec, config):
     # change below target, there is still a concern on the table and the PR is
     # not yet as close to 100% as it can be.
     if config.get("pr_remediate_address_all_concerns", True):
+        # Any individual reviewer who did not approve keeps the concern open.
         dissents = int(rec.get("panel_dissents") or 0) + int(rec.get("panel2_dissents") or 0)
         if dissents:
             return (True,
                     "%d individual reviewer(s) did not approve despite the panel verdict — "
                     "addressing their concerns before merging" % dissents,
                     max(deficit, round(target / 2.0, 4)))
+        # So does any reviewer whose own confidence is below target.
         reviewer_confs = [c for c in (rec.get("panel_min_reviewer_confidence"),
                                       rec.get("panel2_min_reviewer_confidence")) if c is not None]
         if reviewer_confs and min(reviewer_confs) < target:
@@ -629,6 +671,7 @@ def should_remediate(rec, config):
     # (The Tier-1 findings check that used to live here now runs above the
     # merge-bar early return — see the comment there for why the order matters.)
 
+    # Approved with no score to improve on.
     if score is None:
         return (False,
                 "panel verdict(s) Approve; no confidence reported — nothing further to act on",
@@ -658,6 +701,7 @@ def remediation_pending(rec, config):
     can only ever delay a merge by a bounded number of remediation attempts and
     can never deadlock a PR.
     """
+    # Every "stop trying" condition returns False.
     if not rec:
         return False, "no review record"
     if not config.get("pr_auto_remediate_enabled", True):
@@ -667,6 +711,7 @@ def remediation_pending(rec, config):
     if rec.get("auto_remediate_status") == "exhausted_human_review":
         return False, "remediation attempts exhausted"
 
+    # Read the attempts so far and the maximum allowed.
     try:
         attempts = int(rec.get("remediation_attempts") or 0)
     except (TypeError, ValueError):
@@ -676,10 +721,12 @@ def remediation_pending(rec, config):
     except (TypeError, ValueError):
         max_attempts = 3
 
+    # Out of attempts: only the premium turn, if still unused, keeps going.
     if attempts >= max_attempts:
         if not premium_turn_available(rec, config):
             return False, "remediation attempts exhausted (%d/%d)" % (attempts, max_attempts)
 
+    # Otherwise the remediation objective decides.
     should, reason, _deficit = should_remediate(rec, config)
     return (True, reason) if should else (False, reason)
 
@@ -689,6 +736,7 @@ def _premium_budget(config):
     escalation models (fable / astra). Default 1 -- these are the most
     expensive models on the roster, so the cap is a COUNT, not merely a
     position in the ladder. Clamped to 0..3; 0 disables the tier."""
+    # Read the setting (default 1) and clamp it to 0-3.
     try:
         n = int((config or {}).get("pr_remediate_premium_attempts", 1))
     except (TypeError, ValueError):
@@ -705,10 +753,12 @@ def premium_turn_available(rec, config):
     exists to escalate a PR the ordinary ladder has already failed, so
     carving its attempt out of that same budget would just replace the
     Opus-class last turn instead of following it."""
+    # No record, or the premium tier disabled: no premium turn.
     if not rec:
         return False
     if _premium_budget(config) <= 0:
         return False
+    # Compare premium attempts used against the budget.
     try:
         used = int(rec.get("premium_attempts") or 0)
     except (TypeError, ValueError):
@@ -738,6 +788,7 @@ def next_remediation_requirements(
     models "cheap" and the cost-first picker would otherwise spend the most
     expensive models on the roster on routine first attempts.
     """
+    # Start from the previous exclusions plus the model that just failed.
     exclude = set(getattr(prev_reqs, "exclude_models", ()) or ())
     if tried_key:
         exclude.add(tried_key)
@@ -754,11 +805,13 @@ def next_remediation_requirements(
     except Exception as e:  # noqa: BLE001 -- a broken import must not stop the retry
         logger.debug("next_remediation_requirements: premium pool split skipped: %s", e)
 
+    # After this many failed turns, narrow to Opus-class models (default 2).
     try:
         threshold = int((config or {}).get("pr_remediate_last_turn_after_attempts", 2))
     except (TypeError, ValueError):
         threshold = 2
 
+    # Not a premium turn and past the threshold: try narrowing to Opus-class models.
     if not premium and threshold > 0 and attempts >= threshold:
         try:
             import fix_engine
@@ -776,6 +829,7 @@ def next_remediation_requirements(
                                 # import must not stop the retry from happening at all.
             logger.debug("next_remediation_requirements: Opus-class escalation skipped: %s", e)
 
+    # Step the complexity up one level (capped at the top).
     complexity = getattr(prev_reqs, "complexity", "small")
     try:
         idx = _COMPLEXITY_RANK_ORDER.index(complexity)
@@ -783,6 +837,7 @@ def next_remediation_requirements(
         idx = 1
     next_complexity = _COMPLEXITY_RANK_ORDER[min(idx + 1, len(_COMPLEXITY_RANK_ORDER) - 1)]
 
+    # Build the new requirements, keeping the other settings from the previous ones.
     from model_selection import LlmRequirements as _ReqClass
     return _ReqClass(
         complexity=next_complexity,
@@ -812,6 +867,7 @@ def auto_remediate_pr(
     PR to be; it floors the complexity tier so a flat-out DENY is not handed to
     a "small" model just because the diff happens to be one file.
     """
+    # Identify the PR and get (or create) its review record.
     config = config or {}
     repo_full_name = getattr(repo, "full_name", str(repo))
     key = f"{repo_full_name}#{pr.number}"
@@ -822,6 +878,7 @@ def auto_remediate_pr(
         state["pr_reviews"][key] = {}
     rec = state["pr_reviews"][key]
 
+    # The PR's changed files, their paths, and the current head commit.
     files = list(pr.get_files())
     changed_paths = [getattr(f, "filename", "") for f in files if getattr(f, "filename", "")]
     head_sha = getattr(getattr(pr, "head", None), "sha", None)
@@ -835,6 +892,7 @@ def auto_remediate_pr(
         eighteen seconds. Mirror the "record it once, stay quiet until the
         reason actually changes" guard pr_review._maybe_auto_merge already uses.
         """
+        # A stamp of this notice and head; post only if it differs from the last one.
         stamp = "%s@%s" % (marker, head_sha or "?")
         if rec.get("auto_remediate_notice") != stamp:
             try:
@@ -842,12 +900,14 @@ def auto_remediate_pr(
             except Exception as e:  # noqa: BLE001
                 logger.warning("auto_remediate_pr: failed to post %s comment on %s: %s",
                                marker, key, e)
+            # Remember the stamp and save the record either way.
             fields["auto_remediate_notice"] = stamp
         update_pr_review(repo_full_name, pr.number, **fields)
 
     # Never rewrite a promotion/backmerge PR — see _PROMOTION_HEAD_RE.
     head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
     if _PROMOTION_HEAD_RE.match(head_ref):
+        # Skip promotion PRs unless explicitly allowed, and even then only with a real objection.
         reason = ""
         if config.get("pr_auto_remediate_skip_promotion", True):
             reason = (
@@ -882,6 +942,7 @@ def auto_remediate_pr(
                 "confidence deficit alone is not something an edit to this branch can "
                 "address, so it keeps exactly what the source branch has" % head_ref
             )
+        # A reason to skip: record it on the PR and stop.
         if reason:
             logger.info("auto_remediate_pr: %s: %s", key, reason)
             update_pr_review(repo_full_name, pr.number, auto_remediate_blocked=True,
@@ -892,6 +953,7 @@ def auto_remediate_pr(
 
     # Guardrails check
     passed, violation = check_pr_guardrails(pr, files, changed_paths, config)
+    # Blocked: build guidance and a banner, post it once, and lock the PR from auto-fixing.
     if not passed:
         guidance = pr_concierge.generate_user_guidance(
             repo_name=repo_full_name,
@@ -912,6 +974,7 @@ def auto_remediate_pr(
         return False, f"Guardrail violation: {violation}"
 
     # Attempt ceiling check
+    # Attempts so far and the ceiling.
     attempts = rec.get("remediation_attempts", 0)
     max_attempts = int(config.get("pr_auto_remediate_max_attempts", 3))
     # The premium tier buys ONE more turn past the ordinary ceiling, once per
@@ -921,6 +984,7 @@ def auto_remediate_pr(
     if premium_turn:
         logger.info("auto_remediate_pr: %s — ordinary budget spent (%d/%d); taking the single "
                     "premium escalation attempt", key, attempts, max_attempts)
+    # Out of attempts with no premium turn left: post guidance once and hand to a human.
     if attempts >= max_attempts and not premium_turn:
         guidance = pr_concierge.generate_user_guidance(
             repo_name=repo_full_name,
@@ -943,6 +1007,7 @@ def auto_remediate_pr(
 
     # Twin-parity detection and auto-mirroring on pxmx
     if "pxmx" in repo_full_name.lower():
+        # Record each twin file that drifted, with the mirrored content from the source.
         drifts = twin_sync.detect_twin_drift(repo_full_name, files)
         if drifts:
             mirrored_list = []
@@ -956,6 +1021,7 @@ def auto_remediate_pr(
             rec["mirrored_twins"] = mirrored_list
 
     # Wire contract & Performance hotpath audits
+    # Run the wire-contract and hot-path performance audits.
     contract_warnings = contract_guard.audit_wire_contract(files)
     perf_warnings = perf_auditor.audit_performance_hotpaths(files)
     # NOTE: in the persisted review record (app_state.record_pr_review) "findings"
@@ -964,6 +1030,7 @@ def auto_remediate_pr(
     # AttributeError: 'int' object has no attribute 'extend' and aborted
     # remediation for every PR that tripped a contract/perf audit.
     audit_items = list(contract_warnings or []) + list(perf_warnings or [])
+    # Add their findings to the review record and bump the matching counts.
     if audit_items:
         merged_items = list(rec.get("items") or [])
         merged_items.extend(audit_items)
@@ -975,6 +1042,7 @@ def auto_remediate_pr(
                 rec[_field] = int(rec.get(_field) or 0) + 1
 
     # Assess complexity & requirements
+    # Collect the panel critiques and any dissent feedback (read from the PR if missing).
     critique = "\n".join(c for c in (rec.get("panel_critique"), rec.get("panel2_critique")) if c)
     dissent_feedback = rec.get("dissent_feedback") or ""
     if not dissent_feedback:
@@ -999,10 +1067,12 @@ def auto_remediate_pr(
     elif deficit >= 0.10 and _COMPLEXITY_RANK_ORDER.index(assessed_complexity) < _COMPLEXITY_RANK_ORDER.index("medium"):
         assessed_complexity = "medium"
 
+    # Requirements class, plus the previous attempt's tier and model.
     from model_selection import LlmRequirements as _ReqClass
     prev_complexity = rec.get("last_remediation_complexity")
     last_tried_model = rec.get("last_remediation_model")
 
+    # A retry: step up from the previous tier and exclude the model that failed.
     if attempts > 0 and prev_complexity:
         prev_reqs = _ReqClass(
             complexity=prev_complexity,
@@ -1010,6 +1080,7 @@ def auto_remediate_pr(
             exclude_models=tuple(rec.get("excluded_models") or []),
         )
         reqs = next_remediation_requirements(prev_reqs, failure_kind="retry", tried_key=last_tried_model, config=config, attempts=attempts, premium=premium_turn)
+    # First attempt: apply the premium/cost exclusions only.
     else:
         reqs = next_remediation_requirements(
             _ReqClass(complexity=assessed_complexity, needs_structured_output=True),
@@ -1024,10 +1095,12 @@ def auto_remediate_pr(
         )
 
     # Invoke fix_one_pr
+    # Use fix_one_pr unless a fix function was passed in (e.g. by tests).
     if fix_fn is None:
         from pr_review import fix_one_pr as default_fix_fn
         fix_fn = default_fix_fn
 
+    # Run the fix, catching any failure as an unsuccessful attempt.
     used_model_out: Dict[str, Any] = {}
     try:
         success, msg = fix_fn(
@@ -1041,6 +1114,7 @@ def auto_remediate_pr(
         success = False
         msg = f"Fix invocation failed: {e}"
 
+    # Which model actually ran.
     used_model = used_model_out.get("model") or used_model_out.get("key")
 
     # Contention is not an attempt. fix_one_pr bailed on the per-PR lock before
@@ -1062,6 +1136,7 @@ def auto_remediate_pr(
             "not charged to the remediation budget, retrying next scan", key)
         return False, msg
 
+    # This run counts as one more attempt.
     new_attempts = attempts + 1
 
     # Charge the premium budget when the premium TURN IS TAKEN, whatever model
@@ -1095,6 +1170,7 @@ def auto_remediate_pr(
         # unlimited supply of premium turns.
         _premium_used = int(rec.get("premium_attempts") or 0) + (1 if premium_turn else 0)
 
+    # Success: record the attempt, the tier and the model used.
     if success:
         update_pr_review(
             repo_full_name,
@@ -1136,6 +1212,7 @@ def auto_remediate_pr(
                     "remediation budget: %s", key, barren_done + 1, max_barren, msg)
                 return False, msg
 
+        # A real failure: record it and exclude the model that failed from the next try.
         excluded = list(rec.get("excluded_models") or [])
         if used_model and used_model not in excluded:
             excluded.append(used_model)
@@ -1173,6 +1250,7 @@ def maybe_auto_remediate(
     DENY that AppBuilder chose not to act on is visible in the UI instead of
     being an invisible no-op.
     """
+    # Identify the PR.
     config = config or {}
     repo_full_name = getattr(repo, "full_name", str(repo))
     key = f"{repo_full_name}#{pr.number}"
@@ -1181,6 +1259,7 @@ def maybe_auto_remediate(
         """Record the decision, then refuse. Without this an operator staring at
         a 🔴 DENY review has no way to tell 'AppBuilder decided not to act' from
         'AppBuilder never ran'."""
+        # Save the reason on the review record; a save failure is only logged.
         try:
             update_pr_review(repo_full_name, pr.number,
                              auto_remediate_reason=reason, **fields)
@@ -1188,6 +1267,7 @@ def maybe_auto_remediate(
             logger.debug("maybe_auto_remediate: could not record skip for %s: %s", key, e)
         return False, reason
 
+    # Skip when remediation is off, or the PR is a draft, merged or closed.
     if not config.get("pr_auto_remediate_enabled", True):
         return False, "pr_auto_remediate_enabled is false"
     if getattr(pr, "draft", False):
@@ -1197,9 +1277,11 @@ def maybe_auto_remediate(
     if (getattr(pr, "state", "") or "open").lower() != "open":
         return False, "PR is not open"
 
+    # The PR's review record and current head.
     rec = (state.get("pr_reviews") or {}).get(key) or {}
     head_sha = getattr(getattr(pr, "head", None), "sha", None)
 
+    # Already auto-merged: nothing to do.
     if rec.get("auto_merged"):
         return False, "PR was auto-merged"
 
@@ -1227,6 +1309,7 @@ def maybe_auto_remediate(
             rec = (state.get("pr_reviews") or {}).get(key) or {}
         else:
             return _skip("PR remediation is blocked by guardrail")
+    # Out of attempts: a human has to take over.
     if rec.get("auto_remediate_status") == "exhausted_human_review":
         return _skip("PR remediation attempt limit reached")
 
@@ -1257,5 +1340,6 @@ def maybe_auto_remediate(
     update_pr_review(repo_full_name, pr.number, auto_remediate_reason=reason,
                      auto_remediate_deficit=deficit)
 
+    # Go ahead and remediate.
     return auto_remediate_pr(gh, repo, pr, config, deficit=deficit)
 

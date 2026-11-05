@@ -28,8 +28,10 @@ import os
 import shutil
 import sys
 
+# Module logger.
 logger = logging.getLogger(__name__)
 
+# Ruff rules to run and limits on how much work one review may do.
 _RUFF_RULES = "F821,F822,F823"  # undefined name / undefined in __all__ / used-before-assignment
 _MAX_FILES = 25
 _MAX_FILE_BYTES = 300_000  # skip pathological/generated files; ruff would time out uselessly
@@ -40,14 +42,17 @@ def _fetch_full_content(repo, path, ref):
     """Full post-patch content of one file at the PR head SHA, or None if it
     can't be fetched (deleted file, binary, oversized, API error) — callers
     must treat None as 'skip', never as 'file is empty'."""
+    # Fetch the file at the given ref; any failure means skip.
     try:
         c = repo.get_contents(path, ref=ref)
     except Exception as e:  # noqa: BLE001 — deleted/renamed/binary/oversized are all normal
         logger.debug("lint_python: could not fetch %s@%s: %s", path, ref, e)
         return None
+    # Skip missing or oversized content.
     raw = getattr(c, "decoded_content", None)
     if raw is None or len(raw) > _MAX_FILE_BYTES:
         return None
+    # Decode as UTF-8; binary files are skipped.
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -67,6 +72,7 @@ def _ruff_executable():
     Resolve against the running interpreter's own directory first (which is
     the venv that ruff was installed into), then fall back to PATH.
     """
+    # Prefer ruff next to the running interpreter, then PATH.
     candidate = os.path.join(os.path.dirname(sys.executable), "ruff")
     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
         return candidate
@@ -80,12 +86,14 @@ def _run_ruff(source, filename_hint):
     JSON diagnostics list, or [] on any tooling failure (never raises — a
     missing/broken ruff binary must degrade to 'no findings', not crash the
     whole review)."""
+    # Write the source to a temp file for ruff.
     suffix = ".py"
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False,
                                           encoding="utf-8") as tf:
             tf.write(source)
             tmp_path = tf.name
+        # Run ruff with only the undefined-name rules, then delete the temp file.
         try:
             proc = subprocess.run(
                 [_ruff_executable(), "check", "--isolated", "--select", _RUFF_RULES,
@@ -102,10 +110,12 @@ def _run_ruff(source, filename_hint):
         # (FileNotFoundError, non-JSON stdout) should be swallowed as "skip".
         if not proc.stdout.strip():
             return []
+        # Parse the JSON output and tag each finding with the file name.
         diagnostics = json.loads(proc.stdout)
         for d in diagnostics:
             d["_filename_hint"] = filename_hint
         return diagnostics
+    # Tooling failures mean no findings.
     except FileNotFoundError:
         logger.info("lint_python: ruff not installed — skipping undefined-name pass")
         return []
@@ -132,10 +142,12 @@ def _run_ruff_checked(source, filename_hint):
     wrong and is reported as not-ok.
     """
     try:
+        # Write the source to a temp file for ruff.
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False,
                                           encoding="utf-8") as tf:
             tf.write(source)
             tmp_path = tf.name
+        # Run ruff with only the undefined-name rules, then delete the temp file.
         try:
             proc = subprocess.run(
                 [_ruff_executable(), "check", "--isolated", "--select", _RUFF_RULES,
@@ -157,10 +169,12 @@ def _run_ruff_checked(source, filename_hint):
             logger.info("lint_python: ruff produced no output for %s — not treating as verified",
                         filename_hint)
             return [], False
+        # Parse the JSON output and tag each finding with the file name.
         diagnostics = json.loads(proc.stdout)
         for d in diagnostics:
             d["_filename_hint"] = filename_hint
         return diagnostics, True
+    # Tooling failures mean not verified.
     except FileNotFoundError:
         logger.info("lint_python: ruff not installed — skipping undefined-name pass")
         return [], False
@@ -181,19 +195,23 @@ def check_undefined_names_verified(repo, files, head_sha):
     no undefined names. Files skipped for any reason are simply absent —
     never silently counted as clean.
     """
+    # Changed .py files that were not removed, capped at _MAX_FILES.
     findings = []
     verified_paths = []
     py_files = [f for f in files
                 if getattr(f, "filename", "").endswith(".py")
                 and getattr(f, "status", "") != "removed"][:_MAX_FILES]
+    # Fetch each file's full content; skip if unavailable.
     for f in py_files:
         path = f.filename
         source = _fetch_full_content(repo, path, head_sha)
         if source is None:
             continue
+        # Run ruff and record the file as verified if it ran.
         diagnostics, ok = _run_ruff_checked(source, path)
         if ok:
             verified_paths.append(path)
+        # Turn each diagnostic into an error finding.
         for d in diagnostics:
             code = (d.get("code") or "").strip()
             msg = (d.get("message") or "").strip()
@@ -218,9 +236,11 @@ def format_undefined_name_context(verified_paths):
     edit can resolve them: the next pass simply raises them again. AB already
     answers that exact question mechanically, so hand the panel the answer.
     """
+    # Nothing verified: no context.
     paths = [p for p in (verified_paths or []) if p]
     if not paths:
         return ""
+    # Build the context text listing the verified files.
     shown = paths[:_MAX_FILES]
     return (
         "\n\nMECHANICAL PRE-CHECK — ALREADY PERFORMED, TREAT AS GROUND TRUTH:\n"
@@ -240,4 +260,5 @@ def check_undefined_names(repo, files, head_sha):
     Returns {level, title, detail} findings (level='error'). Deleted files
     are skipped (nothing to fetch); best-effort throughout — any failure
     degrades to 'no findings' for that file, never raises."""
+    # Same check, without the verified list.
     return check_undefined_names_verified(repo, files, head_sha)[0]

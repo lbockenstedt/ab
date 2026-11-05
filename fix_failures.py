@@ -18,14 +18,18 @@ did produce a structured fix that merely failed to apply -- a barren reply
 carries no signal about the fix, so it must not spend the remediation budget.
 """
 
+# Reply was empty.
 BARREN_EMPTY = "The model returned an empty response."
 
+# Reply had no JSON object.
 BARREN_NO_JSON = ("No JSON object was found in the response. Return ONLY a JSON "
                   "object with \"confidence\" and \"edits\".")
 
+# Reply's JSON did not parse.
 BARREN_INVALID_JSON = ("The response was not valid JSON. Return ONLY a single "
                        "well-formed JSON object with \"confidence\" and \"edits\".")
 
+# All barren failure messages, for matching.
 BARREN_FAILURES = frozenset({BARREN_EMPTY, BARREN_NO_JSON, BARREN_INVALID_JSON})
 
 # fix_one_pr refuses outright when another task already holds the per-PR fix
@@ -47,6 +51,7 @@ def is_contended_failure(message):
     forever. Contention is not a model event at all and needs no such cap --
     the lock is released when the in-flight fix finishes.
     """
+    # Only strings can match.
     if not isinstance(message, str):
         return False
     return CONTENDED_LOCK in message
@@ -59,9 +64,11 @@ def is_barren_failure(message):
     prefixes ("Fix invocation failed: ..."), and a wrapped barren failure is
     still barren.
     """
+    # Only non-blank strings can match.
     if not isinstance(message, str):
         return False
     text = message.strip()
     if not text:
         return False
+    # Barren if it contains any of the known messages.
     return any(failure in text for failure in BARREN_FAILURES)

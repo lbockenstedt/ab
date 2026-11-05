@@ -35,27 +35,36 @@ Two PROFILES, selected by the caller, never mixed:
   constants back this profile and are a SEPARATE object from the readonly
   ones on purpose (see test_claude_cli_build_profile.py's identity checks).
 """
+# json builds the --agents / --json-schema arguments and re-serialises structured output.
 import json
 
+# Name under which the cheap search subagent is registered with the CLI.
 SEARCH_AGENT_NAME = "searcher"
 DEFAULT_SEARCH_MODEL = "haiku"  # cheapest tier — mechanical grep/file-lookup only
 
+# Tool families the reviewer may use: read, search, shell (restricted below), sub-tasks.
 # --- readonly profile (default, unchanged) ---------------------------------
 TOOL_CATEGORIES = "Read,Grep,Glob,Bash,Task"
+# Shell commands explicitly allowed: read-only git history inspection.
 ALLOWED_TOOLS = ["Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)", "Bash(git blame:*)"]
+# Tools/commands always denied for reviewers: file edits, deletes, history rewrites,
+# publishing, and network access.
 DISALLOWED_TOOLS = ["Edit", "Write", "Bash(rm:*)", "Bash(git push:*)", "Bash(git commit:*)",
                     "Bash(git checkout:*)", "Bash(git reset:*)", "Bash(git clean:*)",
                     "WebFetch", "WebSearch"]
 
+# Tool families for the builder: the reviewer set plus Edit, Write and Skill.
 # --- build profile (feature_build.py's mutating agent ONLY) ----------------
 # Adds Edit/Write/Skill; still denies every history-rewriting/publishing git
 # op (AppBuilder commits+pushes itself, never the agent) plus rm/sudo/curl/pip
 # install/WebFetch/WebSearch (no network egress, no privilege escalation, no
 # destructive shell from an agent operating on a temp checkout).
 BUILD_TOOL_CATEGORIES = "Read,Grep,Glob,Bash,Task,Edit,Write,Skill"
+# Extra shell commands the builder may run: git inspection and syntax checks.
 BUILD_ALLOWED_TOOLS = ["Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)",
                        "Bash(git blame:*)", "Bash(git status:*)",
                        "Bash(python3 -m py_compile:*)", "Bash(bash -n:*)"]
+# Commands still denied for the builder (see the comment above).
 BUILD_DISALLOWED_TOOLS = ["Bash(rm:*)", "Bash(git push:*)", "Bash(git commit:*)",
                           "Bash(git checkout:*)", "Bash(git reset:*)", "Bash(git clean:*)",
                           "Bash(sudo:*)", "Bash(curl:*)", "Bash(pip install:*)",
@@ -67,6 +76,7 @@ def search_agent_json(search_model=None):
     top-level (usually pricier) session delegates mechanical grep/file-
     hunting to this agent instead of spending its own tokens on it — the
     same cost-tiering pattern used elsewhere for research subagents."""
+    # JSON object describing one subagent that may only Read/Grep/Glob, on a cheap model.
     return json.dumps({
         SEARCH_AGENT_NAME: {
             "description": "Fast file/grep/glob search specialist. Delegate any "
@@ -108,28 +118,39 @@ def build_command(claude_bin, model=None, repo_checkout_path=None, json_schema=N
     so the agent can Read the full recipe on demand without it all burning
     prompt budget up front. Ignored when repo_checkout_path itself is falsy
     (no checkout means no tool-access surface to extend)."""
+    # Reject unknown profiles outright.
     if profile not in ("readonly", "build"):
         raise ValueError(f"unknown claude_cli profile: {profile!r}")
+    # A mutating build agent must be scoped to a checkout directory.
     if profile == "build" and not repo_checkout_path:
         raise ValueError("profile='build' requires an explicit repo_checkout_path")
 
+    # Base command: always ask for JSON output.
     cmd = [claude_bin, "--output-format", "json"]
+    # Optional model override.
     if model:
         cmd += ["--model", model]
+    # Tool flags are only added when native tools are requested.
     if enable_native_tools:
+        # Pick the allow/deny lists for the chosen profile.
         if profile == "build":
             categories, allowed, disallowed = BUILD_TOOL_CATEGORIES, BUILD_ALLOWED_TOOLS, BUILD_DISALLOWED_TOOLS
         else:
             categories, allowed, disallowed = TOOL_CATEGORIES, ALLOWED_TOOLS, DISALLOWED_TOOLS
+        # Pass the tool families, allow list and deny list to the CLI.
         cmd += ["--tools", categories]
         cmd += ["--allowedTools"] + allowed
         cmd += ["--disallowedTools"] + disallowed
+        # Do not prompt for permission on the enabled tools (the CLI runs unattended).
         cmd += ["--permission-mode", "bypassPermissions"]
+        # Register the cheap search subagent.
         cmd += ["--agents", search_agent_json(search_model)]
+        # Give the agent access to the checkout, plus any extra directories.
         if repo_checkout_path:
             cmd += ["--add-dir", repo_checkout_path]
             for extra_dir in (extra_add_dirs or []):
                 cmd += ["--add-dir", extra_dir]
+    # Ask the CLI to validate output against a JSON schema (string or dict).
     if json_schema:
         cmd += ["--json-schema",
                json_schema if isinstance(json_schema, str) else json.dumps(json_schema)]
@@ -145,7 +166,10 @@ def extract_text(data, json_schema=None):
     freeform ``result``/``text`` field, which is where claude_cli's "JSON
     parse failed (Extra data: ...)" errors came from (stray prose/markdown
     around the JSON in a freeform response)."""
+    # Treat anything that is not a dict as an empty response.
     data = data if isinstance(data, dict) else {}
+    # Schema-validated call: return the pre-parsed structured output as clean JSON.
     if json_schema and "structured_output" in data:
         return json.dumps(data["structured_output"])
+    # Otherwise use the free-text result field (or "text"), or empty.
     return data.get("result") or data.get("text") or ""

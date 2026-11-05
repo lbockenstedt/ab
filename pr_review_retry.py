@@ -44,11 +44,16 @@ def is_queued_for_retry_stale(prior_review, head_sha):
     this returns False so _review_one treats the existing "panel unavailable"
     comment as already_current and stops calling the LLM panel every poll —
     a human must Approve or Reprocess to try again."""
+    # Treat a missing prior review as an empty record so the .get() calls below are safe.
     prior = prior_review or {}
+    # The PR counts as "queued" only if either panel seat recorded queue_for_retry AND that
+    # review was made against the exact commit (head SHA) we are looking at now.
     queued = bool(
         (prior.get("panel_status") == "queue_for_retry" or prior.get("panel2_status") == "queue_for_retry")
         and prior.get("head") == head_sha
     )
+    # Not queued (or the PR moved to a new commit): the normal review path handles it.
     if not queued:
         return False
+    # Allow another retry only while we are still under the automatic-retry ceiling.
     return int(prior.get("queue_retry_count") or 0) < MAX_AUTO_QUEUE_RETRIES

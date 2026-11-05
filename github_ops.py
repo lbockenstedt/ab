@@ -1,9 +1,12 @@
 """GitHub API integration: repo resolution, label/version ops, duplicate detection, and automated issue creation (extracted from main.py)."""
+# Standard library plus requests for HTTP calls.
 import json, os, re, requests
 from datetime import datetime, timezone
+# Duplicate-detection helpers live in dedup.py; re-exported here under the old names.
 from dedup import _is_duplicate_match as _is_duplicate_match_impl, _jaccard as _jaccard_impl, _normalize_for_dedup as _normalize_for_dedup_impl, _token_set as _token_set_impl
 from dedup import _body_signal_match, _body_containment_match
 
+# Shared helpers from main.
 from main import (
     _in_update_cooldown,
     call_llm,
@@ -15,6 +18,7 @@ from main import (
 
 def clean_repo_name(name):
     """Converts a full GitHub URL or a 'user/repo' string into 'user/repo' format."""
+    # Strip the scheme, the github.com host, a .git suffix and trailing slashes.
     name = name.strip()
     if name.startswith("http"):
         name = name.replace("https://", "").replace("http://", "")
@@ -29,6 +33,7 @@ def get_monitored_repos(config):
     """Extracts and normalizes a list of monitored repositories from config,
     always including the self-diagnosis repository if it can be resolved.
     """
+    # Read the configured repos (a list or a string), splitting on commas and "\n".
     raw_repos = config.get("monitored_repos", [])
     monitored_repos = []
     if isinstance(raw_repos, list):
@@ -41,10 +46,12 @@ def get_monitored_repos(config):
             cleaned = clean_repo_name(split_r)
             if cleaned: monitored_repos.append(cleaned)
 
+    # Always include the self-diagnosis repo.
     sd_repo = resolve_self_diagnosis_repo(config)
     if sd_repo:
         monitored_repos.append(sd_repo)
 
+    # De-duplicate.
     return list(set(monitored_repos))
 
 
@@ -65,6 +72,7 @@ def resolve_module_repo(module, monitored_repos, config):
     The returned repo is always a member of monitored_repos (auto-match) or a
     user-declared repo (explicit map); it is never invented.
     """
+    # No module name: no repo.
     if not module:
         return None
     mod_key = str(module).strip().lower()
@@ -98,6 +106,7 @@ def parse_module_repo_map(value):
     dropped. Module keys are stored as-is (case-insensitive lookup happens in
     resolve_module_repo), so callers see the original casing.
     """
+    # Pick the input's key/value pairs based on its type.
     result = {}
     if value is None:
         return result
@@ -125,6 +134,7 @@ def parse_module_repo_map(value):
     else:
         return result
 
+    # Keep only entries with both a module and a repo.
     for mod, repo in pairs:
         mod_s = str(mod).strip()
         repo_s = clean_repo_name(str(repo).strip()) if repo else ""
@@ -135,6 +145,7 @@ def parse_module_repo_map(value):
 
 def discover_labels(gh_current, monitored_repos):
     """Fetches all unique labels from all monitored repositories, including built-in defaults."""
+    # Start with built-in labels, then add every label found in each repo.
     all_labels = {"automated-fix", "bug", "Bug", "critical", "high-priority"}
     for repo_name in monitored_repos:
         try:
@@ -147,6 +158,7 @@ def discover_labels(gh_current, monitored_repos):
     return sorted(list(all_labels))
 
 
+# Colours used when creating labels that do not exist yet.
 _LABEL_COLORS = {
     "automated-fix": "0e8a16",  # green
     "Bug": "b60205",            # red (classic GitHub bug color)
@@ -167,6 +179,7 @@ def _ensure_label(gh_repo, name):
     GitHub issue creation raises if a label name is absent, so this is called
     before create_issue for every label we intend to apply. No-op if it exists.
     """
+    # Label exists already: done.
     try:
         gh_repo.get_label(name)
         return True
@@ -202,8 +215,11 @@ def bump_repo_version(repo_path):
 
 
 def trigger_infrastructure_update():
+    """Ask the configured infrastructure update API to sync; return a short status string."""
+    # Skip when the URL is missing or still the placeholder.
     url = os.getenv("UPDATE_API_URL")
     if not url or "your-netbox" in url: return "URL not configured"
+    # POST to the API and report the result.
     try:
         resp = requests.post(url, json={}, timeout=10)
         return "SUCCESS: Sync Triggered" if resp.status_code == 200 else f"FAILED: {resp.status_code}"
@@ -222,10 +238,14 @@ def _normalize_for_dedup(text):
 
 
 def _token_set(text):
+    """Return the token set for text (wrapper around dedup._token_set)."""
+    # Delegate to dedup.py.
     return _token_set_impl(text)
 
 
 def _jaccard(a, b):
+    """Return the Jaccard similarity of two token sets (wrapper around dedup._jaccard)."""
+    # Delegate to dedup.py.
     return _jaccard_impl(a, b)
 
 
@@ -233,12 +253,15 @@ def _is_duplicate_match(new_title, new_body, ex_title, ex_body):
     """Returns True if a new error matches an existing issue, using normalized +
     fuzzy comparison so LLM rephrasing, timestamp drift, boilerplate wrapper,
     and module-name variants (opns/opnsense) don't defeat dedup."""
+    # Delegate to dedup.py.
     return _is_duplicate_match_impl(new_title, new_body, ex_title, ex_body)
 
 
+# How long a closed issue can still be matched as a recurrence.
 DEDUP_CLOSED_WINDOW_DAYS = 60
 
 
+# Minimum title similarity when matching an issue in a different repo.
 GLOBAL_FALLBACK_JACCARD = 0.8
 
 
@@ -265,6 +288,7 @@ def _llm_confirms_same_issue(new_title, new_body, ex_title, ex_body, ex_number=N
     picker now chooses the model itself; "trivial" keeps this from competing
     for the same tier fix generation needs."""
     try:
+        # Prompt: both reports, plus guidance that differing values do not make different bugs.
         prompt = (
             "Two error reports from an automated monitoring system. Decide "
             "whether the SECOND (new) report describes the SAME underlying "
@@ -283,6 +307,7 @@ def _llm_confirms_same_issue(new_title, new_body, ex_title, ex_body, ex_number=N
             "looks superficially similar.\n\n"
             'Return ONLY a JSON object: {"same_issue": true or false, "reason": "one short sentence"}'
         )
+        # Ask a trivial-tier structured-output model.
         from model_selection import LlmRequirements
         reqs = LlmRequirements(complexity="trivial", needs_structured_output=True,
                                min_context_tokens=len(prompt) // 4)
@@ -291,6 +316,7 @@ def _llm_confirms_same_issue(new_title, new_body, ex_title, ex_body, ex_number=N
             system_prompt="You are a precise bug-triage assistant. Only return a JSON object.",
             requirements=reqs,
         )
+        # Pull out the JSON verdict; anything malformed counts as "different".
         match = re.search(r'\{.*\}', res or "", re.DOTALL)
         if not match:
             return False, "LLM returned no parseable verdict"
@@ -332,15 +358,20 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
         logger.warning(f"find_global_duplicate_issue received non-dict error_data: {type(error_data)}")
         return None, None, False
 
+    # Title and body of the new error; with neither, there is nothing to match.
     new_title = error_data.get('title') or ''
     new_body = error_data.get('body') or ''
 
     if not str(new_title).strip() and not str(new_body).strip():
         return None, None, False
 
+    # Repo the error is meant for.
     target_repo = error_data.get('repo')
 
     def _search_repo(repo_name, require_strict_global=False, is_self_diag=False):
+        """Search one repo's open and recent closed issues for a match; return (issue, repo, closed)
+        or None.
+        """
         try:
             repo = gh_current.get_repo(repo_name)
             # state='all' so we see recently-closed recurrences too; newest-first
@@ -380,6 +411,7 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
                         anchor = anchor.replace(tzinfo=timezone.utc)
                     if anchor and (now - anchor).days > DEDUP_CLOSED_WINDOW_DAYS:
                         continue
+                # Body of the existing issue.
                 issue_body = issue.body or ""
 
                 # Special case: Self-Diagnosis. Relax the match to rely primarily on title
@@ -429,6 +461,7 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
 
     # 1. Target repo first — the recurrence almost always lands in the same repo.
     if target_repo:
+        # Is the target the self-diagnosis repo?
         config = load_config()
         self_diag_repo = config.get("self_diagnosis_repo")
         is_self_diag = (target_repo == self_diag_repo)
@@ -467,6 +500,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
     'body' are present and non-empty strings before any GitHub API call is made.
     """
     try:
+        # Shortly after an update, suppress new issues (restart noise).
         in_cooldown, remaining = _in_update_cooldown()
         if in_cooldown:
             logger.info(
@@ -484,6 +518,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
             )
             return None
 
+        # Read the title and body.
         title_text = error_data.get('title')
         body_text = error_data.get('body')
 
@@ -508,8 +543,10 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
         title_text = str(title_text)
         body_text = str(body_text)
 
+        # Repo the error is for (defaults to the target repo).
         current_repo_name = error_data.get('repo') or gh_repo.full_name
 
+        # Look for an existing open or recent closed issue that matches.
         logger.info(f"[dedup] Checking for an existing issue matching {title_text[:80]!r} "
                     f"(target {current_repo_name}, +{len(monitored_repos)} monitored repos)…")
         existing_issue, duplicate_repo_name, was_closed = find_global_duplicate_issue(
@@ -530,9 +567,11 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
         else:
             logger.info(f"[dedup] NO MATCH for {title_text[:80]!r} — filing a NEW issue.")
 
+        # A match was found.
         if existing_issue:
             duplicate_repo_display = duplicate_repo_name or current_repo_name
 
+            # Dismissed issue: suppress only if this is a real recurrence (body match or LLM check).
             # If the matching issue still carries the 'ab-dismissed' label,
             # it was intentionally marked as not a real issue. Only suppress when
             # the NEW error is a genuine recurrence of the dismissed one — first
@@ -621,6 +660,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
             if existing_issue:
                 logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {duplicate_repo_display}. Adding info.")
 
+                # Add the new evidence as a comment unless it is already in the issue.
                 existing_body = existing_issue.body or ""
                 if body_text.lower() not in existing_body.lower():
                     existing_issue.create_comment(
@@ -631,6 +671,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
 
                 return existing_issue
 
+        # No match: build the new issue's title and body.
         full_title = f"🤖 Log Alert: {title_text}"
         # Hidden module marker so the fix step can pull the source module's
         # related logs from the local hub_logs mirror as fix context (see
@@ -657,12 +698,14 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
         if raw:
             full_title = title_text
             full_body = body_text
+        # Default labels for automated issues.
         applied_labels = labels if labels is not None else ["automated-fix", "log-detected"]
         # Ensure each label exists on the target repo first — create_issue
         # raises UnknownObjectException if a label is absent (e.g. the "Bug"
         # label on a freshly-monitored repo like lbockenstedt/lm).
         for lbl in applied_labels:
             _ensure_label(gh_repo, lbl)
+        # Create the issue and mark it as not a duplicate.
         issue = gh_repo.create_issue(
             title=full_title,
             body=full_body,
@@ -674,6 +717,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
         except Exception:
             pass
         return issue
+    # Any error: log it and return None.
     except Exception as e:
         logger.error(f"Failed to handle automated issue creation: {e}")
         logger.debug(f"create_automated_issue error_data was: {error_data!r}")
@@ -684,9 +728,11 @@ def find_existing_pull_request(repo_obj, target_branch, base_branch):
     """Checks whether an open pull request already exists for the given head/base pair."""
     existing_pr = None
 
+    # GitHub's head filter needs "owner:branch".
     owner = repo_obj.owner.login
     head_param = f"{owner}:{target_branch}"
 
+    # Ask GitHub for open PRs with this head and base.
     try:
         existing_prs = repo_obj.get_pulls(state='open', head=head_param, base=base_branch)
         for pr_item in existing_prs:
@@ -695,6 +741,7 @@ def find_existing_pull_request(repo_obj, target_branch, base_branch):
     except Exception as e:
         logger.warning(f"Filtered PR check failed for {target_branch} -> {base_branch}: {e}")
 
+    # Fallback: scan every open PR manually.
     if not existing_pr:
         try:
             all_open_prs = repo_obj.get_pulls(state='open')
@@ -711,6 +758,7 @@ def find_existing_pull_request(repo_obj, target_branch, base_branch):
 def _ensure_ab_closed_label(repo):
     """Ensure the `ab-closed` label exists in repo (create if missing). Best-effort.
     Mirrors the ab-dismissed ensure-pattern used in delete_issue."""
+    # Exists already: nothing to do.
     try:
         repo.get_label("ab-closed")
     except Exception:
@@ -725,6 +773,7 @@ def _apply_closed_label(repo, issue, issue_id):
     """Best-effort add the `ab-closed` label to an issue being closed (existing
     labels are kept). Failure to label is non-fatal — the close + local transition still
     proceed."""
+    # Create the label if needed, then add it.
     try:
         _ensure_ab_closed_label(repo)
         issue.add_to_labels("ab-closed")
@@ -732,6 +781,7 @@ def _apply_closed_label(repo, issue, issue_id):
         logger.warning(f"Could not apply ab-closed label to {issue_id}: {e}")
 
 
+# Public names exported by this module.
 __all__ = [
     'clean_repo_name',
     'get_monitored_repos',
