@@ -5,6 +5,44 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AppBuilder Hub (Fixed)</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      // HPE Design System tokens (design-system.hpe.design) — same values as
+      // lm/scripts/build-tailwind.sh. brand = decorative only; primary is the
+      // AA-contrast green for filled buttons and green text.
+      tailwind.config = { theme: { extend: {
+        fontFamily: { sans: ['"HPE Graphik"', 'Arial', 'sans-serif'] },
+        colors: {
+          brand: '#01A982',
+          primary: { DEFAULT: '#068667', hover: '#006750', text: '#006750' },
+          navy: '#263040',
+          focus: '#292D3A',
+          red:     { 50: '#FFECEC', 500: '#CC1F1A', 600: '#CC1F1A' },
+          amber:   { 50: '#FFF3DD', 500: '#D36D00' },
+          green:   { 50: '#E3FDF4', 500: '#009A71' },
+          emerald: { 50: '#E3FDF4', 500: '#009A71' },
+          blue:    { 50: '#E0F8FF', 500: '#0055DA' },
+          sky:     { 50: '#E0F8FF', 500: '#0055DA' },
+        },
+      } } };
+    </script>
+    <style>
+      /* HPE Graphik: an installed copy first, then the HPE CDN; Arial otherwise. */
+      @font-face { font-family: 'HPE Graphik'; font-weight: 400; font-display: swap;
+        src: local('HPE Graphik Regular'), local('HPEGraphik-Regular'),
+             url('https://www.hpe.com/content/dam/hpe/fonts/graphik/HPEGraphik-Regular-Web.woff2') format('woff2'); }
+      @font-face { font-family: 'HPE Graphik'; font-weight: 500; font-display: swap;
+        src: local('HPE Graphik Medium'), local('HPEGraphik-Medium'),
+             url('https://www.hpe.com/content/dam/hpe/fonts/graphik/HPEGraphik-Medium-Web.woff2') format('woff2'); }
+      @font-face { font-family: 'HPE Graphik'; font-weight: 600; font-display: swap;
+        src: local('HPE Graphik Semibold'), local('HPEGraphik-Semibold'),
+             url('https://www.hpe.com/content/dam/hpe/fonts/graphik/HPEGraphik-Semibold-Web.woff2') format('woff2'); }
+      @font-face { font-family: 'HPE Graphik'; font-weight: 700; font-display: swap;
+        src: local('HPE Graphik Bold'), local('HPEGraphik-Bold'),
+             url('https://www.hpe.com/content/dam/hpe/fonts/graphik/HPEGraphik-Bold-Web.woff2') format('woff2'); }
+      body { font-family: 'HPE Graphik', Arial, sans-serif; }
+      :focus-visible { outline: 2px solid #292D3A; outline-offset: 2px; }
+      :is(.hpe-topbar, .bg-navy, .bg-slate-800, .bg-slate-900) :focus-visible { outline-color: #FFFFFF; }
+    </style>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script>
       // Auto-refresh is JS-driven (not <meta http-equiv="refresh">) so the
@@ -18,7 +56,8 @@
     </script>
     <style>
         :root {
-            --hpe-green: #01A982;
+            --hpe-green: #01A982;        /* decorative (borders, rules) */
+            --hpe-green-text: #006750;   /* HPE text.primary: green text on light surfaces */
             --hpe-navy: #263040;
             --hpe-navy-dark: #1F2531;
             --hpe-bg-light: #F5F5F5;
@@ -30,7 +69,7 @@
         body {
             background-color: var(--hpe-bg-light);
             color: var(--hpe-text-main);
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            font-family: 'HPE Graphik', Arial, sans-serif;
         }
         .hpe-card {
             background: var(--hpe-white);
@@ -52,10 +91,9 @@
             border-radius: 9999px;
             font-size: 0.75rem;
             font-weight: 600;
-            text-transform: uppercase;
         }
-        .pill-online { background-color: #d1fae5; color: #065f46; }
-        .pill-offline { background-color: #fee2e2; color: #991b1b; }
+        .pill-online { background-color: #E3FDF4; color: #006750; }
+        .pill-offline { background-color: #FFECEC; color: #CC1F1A; }
         input, select, textarea {
             background-color: white !important;
             color: var(--hpe-text-main) !important;
@@ -63,7 +101,7 @@
         }
         .btn-primary {
             background-color: rgba(1, 169, 130, 0.1);
-            color: var(--hpe-green);
+            color: var(--hpe-green-text);
             border: 1px solid var(--hpe-green);
             transition: all 0.2s ease;
         }
@@ -93,16 +131,16 @@
         }
         .nav-item:hover {
             background: rgba(1, 169, 130, 0.1);
-            color: var(--hpe-green);
+            color: var(--hpe-green-text);
         }
         .nav-item.active {
             background: rgba(1, 169, 130, 0.15);
-            color: var(--hpe-green);
+            color: var(--hpe-green-text);
             font-weight: 600;
             border-left: 4px solid var(--hpe-green);
         }
         /* Card titles → brand navy + bold (LM token: text-lg font-bold
-           text-[#263040]). Compound selector beats the single-class Tailwind
+           text-navy). Compound selector beats the single-class Tailwind
            text-slate-800/700 utilities without !important. h4 section labels
            are styled per-instance to LM's grey-uppercase section-label token. */
         .hpe-card h3 {
@@ -124,7 +162,7 @@
         }
         .sub-nav-item:hover { color: #0f172a; } /* slate-900 */
         .sub-nav-item.active {
-            color: var(--hpe-green);
+            color: var(--hpe-green-text);
             font-weight: 600;
             border-bottom-color: var(--hpe-green);
         }
@@ -170,7 +208,7 @@
            Dismiss / Clear actions are a consistent size + shape, colour aside. */
         .btn-danger {
             background-color: #fee2e2; /* red-100 */
-            color: #b91c1c;            /* red-700 */
+            color: #CC1F1A;            /* HPE critical text */
             border: 1px solid #fecaca; /* red-200 */
             transition: all 0.2s ease;
         }
@@ -195,7 +233,7 @@
         .chat-bubble { border-radius: 12px; padding: 10px 14px; font-size: 0.875rem; line-height: 1.4; }
         .chat-user .chat-bubble { background-color: #334155; color: #fff; border-bottom-right-radius: 3px; }
         .chat-assistant .chat-bubble { background-color: #1e293b; color: #4ade80; border-bottom-left-radius: 3px; }
-        .chat-role { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: #94a3b8; margin-bottom: 2px; }
+        .chat-role { font-size: 0.75rem; color: #64748b; margin-bottom: 2px; }
         .chat-pending { opacity: 0.7; }
         .chat-cursor::after {
             content: "▋";
@@ -217,7 +255,7 @@
             cursor: pointer;
         }
         .chat-side-item:hover { background-color: #f1f5f9; color: #1e293b; }
-        .chat-side-item.active { background-color: #dcfce7; color: #065f46; font-weight: 600; }
+        .chat-side-item.active { background-color: #E3FDF4; color: #006750; font-weight: 600; }
         .chat-side-title { flex: 1; min-width: 0; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; text-decoration: none; }
         .chat-side-actions { display: flex; align-items: center; gap: 0.25rem; }
         .chat-side-del { flex: none; color: #94a3b8; opacity: 0; transition: opacity 0.15s ease; background: none; border: none; padding: 2px 4px; cursor: pointer; }
@@ -233,10 +271,10 @@
             display: flex; align-items: flex-start; gap: 8px; opacity: 0;
             transform: translateX(12px); transition: opacity .18s ease, transform .18s ease; }
         .bf-toast.show { opacity: 1; transform: translateX(0); }
-        .bf-toast.success { background: #01A982; }
-        .bf-toast.error   { background: #dc2626; }
+        .bf-toast.success { background: #068667; }  /* HPE primary.strong (white text, AA) */
+        .bf-toast.error   { background: #CC1F1A; }
         .bf-toast.info    { background: #263040; }
-        .bf-toast.warn    { background: #d97706; }
+        .bf-toast.warn    { background: #9B4F00; }
         .bf-toast .bf-toast-x { margin-left: auto; cursor: pointer; opacity: .85;
             background: none; border: none; color: inherit; font-size: 15px; line-height: 1; padding: 0; }
     </style>
@@ -273,7 +311,7 @@
              (Logo | Lab Manager | <Module>) header pattern. The module label
              tracks the active sidebar view so it always reads "where am I". -->
         <div class="flex items-center gap-3 min-w-0">
-            <div class="bg-[#01A982] p-1.5 rounded-lg flex items-center shrink-0" title="AppBuilder">
+            <div class="bg-primary p-1.5 rounded-lg flex items-center shrink-0" title="AppBuilder">
                 <i class="fas fa-robot text-white text-sm"></i>
             </div>
             <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
@@ -438,7 +476,7 @@
         <div class="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0">
             <div class="flex items-center justify-between">
                 <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider">System Health</h4>
-                <i class="fas fa-heartbeat text-[#01A982] text-xs"></i>
+                <i class="fas fa-heartbeat text-primary-text text-xs"></i>
             </div>
             <div class="space-y-1.5 text-xs">
                 <div onclick="goFilter('resolved')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Resolved"><span class="text-slate-500">Resolved</span><span class="font-bold text-green-600">{{ state.success_count }}</span></div>
@@ -480,8 +518,8 @@
             <!-- Active Tasks Card (System Health moved to the left sidebar) -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-6">
-                    <h3 class="text-lg font-bold text-[#263040]">Active Tasks</h3>
-                    <i class="fas fa-tasks text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-navy">Active Tasks</h3>
+                    <i class="fas fa-tasks text-primary-text"></i>
                 </div>
                 <div class="flex flex-col h-full justify-between">
                     <div id="active-tasks-list" class="space-y-2 overflow-y-auto max-h-64">
@@ -492,7 +530,7 @@
                                         {% if task.kind == 'pr' %}
                                             <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-300"><i class="fas fa-code-branch"></i> PR REVIEW</span>
                                         {% else %}
-                                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#01A982]/10 text-[#01A982] border border-[#01A982]/30"><i class="fas fa-search"></i> SCAN / FIX</span>
+                                            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand/10 text-primary-text border border-brand/30"><i class="fas fa-search"></i> SCAN / FIX</span>
                                         {% endif %}
                                     </div>
                                     <p class="task-name text-slate-700 font-mono text-xs break-all font-bold">{{ task.name }}</p>
@@ -526,7 +564,7 @@
             <div class="px-6 py-4 border-b border-slate-200 bg-white flex flex-col gap-3">
                 <!-- Row 1: title + bulk actions -->
                 <div class="flex justify-between items-center flex-wrap gap-2">
-                    <h3 class="text-lg font-bold text-[#263040] whitespace-nowrap">Status</h3>
+                    <h3 class="text-lg font-bold text-navy whitespace-nowrap">Status</h3>
                     <div class="flex gap-2 items-center flex-wrap">
                         <button onclick="retryAll(null)" class="btn-primary px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap">
                             <i class="fas fa-redo-alt mr-1"></i> Retry All
@@ -541,7 +579,7 @@
                 </div>
                 <!-- Row 2: filters (pinned right) -->
                 <div class="flex items-center flex-nowrap gap-2">
-                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border-[#01A982]" title="Active issues (closed hidden)">Active</button>
+                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-brand/10 hover:bg-brand/20 text-primary-text border-brand" title="Active issues (closed hidden)">Active</button>
                     <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
                     <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
                     <button data-filter="resolved" onclick="filterActivity('resolved')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Resolved</button>
@@ -576,7 +614,7 @@
                 <tbody class="divide-y divide-slate-200">
                     {% for issue_id, info in state.processed.items() %}
                     <tr class="hover:bg-slate-50 transition-colors" data-status="{{ info.status }}">
-                        <td class="px-4 py-3 font-mono text-[#01A982] align-middle truncate" title="{{ issue_id }}">{{ issue_id }}</td>
+                        <td class="px-4 py-3 font-mono text-primary-text align-middle truncate" title="{{ issue_id }}">{{ issue_id }}</td>
                         <td class="px-4 py-3 align-middle">
                             <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% elif info.status == 'feature_flagged' %}text-purple-700 bg-purple-100{% elif info.status == 'feature_classify_retry' %}text-amber-700 bg-amber-100{% elif info.status == 'feature_needs_info' %}text-sky-700 bg-sky-100{% elif info.status == 'feature_built' %}text-teal-700 bg-teal-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
                         </td>
@@ -1021,25 +1059,25 @@
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">GitHub Personal Access Token</label>
-                                <input type="password" id="github-token" name="GITHUB_TOKEN" value="" autocomplete="new-password" title="GitHub Personal Access Token used for all repo, issue and PR operations. Write-only: leave blank to keep the stored token." placeholder="{% if settings.GITHUB_TOKEN_configured %}Leave blank to keep the current token{% else %}Not configured{% endif %}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="password" id="github-token" name="GITHUB_TOKEN" value="" autocomplete="new-password" title="GitHub Personal Access Token used for all repo, issue and PR operations. Write-only: leave blank to keep the stored token." placeholder="{% if settings.GITHUB_TOKEN_configured %}Leave blank to keep the current token{% else %}Not configured{% endif %}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <p class="text-xs text-slate-500">
                                     {% if settings.GITHUB_TOKEN_from_env %}Supplied by the <code>GITHUB_TOKEN</code> environment variable — nothing is stored in the config, so clearing here will not revoke it.
-                                    {% elif settings.GITHUB_TOKEN_configured %}A token is stored. Type a new one only to replace it, or <a href="#" onclick="abGithubTokenClear(); return false;" class="text-[#01A982] underline">clear it</a>.
+                                    {% elif settings.GITHUB_TOKEN_configured %}A token is stored. Type a new one only to replace it, or <a href="#" onclick="abGithubTokenClear(); return false;" class="text-primary-text underline">clear it</a>.
                                     {% else %}No token stored yet.{% endif %}
                                 </p>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Default Branch</label>
-                                <input type="text" name="default_branch" value="{{ settings.default_branch }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="text" name="default_branch" value="{{ settings.default_branch }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Update API URL (NetBox)</label>
-                                <input type="text" name="UPDATE_API_URL" value="{{ settings.UPDATE_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="text" name="UPDATE_API_URL" value="{{ settings.UPDATE_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <div class="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-3">
                                     <label class="flex items-center gap-2 text-sm font-medium text-slate-700">
-                                        <input type="checkbox" name="delete_merged_branches" {% if settings.delete_merged_branches is not defined or settings.delete_merged_branches %}checked{% endif %} class="rounded border-slate-300 focus:ring-[#01A982]">
+                                        <input type="checkbox" name="delete_merged_branches" {% if settings.delete_merged_branches is not defined or settings.delete_merged_branches %}checked{% endif %} class="rounded border-slate-300 focus:ring-brand">
                                         Delete AppBuilder's own branches after their PR merges
                                     </label>
                                     <p class="text-xs text-slate-500">
@@ -1049,18 +1087,18 @@
                                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                         <div class="space-y-1">
                                             <label class="text-sm font-medium text-slate-600">Protected branches (never delete or force-push)</label>
-                                            <input type="text" name="protected_branches" value="{{ (settings.protected_branches or []) | join(', ') }}" placeholder="main, master, dev, qa" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="text" name="protected_branches" value="{{ (settings.protected_branches or []) | join(', ') }}" placeholder="main, master, dev, qa" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                             <p class="text-xs text-slate-500">Comma-separated. main, master, dev, qa, staging, release and next are always protected, as are the Default and Dev branches set here.</p>
                                         </div>
                                         <div class="space-y-1">
                                             <label class="text-sm font-medium text-slate-600">Auto-created branch prefixes (safe to delete)</label>
-                                            <input type="text" name="auto_branch_prefixes" value="{{ (settings.auto_branch_prefixes or []) | join(', ') }}" placeholder="bug/, ai-feature/" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="text" name="auto_branch_prefixes" value="{{ (settings.auto_branch_prefixes or []) | join(', ') }}" placeholder="bug/, ai-feature/" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                             <p class="text-xs text-slate-500">Comma-separated prefixes. Leave blank to use the defaults.</p>
                                         </div>
                                     </div>
                                     <div class="space-y-1">
                                         <label class="text-sm font-medium text-slate-600">Release lock (hold auto-merge)</label>
-                                        <input type="text" name="release_locked_branches" title="Branches AppBuilder must not auto-merge into until you remove them here — PRs are still reviewed but held" value="{{ (settings.release_locked_branches or []) | join(', ') }}" placeholder="dev, qa" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                        <input type="text" name="release_locked_branches" title="Branches AppBuilder must not auto-merge into until you remove them here — PRs are still reviewed but held" value="{{ (settings.release_locked_branches or []) | join(', ') }}" placeholder="dev, qa" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                         <p class="text-xs text-slate-500">Comma-separated. While a branch is listed here, AppBuilder keeps reviewing PRs but will <span class="font-medium">not auto-merge</span> into it — changes stack up as open PRs for testing/validation and are processed once you remove it. Humans can still merge manually.</p>
                                     </div>
                                 </div>
@@ -1071,7 +1109,7 @@
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
                                     {% for repo in repo_options %}
                                     <label class="flex items-center gap-2 text-sm text-slate-700 min-w-0" title="{{ repo }}">
-                                        <input type="checkbox" name="monitored_repos" value="{{ repo }}" {% if repo in monitored_set %}checked{% endif %} class="rounded border-slate-300 focus:ring-[#01A982] flex-shrink-0">
+                                        <input type="checkbox" name="monitored_repos" value="{{ repo }}" {% if repo in monitored_set %}checked{% endif %} class="rounded border-slate-300 focus:ring-brand flex-shrink-0">
                                         <span class="truncate">{{ repo }}</span>
                                     </label>
                                     {% endfor %}
@@ -1081,7 +1119,7 @@
                                 <span class="text-xs text-slate-400 block">Couldn't load your GitHub repo list (no token or fetch failed) — enter repos manually below.</span>
                                 {% endif %}
                                 <label class="text-xs text-slate-500">Additional repos (comma-separated, e.g. <code class="bg-slate-100 px-1 rounded">org/repo</code>)</label>
-                                <input type="text" name="monitored_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="owner/repo, org/another">
+                                <input type="text" name="monitored_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="owner/repo, org/another">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Trusted Repositories (Allow Direct Push)</label>
@@ -1089,7 +1127,7 @@
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
                                     {% for repo in trusted_options %}
                                     <label class="flex items-center gap-2 text-sm text-slate-700 min-w-0" title="{{ repo }}">
-                                        <input type="checkbox" name="trusted_repos" value="{{ repo }}" {% if repo in trusted_set %}checked{% endif %} class="rounded border-slate-300 focus:ring-[#01A982] flex-shrink-0">
+                                        <input type="checkbox" name="trusted_repos" value="{{ repo }}" {% if repo in trusted_set %}checked{% endif %} class="rounded border-slate-300 focus:ring-brand flex-shrink-0">
                                         <span class="truncate">{{ repo }}</span>
                                     </label>
                                     {% endfor %}
@@ -1099,13 +1137,13 @@
                                 <span class="text-xs text-slate-400 block">Couldn't load your GitHub repo list — enter repos manually below.</span>
                                 {% endif %}
                                 <label class="text-xs text-slate-500">Additional trusted repos (comma-separated, e.g. <code class="bg-slate-100 px-1 rounded">org/repo</code>)</label>
-                                <input type="text" name="trusted_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="owner/repo, org/another">
+                                <input type="text" name="trusted_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="owner/repo, org/another">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Self-Diagnosis Repository (Where AppBuilder files its own bugs)</label>
-                                <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. lbockenstedt/ab">
+                                <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. lbockenstedt/ab">
                                 <div class="flex items-center gap-3 mt-2">
-                                    <input type="checkbox" name="self_log_scan_enabled" id="self_log_scan_enabled" {{ 'checked' if settings.self_log_scan_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <input type="checkbox" name="self_log_scan_enabled" id="self_log_scan_enabled" {{ 'checked' if settings.self_log_scan_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="self_log_scan_enabled" class="text-xs font-medium text-slate-700" title="On by default: AppBuilder scans its own logs for errors and files them in the self-diagnosis repo. Turn off to stop self-monitoring.">
                                         Self-monitor AppBuilder logs (file issues for AppBuilder's own errors)
                                     </label>
@@ -1153,21 +1191,21 @@
                                     <button type="button" onclick="autofillModuleRepoMap()" id="mrm-autofill-btn" class="btn-sec px-3 py-1 rounded font-bold text-xs whitespace-nowrap" title="Suggest entries from the repos you already monitor. Only fills ALIASES (module type differs from repo name) — names that already auto-match are left out. Never overwrites entries you have set.">Auto-fill</button>
                                 </div>
                                 <div id="mrm-autofill-note" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 text-slate-600"></div>
-                                <textarea name="module_repo_map" id="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
+                                <textarea name="module_repo_map" id="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
                                 <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
                             </div>
                             <div class="space-y-3 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
                                 <label class="text-sm font-semibold text-slate-700">AppBuilder Sources <span class="text-slate-400 font-normal">(turn noisy sources on one at a time)</span></label>
                                 <div class="flex items-center gap-3">
-                                    <input type="checkbox" name="bug_reports_enabled" id="bug_reports_enabled" {{ 'checked' if settings.get('bug_reports_enabled', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <input type="checkbox" name="bug_reports_enabled" id="bug_reports_enabled" {{ 'checked' if settings.get('bug_reports_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="bug_reports_enabled" class="text-xs font-medium text-slate-700" title="File &amp; auto-fix BUG reports submitted via the LM WebUI. On by default.">BugFixes from LM — file &amp; fix bug reports from the LM WebUI</label>
                                 </div>
                                 <div class="flex items-center gap-3">
-                                    <input type="checkbox" name="feature_requests_enabled" id="feature_requests_enabled" {{ 'checked' if settings.get('feature_requests_enabled', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <input type="checkbox" name="feature_requests_enabled" id="feature_requests_enabled" {{ 'checked' if settings.get('feature_requests_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="feature_requests_enabled" class="text-xs font-medium text-slate-700" title="File FEATURE requests from the LM WebUI (enhancement issues; never auto-implemented).">Feature Requests from LM — file feature requests from the LM WebUI</label>
                                 </div>
                                 <div class="flex items-center gap-3">
-                                    <input type="checkbox" name="fix_logdetected_enabled" id="fix_logdetected_enabled" {{ 'checked' if settings.get('fix_logdetected_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <input type="checkbox" name="fix_logdetected_enabled" id="fix_logdetected_enabled" {{ 'checked' if settings.get('fix_logdetected_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-400">(Bug &amp; Critical always fix)</span></label>
                                 </div>
                                 <label class="text-xs font-medium text-slate-600 block mt-2">Hub-log auto-filing — per module <span class="text-slate-400 font-normal">(none checked = OFF; enable one at a time)</span></label>
@@ -1175,7 +1213,7 @@
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
                                     {% for m in log_module_options %}
                                     <label class="flex items-center gap-2 text-sm text-slate-700 min-w-0" title="{{ m }}">
-                                        <input type="checkbox" name="enabled_log_modules" value="{{ m }}" {% if m in settings.get('enabled_log_modules', []) %}checked{% endif %} class="rounded border-slate-300 focus:ring-[#01A982] flex-shrink-0">
+                                        <input type="checkbox" name="enabled_log_modules" value="{{ m }}" {% if m in settings.get('enabled_log_modules', []) %}checked{% endif %} class="rounded border-slate-300 focus:ring-brand flex-shrink-0">
                                         <span class="truncate">{{ m }}</span>
                                     </label>
                                     {% endfor %}
@@ -1205,7 +1243,7 @@
                             {% set _entry_providers = (settings.llm_entries or []) | map(attribute='provider') | list %}
                             <div class="mb-3 flex flex-wrap items-center gap-2">
                                 <label for="add-cred-provider" class="text-xs font-medium text-slate-500">Add a provider:</label>
-                                <select id="add-cred-provider" onchange="revealCredCard(this.value); this.value='';" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <select id="add-cred-provider" onchange="revealCredCard(this.value); this.value='';" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                     <option value="">＋ Select an LLM provider to configure…</option>
                                     <option value="google">Google</option>
                                     <option value="anthropic">Anthropic</option>
@@ -1251,7 +1289,7 @@
                                         <div id="copilot-auth-status" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 space-y-1">
                                             <div id="copilot-auth-line" class="font-medium"></div>
                                             <div id="copilot-auth-code" class="hidden text-center">
-                                                <span class="text-[11px] text-slate-500">Enter this code at <a id="copilot-auth-link" href="#" target="_blank" class="text-[#01A982] font-semibold hover:underline">github.com/login/device</a>:</span>
+                                                <span class="text-[11px] text-slate-500">Enter this code at <a id="copilot-auth-link" href="#" target="_blank" class="text-primary-text font-semibold hover:underline">github.com/login/device</a>:</span>
                                                 <div id="copilot-auth-usercode" class="font-mono text-lg font-bold tracking-widest text-slate-800 mt-1 select-all"></div>
                                             </div>
                                         </div>
@@ -1286,8 +1324,8 @@
                                         {% if pname == 'ollama_cloud' %}
                                         <p class="text-xs text-slate-500">Hosted <strong>Ollama Cloud</strong> — unlike the self-hosted <code class="bg-slate-100 px-1 rounded">ollama</code> slots this one <strong>requires an API key</strong> (from <span class="font-mono">ollama.com</span>); without one the slot is skipped in failover instead of failing every call. Base URL defaults to <span class="font-mono">https://ollama.com</span>.</p>
                                         {% endif %}
-                                        <input type="password" id="vault-key-{{ pname }}" title="Leave blank to keep the existing API key; type a new value to replace it" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if cred.get('has_key') else 'API Key' }}" data-touched="0" oninput="this.dataset.touched='1'" value="" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
-                                        <input type="text" id="vault-url-{{ pname }}" placeholder="{% if pname == 'ollama_cloud' %}Base URL (optional — defaults to https://ollama.com){% else %}Base URL (optional){% endif %}" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                        <input type="password" id="vault-key-{{ pname }}" title="Leave blank to keep the existing API key; type a new value to replace it" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if cred.get('has_key') else 'API Key' }}" data-touched="0" oninput="this.dataset.touched='1'" value="" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-brand border border-slate-200">
+                                        <input type="text" id="vault-url-{{ pname }}" placeholder="{% if pname == 'ollama_cloud' %}Base URL (optional — defaults to https://ollama.com){% else %}Base URL (optional){% endif %}" value="{{ cred.get('base_url','') }}" class="w-full p-2 text-sm rounded outline-none focus:ring-2 focus:ring-brand border border-slate-200">
                                         <button type="button" onclick="saveCredential('{{ pname }}')" class="w-full py-1 text-xs btn-primary rounded font-bold">Save {{ pname }} Credential</button>
                                         {% if cred.get('has_key') or cred.get('base_url') %}
                                         <button type="button" onclick="deconfigureCredential('{{ pname }}')" class="w-full py-1 text-xs btn-danger rounded font-bold" title="Remove the stored credential for {{ pname }}. Entries using {{ pname }} stop working until reconfigured (unless they set their own per-entry key).">Deconfigure {{ pname }}</button>
@@ -1310,8 +1348,8 @@
                             <div id="add-entry-form" class="hidden mb-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                                 <p class="text-xs font-bold text-blue-700 mb-2">New Entry</p>
                                 <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-2">
-                                    <input type="text" id="new-entry-label" placeholder="Label (e.g. Google Flash)" class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <select id="new-entry-provider" onchange="loadVaultModels()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="text" id="new-entry-label" placeholder="Label (e.g. Google Flash)" class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                    <select id="new-entry-provider" onchange="loadVaultModels()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                         <option value="google">Google</option>
                                         <option value="anthropic">Anthropic</option>
                                         <option value="openai">OpenAI</option>
@@ -1324,14 +1362,14 @@
                                         <option value="claude_cli">Claude CLI (local)</option>
                                         <option value="copilot">GitHub Copilot</option>
                                     </select>
-                                    <select id="new-entry-model" onchange="updateDefaultRpm()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <select id="new-entry-model" onchange="updateDefaultRpm()" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                         <option value="">— save credential first —</option>
                                     </select>
-                                    <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <input type="text" id="new-entry-baseurl" placeholder="Base URL (optional — e.g. http://gpu-box:11434)" title="Per-entry endpoint. Overrides the shared credential — lets 3 ollama entries target local CPU / LAN GPU / cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <input type="text" id="new-entry-apikey" placeholder="API key (optional — overrides shared)" title="Per-entry key. Set only for a cloud endpoint that needs one." class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" id="new-entry-rpm" placeholder="RPM (auto-filled)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                    <input type="text" id="new-entry-baseurl" placeholder="Base URL (optional — e.g. http://gpu-box:11434)" title="Per-entry endpoint. Overrides the shared credential — lets 3 ollama entries target local CPU / LAN GPU / cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                    <input type="text" id="new-entry-apikey" placeholder="API key (optional — overrides shared)" title="Per-entry key. Set only for a cloud endpoint that needs one." class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                     <label class="col-span-2 md:col-span-1 flex items-center gap-2 p-2 text-sm text-slate-600" title="Enabled endpoints are ranked by the capability/cost picker for every call. Disable to keep the credential configured but exclude it from routing.">
-                                        <input type="checkbox" id="new-entry-enabled" checked class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+                                        <input type="checkbox" id="new-entry-enabled" checked class="rounded border-slate-300 text-primary-text focus:ring-brand">
                                         Enabled (available to the picker)
                                     </label>
                                 </div>
@@ -1352,7 +1390,7 @@
                                         {% if entry.rpm %}<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{{ entry.rpm }} RPM</span>{% endif %}
                                         {% if entry.health and entry.health.unhealthy %}<span class="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-bold" title="{{ entry.health.consecutive_failures }} calls in a row failed{% if entry.health.last_error %} — {{ entry.health.last_error }}{% endif %}{% if entry.health.last_error_at %} (last: {{ entry.health.last_error_at }}){% endif %}">⚠ failing</span>{% endif %}
                                         <label class="flex items-center gap-1 text-[11px] text-slate-500" title="Enabled endpoints are ranked by the picker for every call.">
-                                            <input type="checkbox" onchange="toggleEntryEnabled('{{ entry.id }}', this.checked)" {{ 'checked' if entry.enabled != False else '' }} class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+                                            <input type="checkbox" onchange="toggleEntryEnabled('{{ entry.id }}', this.checked)" {{ 'checked' if entry.enabled != False else '' }} class="rounded border-slate-300 text-primary-text focus:ring-brand">
                                             on
                                         </label>
                                         <span id="entry-test-result-{{ entry.id }}" class="text-[10px] px-1.5 py-0.5 rounded font-mono"></span>
@@ -1363,8 +1401,8 @@
                                     <!-- Inline edit form -->
                                     <div class="hidden p-3 border-t border-slate-200 bg-white rounded-b-lg" id="entry-edit-{{ entry.id }}">
                                         <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-2">
-                                            <input type="text" id="edit-label-{{ entry.id }}" value="{{ entry.label or '' }}" placeholder="Label" class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <select id="edit-provider-{{ entry.id }}" onchange="loadEditModels('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="text" id="edit-label-{{ entry.id }}" value="{{ entry.label or '' }}" placeholder="Label" class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                            <select id="edit-provider-{{ entry.id }}" onchange="loadEditModels('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                                 <option value="google" {{ 'selected' if entry.provider == 'google' else '' }}>Google</option>
                                                 <option value="anthropic" {{ 'selected' if entry.provider == 'anthropic' else '' }}>Anthropic</option>
                                                 <option value="openai" {{ 'selected' if entry.provider == 'openai' else '' }}>OpenAI</option>
@@ -1377,12 +1415,12 @@
                                                 <option value="claude_cli" {{ 'selected' if entry.provider == 'claude_cli' else '' }}>Claude CLI (local)</option>
                                                 <option value="copilot" {{ 'selected' if entry.provider == 'copilot' else '' }}>GitHub Copilot</option>
                                             </select>
-                                            <select id="edit-model-{{ entry.id }}" onchange="updateEditRpm('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <select id="edit-model-{{ entry.id }}" onchange="updateEditRpm('{{ entry.id }}')" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                                 <option value="{{ entry.model }}" selected>{{ entry.model }}</option>
                                             </select>
-                                            <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <input type="text" id="edit-baseurl-{{ entry.id }}" value="{{ entry.base_url or '' }}" placeholder="Base URL (e.g. http://localhost:11434)" title="Per-entry endpoint. Overrides the shared credential — set localhost for a local CPU ollama, a LAN IP for a GPU box, or https://ollama.com for cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                            <input type="text" id="edit-apikey-{{ entry.id }}" title="Leave blank to keep the existing key; type to override the shared credential" value="" data-touched="0" oninput="this.dataset.touched='1'" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if entry.has_key else 'API key (optional — overrides shared)' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                            <input type="number" id="edit-rpm-{{ entry.id }}" value="{{ entry.rpm or 0 }}" placeholder="RPM (0=unlimited)" min="0" oninput="this.dataset.userSet='1'" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                            <input type="text" id="edit-baseurl-{{ entry.id }}" value="{{ entry.base_url or '' }}" placeholder="Base URL (e.g. http://localhost:11434)" title="Per-entry endpoint. Overrides the shared credential — set localhost for a local CPU ollama, a LAN IP for a GPU box, or https://ollama.com for cloud." class="col-span-2 md:col-span-1 p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                            <input type="text" id="edit-apikey-{{ entry.id }}" title="Leave blank to keep the existing key; type to override the shared credential" value="" data-touched="0" oninput="this.dataset.touched='1'" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if entry.has_key else 'API key (optional — overrides shared)' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                         </div>
                                         <div class="flex gap-2">
                                             <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs btn-primary rounded font-bold">Save</button>
@@ -1405,7 +1443,7 @@
                         <div class="mb-6 p-4 rounded-lg bg-slate-50 border border-slate-200">
                             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Step 3 &mdash; Model Registry (capability &amp; cost rules)</p>
                             <p class="text-xs text-slate-500 mb-3">Each <b>enabled</b> endpoint above is ranked per call by the registry: which model can do how hard a job, at what cost tier, with which capabilities. It now has its own tab with a labelled editor &mdash; every field is a dropdown, number or checkbox, so there is no syntax to guess at.</p>
-                            <button type="button" title="Open the Model Registry tab -- edit cost tier, capability rank, speed class and capability flags per rule with labelled controls" onclick="settingsTab('sec-model-registry')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]"><i class="fas fa-sliders-h mr-1"></i>Open Model Registry</button>
+                            <button type="button" title="Open the Model Registry tab -- edit cost tier, capability rank, speed class and capability flags per rule with labelled controls" onclick="settingsTab('sec-model-registry')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-sliders-h mr-1"></i>Open Model Registry</button>
                             {% if registry_unclassified %}
                             <span class="ml-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">{{ registry_unclassified|length }} unclassified model(s) need a rule</span>
                             {% endif %}
@@ -1415,7 +1453,7 @@
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
-                                <input type="number" name="LLM_TIMEOUT" value="{{ settings.LLM_TIMEOUT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="LLM_TIMEOUT" value="{{ settings.LLM_TIMEOUT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
@@ -1463,11 +1501,11 @@
 
                         <!-- Toolbar -->
                         <div class="flex flex-wrap items-center gap-2 mb-3">
-                            <button type="button" title="Append a new empty rule with safe defaults (cheap / medium / streaming) to the bottom of the list" onclick="abRegAdd()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]"><i class="fas fa-plus mr-1"></i>Add rule</button>
+                            <button type="button" title="Append a new empty rule with safe defaults (cheap / medium / streaming) to the bottom of the list" onclick="abRegAdd()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-plus mr-1"></i>Add rule</button>
                             <button type="button" title="Upsert free-tier catch-all rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" onclick="registrySetLocalFree()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Set local providers free</button>
                             <button type="button" title="Expand every rule card so all fields are visible" onclick="abRegExpandAll(true)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Expand all</button>
                             <button type="button" title="Collapse every rule card back to its one-line summary" onclick="abRegExpandAll(false)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Collapse all</button>
-                            <input id="registry-filter" type="search" placeholder="Filter by provider, match or label&hellip;" title="Show only rules whose provider, match glob, label or id contains this text. Filtering never changes what is saved." oninput="abRegRender()" class="ml-auto w-64 p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]">
+                            <input id="registry-filter" type="search" placeholder="Filter by provider, match or label&hellip;" title="Show only rules whose provider, match glob, label or id contains this text. Filtering never changes what is saved." oninput="abRegRender()" class="ml-auto w-64 p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-brand">
                         </div>
 
                         <!-- Suggestions only: `list` on a text input keeps a
@@ -1491,11 +1529,11 @@
 
                         <!-- Advanced: the raw JSON that actually posts. -->
                         <div class="mt-4">
-                            <a href="javascript:void(0)" onclick="abRegToggleJson()" id="registry-json-toggle" class="text-xs font-bold text-[#01A982] hover:underline">&#9656; Advanced &mdash; raw JSON</a>
+                            <a href="javascript:void(0)" onclick="abRegToggleJson()" id="registry-json-toggle" class="text-xs font-bold text-primary-text hover:underline">&#9656; Advanced &mdash; raw JSON</a>
                         </div>
                         <div id="registry-json-box" hidden class="mt-2">
                             <p class="text-xs text-slate-500 mb-2">This is the value that posts. The cards above rewrite it on every change; edit it directly and press <b>Apply JSON to editor</b> to pull your changes back into the cards. A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span> and <span class="font-mono">match</span>. Invalid JSON is rejected on save and the previous value is kept.</p>
-                            <textarea id="model_registry_json" name="model_registry_json" rows="14" spellcheck="false" title="The raw model-registry rule list, as JSON. Normally maintained by the cards above." class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">{{ registry_rules_json }}</textarea>
+                            <textarea id="model_registry_json" name="model_registry_json" rows="14" spellcheck="false" title="The raw model-registry rule list, as JSON. Normally maintained by the cards above." class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">{{ registry_rules_json }}</textarea>
                             <button type="button" title="Re-parse the JSON above and rebuild the rule cards from it. Use after editing the JSON by hand." onclick="abRegApplyJson()" class="mt-2 px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Apply JSON to editor</button>
                         </div>
 
@@ -1557,18 +1595,18 @@
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Model</label>
                                 <input type="text" id="local-llm-model" value="qwen2.5-coder:14b"
-                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand border border-slate-200">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Context length (num_ctx)</label>
                                 <input type="number" id="local-llm-ctx" value="32768" min="0" step="1024"
-                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand border border-slate-200">
                                 <span class="text-xs text-slate-400">0 = use the model's default context.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">CPU cores (num_thread)</label>
                                 <input type="number" id="local-llm-cores" value="{{ state.cpu_count }}" min="1"
-                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] border border-slate-200">
+                                       class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand border border-slate-200">
                                 <span class="text-xs text-slate-400">Detected {{ state.cpu_count }} cores.</span>
                             </div>
                             <div class="space-y-2">
@@ -1596,11 +1634,11 @@
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Manage Ollama Models</h4>
                             <p class="text-xs text-slate-400 mb-3">List, pull, and remove models on an Ollama endpoint. Point it at your local box (default) or a remote one (e.g. the M4) via the Endpoint field.</p>
                             <div class="flex flex-wrap gap-2 items-center mb-3">
-                                <input type="text" id="mm-baseurl" value="http://localhost:11434" placeholder="Endpoint (http://host:11434)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="text" id="mm-baseurl" value="http://localhost:11434" placeholder="Endpoint (http://host:11434)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                 <button type="button" onclick="mmRefresh()" class="btn-sec px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-sync-alt mr-1"></i>List</button>
                             </div>
                             <div class="flex flex-wrap gap-2 items-center mb-1">
-                                <input type="text" id="mm-pull-model" list="mm-model-suggestions" placeholder="Model to pull (type or pick — e.g. qwen2.5-coder:14b)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="text" id="mm-pull-model" list="mm-model-suggestions" placeholder="Model to pull (type or pick — e.g. qwen2.5-coder:14b)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                 <datalist id="mm-model-suggestions">
                                     <option value="qwen2.5-coder:7b"></option>
                                     <option value="qwen2.5-coder:14b"></option>
@@ -1655,26 +1693,26 @@
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2 col-span-1 md:col-span-2">
-                                <label class="text-sm font-medium text-slate-600">QA Service URL <span class="text-[#01A982] font-bold">(primary)</span></label>
-                                <input type="text" name="QA_API_URL" value="{{ settings.QA_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. http://qa-server:8080">
+                                <label class="text-sm font-medium text-slate-600">QA Service URL <span class="text-primary-text font-bold">(primary)</span></label>
+                                <input type="text" name="QA_API_URL" value="{{ settings.QA_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. http://qa-server:8080">
                                 <span class="text-xs text-slate-500">URL of the QA service API. When set, AppBuilder calls <code class="bg-slate-100 px-1 rounded">POST /api/run?module=&lt;repo&gt;</code> after each fix instead of running tests locally.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">QA Test Repository (owner/repo) <span class="text-xs text-slate-400">fallback</span></label>
-                                <input type="text" name="QA_REPO" value="{{ settings.QA_REPO }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. myorg/qa-suite">
+                                <input type="text" name="QA_REPO" value="{{ settings.QA_REPO }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. myorg/qa-suite">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Global QA Test Command <span class="text-xs text-slate-400">fallback</span></label>
-                                <input type="text" name="QA_TEST_COMMAND" value="{{ settings.QA_TEST_COMMAND }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="e.g. pytest tests/target_repo">
+                                <input type="text" name="QA_TEST_COMMAND" value="{{ settings.QA_TEST_COMMAND }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. pytest tests/target_repo">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Log Analysis interval (minutes)</label>
-                                <input type="number" name="log_analysis_interval_min" value="{{ settings.log_analysis_interval_min if settings.log_analysis_interval_min is not none else 30 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="log_analysis_interval_min" value="{{ settings.log_analysis_interval_min if settings.log_analysis_interval_min is not none else 30 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <span class="text-xs text-slate-400">How far back Log Analysis looks + how often the idle snapshot refreshes (default 30).</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Startup grace (seconds)</label>
-                                <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 300 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 300 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <span class="text-xs text-slate-400">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
                             </div>
                             <!-- col-span-2, matching the parent md:grid-cols-2. It was
@@ -1688,8 +1726,8 @@
                                 </div>
                                 <div id="auth-users-list" class="text-xs text-slate-500 italic">Not loaded.</div>
                                 <div class="grid grid-cols-1 md:grid-cols-3 gap-2 pt-2">
-                                    <input type="text" id="auth-new-user" placeholder="new username" autocomplete="off" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
-                                    <input type="password" id="auth-new-pass" placeholder="password (min 8 chars)" autocomplete="new-password" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="text" id="auth-new-user" placeholder="new username" autocomplete="off" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                    <input type="password" id="auth-new-pass" placeholder="password (min 8 chars)" autocomplete="new-password" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                     <div class="flex gap-2">
                                         <button type="button" onclick="authCreateUser()" class="btn-primary flex-1 py-2 rounded font-bold text-xs">Add user</button>
                                         <button type="button" onclick="authSetPassword()" class="btn-sec flex-1 py-2 rounded font-bold text-xs" title="Set the password for an EXISTING user with the name above">Set password</button>
@@ -1700,44 +1738,44 @@
                             </div>
                                                         <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Claude CLI binary path</label>
-                                <input type="text" name="claude_binary" value="{{ settings.claude_binary or '' }}" placeholder="auto-detect (leave blank)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="text" name="claude_binary" value="{{ settings.claude_binary or '' }}" placeholder="auto-detect (leave blank)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <span class="text-xs text-slate-400">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="flex items-center gap-2 text-sm font-medium text-slate-600">
-                                    <input type="checkbox" name="gate_scans_on_model_preload" value="1" {{ 'checked' if settings.gate_scans_on_model_preload else '' }} class="w-4 h-4 accent-[#01A982]">
+                                    <input type="checkbox" name="gate_scans_on_model_preload" value="1" {{ 'checked' if settings.gate_scans_on_model_preload else '' }} class="w-4 h-4 accent-brand">
                                     Hold scans until models are loaded
                                 </label>
                                 <span class="text-xs text-slate-400">Ollama serialises requests, so a scan that starts first puts a multi-minute CPU build in the single slot and the preload queues <b>behind</b> it — models go resident long after the work that needed them. On by default.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max wait for model residency (s)</label>
-                                <input type="number" name="model_gate_max_wait_s" value="{{ settings.model_gate_max_wait_s if settings.model_gate_max_wait_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="model_gate_max_wait_s" value="{{ settings.model_gate_max_wait_s if settings.model_gate_max_wait_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <span class="text-xs text-slate-400">Cap on the above, so a preload that can never succeed cannot wedge scanning. On timeout AppBuilder proceeds and logs a warning. Default 3600.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama model-load timeout (s)</label>
-                                <input type="number" name="ollama_preload_timeout_s" value="{{ settings.ollama_preload_timeout_s if settings.ollama_preload_timeout_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="ollama_preload_timeout_s" value="{{ settings.ollama_preload_timeout_s if settings.ollama_preload_timeout_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <span class="text-xs text-slate-400">How long a model may take to become <b>resident</b> (preload), separate from inference timeout. A cold load is disk&nbsp;→&nbsp;RAM plus a num_ctx-sized KV allocation, so on a CPU-only box a 14B at 32k can take well over 15&nbsp;min. Default 3600. Raise this rather than lowering num_ctx.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama context window (num_ctx)</label>
-                                <input type="number" name="ollama_num_ctx" value="{{ settings.ollama_num_ctx if settings.ollama_num_ctx is not none else 32768 }}" min="2048" step="1024" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="ollama_num_ctx" value="{{ settings.ollama_num_ctx if settings.ollama_num_ctx is not none else 32768 }}" min="2048" step="1024" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <span class="text-xs text-slate-400">Ollama prompt context size — prevents "prompt longer than context length" 400s. Default 32768; raise for very large fixes.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama CPU threads (num_thread)</label>
-                                <input type="number" name="ollama_num_thread" value="{{ settings.ollama_num_thread if settings.ollama_num_thread is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="ollama_num_thread" value="{{ settings.ollama_num_thread if settings.ollama_num_thread is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <span class="text-xs text-slate-400">CPU threads for ollama inference. 0 = ollama default (~physical cores). Set to your allocated core count to speed big models.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama max loaded models</label>
-                                <input type="number" name="ollama_max_loaded_models" value="{{ settings.ollama_max_loaded_models if settings.ollama_max_loaded_models is not none else 3 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="ollama_max_loaded_models" value="{{ settings.ollama_max_loaded_models if settings.ollama_max_loaded_models is not none else 3 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 <span class="text-xs text-slate-400">OLLAMA_MAX_LOADED_MODELS — models kept resident at once. Set ≥ your ensemble size. Applied by running Local LLM Setup (writes ollama's systemd env).</span>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Per-Repo Test Commands (repo:cmd, repo:cmd)</label>
-                                <textarea name="repo_tests" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="my-org/repo1:npm test, my-org/repo2:pytest tests/core">{{ settings.repo_tests_str }}</textarea>
+                                <textarea name="repo_tests" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="my-org/repo1:npm test, my-org/repo2:pytest tests/core">{{ settings.repo_tests_str }}</textarea>
                                 <span class="text-xs text-slate-500">Override the global test command for specific repositories. Format: <code class="bg-slate-100 px-1 rounded">owner/repo:command</code></span>
                             </div>
                         </div>
@@ -1755,15 +1793,15 @@
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub WebUI URL (approvals + status fallback)</label>
-                                <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="http://your-hub:8000">
+                                <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="http://your-hub:8000">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub WebSocket URL</label>
-                                <input type="text" name="HUB_WS_URL" value="{{ settings.HUB_WS_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="ws://your-hub:8765 (derived from Hub WebUI URL if blank)">
+                                <input type="text" name="HUB_WS_URL" value="{{ settings.HUB_WS_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="ws://your-hub:8765 (derived from Hub WebUI URL if blank)">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub Agent ID</label>
-                                <input type="text" name="HUB_AGENT_ID" value="{{ settings.HUB_AGENT_ID or 'ab' }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="ab">
+                                <input type="text" name="HUB_AGENT_ID" value="{{ settings.HUB_AGENT_ID or 'ab' }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="ab">
                             </div>
                         </div>
                         <!-- Hub Agent status / approval panel (AppBuilder authenticates to the
@@ -1786,7 +1824,7 @@
                             </div>
                             <p class="text-[11px] text-slate-500 mt-2">
                                 Approve <code class="bg-slate-100 px-1 rounded">ab</code> in the Hub WebUI → Setup → Spoke Approvals
-                                {% if settings.HUB_QUERY_URL %}at <a href="{{ settings.HUB_QUERY_URL }}" target="_blank" class="text-[#01A982] underline">{{ settings.HUB_QUERY_URL }}</a>{% endif %}.
+                                {% if settings.HUB_QUERY_URL %}at <a href="{{ settings.HUB_QUERY_URL }}" target="_blank" class="text-primary-text underline">{{ settings.HUB_QUERY_URL }}</a>{% endif %}.
                                 The session key is exchanged automatically after approval — zero-touch.
                             </p>
                         </div>
@@ -1797,7 +1835,7 @@
              config.json. -->
                         <div class="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
                             <div class="flex items-center gap-3 mb-3">
-                                <input type="checkbox" name="skills_enabled" id="skills_enabled" {{ 'checked' if settings.get('skills_enabled', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="skills_enabled" id="skills_enabled" {{ 'checked' if settings.get('skills_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="skills_enabled" class="text-sm font-semibold text-slate-700" title="Load repo-committed Skill recipes (add-simulation, dual-copy-guard, ...) so fix/build work follows the same boundaries a human invoking the skill would. On by default.">
                                     Project Skills <span class="text-slate-400 font-normal">(recipes AppBuilder follows for fix/build work)</span>
                                 </label>
@@ -1805,21 +1843,21 @@
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div class="space-y-2">
                                     <label class="text-xs font-medium text-slate-600">Skills Repo</label>
-                                    <input type="text" name="skills_repo" value="{{ settings.get('skills_repo', 'lbockenstedt/lm') }}" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="lbockenstedt/lm">
+                                    <input type="text" name="skills_repo" value="{{ settings.get('skills_repo', 'lbockenstedt/lm') }}" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="lbockenstedt/lm">
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-xs font-medium text-slate-600">Skills Path</label>
-                                    <input type="text" name="skills_path" value="{{ settings.get('skills_path', '.claude/skills') }}" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder=".claude/skills">
+                                    <input type="text" name="skills_path" value="{{ settings.get('skills_path', '.claude/skills') }}" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder=".claude/skills">
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-xs font-medium text-slate-600" title="How long a fetched skill list is cached before re-fetching from GitHub.">Cache TTL (seconds)</label>
-                                    <input type="number" name="skills_ttl_s" value="{{ settings.get('skills_ttl_s', 3600) }}" min="60" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" name="skills_ttl_s" value="{{ settings.get('skills_ttl_s', 3600) }}" min="60" class="w-full p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 </div>
                             </div>
                         </div>
                         <div class="space-y-3 mt-4">
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                                <input type="checkbox" name="direct_push_enabled" id="direct_push_enabled" {{ 'checked' if settings.direct_push_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="direct_push_enabled" id="direct_push_enabled" {{ 'checked' if settings.direct_push_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="direct_push_enabled" class="text-xs font-medium text-slate-700">
                                     Direct Push for Trusted Repos
                                 </label>
@@ -1837,7 +1875,7 @@
                                         LLM Router API Key (<code>/v1/messages</code>)
                                     </label>
                                     {% if settings.llm_proxy_api_key_configured %}
-                                    <span class="text-[11px] font-bold text-[#01A982]"><i class="fas fa-lock mr-1"></i>Key configured — API requires a token</span>
+                                    <span class="text-[11px] font-bold text-primary-text"><i class="fas fa-lock mr-1"></i>Key configured — API requires a token</span>
                                     {% else %}
                                     <span class="text-[11px] font-bold text-red-600"><i class="fas fa-triangle-exclamation mr-1"></i>No key — the API is refusing all requests</span>
                                     {% endif %}
@@ -1845,7 +1883,7 @@
                                 <div class="flex items-center gap-2">
                                     <input type="password" name="llm_proxy_api_key" id="llm_proxy_api_key" value="" autocomplete="new-password"
                                            placeholder="{% if settings.llm_proxy_api_key_configured %}•••••••••• already set — leave blank to keep it{% else %}Required — set a key to enable the API{% endif %}"
-                                           class="flex-1 p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                           class="flex-1 p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <button type="button" onclick="abProxyKeyGenerate()" title="Generate a random 32-byte key in your browser and put it in the field. Copy it before saving — it is never shown again."
                                             class="px-3 py-2 text-xs font-bold rounded-md border border-slate-300 hover:bg-slate-100 whitespace-nowrap">Generate</button>
                                     <button type="button" onclick="abProxyKeyClear()" title="Explicitly remove the stored key. The API then refuses every request until a new key is set."
@@ -1861,37 +1899,37 @@
                                 </p>
                             </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                                <input type="checkbox" name="llm_proxy_agentic_default" id="llm_proxy_agentic_default" {{ 'checked' if settings.llm_proxy_agentic_default else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="llm_proxy_agentic_default" id="llm_proxy_agentic_default" {{ 'checked' if settings.llm_proxy_agentic_default else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="llm_proxy_agentic_default" class="text-xs font-medium text-slate-700" title="Off by default: only requests with model=ab-agent run the agentic loop. On: every /v1/messages (LLM router / Claude CLI) request runs AppBuilder's agent loop with repo tools.">
                                     Agentic LLM Router by default (all /v1/messages use the agent loop)
                                 </label>
                             </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                                <input type="checkbox" name="llm_proxy_autofix_enabled" id="llm_proxy_autofix_enabled" {{ 'checked' if settings.llm_proxy_autofix_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="llm_proxy_autofix_enabled" id="llm_proxy_autofix_enabled" {{ 'checked' if settings.llm_proxy_autofix_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="llm_proxy_autofix_enabled" class="text-xs font-medium text-slate-700" title="Off by default: the agentic router proposes fixes but does not run them. On: the router may trigger the real fix pipeline — still gated by the review panel, with core-systems diffs forced to a human-reviewed PR.">
                                     Allow Agentic Router to trigger fixes (full autonomy, panel + boundary gated)
                                 </label>
                             </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                                <input type="checkbox" name="qa_enabled" id="qa_enabled" {{ 'checked' if settings.qa_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="qa_enabled" id="qa_enabled" {{ 'checked' if settings.qa_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="qa_enabled" class="text-xs font-medium text-slate-700">
                                     Enable QA Test Module
                                 </label>
                             </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                                <input type="checkbox" name="skip_review" id="skip_review" {{ 'checked' if settings.skip_review else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="skip_review" id="skip_review" {{ 'checked' if settings.skip_review else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="skip_review" class="text-xs font-medium text-slate-700">
                                     Bypass Skeptical Reviewer
                                 </label>
                             </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                                <input type="checkbox" name="heartbeat_triage_enabled" id="heartbeat_triage_enabled" {{ 'checked' if settings.heartbeat_triage_enabled else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="heartbeat_triage_enabled" id="heartbeat_triage_enabled" {{ 'checked' if settings.heartbeat_triage_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="heartbeat_triage_enabled" class="text-xs font-medium text-slate-700" title="Off by default: only errors file issues. On: also file issues for modules with a missing/stale heartbeat (no error needed).">
                                     Heartbeat Triage (file issues for missing heartbeats)
                                 </label>
                             </div>
                             <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                                <input type="checkbox" name="verify_already_resolved" id="verify_already_resolved" {{ 'checked' if settings.verify_already_resolved else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]" title="On by default. When a fix run produces no accepted change (the model found nothing to change, or its change was rejected as unnecessary), AppBuilder verifies whether the reported problem is ALREADY fixed in the current code. If a model confirms it with evidence at/above the confidence threshold, the issue is marked RESOLVED and closed (with an evidence comment) instead of posting an 'AppBuilder Failure'. Failure is reserved for 'I could not fix it', not 'there was nothing to fix'. Reversible: reopen if it recurs.">
+                                <input type="checkbox" name="verify_already_resolved" id="verify_already_resolved" {{ 'checked' if settings.verify_already_resolved else '' }} class="w-4 h-4 text-primary-text focus:ring-brand" title="On by default. When a fix run produces no accepted change (the model found nothing to change, or its change was rejected as unnecessary), AppBuilder verifies whether the reported problem is ALREADY fixed in the current code. If a model confirms it with evidence at/above the confidence threshold, the issue is marked RESOLVED and closed (with an evidence comment) instead of posting an 'AppBuilder Failure'. Failure is reserved for 'I could not fix it', not 'there was nothing to fix'. Reversible: reopen if it recurs.">
                                 <label for="verify_already_resolved" class="text-xs font-medium text-slate-700" title="On by default. When a fix run produces no accepted change (the model found nothing to change, or its change was rejected as unnecessary), AppBuilder verifies whether the reported problem is ALREADY fixed in the current code. If a model confirms it with evidence at/above the confidence threshold, the issue is marked RESOLVED and closed (with an evidence comment) instead of posting an 'AppBuilder Failure'. Failure is reserved for 'I could not fix it', not 'there was nothing to fix'. Reversible: reopen if it recurs.">
                                     Mark already-fixed issues resolved (not failed)
                                 </label>
@@ -1900,7 +1938,7 @@
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Triage Strictness</label>
-                                <select name="TRIAGE_STRICTNESS" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <select name="TRIAGE_STRICTNESS" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <option value="Strict" {{ 'selected' if settings.TRIAGE_STRICTNESS == 'Strict' else '' }}>Strict (Requires full logs/traces)</option>
                                     <option value="Moderate" {{ 'selected' if settings.TRIAGE_STRICTNESS == 'Moderate' else '' }}>Moderate (Prefer logs, but allows a good description)</option>
                                     <option value="Lenient" {{ 'selected' if settings.TRIAGE_STRICTNESS == 'Lenient' else '' }}>Lenient (Attempt fix if a plausible lead exists)</option>
@@ -1908,45 +1946,45 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Concurrent Fixes</label>
-                                <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600" title="A SEPARATE gate from Max Concurrent Fixes, applied PER POOL: this many jobs can run at once in Code, a SEPARATE this-many in Log, and a separate this-many in Review — not one shared total. Within a pool, each provider slot runs one job at a time; a busy slot is skipped for the next free one, and if every slot in the pool is busy the call waits and retries rather than failing.">Max Concurrent LLM Calls <span class="text-slate-400 font-normal">(per pool — Code / Log / Review each get this many, independently)</span></label>
-                                <input type="number" name="LLM_MAX_CONCURRENT" value="{{ settings.LLM_MAX_CONCURRENT }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="LLM_MAX_CONCURRENT" value="{{ settings.LLM_MAX_CONCURRENT }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Issues Per Cycle <span class="text-slate-400 font-normal">(per repo — rest defer to next scan)</span></label>
-                                <input type="number" name="MAX_ISSUES_PER_CYCLE" value="{{ settings.MAX_ISSUES_PER_CYCLE }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="MAX_ISSUES_PER_CYCLE" value="{{ settings.MAX_ISSUES_PER_CYCLE }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Prod Verification Days</label>
-                                <input type="number" name="PROD_VERIFICATION_DAYS" value="{{ settings.PROD_VERIFICATION_DAYS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="PROD_VERIFICATION_DAYS" value="{{ settings.PROD_VERIFICATION_DAYS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                         </div>
                         <div class="space-y-2 pt-6">
                             <label class="text-sm font-medium text-slate-600">Trigger Labels</label>
                             <div class="flex gap-4 mb-3">
                                 <label class="flex items-center gap-2 text-xs cursor-pointer">
-                                    <input type="radio" name="label_mode" value="ANY" {{ 'checked' if 'ANY' in settings.monitored_labels else '' }} class="w-3 h-3 text-[#01A982]"> Any Issue
+                                    <input type="radio" name="label_mode" value="ANY" {{ 'checked' if 'ANY' in settings.monitored_labels else '' }} class="w-3 h-3 text-primary-text"> Any Issue
                                 </label>
                                 <label class="flex items-center gap-2 text-xs cursor-pointer">
-                                    <input type="radio" name="label_mode" value="NONE" {{ 'checked' if 'NONE' in settings.monitored_labels else '' }} class="w-3 h-3 text-[#01A982]"> None
+                                    <input type="radio" name="label_mode" value="NONE" {{ 'checked' if 'NONE' in settings.monitored_labels else '' }} class="w-3 h-3 text-primary-text"> None
                                 </label>
                                 <label class="flex items-center gap-2 text-xs cursor-pointer">
-                                    <input type="radio" name="label_mode" value="SPECIFIC" {{ 'checked' if 'ANY' not in settings.monitored_labels and 'NONE' not in settings.monitored_labels else '' }} class="w-3 h-3 text-[#01A982]"> Specific Labels
+                                    <input type="radio" name="label_mode" value="SPECIFIC" {{ 'checked' if 'ANY' not in settings.monitored_labels and 'NONE' not in settings.monitored_labels else '' }} class="w-3 h-3 text-primary-text"> Specific Labels
                                 </label>
                             </div>
                             <div class="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
                                 <div class="grid grid-cols-3 gap-x-4 gap-y-1">
                                     {% for label in available_labels %}
-                                    <label class="flex items-center gap-1.5 text-xs cursor-pointer hover:text-[#01A982] truncate">
-                                        <input type="checkbox" name="monitored_labels" value="{{ label }}" {{ 'checked' if label in settings.monitored_labels else '' }} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                    <label class="flex items-center gap-1.5 text-xs cursor-pointer hover:text-primary-text truncate">
+                                        <input type="checkbox" name="monitored_labels" value="{{ label }}" {{ 'checked' if label in settings.monitored_labels else '' }} class="w-3 h-3 flex-shrink-0 text-primary-text">
                                         <span class="truncate">{{ label }}</span>
                                     </label>
                                     {% endfor %}
                                 </div>
                                 <div class="pt-2 border-t border-slate-200">
-                                    <input type="text" name="custom_labels" placeholder="Add custom labels (comma separated)" class="w-full p-1 text-xs rounded border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                                    <input type="text" name="custom_labels" placeholder="Add custom labels (comma separated)" class="w-full p-1 text-xs rounded border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
                                 </div>
                             </div>
                         </div>
@@ -1979,7 +2017,7 @@
                             <div class="space-y-2 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Allowed groups (admin groups)</label>
                                 <div class="flex gap-2">
-                                    <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] hidden"></select>
+                                    <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand hidden"></select>
                                     <button type="button" id="oidc-group-btn" onclick="loadOidcGroupPicker()" class="px-3 py-2 rounded-md text-sm font-medium bg-slate-100 hover:bg-slate-200 whitespace-nowrap">Pick from Entra</button>
                                 </div>
                                 <p id="oidc-group-msg" class="text-xs text-amber-600 hidden"></p>
@@ -1987,7 +2025,7 @@
                                 <input type="hidden" id="oidc-allowed-group">
                                 <details class="mt-1">
                                     <summary class="text-xs text-slate-400 cursor-pointer select-none">Enter object IDs manually</summary>
-                                    <input type="text" id="oidc-allowed-group-manual" onchange="onOidcGroupManual(this)" class="w-full mt-2 p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] font-mono text-xs" placeholder="comma-separated group object IDs">
+                                    <input type="text" id="oidc-allowed-group-manual" onchange="onOidcGroupManual(this)" class="w-full mt-2 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand font-mono text-xs" placeholder="comma-separated group object IDs">
                                 </details>
                                 <p class="text-xs text-slate-400">
                                     Membership in <strong>any</strong> listed group grants access. Matching is by
@@ -2000,29 +2038,29 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Directory (tenant) ID</label>
-                                <input type="text" id="oidc-tenant-id" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="text" id="oidc-tenant-id" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Application (client) ID</label>
-                                <input type="text" id="oidc-client-id" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="text" id="oidc-client-id" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Redirect URI</label>
-                                <input type="text" id="oidc-redirect-uri" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="https://this-host/auth/oidc/callback">
+                                <input type="text" id="oidc-redirect-uri" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="https://this-host/auth/oidc/callback">
                                 <p class="text-xs text-slate-400">Must match a redirect URI registered on the Entra app exactly.</p>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Client certificate path</label>
-                                <input type="text" id="oidc-cert-path" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="/etc/ab/oidc/client-cert.pem">
+                                <input type="text" id="oidc-cert-path" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="/etc/ab/oidc/client-cert.pem">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Client key path</label>
-                                <input type="text" id="oidc-key-path" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="/etc/ab/oidc/client-key.pem">
+                                <input type="text" id="oidc-key-path" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="/etc/ab/oidc/client-key.pem">
                             </div>
                             <div class="space-y-2 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Client secret <span class="text-slate-400 font-normal">(only if not using a certificate)</span></label>
                                 <div class="flex gap-2">
-                                    <input type="password" id="oidc-client-secret" autocomplete="new-password" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="Leave blank to keep the stored secret">
+                                    <input type="password" id="oidc-client-secret" autocomplete="new-password" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="Leave blank to keep the stored secret">
                                     <button type="button" onclick="abOidcSecretClear()" class="px-3 py-2 rounded-md text-sm font-medium bg-slate-100 hover:bg-slate-200">Clear</button>
                                 </div>
                                 <p class="text-xs text-slate-400">A certificate is preferred. Leaving this blank never wipes the stored secret.</p>
@@ -2041,7 +2079,7 @@
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Log File Path</label>
-                                <input type="text" name="LOG_FILE_PATH" value="{{ settings.LOG_FILE_PATH }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="/var/log/ab/ab.log">
+                                <input type="text" name="LOG_FILE_PATH" value="{{ settings.LOG_FILE_PATH }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="/var/log/ab/ab.log">
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
@@ -2064,7 +2102,7 @@
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <div class="flex items-center gap-2">
-                                    <input type="checkbox" name="CHAT_TOOLS_ENABLED" id="CHAT_TOOLS_ENABLED" {{ 'checked' if settings.CHAT_TOOLS_ENABLED else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <input type="checkbox" name="CHAT_TOOLS_ENABLED" id="CHAT_TOOLS_ENABLED" {{ 'checked' if settings.CHAT_TOOLS_ENABLED else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="CHAT_TOOLS_ENABLED" class="text-xs font-medium text-slate-700">
                                         Enable chat tools &amp; repo/issue awareness (disable for the legacy plain-assistant chat)
                                     </label>
@@ -2072,7 +2110,7 @@
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <div class="flex items-center gap-2">
-                                    <input type="checkbox" name="ORCHESTRATOR_ENABLED" id="ORCHESTRATOR_ENABLED" {{ 'checked' if settings.ORCHESTRATOR_ENABLED else '' }} title="When on, a chat request is planned into a small DAG of sub-tasks and the independent parts run at the SAME TIME, each on the best available LLM (your CPU box, GPU box, and cloud working in parallel), then merged. Off = one model answers the whole request." class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <input type="checkbox" name="ORCHESTRATOR_ENABLED" id="ORCHESTRATOR_ENABLED" {{ 'checked' if settings.ORCHESTRATOR_ENABLED else '' }} title="When on, a chat request is planned into a small DAG of sub-tasks and the independent parts run at the SAME TIME, each on the best available LLM (your CPU box, GPU box, and cloud working in parallel), then merged. Off = one model answers the whole request." class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="ORCHESTRATOR_ENABLED" class="text-xs font-medium text-slate-700">
                                         🧠 Multi-agent orchestration (split a request across LLMs in parallel, then merge)
                                     </label>
@@ -2081,7 +2119,7 @@
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Planner / router model</label>
-                                <select name="ORCHESTRATOR_PLANNER_PIN" title="The 'brain' that reads your request, plans the sub-tasks, and routes them. Auto prefers a capable, low-latency model (smartest tier first, then fastest within it). Pin one endpoint — e.g. a fast cloud model — to make planning consistently fast and smart." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <select name="ORCHESTRATOR_PLANNER_PIN" title="The 'brain' that reads your request, plans the sub-tasks, and routes them. Auto prefers a capable, low-latency model (smartest tier first, then fastest within it). Pin one endpoint — e.g. a fast cloud model — to make planning consistently fast and smart." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <option value="" {{ 'selected' if not settings.ORCHESTRATOR_PLANNER_PIN else '' }}>Auto (smart + fast — capable tier first, latency-ranked)</option>
                                     {% for e in settings.llm_entries or [] %}
                                     {% set _ppin = e.provider ~ '|' ~ (e.base_url or '') ~ '|' ~ e.model %}
@@ -2092,15 +2130,15 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Parallel Agents</label>
-                                <input type="number" min="1" name="ORCHESTRATOR_MAX_PARALLEL" value="{{ settings.ORCHESTRATOR_MAX_PARALLEL or 3 }}" title="Upper bound on how many sub-task agents run at once. Keep at or below your number of usable LLM endpoints." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" min="1" name="ORCHESTRATOR_MAX_PARALLEL" value="{{ settings.ORCHESTRATOR_MAX_PARALLEL or 3 }}" title="Upper bound on how many sub-task agents run at once. Keep at or below your number of usable LLM endpoints." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Agents per Request</label>
-                                <input type="number" min="1" name="ORCHESTRATOR_MAX_TASKS" value="{{ settings.ORCHESTRATOR_MAX_TASKS or 5 }}" title="Upper bound on how many sub-tasks the planner may split a request into." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" min="1" name="ORCHESTRATOR_MAX_TASKS" value="{{ settings.ORCHESTRATOR_MAX_TASKS or 5 }}" title="Upper bound on how many sub-tasks the planner may split a request into." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Chat provider</label>
-                                <select name="chat_pin" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <select name="chat_pin" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <option value="" {{ 'selected' if not settings.chat_pin else '' }}>Auto (capability/cost picker — latency-favoured)</option>
                                     {% for e in settings.llm_entries or [] %}
                                     {% set _pin = e.provider ~ '|' ~ (e.base_url or '') ~ '|' ~ e.model %}
@@ -2111,39 +2149,39 @@
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Tool Iterations per Turn</label>
-                                <input type="number" name="CHAT_TOOL_MAX_ITERATIONS" value="{{ settings.CHAT_TOOL_MAX_ITERATIONS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="CHAT_TOOL_MAX_ITERATIONS" value="{{ settings.CHAT_TOOL_MAX_ITERATIONS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Tool Result Token Budget</label>
-                                <input type="number" name="CHAT_TOOL_MAX_TOKENS" value="{{ settings.CHAT_TOOL_MAX_TOKENS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="CHAT_TOOL_MAX_TOKENS" value="{{ settings.CHAT_TOOL_MAX_TOKENS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Index: Issues Per Repo</label>
-                                <input type="number" name="CHAT_INDEX_ISSUE_LIMIT" value="{{ settings.CHAT_INDEX_ISSUE_LIMIT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="CHAT_INDEX_ISSUE_LIMIT" value="{{ settings.CHAT_INDEX_ISSUE_LIMIT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Index Cache TTL (seconds)</label>
-                                <input type="number" name="CHAT_INDEX_CACHE_TTL" value="{{ settings.CHAT_INDEX_CACHE_TTL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="CHAT_INDEX_CACHE_TTL" value="{{ settings.CHAT_INDEX_CACHE_TTL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Fix Proposal TTL (seconds)</label>
-                                <input type="number" name="CHAT_FIX_PROPOSAL_TTL" value="{{ settings.CHAT_FIX_PROPOSAL_TTL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="CHAT_FIX_PROPOSAL_TTL" value="{{ settings.CHAT_FIX_PROPOSAL_TTL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">History Window (messages)</label>
-                                <input type="number" name="CHAT_HISTORY_WINDOW" value="{{ settings.CHAT_HISTORY_WINDOW }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="CHAT_HISTORY_WINDOW" value="{{ settings.CHAT_HISTORY_WINDOW }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">System Prompt <span class="text-slate-400 font-normal">(blank = default assistant persona)</span></label>
-                                <textarea name="CHAT_SYSTEM_PROMPT" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="You are a helpful assistant.">{{ settings.CHAT_SYSTEM_PROMPT }}</textarea>
+                                <textarea name="CHAT_SYSTEM_PROMPT" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="You are a helpful assistant.">{{ settings.CHAT_SYSTEM_PROMPT }}</textarea>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub Log Max Entries (LLM scrub)</label>
-                                <input type="number" name="LLM_LOG_MAX_ENTRIES" value="{{ settings.LLM_LOG_MAX_ENTRIES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="LLM_LOG_MAX_ENTRIES" value="{{ settings.LLM_LOG_MAX_ENTRIES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Hub Log Max Chars (LLM scrub)</label>
-                                <input type="number" name="LLM_LOG_MAX_CHARS" value="{{ settings.LLM_LOG_MAX_CHARS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="LLM_LOG_MAX_CHARS" value="{{ settings.LLM_LOG_MAX_CHARS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
@@ -2167,7 +2205,7 @@
                             </div>
                             <div id="sched-usage-wrap" class="hidden flex items-center gap-2">
                                 <div class="w-24 h-2 bg-slate-200 rounded-full overflow-hidden">
-                                    <div id="sched-usage-bar" class="h-full rounded-full bg-[#01A982] transition-all" style="width:0%"></div>
+                                    <div id="sched-usage-bar" class="h-full rounded-full bg-primary transition-all" style="width:0%"></div>
                                 </div>
                                 <span id="sched-usage-text" class="text-slate-500 whitespace-nowrap"></span>
                             </div>
@@ -2178,21 +2216,21 @@
                             <!-- Enable + booleans -->
                             <div class="space-y-3">
                                 <label class="flex items-center gap-3 cursor-pointer">
-                                    <input type="checkbox" name="SCHEDULER_ENABLED" {{ 'checked' if settings.get('SCHEDULER_ENABLED') else '' }} class="w-4 h-4 text-[#01A982] rounded">
+                                    <input type="checkbox" name="SCHEDULER_ENABLED" {{ 'checked' if settings.get('SCHEDULER_ENABLED') else '' }} class="w-4 h-4 text-primary-text rounded">
                                     <div>
                                         <p class="text-sm font-medium text-slate-700">Enable Scheduler</p>
                                         <p class="text-xs text-slate-400">Enforce work-hours cap and daily budget</p>
                                     </div>
                                 </label>
                                 <label class="flex items-center gap-3 cursor-pointer">
-                                    <input type="checkbox" name="SCHEDULER_WEEKEND_FULL" {{ 'checked' if settings.get('SCHEDULER_WEEKEND_FULL', True) else '' }} class="w-4 h-4 text-[#01A982] rounded">
+                                    <input type="checkbox" name="SCHEDULER_WEEKEND_FULL" {{ 'checked' if settings.get('SCHEDULER_WEEKEND_FULL', True) else '' }} class="w-4 h-4 text-primary-text rounded">
                                     <div>
                                         <p class="text-sm font-medium text-slate-700">Full Speed on Weekends</p>
                                         <p class="text-xs text-slate-400">Ignore work-hours cap Sat &amp; Sun</p>
                                     </div>
                                 </label>
                                 <label class="flex items-center gap-3 cursor-pointer">
-                                    <input type="checkbox" name="TRIAGE_ONLY_MODE" {{ 'checked' if settings.get('TRIAGE_ONLY_MODE') else '' }} class="w-4 h-4 text-[#01A982] rounded">
+                                    <input type="checkbox" name="TRIAGE_ONLY_MODE" {{ 'checked' if settings.get('TRIAGE_ONLY_MODE') else '' }} class="w-4 h-4 text-primary-text rounded">
                                     <div>
                                         <p class="text-sm font-medium text-slate-700">Always Triage Only</p>
                                         <p class="text-xs text-slate-400">Analyse &amp; label every issue but never push fix commits — lowest LLM usage</p>
@@ -2204,7 +2242,7 @@
                             <div class="space-y-2">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Critical Label Override</p>
                                 <p class="text-xs text-slate-400">Issues with this label bypass the work-hours cap and daily budget and are always fixed immediately.</p>
-                                <input type="text" name="SCHEDULER_CRITICAL_LABEL" value="{{ settings.get('SCHEDULER_CRITICAL_LABEL', 'critical') }}" placeholder="e.g. critical" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <input type="text" name="SCHEDULER_CRITICAL_LABEL" value="{{ settings.get('SCHEDULER_CRITICAL_LABEL', 'critical') }}" placeholder="e.g. critical" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                 <p class="text-[10px] text-slate-400">Leave blank to disable the override.</p>
                             </div>
 
@@ -2212,7 +2250,7 @@
                             <div class="space-y-2">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Bug Label Priority</p>
                                 <p class="text-xs text-slate-400">Human-filed bugs with this label bypass the work-hours window and are processed before auto log-detected errors (bugs get the per-cycle cap first). Feature requests are unaffected (they aren't auto-processed).</p>
-                                <input type="text" name="SCHEDULER_BUG_LABEL" value="{{ settings.get('SCHEDULER_BUG_LABEL', 'Bug') }}" placeholder="e.g. Bug" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <input type="text" name="SCHEDULER_BUG_LABEL" value="{{ settings.get('SCHEDULER_BUG_LABEL', 'Bug') }}" placeholder="e.g. Bug" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                 <p class="text-[10px] text-slate-400">Matches the label File-a-Bug applies (Bug). Leave blank to disable the priority tier.</p>
                             </div>
 
@@ -2222,12 +2260,12 @@
                                 <div class="flex items-center gap-2">
                                     <div class="flex-1">
                                         <label class="text-xs text-slate-500 mb-1 block">Start Hour</label>
-                                        <input type="number" name="SCHEDULER_WORK_START_HOUR" min="0" max="23" value="{{ settings.get('SCHEDULER_WORK_START_HOUR', 7) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                        <input type="number" name="SCHEDULER_WORK_START_HOUR" min="0" max="23" value="{{ settings.get('SCHEDULER_WORK_START_HOUR', 7) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                     </div>
                                     <span class="text-slate-400 mt-4">→</span>
                                     <div class="flex-1">
                                         <label class="text-xs text-slate-500 mb-1 block">End Hour</label>
-                                        <input type="number" name="SCHEDULER_WORK_END_HOUR" min="0" max="23" value="{{ settings.get('SCHEDULER_WORK_END_HOUR', 18) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                        <input type="number" name="SCHEDULER_WORK_END_HOUR" min="0" max="23" value="{{ settings.get('SCHEDULER_WORK_END_HOUR', 18) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                     </div>
                                 </div>
                                 <p class="text-[10px] text-slate-400">e.g. 7 → 18 means 7 AM to 6 PM</p>
@@ -2238,11 +2276,11 @@
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Daily Budget</p>
                                 <div class="space-y-1">
                                     <label class="text-xs text-slate-500">Max issues fixed per day (all hours)</label>
-                                    <input type="number" name="SCHEDULER_DAILY_BUDGET" min="1" value="{{ settings.get('SCHEDULER_DAILY_BUDGET', 50) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                    <input type="number" name="SCHEDULER_DAILY_BUDGET" min="1" value="{{ settings.get('SCHEDULER_DAILY_BUDGET', 50) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                 </div>
                                 <div class="space-y-1">
                                     <label class="text-xs text-slate-500">Work-hours cap (% of daily budget)</label>
-                                    <input type="number" name="SCHEDULER_WORK_CAP_PCT" min="1" max="100" value="{{ settings.get('SCHEDULER_WORK_CAP_PCT', 25) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                    <input type="number" name="SCHEDULER_WORK_CAP_PCT" min="1" max="100" value="{{ settings.get('SCHEDULER_WORK_CAP_PCT', 25) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                     <p class="text-[10px] text-slate-400">25% of 50 = 12 fixes before AppBuilder goes quiet during work hours</p>
                                 </div>
                             </div>
@@ -2251,7 +2289,7 @@
                             <div class="space-y-2">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Off-Hours Poll Interval</p>
                                 <label class="text-xs text-slate-500">Seconds between scans outside work hours</label>
-                                <input type="number" name="POLL_INTERVAL_SECONDS" min="60" value="{{ settings.get('POLL_INTERVAL_SECONDS', 3600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <input type="number" name="POLL_INTERVAL_SECONDS" min="60" value="{{ settings.get('POLL_INTERVAL_SECONDS', 3600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                 <p class="text-[10px] text-slate-400">Default 3600s (1 hour).</p>
                             </div>
 
@@ -2259,7 +2297,7 @@
                             <div class="space-y-2">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Work-Hours Poll Interval</p>
                                 <label class="text-xs text-slate-500">Seconds between scans during work hours</label>
-                                <input type="number" name="SCHEDULER_WORK_POLL_INTERVAL" min="60" value="{{ settings.get('SCHEDULER_WORK_POLL_INTERVAL', 3600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] text-sm">
+                                <input type="number" name="SCHEDULER_WORK_POLL_INTERVAL" min="60" value="{{ settings.get('SCHEDULER_WORK_POLL_INTERVAL', 3600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                 <p class="text-[10px] text-slate-400">Default 3600s (1 hour). Used only during the configured work hours; otherwise the Off-Hours interval above applies.</p>
                             </div>
                         </div>
@@ -2279,7 +2317,7 @@
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Feature Auto-Drive</h4>
                         </div>
                         <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200 mb-4">
-                            <input type="checkbox" name="feature_drive_enabled" id="feature_drive_enabled" {{ 'checked' if settings.get('feature_drive_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                            <input type="checkbox" name="feature_drive_enabled" id="feature_drive_enabled" {{ 'checked' if settings.get('feature_drive_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="feature_drive_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, LM feature requests that clear admin-approval are classified as build/flag/clarify each scan cycle. A 'build' verdict runs the mutating agent and opens a PR — it always still needs a human Approve+Merge unless auto-merge is separately enabled below.">
                                 Enable Feature Auto-Drive <span class="text-slate-400 font-normal">(classify + build — always opens a PR, never pushes directly to a branch)</span>
                             </label>
@@ -2287,16 +2325,16 @@
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Intake Label</label>
-                                <input type="text" name="feature_drive_label" value="{{ settings.get('feature_drive_label', 'enhancement') }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]" placeholder="enhancement">
+                                <input type="text" name="feature_drive_label" value="{{ settings.get('feature_drive_label', 'enhancement') }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="enhancement">
                                 <span class="text-xs text-slate-500">The single GitHub label feature auto-drive queries on — a SEPARATE query from Trigger Labels above, never combined with it (GitHub's label filter is AND, not OR).</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Classified Per Cycle</label>
-                                <input type="number" name="feature_drive_max_per_cycle" min="1" value="{{ settings.get('feature_drive_max_per_cycle', 1) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                <input type="number" name="feature_drive_max_per_cycle" min="1" value="{{ settings.get('feature_drive_max_per_cycle', 1) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                         </div>
                         <div class="flex items-center gap-3 mt-4">
-                            <input type="checkbox" name="feature_drive_require_marker" id="feature_drive_require_marker" {{ 'checked' if settings.get('feature_drive_require_marker', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                            <input type="checkbox" name="feature_drive_require_marker" id="feature_drive_require_marker" {{ 'checked' if settings.get('feature_drive_require_marker', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="feature_drive_require_marker" class="text-xs font-medium text-slate-700" title="On (default): only LM-filed, admin-approved feature requests are classified. Off: any open issue carrying the Intake Label in a selected repo is classified, whether or not it came through LM's approval gate.">
                                 Require LM approval marker <span class="text-slate-400 font-normal">(off widens intake beyond LM-approved requests — not recommended until the boundary list is tuned)</span>
                             </label>
@@ -2306,18 +2344,18 @@
                             {% if feature_drive_repo_options %}
                             <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-40 overflow-y-auto">
                                 {% for repo in feature_drive_repo_options %}
-                                <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982] truncate" title="{{ repo }}">
-                                    <input type="checkbox" name="feature_drive_repos" value="{{ repo }}" {% if repo in feature_drive_repos_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-primary-text truncate" title="{{ repo }}">
+                                    <input type="checkbox" name="feature_drive_repos" value="{{ repo }}" {% if repo in feature_drive_repos_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-primary-text">
                                     <span class="truncate">{{ repo }}</span>
                                 </label>
                                 {% endfor %}
                             </div>
                             {% endif %}
-                            <input type="text" name="feature_drive_repos_extra" placeholder="Additional repos (comma-separated) — leave everything blank/unchecked to use all Monitored Repositories" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                            <input type="text" name="feature_drive_repos_extra" placeholder="Additional repos (comma-separated) — leave everything blank/unchecked to use all Monitored Repositories" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
                         </div>
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
                             <label class="text-sm font-medium text-slate-600">Boundaries <span class="text-slate-400 font-normal">(things Feature Auto-Drive must never build without you — add/remove/adjust freely)</span></label>
-                            <textarea name="feature_boundaries_json" rows="14" class="w-full p-2 text-xs font-mono rounded-lg outline-none focus:ring-2 focus:ring-[#01A982] bg-slate-50" spellcheck="false">{{ settings.feature_boundaries_json }}</textarea>
+                            <textarea name="feature_boundaries_json" rows="14" class="w-full p-2 text-xs font-mono rounded-lg outline-none focus:ring-2 focus:ring-brand bg-slate-50" spellcheck="false">{{ settings.feature_boundaries_json }}</textarea>
                             <span class="text-xs text-slate-500">
                                 A JSON array. Each entry: <code class="bg-slate-100 px-1 rounded">id</code> (stable slug), <code class="bg-slate-100 px-1 rounded">label</code>, <code class="bg-slate-100 px-1 rounded">rule</code> (quoted verbatim when something is flagged), <code class="bg-slate-100 px-1 rounded">paths</code> (glob list), <code class="bg-slate-100 px-1 rounded">keywords</code>, <code class="bg-slate-100 px-1 rounded">hard</code> (true = flag immediately, no LLM call needed), <code class="bg-slate-100 px-1 rounded">enabled</code>.
                                 Invalid JSON is rejected on save — your previous list is kept and a warning toast explains why.
@@ -2331,7 +2369,7 @@
                                     <tbody class="divide-y divide-slate-100">
                                         {% for b in settings.feature_boundaries %}
                                         <tr>
-                                            <td class="px-3 py-1.5 font-mono text-[#01A982]">{{ b.id }}</td>
+                                            <td class="px-3 py-1.5 font-mono text-primary-text">{{ b.id }}</td>
                                             <td class="px-3 py-1.5">{{ b.label }}</td>
                                             <td class="px-3 py-1.5">{{ '🔴 hard' if b.hard else '🔵 soft' }}</td>
                                             <td class="px-3 py-1.5">{{ '✅' if b.get('enabled', True) else '⏸️ disabled' }}</td>
@@ -2348,12 +2386,12 @@
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Build Timeout (seconds)</label>
-                                    <input type="number" name="feature_build_timeout_s" min="60" value="{{ settings.get('feature_build_timeout_s', 1800) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" name="feature_build_timeout_s" min="60" value="{{ settings.get('feature_build_timeout_s', 1800) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <span class="text-xs text-slate-500">The mutating build agent's own LLM call timeout — needs to be much longer than a normal fix (default 1800s / 30min).</span>
                                 </div>
                             </div>
                             <div class="flex items-center gap-3 mt-2">
-                                <input type="checkbox" name="feature_require_docs" id="feature_require_docs" {{ 'checked' if settings.get('feature_require_docs', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="feature_require_docs" id="feature_require_docs" {{ 'checked' if settings.get('feature_require_docs', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="feature_require_docs" class="text-xs font-medium text-slate-700" title="On (default): a build that touches source but no docs/*.md file gets one corrective turn, then is flagged for a human instead of shipping undocumented.">
                                     Require documentation updates
                                 </label>
@@ -2363,7 +2401,7 @@
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
                             <label class="text-sm font-semibold text-slate-700">Auto-Merge <span class="text-red-500 font-normal">(unattended — reviewed by both panels, but no human clicks Approve/Merge)</span></label>
                             <div class="flex items-center gap-3">
-                                <input type="checkbox" name="feature_automerge_enabled" id="feature_automerge_enabled" {{ 'checked' if settings.get('feature_automerge_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="feature_automerge_enabled" id="feature_automerge_enabled" {{ 'checked' if settings.get('feature_automerge_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="feature_automerge_enabled" class="text-xs font-medium text-slate-700" title="Off by default. Applies to ANY PR — human or feature-built — targeting a branch listed below. A PR targeting main, or any branch not listed, can never be auto-merged, at any confidence.">
                                     Enable auto-merge onto allowlisted branches
                                 </label>
@@ -2371,25 +2409,25 @@
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Minimum Confidence (both panels)</label>
-                                    <input type="number" name="feature_automerge_min_confidence" value="{{ settings.get('feature_automerge_min_confidence', 1.0) }}" min="0" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" name="feature_automerge_min_confidence" value="{{ settings.get('feature_automerge_min_confidence', 1.0) }}" min="0" max="1" step="0.01" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <span class="text-xs text-slate-500">Defaults to 1.0 — effectively off until you deliberately lower it. BOTH review panels must clear this.</span>
                                 </div>
                                 <div class="flex items-center gap-3 pt-6">
-                                    <input type="checkbox" name="feature_automerge_require_clean" id="feature_automerge_require_clean" {{ 'checked' if settings.get('feature_automerge_require_clean', True) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                    <input type="checkbox" name="feature_automerge_require_clean" id="feature_automerge_require_clean" {{ 'checked' if settings.get('feature_automerge_require_clean', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="feature_automerge_require_clean" class="text-xs font-medium text-slate-700" title="On (default): any Tier-1 finding (secrets/parity/undefined-names/tooltip/etc, error OR warning level) blocks auto-merge. Advisories alone don't block.">
                                         Require zero Tier-1 errors/warnings
                                     </label>
                                 </div>
                             </div>
                             <div class="flex items-start gap-3 mt-2 p-3 rounded-lg bg-amber-50 border border-amber-200">
-                                <input type="checkbox" name="feature_automerge_require_allowlist" id="feature_automerge_require_allowlist" {{ 'checked' if settings.get('feature_automerge_require_allowlist', True) else '' }} class="w-4 h-4 mt-0.5 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="feature_automerge_require_allowlist" id="feature_automerge_require_allowlist" {{ 'checked' if settings.get('feature_automerge_require_allowlist', True) else '' }} class="w-4 h-4 mt-0.5 text-primary-text focus:ring-brand">
                                 <label for="feature_automerge_require_allowlist" class="text-xs text-slate-700">
                                     <span class="font-semibold">Only auto-merge provably-additive diffs</span> (docs-only / log-only / tooltip-only)
                                     <span class="block text-amber-700 mt-1">On (default) is why a normal code change never auto-merges, however high its confidence — behaviour-changing diffs route to a human. <strong>Unticking this widens auto-merge to ANY diff</strong> that clears the other gates: both panels Approve above the confidence floor, no Tier-1 findings, no boundary touched, on an allowlisted branch in an allowlisted repo. main/master stay owner-only either way.</span>
                                 </label>
                             </div>
                             <div class="flex items-start gap-3 mt-2 p-3 rounded-lg bg-red-50 border border-red-300">
-                                <input type="checkbox" name="feature_automerge_allow_release_branch" id="feature_automerge_allow_release_branch" {{ 'checked' if settings.get('feature_automerge_allow_release_branch', False) else '' }} class="w-4 h-4 mt-0.5 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="feature_automerge_allow_release_branch" id="feature_automerge_allow_release_branch" {{ 'checked' if settings.get('feature_automerge_allow_release_branch', False) else '' }} class="w-4 h-4 mt-0.5 text-primary-text focus:ring-brand">
                                 <label for="feature_automerge_allow_release_branch" class="text-xs text-slate-700">
                                     <span class="font-semibold text-red-700">Allow auto-merge into the release branch (main/master)</span>
                                     <span class="block text-red-700 mt-1">Off by default: merges into main are owner-only and refused in code. Ticking this lifts that structural refusal for rapid-development phases — unattended merges can then land on the branch you cut releases from. <strong>This alone is not enough:</strong> main must ALSO be ticked in Auto-Merge Target Branches below (it only appears there once this is on). Every other gate still applies — both panels, confidence floor, Tier-1 clean, boundaries, release locks.</span>
@@ -2401,14 +2439,14 @@
                                 {% if feature_automerge_branch_options %}
                                 <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
                                     {% for branch in feature_automerge_branch_options %}
-                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982] truncate" title="{{ branch }}">
-                                        <input type="checkbox" name="feature_automerge_target_branches" value="{{ branch }}" {% if branch in feature_automerge_target_branches_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-primary-text truncate" title="{{ branch }}">
+                                        <input type="checkbox" name="feature_automerge_target_branches" value="{{ branch }}" {% if branch in feature_automerge_target_branches_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-primary-text">
                                         <span class="truncate">{{ branch }}</span>
                                     </label>
                                     {% endfor %}
                                 </div>
                                 {% endif %}
-                                <input type="text" name="feature_automerge_target_branches_extra" placeholder="Additional branches (comma-separated)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                                <input type="text" name="feature_automerge_target_branches_extra" placeholder="Additional branches (comma-separated)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
                             </div>
                             <div class="space-y-2 mt-2">
                                 <label class="text-sm font-medium text-slate-600">Auto-Merge Repositories <span class="text-red-500 font-normal">(opt-in — empty means NOTHING auto-merges, regardless of the toggle above)</span></label>
@@ -2416,14 +2454,14 @@
                                 {% if feature_automerge_repo_options %}
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-40 overflow-y-auto">
                                     {% for repo in feature_automerge_repo_options %}
-                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982] truncate" title="{{ repo }}">
-                                        <input type="checkbox" name="feature_automerge_repos" value="{{ repo }}" {% if repo in feature_automerge_repos_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-primary-text truncate" title="{{ repo }}">
+                                        <input type="checkbox" name="feature_automerge_repos" value="{{ repo }}" {% if repo in feature_automerge_repos_set %}checked{% endif %} class="w-3 h-3 flex-shrink-0 text-primary-text">
                                         <span class="truncate">{{ repo }}</span>
                                     </label>
                                     {% endfor %}
                                 </div>
                                 {% endif %}
-                                <input type="text" name="feature_automerge_repos_extra" placeholder="Additional repos (comma-separated)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                                <input type="text" name="feature_automerge_repos_extra" placeholder="Additional repos (comma-separated)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
                             </div>
                             {% if settings.get('feature_automerge_enabled') and not (settings.get('pr_review_llm_enabled') and settings.get('pr_review_state_logic_enabled')) %}
                             <p class="text-xs text-amber-600 font-medium mt-2">⚠️ Auto-merge is on, but one or both review panels (LLM tab → Pre-review) are off — auto-merge can never clear without them, so nothing will happen until you enable both.</p>
@@ -2436,7 +2474,7 @@
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Premium attempts per PR</label>
-                                    <input type="number" name="pr_remediate_premium_attempts" value="{{ settings.get('pr_remediate_premium_attempts', 1) }}" min="0" max="3" step="1" title="How many extra remediation turns a PR may spend on the premium models, past the ordinary attempt ceiling. Charged when the escalation turn is taken, whatever model answers. 0 disables the extra turn." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" name="pr_remediate_premium_attempts" value="{{ settings.get('pr_remediate_premium_attempts', 1) }}" min="0" max="3" step="1" title="How many extra remediation turns a PR may spend on the premium models, past the ordinary attempt ceiling. Charged when the escalation turn is taken, whatever model answers. 0 disables the extra turn." class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <span class="text-xs text-slate-500">Defaults to 1, capped at 3. This is a <strong>count of billable calls</strong>, not a ladder position: it is charged when the escalation turn is taken, whatever model answers (including a failed or empty reply). Set to <strong>0</strong> to switch the extra turn off entirely.</span>
                                 </div>
                                 <div class="flex items-start gap-3 pt-6">
@@ -2448,14 +2486,14 @@
                                 {% if premium_model_options %}
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-40 overflow-y-auto">
                                     {% for m in premium_model_options %}
-                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-[#01A982] truncate" title="{{ m }}">
-                                        <input type="checkbox" name="premium_models" value="{{ m }}" {% if m in premium_models_set %}checked{% endif %} title="Tick to reserve this model for the premium escalation turn: it is kept out of ordinary remediation turns and only used for the extra escalation attempt." class="w-3 h-3 flex-shrink-0 text-[#01A982]">
+                                    <label class="flex items-center gap-2 text-xs cursor-pointer hover:text-primary-text truncate" title="{{ m }}">
+                                        <input type="checkbox" name="premium_models" value="{{ m }}" {% if m in premium_models_set %}checked{% endif %} title="Tick to reserve this model for the premium escalation turn: it is kept out of ordinary remediation turns and only used for the extra escalation attempt." class="w-3 h-3 flex-shrink-0 text-primary-text">
                                         <span class="truncate">{{ m }}</span>
                                     </label>
                                     {% endfor %}
                                 </div>
                                 {% endif %}
-                                <input type="text" name="premium_models_extra" value="{{ premium_models_extra }}" title="Extra premium-model patterns (fnmatch globs) or model ids that are not configured yet, comma-separated. Added to the premium escalation allowlist alongside the ticked models." placeholder="Patterns or unconfigured models, comma-separated (e.g. claude-fable-*, gpt-6*)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-[#01A982]">
+                                <input type="text" name="premium_models_extra" value="{{ premium_models_extra }}" title="Extra premium-model patterns (fnmatch globs) or model ids that are not configured yet, comma-separated. Added to the premium escalation allowlist alongside the ticked models." placeholder="Patterns or unconfigured models, comma-separated (e.g. claude-fable-*, gpt-6*)" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
                                 <p class="text-xs text-amber-700">Wildcards are matched against the model name, so <code>gpt-6*</code> keeps covering new GPT-6 variants as they appear — preferable to ticking today's names and silently missing tomorrow's. <strong>Clearing every box and this field disables the reservation:</strong> these models then compete for ordinary work at their frontier rank.</p>
                             </div>
                         </div>
@@ -2463,7 +2501,7 @@
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
                             <label class="text-sm font-semibold text-slate-700">Scheduled Promotion <span class="text-slate-400 font-normal">(opens dev→qa / qa→main PRs on a cadence — never merges)</span></label>
                             <div class="flex items-center gap-3">
-                                <input type="checkbox" name="promote_schedule_enabled" id="promote_schedule_enabled" {{ 'checked' if settings.get('promote_schedule_enabled', False) else '' }} class="w-4 h-4 text-[#01A982] focus:ring-[#01A982]">
+                                <input type="checkbox" name="promote_schedule_enabled" id="promote_schedule_enabled" {{ 'checked' if settings.get('promote_schedule_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="promote_schedule_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, AppBuilder opens a promotion PR (via .github/workflows/promote.yml) for each hop below on the configured interval. It only OPENS the PR; your existing review/auto-merge gates still decide whether it merges.">
                                     Enable scheduled promotion
                                 </label>
@@ -2472,22 +2510,22 @@
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">dev → qa cadence (hours)</label>
-                                    <input type="number" name="promote_schedule_dev_to_qa_hours" min="0" value="{{ settings.get('promote_schedule_dev_to_qa_hours', 24) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" name="promote_schedule_dev_to_qa_hours" min="0" value="{{ settings.get('promote_schedule_dev_to_qa_hours', 24) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <span class="text-xs text-slate-500">Default 24h. How often to batch dev into a qa promotion PR. 0 = off.</span>
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">qa → main cadence (hours)</label>
-                                    <input type="number" name="promote_schedule_qa_to_main_hours" min="0" value="{{ settings.get('promote_schedule_qa_to_main_hours', 0) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" name="promote_schedule_qa_to_main_hours" min="0" value="{{ settings.get('promote_schedule_qa_to_main_hours', 0) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <span class="text-xs text-slate-500">Default <strong>0 (off)</strong> — opening production PRs on a timer is opt-in. Still only opens a PR; it does not merge.</span>
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Check interval (minutes)</label>
-                                    <input type="number" name="promote_schedule_check_interval_min" min="1" value="{{ settings.get('promote_schedule_check_interval_min', 30) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="number" name="promote_schedule_check_interval_min" min="1" value="{{ settings.get('promote_schedule_check_interval_min', 30) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <span class="text-xs text-slate-500">How often the scheduler wakes to check whether a hop is due (default 30m).</span>
                                 </div>
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Repository scope</label>
-                                    <input type="text" name="promote_schedule_repo" value="{{ settings.get('promote_schedule_repo', '__all__') }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-[#01A982]">
+                                    <input type="text" name="promote_schedule_repo" value="{{ settings.get('promote_schedule_repo', '__all__') }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <span class="text-xs text-slate-500"><code>__all__</code> (default) = every promotable repo, exactly like the footer "All" button. Or a single <code>owner/name</code>.</span>
                                 </div>
                             </div>
@@ -2539,8 +2577,8 @@
             <!-- Main: active conversation -->
             <section class="flex-1 flex flex-col p-6 min-w-0">
                 <div class="flex items-center justify-between mb-4 flex-none">
-                    <h3 class="text-lg font-bold text-[#263040] flex items-center gap-2 truncate">
-                        <i class="fas fa-comments text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-navy flex items-center gap-2 truncate">
+                        <i class="fas fa-comments text-primary-text"></i>
                         <span id="chat-title" class="truncate">{{ active_chat_title }}</span>
                         <span class="text-xs text-slate-400 font-normal">(auto LLM, persists across reboots)</span>
                     </h3>
@@ -2592,7 +2630,7 @@
             <div class="rounded-xl border border-slate-200 bg-white p-4">
                 <label for="promote-repo" class="block text-xs uppercase tracking-widest text-slate-500 font-semibold mb-2">Repository</label>
                 <select id="promote-repo" title="Which repository to promote"
-                    class="w-full max-w-md bg-white text-sm text-slate-800 border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-[#01A982]">
+                    class="w-full max-w-md bg-white text-sm text-slate-800 border border-slate-300 rounded-lg px-3 py-2 focus:outline-none focus:border-brand">
                     <option value="">Loading repos…</option>
                 </select>
             </div>
@@ -2605,7 +2643,7 @@
                     </div>
                     <button onclick="promoteBranch('dev','qa')" id="promote-dev-qa"
                         title="Open a pull request promoting dev into qa. Starts the promotion only — it does not merge."
-                        class="flex-none border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white text-xs uppercase tracking-widest font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                        class="flex-none border border-brand text-primary-text hover:bg-primary hover:text-white text-xs uppercase tracking-widest font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
                         <i class="fas fa-arrow-right mr-1"></i>Promote
                     </button>
                 </div>
@@ -2616,7 +2654,7 @@
                     </div>
                     <button onclick="promoteBranch('qa','main')" id="promote-qa-main"
                         title="Open a pull request promoting qa into main. Starts the promotion only — it does not merge."
-                        class="flex-none border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white text-xs uppercase tracking-widest font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                        class="flex-none border border-brand text-primary-text hover:bg-primary hover:text-white text-xs uppercase tracking-widest font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
                         <i class="fas fa-arrow-right mr-1"></i>Promote
                     </button>
                 </div>
@@ -2660,13 +2698,13 @@
                  no tokens spent — so it is free to run and makes routing legible. -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-lg font-bold text-[#263040]">LLM Picker (dry run)</h3>
-                    <i class="fas fa-route text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-navy">LLM Picker (dry run)</h3>
+                    <i class="fas fa-route text-primary-text"></i>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Runs the real model picker for each requirement preset used across the pipeline (triage, log scan, fix, review, chat, feature build, batch) and shows the ranked resolution: which endpoint <b>wins</b>, which are capable <b>alternatives</b>, and why every other is <b>excluded</b>. Pure and free — no prompt is sent and no tokens are spent.</p>
                 <div class="flex flex-wrap items-end gap-2 mb-3">
                     <label class="text-xs text-slate-500">Preset
-                        <select id="llmdiag-preset" class="mt-1 block p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-[#01A982]">
+                        <select id="llmdiag-preset" class="mt-1 block p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                             <option value="">— all presets —</option>
                             <option value="triage">triage</option>
                             <option value="log_scan">log_scan</option>
@@ -2692,7 +2730,7 @@
                  rather than a benchmark this panel runs. -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">Model Performance</h3>
+                    <h3 class="text-lg font-bold text-navy">Model Performance</h3>
                     <span class="text-xs text-slate-400">tokens/sec while generating</span>
                 </div>
                 <div id="tps-body" class="text-sm text-slate-500 italic">
@@ -2703,8 +2741,8 @@
             <!-- Code Version / Stale Code card -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">Code Version</h3>
-                    <i class="fas fa-code-branch text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-navy">Code Version</h3>
+                    <i class="fas fa-code-branch text-primary-text"></i>
                 </div>
                 <div id="diag-stale-banner" class="hidden mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium flex items-center justify-between gap-3">
                     <span><i class="fas fa-exclamation-triangle mr-2"></i><span id="diag-stale-msg">Running code is stale — restart needed</span></span>
@@ -2732,8 +2770,8 @@
             <!-- Hub & Heartbeat Triage card -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">Hub &amp; Heartbeat Triage</h3>
-                    <i class="fas fa-heartbeat text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-navy">Hub &amp; Heartbeat Triage</h3>
+                    <i class="fas fa-heartbeat text-primary-text"></i>
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
                     <div><div class="text-slate-500">Hub agent</div><div id="diag-hb-agent" class="font-mono text-slate-800">—</div></div>
@@ -2756,8 +2794,8 @@
                  the self-signed cert. Populated by refreshDiagnostics(). -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">Hub Connection &amp; mTLS</h3>
-                    <i class="fas fa-lock text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-navy">Hub Connection &amp; mTLS</h3>
+                    <i class="fas fa-lock text-primary-text"></i>
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                     <div><div class="text-slate-500">WS connected</div><div id="diag-hc-connected" class="font-bold text-slate-800">—</div></div>
@@ -2794,8 +2832,8 @@
                  this shows whether filed bugs are reaching ab. -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">LM Bug-Report Ingestion</h3>
-                    <i class="fas fa-bug text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-navy">LM Bug-Report Ingestion</h3>
+                    <i class="fas fa-bug text-primary-text"></i>
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                     <div><div class="text-slate-500">Enabled</div><div id="diag-bi-enabled" class="font-bold text-slate-800">—</div></div>
@@ -2820,8 +2858,8 @@
                  (as an `enhancement` issue) once an admin approves. -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">LM Feature Request Ingestion</h3>
-                    <i class="fas fa-lightbulb text-[#01A982]"></i>
+                    <h3 class="text-lg font-bold text-navy">LM Feature Request Ingestion</h3>
+                    <i class="fas fa-lightbulb text-primary-text"></i>
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                     <div><div class="text-slate-500">Features on hub</div><div id="diag-fi-total" class="font-mono text-slate-800">—</div></div>
@@ -2845,7 +2883,7 @@
             <!-- Providers table -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">LLM Endpoints</h3>
+                    <h3 class="text-lg font-bold text-navy">LLM Endpoints</h3>
                     <button onclick="refreshDiagnostics()" class="text-xs text-slate-500 hover:text-slate-700"><i class="fas fa-sync-alt"></i> refresh</button>
                 </div>
                 <div class="overflow-x-auto">
@@ -2861,7 +2899,7 @@
             <!-- System (host + process) telemetry — populated by refreshDiagnostics() -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">System</h3>
+                    <h3 class="text-lg font-bold text-navy">System</h3>
                     <button onclick="refreshDiagnostics()" class="text-xs text-slate-500 hover:text-slate-700"><i class="fas fa-sync-alt"></i> refresh</button>
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
@@ -2902,7 +2940,7 @@
             <!-- Update / Restart card -->
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg font-bold text-[#263040]">Update &amp; Restart</h3>
+                    <h3 class="text-lg font-bold text-navy">Update &amp; Restart</h3>
                     <div class="flex gap-2">
                         <button onclick="diagAction('/update_now', 'Checking…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs"><i class="fas fa-cloud-download-alt mr-1"></i>Check for updates</button>
                         <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs">Restart now</button>
@@ -2934,7 +2972,7 @@
                 </form>
                 <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')" class="inline">
                     <button type="submit" title="Check for Issues Now"
-                        class="text-[10px] uppercase tracking-widest opacity-70 hover:opacity-100 border border-[#01A982] hover:border-[#01A982] text-[#01A982] px-2 py-0.5 rounded transition-all whitespace-nowrap">
+                        class="text-[10px] uppercase tracking-widest opacity-70 hover:opacity-100 border border-brand hover:border-brand text-primary-text px-2 py-0.5 rounded transition-all whitespace-nowrap">
                         <i class="fas fa-search mr-1"></i>Scan Now
                     </button>
                 </form>
@@ -2999,7 +3037,7 @@
             okBtn.className = 'px-4 py-2 rounded-lg text-xs uppercase tracking-widest font-semibold transition-all '
                 + (danger
                     ? 'bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed'
-                    : 'bg-[#01A982] text-white hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed');
+                    : 'bg-primary text-white hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed');
 
             const requireType = opts.requireType || '';
             if (requireType) {
@@ -3480,7 +3518,7 @@
                 const badge = document.createElement('span');
                 badge.className = isPr
                     ? 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-300'
-                    : 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#01A982]/10 text-[#01A982] border border-[#01A982]/30';
+                    : 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand/10 text-primary-text border border-brand/30';
                 const icon = document.createElement('i');
                 icon.className = isPr ? 'fas fa-code-branch' : 'fas fa-search';
                 badge.appendChild(icon);
@@ -4187,7 +4225,7 @@
             buttons.forEach(btn => {
                 // LM tokens: selected filter = HPE-green primary chip; others = neutral slate chip.
                 const active = btn.dataset.filter === status;
-                ['bg-[#01A982]/10', 'hover:bg-[#01A982]/20', 'text-[#01A982]', 'border-[#01A982]']
+                ['bg-brand/10', 'hover:bg-brand/20', 'text-primary-text', 'border-brand']
                     .forEach(c => btn.classList.toggle(c, active));
                 ['bg-slate-100', 'hover:bg-slate-200', 'text-slate-600', 'border-slate-200']
                     .forEach(c => btn.classList.toggle(c, !active));
@@ -4319,7 +4357,7 @@
                     wrap.classList.remove('hidden');
                     const pct = Math.min(100, Math.round(d.daily_used / d.daily_cap * 100));
                     bar.style.width = pct + '%';
-                    bar.className = 'h-full rounded-full transition-all ' + (pct >= 100 ? 'bg-red-500' : pct >= 75 ? 'bg-orange-400' : 'bg-[#01A982]');
+                    bar.className = 'h-full rounded-full transition-all ' + (pct >= 100 ? 'bg-red-500' : pct >= 75 ? 'bg-orange-400' : 'bg-primary');
                     txt.textContent = d.daily_used + ' / ' + d.daily_cap + ' fixes';
                 } else {
                     wrap.classList.add('hidden');
@@ -4401,7 +4439,7 @@
                         '<tr class="border-t border-slate-100">'
                         + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + p.pid + '</td>'
                         + '<td class="py-2 pr-3 text-slate-700">' + (p.name || '—')
-                            + (p.self ? ' <span class="text-xs text-[#01A982] font-bold">(self)</span>' : '') + '</td>'
+                            + (p.self ? ' <span class="text-xs text-primary-text font-bold">(self)</span>' : '') + '</td>'
                         + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.rss_mb != null ? p.rss_mb : '—') + '</td>'
                         + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.cpu_percent != null ? p.cpu_percent : '—') + '</td>'
                         + '</tr>').join('')
@@ -4424,10 +4462,10 @@
                 const cmp = document.getElementById('diag-v-compare');
                 if (rv !== '—' && dv !== '—' && rv !== dv) {
                     cmp.textContent = rv + ' → ' + dv;
-                    cmp.classList.add('text-[#01A982]');
+                    cmp.classList.add('text-primary-text');
                 } else {
                     cmp.textContent = dv;
-                    cmp.classList.remove('text-[#01A982]');
+                    cmp.classList.remove('text-primary-text');
                 }
                 const proc = d.process || {};
                 document.getElementById('diag-started').textContent = proc.started_at || '—';
@@ -4484,7 +4522,7 @@
                 document.getElementById('diag-hb-approved-at').textContent = hb.approved_at || '—';
                 const stEl = document.getElementById('diag-hb-state');
                 stEl.textContent = hb.suppressed ? 'suppressed' : (hb.approved ? 'active' : 'pending');
-                stEl.className = 'font-bold ' + (hb.suppressed ? 'text-amber-600' : (hb.approved ? 'text-[#01A982]' : 'text-slate-500'));
+                stEl.className = 'font-bold ' + (hb.suppressed ? 'text-amber-600' : (hb.approved ? 'text-primary-text' : 'text-slate-500'));
                 const supEl = document.getElementById('diag-hb-suppression');
                 if (hb.suppressed) {
                     supEl.classList.remove('hidden');
@@ -4505,9 +4543,9 @@
                     setTxt('diag-hc-mtls', '—'); setTxt('diag-hc-presented', '—'); setTxt('diag-hc-everok', '—');
                 } else {
                     setTxt('diag-hc-connected', hc.connected ? 'connected' : 'disconnected');
-                    setCls('diag-hc-connected', 'font-bold ' + (hc.connected ? 'text-[#01A982]' : 'text-red-600'));
+                    setCls('diag-hc-connected', 'font-bold ' + (hc.connected ? 'text-primary-text' : 'text-red-600'));
                     setTxt('diag-hc-mtls', hc.mtls_active ? 'ON' : 'OFF');
-                    setCls('diag-hc-mtls', 'font-bold ' + (hc.mtls_active ? 'text-[#01A982]' : 'text-red-600'));
+                    setCls('diag-hc-mtls', 'font-bold ' + (hc.mtls_active ? 'text-primary-text' : 'text-red-600'));
                     setTxt('diag-hc-presented', yn(hc.presented_this_attempt));
                     setTxt('diag-hc-everok', yn(hc.cert_ever_worked));
                     // clientAuth EKU verdict — the crux of "verifies but rejected".
@@ -4518,7 +4556,7 @@
                     } else if (cc.client_auth === true) {
                         const lbl = (cc.eku && cc.eku.length) ? 'yes' : 'yes (no EKU — any purpose)';
                         setTxt('diag-hc-clientauth', lbl);
-                        setCls('diag-hc-clientauth', 'font-bold text-[#01A982]');
+                        setCls('diag-hc-clientauth', 'font-bold text-primary-text');
                     } else {
                         setTxt('diag-hc-clientauth', '—');
                         setCls('diag-hc-clientauth', 'font-bold text-slate-500');
@@ -4546,7 +4584,7 @@
                         if (c.parse_error) { el.innerHTML = 'present at ' + c.path + ' <span class="text-slate-400">(unparsed: ' + c.parse_error + ')</span>'; return; }
                         const ss = c.self_signed
                             ? '<span class="' + (selfSignedIsBad ? 'text-red-600' : 'text-amber-600') + ' font-bold">self-signed</span>'
-                            : '<span class="text-[#01A982] font-bold">CA-issued</span>';
+                            : '<span class="text-primary-text font-bold">CA-issued</span>';
                         // A leaf-only chain (len 1) can't be verified by a peer that
                         // only holds roots (the LE intermediate is missing) — flag it.
                         const cl = c.chain_len;
@@ -4566,7 +4604,7 @@
                                     : (i === 0 ? 'leaf' : 'intermediate');
                                 const pub = lk.self_signed
                                     ? (pubRe.test(lk.subject)
-                                        ? ' <span class="text-[#01A982] font-bold">(public root — system store trusts it)</span>'
+                                        ? ' <span class="text-primary-text font-bold">(public root — system store trusts it)</span>'
                                         : ' <span class="text-red-600 font-bold">(PRIVATE root — hub can NOT trust via system store)</span>')
                                     : '';
                                 return '<div class="pl-2 border-l-2 border-slate-200 mt-1">'
@@ -4584,7 +4622,7 @@
                             const list = (c.eku && c.eku.length) ? c.eku.join(', ') : '(none — any purpose)';
                             const ca = (c.client_auth === false)
                                 ? ' <span class="text-red-600 font-bold">✗ no clientAuth — cannot be an mTLS client cert</span>'
-                                : ' <span class="text-[#01A982] font-bold">✓ clientAuth</span>';
+                                : ' <span class="text-primary-text font-bold">✓ clientAuth</span>';
                             ekuBlock = '<div>EKU: ' + list + ca + '</div>';
                         }
                         el.innerHTML =
@@ -4606,7 +4644,7 @@
                 const sT = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v == null ? '—' : v); };
                 sT('diag-bi-enabled', bi.enabled === false ? 'OFF' : (bi.enabled === true ? 'on' : '—'));
                 const enEl = document.getElementById('diag-bi-enabled');
-                if (enEl) enEl.className = 'font-bold ' + (bi.enabled === false ? 'text-amber-600' : 'text-[#01A982]');
+                if (enEl) enEl.className = 'font-bold ' + (bi.enabled === false ? 'text-amber-600' : 'text-primary-text');
                 sT('diag-bi-markers', bi.markers_seen != null ? bi.markers_seen : '—');
                 sT('diag-bi-reports', bi.reports_total != null ? bi.reports_total : '—');
                 sT('diag-bi-filed', bi.filed_this_cycle != null ? bi.filed_this_cycle : '—');
@@ -4622,7 +4660,7 @@
                 sT('diag-fi-total', fi.features_total != null ? fi.features_total : '—');
                 sT('diag-fi-awaiting', fi.awaiting_approval != null ? fi.awaiting_approval : '—');
                 const awEl = document.getElementById('diag-fi-awaiting');
-                if (awEl) awEl.className = 'font-bold ' + (fi.awaiting_approval ? 'text-amber-600' : 'text-[#01A982]');
+                if (awEl) awEl.className = 'font-bold ' + (fi.awaiting_approval ? 'text-amber-600' : 'text-primary-text');
                 sT('diag-fi-approved', fi.approved != null ? fi.approved : '—');
                 sT('diag-fi-filed', fi.filed_this_cycle != null ? fi.filed_this_cycle : '—');
                 sT('diag-fi-repo', fi.repo || '(default: hub repo)');
@@ -4842,7 +4880,7 @@
                             ? '<span class="text-[11px] text-rose-600">' + _bfEsc((r.exhausted_reason || 'exhausted').replace(/_/g, ' ')) + '</span>'
                             : '<span class="text-[11px] text-emerald-600">available</span>';
                         return '<tr class="border-b border-slate-100 last:border-0">' +
-                          '<td class="py-2 pr-3 font-mono text-xs ' + (isActive ? 'font-bold text-[#01A982]' : 'text-slate-700') + '">' +
+                          '<td class="py-2 pr-3 font-mono text-xs ' + (isActive ? 'font-bold text-primary-text' : 'text-slate-700') + '">' +
                             _bfEsc(r.provider || '') + ' · ' + _bfEsc(r.model) + (isActive ? ' <span class="text-[10px] uppercase">active</span>' : '') + '</td>' +
                           '<td class="py-2 pr-3 text-xs text-slate-500">' + _bfEsc(r.tier || '—') + '</td>' +
                           '<td class="py-2 pr-3 text-xs ' + (r.speed === 'fast' ? 'text-emerald-600' : 'text-slate-500') + '">' + _bfEsc(r.speed || '—') + '</td>' +
@@ -4851,7 +4889,7 @@
                           '<td class="py-2 pr-3 text-right tabular-nums text-slate-500">' + r.n + '</td>' +
                           '<td class="py-2 pr-3">' + status + '</td>' +
                           '<td class="py-2"><div class="h-2 rounded bg-slate-100 overflow-hidden">' +
-                            '<div class="h-2 rounded bg-[#01A982]" style="width:' + pct + '%"></div></div></td>' +
+                            '<div class="h-2 rounded bg-primary" style="width:' + pct + '%"></div></div></td>' +
                         '</tr>';
                     }).join('') +
                     '</tbody></table>' +
@@ -5738,7 +5776,7 @@
             const el = document.createElement('input');
             el.type = type;
             el.title = tip;
-            el.className = 'w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]';
+            el.className = 'w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-brand';
             if (type === 'text') el.className += ' font-mono';
             el.value = value === undefined || value === null ? '' : String(value);
             el.addEventListener('change', () => onchange(el));
@@ -5748,7 +5786,7 @@
         function _abRegSelect(options, value, tip, onchange) {
             const el = document.createElement('select');
             el.title = tip;
-            el.className = 'w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-[#01A982]';
+            el.className = 'w-full p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-brand';
             options.forEach(([v, label]) => {
                 const o = document.createElement('option');
                 o.value = v;
