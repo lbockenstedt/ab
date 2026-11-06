@@ -4552,8 +4552,8 @@
                 const yn = (v) => v ? 'yes' : 'no';
                 const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
                 const setCls = (id, cls) => { const el = document.getElementById(id); if (el) el.className = cls; };
-                if (hc.available === false) {
-                    setTxt('diag-hc-connected', 'agent not started');
+                if (hc.available !== true) {
+                    setTxt('diag-hc-connected', hc.available === false ? 'agent not started' : 'not reported');
                     setCls('diag-hc-connected', 'font-bold text-slate-500');
                     setTxt('diag-hc-mtls', '—'); setTxt('diag-hc-presented', '—'); setTxt('diag-hc-everok', '—');
                 } else {
