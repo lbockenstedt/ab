@@ -42,6 +42,10 @@
       body { font-family: 'HPE Graphik', Arial, sans-serif; }
       :focus-visible { outline: 2px solid #292D3A; outline-offset: 2px; }
       :is(.hpe-topbar, .bg-navy, .bg-slate-800, .bg-slate-900) :focus-visible { outline-color: #FFFFFF; }
+      /* Muted text is slate-500 on light surfaces (AA); dark surfaces render it as slate-400. */
+      :is(.hpe-topbar, .bg-navy, .bg-slate-700, .bg-slate-800, .bg-slate-900, .bg-slate-950, .bg-black, .bg-gray-800, .bg-gray-900) :is(.text-slate-500, .text-slate-600),
+      :is(.hpe-topbar, .bg-navy, .bg-slate-700, .bg-slate-800, .bg-slate-900, .bg-slate-950, .bg-black, .bg-gray-800, .bg-gray-900):is(.text-slate-500, .text-slate-600) { color: #94a3b8; }
+      :is(.hpe-topbar, .bg-navy, .bg-slate-800, .bg-slate-900, .bg-black) .text-primary-text { color: #05CC93; }
     </style>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script>
@@ -544,7 +548,7 @@
                                     <!-- Filled/kept live by startActiveTasksLiveRefresh() below so an
                                          operator can see elapsed time and the current step without
                                          waiting for the 30s full-page reload. -->
-                                    <p class="task-elapsed text-slate-400 font-mono text-[10px] mt-0.5"></p>
+                                    <p class="task-elapsed text-slate-500 font-mono text-[10px] mt-0.5"></p>
                                     <p class="task-current-step text-slate-500 text-[11px] italic mt-1 truncate"></p>
                                 </div>
                             {% endfor %}
@@ -600,7 +604,7 @@
                     <button data-filter="pr_auto_merged" onclick="filterActivity('pr_auto_merged')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature-drive PRs auto-merged unattended — no human clicked Approve/Merge"><i class="fas fa-robot mr-1"></i>PR Auto-Merged</button>
                     <button data-filter="pr_denied" onclick="filterActivity('pr_denied')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Denied"><i class="fas fa-code-branch mr-1"></i>PR Denied</button>
                     <button data-filter="pr_closed" onclick="filterActivity('pr_closed')" class="filter-btn px-2 py-0.5 rounded text-[11px] font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs closed without merging (e.g. superseded). Reachable only here — they are not a System Health sub-bucket."><i class="fas fa-code-branch mr-1"></i>PR Closed</button>
-                    <i class="fas fa-history text-slate-400 ml-2"></i>
+                    <i class="fas fa-history text-slate-500 ml-2"></i>
                 </div>
             </div>
             <table class="w-full text-left text-sm table-fixed">
@@ -679,7 +683,7 @@
                                 {% if info.guardrail_rounds %}
                                 <div class="text-slate-500 text-[10px]">
                                     <span class="font-semibold">Build agent:</span> {{ info.build_mode or '?' }} ({{ info.build_model or 'unknown model' }})
-                                    <span class="mx-2 text-slate-300">|</span>
+                                    <span class="mx-2 text-slate-500">|</span>
                                     <span class="font-semibold">Pre-PR guardrails:</span>
                                     {% for g in info.guardrail_rounds %}<span title="{{ g.detail }}">round {{ g.round }} → {{ g.gate }}{% if g.model %} ({{ g.model }}){% endif %}</span>{% if not loop.last %} · {% endif %}{% endfor %}
                                     {% set _last = info.guardrail_rounds[-1] %}
@@ -689,47 +693,47 @@
                                 <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-[10px] italic">
                                     {% if info.status == 'fixed' or info.status == 'verified' or info.status == 'closed' %}
                                         <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Method:</span> {{ info.commit_type if info.commit_type else 'N/A' }}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Reason:</span> {{ info.decision_reason if info.decision_reason else 'N/A' }}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% elif info.status == 'non-actionable' %}
 
                                         <span class="font-semibold text-orange-600">Reason:</span> {{ info.reason if info.reason else 'No details provided.' }}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% elif info.status == 'failed' %}
                                         <span class="font-semibold text-red-600">Why:</span> {{ info.error if info.error else 'AI failed to find a verified fix.' }}
                                         {% if info.get('failure_confidence') is not none %}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Confidence:</span> {{ '%.0f%%' % (info.failure_confidence * 100) }}{% if info.get('failure_threshold') is not none %} (required {{ '%.0f%%' % (info.failure_threshold * 100) }}){% endif %}
                                         {% endif %}
                                         {% if info.get('failure_detail') %}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">{{ 'Reviewer feedback' if info.get('failure_kind') == 'review_rejected' else 'Detail' }}:</span> {{ info.failure_detail }}
                                         {% endif %}
-                                        {% if info.get('failure_model') %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Last model:</span> {{ info.failure_model }}{% endif %}
-                                        {% if info.get('pipeline') == 'fix_engine' %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Feature request</span> via standard fix pipeline ({{ info.handoff_reason }}){% endif %}
+                                        {% if info.get('failure_model') %}<span class="mx-2 text-slate-500">|</span><span class="font-semibold">Last model:</span> {{ info.failure_model }}{% endif %}
+                                        {% if info.get('pipeline') == 'fix_engine' %}<span class="mx-2 text-slate-500">|</span><span class="font-semibold">Feature request</span> via standard fix pipeline ({{ info.handoff_reason }}){% endif %}
                                         {% if info.get('failure_raw_excerpt') is not none %}<details class="mt-1"><summary class="cursor-pointer text-slate-500">Last raw model reply</summary><pre class="whitespace-pre-wrap text-[11px] bg-slate-50 p-2 rounded">{{ info.failure_raw_excerpt or '(empty)' }}</pre></details>{% endif %}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% elif info.status in ('feature_flagged', 'feature_classify_retry', 'feature_failed') %}
-                                        {% if info.flag_kind %}<span class="font-semibold">Kind:</span> {{ info.flag_kind }}<span class="mx-2 text-slate-300">|</span>{% endif %}
-                                        {% if info.boundary_ids %}<span class="font-semibold text-purple-600">Boundaries:</span> {{ info.boundary_ids|join(', ') }}<span class="mx-2 text-slate-300">|</span>{% endif %}
+                                        {% if info.flag_kind %}<span class="font-semibold">Kind:</span> {{ info.flag_kind }}<span class="mx-2 text-slate-500">|</span>{% endif %}
+                                        {% if info.boundary_ids %}<span class="font-semibold text-purple-600">Boundaries:</span> {{ info.boundary_ids|join(', ') }}<span class="mx-2 text-slate-500">|</span>{% endif %}
                                         <span class="font-semibold text-purple-600">Why:</span> <span class="not-italic">{{ info.last_error or info.reason or 'No reason recorded (written before AppBuilder stored one).' }}</span>
-                                        {% if info.model %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Model:</span> {{ info.model }}{% endif %}
-                                        {% if info.attempts %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Attempts:</span> {{ info.attempts }}{% if info.max_attempts %}/{{ info.max_attempts }}{% endif %}{% endif %}
-                                        {% if info.get('confidence') is not none %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Confidence:</span> {{ '%.0f%%' % (info.confidence * 100) }}{% endif %}
-                                        {% if info.previous_reason %}<span class="mx-2 text-slate-300">|</span><span class="font-semibold">Previously:</span> {{ info.previous_status }} — {{ info.previous_reason[:200] }}{% endif %}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        {% if info.model %}<span class="mx-2 text-slate-500">|</span><span class="font-semibold">Model:</span> {{ info.model }}{% endif %}
+                                        {% if info.attempts %}<span class="mx-2 text-slate-500">|</span><span class="font-semibold">Attempts:</span> {{ info.attempts }}{% if info.max_attempts %}/{{ info.max_attempts }}{% endif %}{% endif %}
+                                        {% if info.get('confidence') is not none %}<span class="mx-2 text-slate-500">|</span><span class="font-semibold">Confidence:</span> {{ '%.0f%%' % (info.confidence * 100) }}{% endif %}
+                                        {% if info.previous_reason %}<span class="mx-2 text-slate-500">|</span><span class="font-semibold">Previously:</span> {{ info.previous_status }} — {{ info.previous_reason[:200] }}{% endif %}
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% else %}
                                         <span class="font-semibold">Status:</span> {{ info.status }}
-                                        <span class="mx-2 text-slate-300">|</span>
+                                        <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% endif %}
                                 </div>
@@ -874,12 +878,12 @@
                             {% endif %}
                             <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-[10px] italic">
                                 <span class="font-semibold not-italic text-slate-600 break-all">{{ pr.title }}</span>
-                                <span class="mx-2 text-slate-300">|</span>
+                                <span class="mx-2 text-slate-500">|</span>
                                 {% if pr.errors %}<span class="text-red-600 font-semibold">🔴 {{ pr.errors }} error</span>{% endif %}
                                 {% if pr.warnings %}<span class="text-amber-600 font-semibold">🟠 {{ pr.warnings }} warning</span>{% endif %}
                                 {% if pr.advisories %}<span class="text-blue-600 font-semibold">🔵 {{ pr.advisories }} advisory</span>{% endif %}
                                 {% if not pr.findings %}<span class="text-green-600">no parity drift</span>{% endif %}
-                                <span class="mx-2 text-slate-300">|</span>
+                                <span class="mx-2 text-slate-500">|</span>
                                 <span>reviewed {{ pr.reviewed_at }}</span>
                             </div>
                         </td>
@@ -887,7 +891,7 @@
                     {% endfor %}
                     {% if not state.processed %}
                     <tr>
-                        <td colspan="3" class="px-6 py-8 text-center text-slate-400 italic">No issues processed yet.</td>
+                        <td colspan="3" class="px-6 py-8 text-center text-slate-500 italic">No issues processed yet.</td>
                     </tr>
                     {% endif %}
                 </tbody>
@@ -899,7 +903,7 @@
         <div class="hpe-card rounded-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-2">
                 <div>
-                    <p class="text-xs text-slate-400">Newest entries first · Last 100 lines
+                    <p class="text-xs text-slate-500">Newest entries first · Last 100 lines
                         {% if log_rows %} · {{ log_rows|length }} entries{% endif %}
                     </p>
                 </div>
@@ -912,7 +916,7 @@
             <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
                 <div class="flex items-center gap-2 mb-2">
                     <span class="text-xs font-bold uppercase tracking-wider text-indigo-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</span>
-                    <span id="log-analysis-meta" class="text-[11px] text-slate-400"></span>
+                    <span id="log-analysis-meta" class="text-[11px] text-slate-500"></span>
                 </div>
                 <div id="log-analysis-body" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded-lg border border-slate-200 p-4 max-h-96 overflow-y-auto">—</div>
             </div>
@@ -936,7 +940,7 @@
                             {% endfor %}
                         {% else %}
                             <tr>
-                                <td colspan="3" class="px-6 py-8 text-center text-slate-400 italic">No logs available.</td>
+                                <td colspan="3" class="px-6 py-8 text-center text-slate-500 italic">No logs available.</td>
                             </tr>
                         {% endif %}
                     </tbody>
@@ -950,7 +954,7 @@
         <div class="hpe-card rounded-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-2">
                 <div>
-                    <p class="text-xs text-slate-400">Newest entries first · Fetched {{ hub_fetch_time or 'now' }}
+                    <p class="text-xs text-slate-500">Newest entries first · Fetched {{ hub_fetch_time or 'now' }}
                         {% if hub_logs %}
                             {% if hub_logs_total and hub_logs_total > hub_logs|length %}
                                 · showing newest {{ hub_logs|length }} of {{ hub_logs_total }} entries
@@ -970,7 +974,7 @@
             <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
                 <div class="flex items-center gap-2 mb-2">
                     <span class="text-xs font-bold uppercase tracking-wider text-indigo-700"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</span>
-                    <span id="log-analysis-meta" class="text-[11px] text-slate-400"></span>
+                    <span id="log-analysis-meta" class="text-[11px] text-slate-500"></span>
                 </div>
                 <div id="log-analysis-body" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded-lg border border-slate-200 p-4 max-h-96 overflow-y-auto">—</div>
             </div>
@@ -1003,7 +1007,7 @@
                             {% endfor %}
                         {% else %}
                             <tr>
-                                <td colspan="3" class="px-6 py-8 text-center text-slate-400 italic">
+                                <td colspan="3" class="px-6 py-8 text-center text-slate-500 italic">
                                     {% if hub_fetch_error %}{{ hub_fetch_error }}{% else %}No logs retrieved from Hub. Check HUB_QUERY_URL in settings.{% endif %}
                                 </td>
                             </tr>
@@ -1053,7 +1057,7 @@
                     <!-- 1. GitHub & Repository Core -->
                     <section id="sec-github" data-settings-section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-github text-slate-400"></i>
+                            <i class="fas fa-github text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub & Repository Core</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -1116,7 +1120,7 @@
                                 </div>
                                 <span class="text-xs text-slate-500">Tick the repos AppBuilder should monitor. Populated from your GitHub account (cached 5 min). Add any not listed below.</span>
                                 {% else %}
-                                <span class="text-xs text-slate-400 block">Couldn't load your GitHub repo list (no token or fetch failed) — enter repos manually below.</span>
+                                <span class="text-xs text-slate-500 block">Couldn't load your GitHub repo list (no token or fetch failed) — enter repos manually below.</span>
                                 {% endif %}
                                 <label class="text-xs text-slate-500">Additional repos (comma-separated, e.g. <code class="bg-slate-100 px-1 rounded">org/repo</code>)</label>
                                 <input type="text" name="monitored_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="owner/repo, org/another">
@@ -1134,7 +1138,7 @@
                                 </div>
                                 <span class="text-xs text-slate-500">Tick the repos AppBuilder may push fixes to directly (without a PR). Same GitHub list as monitored.</span>
                                 {% else %}
-                                <span class="text-xs text-slate-400 block">Couldn't load your GitHub repo list — enter repos manually below.</span>
+                                <span class="text-xs text-slate-500 block">Couldn't load your GitHub repo list — enter repos manually below.</span>
                                 {% endif %}
                                 <label class="text-xs text-slate-500">Additional trusted repos (comma-separated, e.g. <code class="bg-slate-100 px-1 rounded">org/repo</code>)</label>
                                 <input type="text" name="trusted_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="owner/repo, org/another">
@@ -1187,7 +1191,7 @@
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <div class="flex items-center justify-between gap-3">
-                                    <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-400 font-normal">(routes Hub log errors to the right repo)</span></label>
+                                    <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-500 font-normal">(routes Hub log errors to the right repo)</span></label>
                                     <button type="button" onclick="autofillModuleRepoMap()" id="mrm-autofill-btn" class="btn-sec px-3 py-1 rounded font-bold text-xs whitespace-nowrap" title="Suggest entries from the repos you already monitor. Only fills ALIASES (module type differs from repo name) — names that already auto-match are left out. Never overwrites entries you have set.">Auto-fill</button>
                                 </div>
                                 <div id="mrm-autofill-note" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 text-slate-600"></div>
@@ -1195,7 +1199,7 @@
                                 <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
                             </div>
                             <div class="space-y-3 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
-                                <label class="text-sm font-semibold text-slate-700">AppBuilder Sources <span class="text-slate-400 font-normal">(turn noisy sources on one at a time)</span></label>
+                                <label class="text-sm font-semibold text-slate-700">AppBuilder Sources <span class="text-slate-500 font-normal">(turn noisy sources on one at a time)</span></label>
                                 <div class="flex items-center gap-3">
                                     <input type="checkbox" name="bug_reports_enabled" id="bug_reports_enabled" {{ 'checked' if settings.get('bug_reports_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="bug_reports_enabled" class="text-xs font-medium text-slate-700" title="File &amp; auto-fix BUG reports submitted via the LM WebUI. On by default.">BugFixes from LM — file &amp; fix bug reports from the LM WebUI</label>
@@ -1206,9 +1210,9 @@
                                 </div>
                                 <div class="flex items-center gap-3">
                                     <input type="checkbox" name="fix_logdetected_enabled" id="fix_logdetected_enabled" {{ 'checked' if settings.get('fix_logdetected_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
-                                    <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-400">(Bug &amp; Critical always fix)</span></label>
+                                    <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-500">(Bug &amp; Critical always fix)</span></label>
                                 </div>
-                                <label class="text-xs font-medium text-slate-600 block mt-2">Hub-log auto-filing — per module <span class="text-slate-400 font-normal">(none checked = OFF; enable one at a time)</span></label>
+                                <label class="text-xs font-medium text-slate-600 block mt-2">Hub-log auto-filing — per module <span class="text-slate-500 font-normal">(none checked = OFF; enable one at a time)</span></label>
                                 {% if log_module_options %}
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
                                     {% for m in log_module_options %}
@@ -1220,7 +1224,7 @@
                                 </div>
                                 <span class="text-xs text-slate-500">Only checked modules have their Hub-log errors filed as issues. Add modules in the Module → Repo Map above to control them here.</span>
                                 {% else %}
-                                <span class="text-xs text-slate-400 block">No module→repo mappings yet — add <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs above, then choose which modules' logs to file here.</span>
+                                <span class="text-xs text-slate-500 block">No module→repo mappings yet — add <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs above, then choose which modules' logs to file here.</span>
                                 {% endif %}
                             </div>
                         </div>
@@ -1232,7 +1236,7 @@
                     <!-- 2. LLM Configuration -->
                     <section id="sec-llm" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-brain text-slate-400"></i>
+                            <i class="fas fa-brain text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">LLM Configuration</h4>
                         </div>
 
@@ -1258,7 +1262,7 @@
                                     <option value="copilot">GitHub Copilot</option>
                                 </select>
                             </div>
-                            <p id="vault-creds-empty" class="text-sm text-slate-400 italic hidden">No providers configured yet — pick one above to add its API credentials.</p>
+                            <p id="vault-creds-empty" class="text-sm text-slate-500 italic hidden">No providers configured yet — pick one above to add its API credentials.</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="vault-creds-list">
                                 {% for pname in ['google','anthropic','openai','groq','openrouter','ollama','ollama2','ollama_cloud','lmstudio','claude_cli','copilot'] %}
                                 {% set cred = settings.llm_credentials.get(pname, {}) if settings.llm_credentials else {} %}
@@ -1386,7 +1390,7 @@
                                     <!-- Summary row -->
                                     <div class="flex items-center gap-2 p-2" id="entry-view-{{ entry.id }}">
                                         <span class="flex-1 font-medium text-slate-700">{{ entry.label or entry.model }}{% if entry.enabled == False %} <span class="text-[10px] bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded align-middle">disabled</span>{% endif %}</span>
-                                        <span class="text-xs text-slate-400">{{ entry.provider }} / {{ entry.model }}</span>
+                                        <span class="text-xs text-slate-500">{{ entry.provider }} / {{ entry.model }}</span>
                                         {% if entry.rpm %}<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">{{ entry.rpm }} RPM</span>{% endif %}
                                         {% if entry.health and entry.health.unhealthy %}<span class="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-bold" title="{{ entry.health.consecutive_failures }} calls in a row failed{% if entry.health.last_error %} — {{ entry.health.last_error }}{% endif %}{% if entry.health.last_error_at %} (last: {{ entry.health.last_error_at }}){% endif %}">⚠ failing</span>{% endif %}
                                         <label class="flex items-center gap-1 text-[11px] text-slate-500" title="Enabled endpoints are ranked by the picker for every call.">
@@ -1394,8 +1398,8 @@
                                             on
                                         </label>
                                         <span id="entry-test-result-{{ entry.id }}" class="text-[10px] px-1.5 py-0.5 rounded font-mono"></span>
-                                        <button type="button" onclick="testEntry('{{ entry.id }}')" id="entry-test-btn-{{ entry.id }}" class="text-slate-400 hover:text-slate-700 text-xs px-1" title="Send a real test prompt to this model and measure response time + tok/s">▶ Test</button>
-                                        <button type="button" onclick="editEntry('{{ entry.id }}')" class="text-slate-400 hover:text-slate-700 text-xs px-1" title="Edit">✏</button>
+                                        <button type="button" onclick="testEntry('{{ entry.id }}')" id="entry-test-btn-{{ entry.id }}" class="text-slate-500 hover:text-slate-700 text-xs px-1" title="Send a real test prompt to this model and measure response time + tok/s">▶ Test</button>
+                                        <button type="button" onclick="editEntry('{{ entry.id }}')" class="text-slate-500 hover:text-slate-700 text-xs px-1" title="Edit">✏</button>
                                         <button type="button" onclick="deleteEntry('{{ entry.id }}')" class="text-red-400 hover:text-red-600 text-xs font-bold px-1">✕</button>
                                     </div>
                                     <!-- Inline edit form -->
@@ -1429,7 +1433,7 @@
                                     </div>
                                 </div>
                                 {% else %}
-                                <p class="text-sm text-slate-400 italic" id="entries-empty">No entries yet — add one above.</p>
+                                <p class="text-sm text-slate-500 italic" id="entries-empty">No entries yet — add one above.</p>
                                 {% endfor %}
                             </div>
                         </div>
@@ -1473,9 +1477,9 @@
                          keeps working. -->
                     <section id="sec-model-registry" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-sliders-h text-slate-400"></i>
+                            <i class="fas fa-sliders-h text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Model Registry &mdash; Capability &amp; Cost Rules</h4>
-                            <span id="registry-rule-count" class="ml-auto text-xs text-slate-400"></span>
+                            <span id="registry-rule-count" class="ml-auto text-xs text-slate-500"></span>
                         </div>
                         <p class="text-xs text-slate-500 mb-4">
                             Routing is capability/cost-aware: there are no fixed provider slots. Every <b>enabled</b> endpoint
@@ -1539,7 +1543,7 @@
 
                         <!-- Effective merged registry (read-only) -->
                         <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mt-6 mb-2">Effective registry (preview &mdash; as last saved)</p>
-                        <p class="text-xs text-slate-400 mb-2">Curated rules merged with auto-discovered models, with <span class="font-mono">speed</span> and <span class="font-mono">rank</span> resolved through their fallbacks. This reflects the <b>saved</b> config, so it updates after you press Save and the page reloads.</p>
+                        <p class="text-xs text-slate-500 mb-2">Curated rules merged with auto-discovered models, with <span class="font-mono">speed</span> and <span class="font-mono">rank</span> resolved through their fallbacks. This reflects the <b>saved</b> config, so it updates after you press Save and the page reloads.</p>
                         <div class="overflow-x-auto border border-slate-200 rounded-lg">
                             <table class="w-full text-xs">
                                 <thead class="bg-slate-50 text-slate-500 uppercase"><tr>
@@ -1581,7 +1585,7 @@
                     <!-- Local LLM (CPU-only) Setup -->
                     <section id="sec-local-llm" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-microchip text-slate-400"></i>
+                            <i class="fas fa-microchip text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Local LLM (CPU-only) Setup</h4>
                         </div>
                         <p class="text-xs text-slate-500 mb-4">
@@ -1589,7 +1593,7 @@
                             applies CPU tuning (a systemd override + a context-tuned model), restarts the
                             <code class="bg-slate-100 px-1 rounded">ollama</code> service, and wires it into AppBuilder
                             provider slot <strong>P4</strong>. Min: ~24 GB RAM, 8+ cores, ~22 GB disk, no GPU.
-                            <span class="text-slate-400">Requires root (the app already runs privileged systemctl).</span>
+                            <span class="text-slate-500">Requires root (the app already runs privileged systemctl).</span>
                         </p>
                         <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-4">
                             <div class="space-y-2">
@@ -1601,13 +1605,13 @@
                                 <label class="text-sm font-medium text-slate-600">Context length (num_ctx)</label>
                                 <input type="number" id="local-llm-ctx" value="32768" min="0" step="1024"
                                        class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand border border-slate-200">
-                                <span class="text-xs text-slate-400">0 = use the model's default context.</span>
+                                <span class="text-xs text-slate-500">0 = use the model's default context.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">CPU cores (num_thread)</label>
                                 <input type="number" id="local-llm-cores" value="{{ state.cpu_count }}" min="1"
                                        class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand border border-slate-200">
-                                <span class="text-xs text-slate-400">Detected {{ state.cpu_count }} cores.</span>
+                                <span class="text-xs text-slate-500">Detected {{ state.cpu_count }} cores.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Availability</label>
@@ -1622,7 +1626,7 @@
                                     class="py-2 px-4 rounded-lg font-bold btn-primary transition-all duration-200 text-sm">
                                 <i class="fas fa-bolt mr-2"></i>Setup Local LLM
                             </button>
-                            <span id="local-llm-setup-state" class="text-xs text-slate-400"></span>
+                            <span id="local-llm-setup-state" class="text-xs text-slate-500"></span>
                         </div>
                         <div id="local-llm-setup-status" class="hidden mt-4 text-xs rounded p-3 bg-slate-900 border border-slate-700">
                             <div id="local-llm-setup-status-line" class="font-medium text-slate-200 mb-2"></div>
@@ -1632,7 +1636,7 @@
                         <!-- Manage Models: list / pull / delete on any ollama endpoint -->
                         <div class="mt-8 pt-6 border-t border-slate-200">
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Manage Ollama Models</h4>
-                            <p class="text-xs text-slate-400 mb-3">List, pull, and remove models on an Ollama endpoint. Point it at your local box (default) or a remote one (e.g. the M4) via the Endpoint field.</p>
+                            <p class="text-xs text-slate-500 mb-3">List, pull, and remove models on an Ollama endpoint. Point it at your local box (default) or a remote one (e.g. the M4) via the Endpoint field.</p>
                             <div class="flex flex-wrap gap-2 items-center mb-3">
                                 <input type="text" id="mm-baseurl" value="http://localhost:11434" placeholder="Endpoint (http://host:11434)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                 <button type="button" onclick="mmRefresh()" class="btn-sec px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-sync-alt mr-1"></i>List</button>
@@ -1656,7 +1660,7 @@
                                 </datalist>
                                 <button type="button" onclick="mmPull()" id="mm-pull-btn" class="btn-primary px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
                             </div>
-                            <p class="text-[11px] text-slate-400 mb-3">Type any name from <span class="font-mono">ollama.com/library</span>, or click Pull on one below. Pull downloads from Ollama's cloud registry to the endpoint above.</p>
+                            <p class="text-[11px] text-slate-500 mb-3">Type any name from <span class="font-mono">ollama.com/library</span>, or click Pull on one below. Pull downloads from Ollama's cloud registry to the endpoint above.</p>
 
                             <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Popular models — click Pull to download</p>
                             <div class="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-4">
@@ -1666,14 +1670,14 @@
                                     ('llama3.1:8b','~4.9 GB'), ('llama3.3:70b','~43 GB'),
                                     ('deepseek-coder-v2:16b','~8.9 GB'), ('gemma2:27b','~16 GB') ] %}
                                 <div class="flex items-center justify-between py-1 px-2 rounded bg-slate-50 border border-slate-100">
-                                    <span class="font-mono text-xs text-slate-700">{{ m }} <span class="text-slate-400">{{ sz }}</span></span>
+                                    <span class="font-mono text-xs text-slate-700">{{ m }} <span class="text-slate-500">{{ sz }}</span></span>
                                     <button type="button" onclick="mmPull('{{ m }}')" class="btn-sec text-[11px] px-2 py-0.5 rounded font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
                                 </div>
                                 {% endfor %}
                             </div>
 
                             <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Installed models</p>
-                            <div id="mm-list" class="text-xs text-slate-400 italic">Click List to load installed models.</div>
+                            <div id="mm-list" class="text-xs text-slate-500 italic">Click List to load installed models.</div>
                             <div id="mm-pull-status" class="hidden mt-3 text-xs rounded p-3 bg-slate-900 border border-slate-700">
                                 <div id="mm-pull-line" class="font-medium text-slate-200 mb-2"></div>
                                 <pre id="mm-pull-log" class="whitespace-pre-wrap break-all text-[11px] text-green-400 max-h-56 overflow-y-auto font-mono"></pre>
@@ -1688,7 +1692,7 @@
                     <!-- 3. QA & Verification -->
                     <section id="sec-qa" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-vial text-slate-400"></i>
+                            <i class="fas fa-vial text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">QA & Verification</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1698,22 +1702,22 @@
                                 <span class="text-xs text-slate-500">URL of the QA service API. When set, AppBuilder calls <code class="bg-slate-100 px-1 rounded">POST /api/run?module=&lt;repo&gt;</code> after each fix instead of running tests locally.</span>
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">QA Test Repository (owner/repo) <span class="text-xs text-slate-400">fallback</span></label>
+                                <label class="text-sm font-medium text-slate-600">QA Test Repository (owner/repo) <span class="text-xs text-slate-500">fallback</span></label>
                                 <input type="text" name="QA_REPO" value="{{ settings.QA_REPO }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. myorg/qa-suite">
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Global QA Test Command <span class="text-xs text-slate-400">fallback</span></label>
+                                <label class="text-sm font-medium text-slate-600">Global QA Test Command <span class="text-xs text-slate-500">fallback</span></label>
                                 <input type="text" name="QA_TEST_COMMAND" value="{{ settings.QA_TEST_COMMAND }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. pytest tests/target_repo">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Log Analysis interval (minutes)</label>
                                 <input type="number" name="log_analysis_interval_min" value="{{ settings.log_analysis_interval_min if settings.log_analysis_interval_min is not none else 30 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-400">How far back Log Analysis looks + how often the idle snapshot refreshes (default 30).</span>
+                                <span class="text-xs text-slate-500">How far back Log Analysis looks + how often the idle snapshot refreshes (default 30).</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Startup grace (seconds)</label>
                                 <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 300 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-400">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
+                                <span class="text-xs text-slate-500">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
                             </div>
                             <!-- col-span-2, matching the parent md:grid-cols-2. It was
                                  col-span-3: a child spanning 3 tracks in a 2-track grid makes
@@ -1721,7 +1725,7 @@
                                  and squeezes the whole section into a narrow left-hand column. -->
                             <div class="space-y-2 col-span-1 md:col-span-2 border-t border-slate-200 pt-4 mt-2">
                                 <div class="flex items-center justify-between">
-                                    <label class="text-sm font-medium text-slate-600">User Accounts <span class="text-slate-400 font-normal">(every account has full admin access)</span></label>
+                                    <label class="text-sm font-medium text-slate-600">User Accounts <span class="text-slate-500 font-normal">(every account has full admin access)</span></label>
                                     <button type="button" onclick="loadAuthUsers()" class="btn-sec px-3 py-1 rounded font-bold text-xs">Refresh</button>
                                 </div>
                                 <div id="auth-users-list" class="text-xs text-slate-500 italic">Not loaded.</div>
@@ -1734,44 +1738,44 @@
                                     </div>
                                 </div>
                                 <span id="auth-users-msg" class="text-xs"></span>
-                                <span class="text-xs text-slate-400 block">These act immediately — they are not part of the Save below. Locked out? From a shell on this host: <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; auth.set_password('user','newpass')"</code></span>
+                                <span class="text-xs text-slate-500 block">These act immediately — they are not part of the Save below. Locked out? From a shell on this host: <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; auth.set_password('user','newpass')"</code></span>
                             </div>
                                                         <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Claude CLI binary path</label>
                                 <input type="text" name="claude_binary" value="{{ settings.claude_binary or '' }}" placeholder="auto-detect (leave blank)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-400">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
+                                <span class="text-xs text-slate-500">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="flex items-center gap-2 text-sm font-medium text-slate-600">
                                     <input type="checkbox" name="gate_scans_on_model_preload" value="1" {{ 'checked' if settings.gate_scans_on_model_preload else '' }} class="w-4 h-4 accent-brand">
                                     Hold scans until models are loaded
                                 </label>
-                                <span class="text-xs text-slate-400">Ollama serialises requests, so a scan that starts first puts a multi-minute CPU build in the single slot and the preload queues <b>behind</b> it — models go resident long after the work that needed them. On by default.</span>
+                                <span class="text-xs text-slate-500">Ollama serialises requests, so a scan that starts first puts a multi-minute CPU build in the single slot and the preload queues <b>behind</b> it — models go resident long after the work that needed them. On by default.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max wait for model residency (s)</label>
                                 <input type="number" name="model_gate_max_wait_s" value="{{ settings.model_gate_max_wait_s if settings.model_gate_max_wait_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-400">Cap on the above, so a preload that can never succeed cannot wedge scanning. On timeout AppBuilder proceeds and logs a warning. Default 3600.</span>
+                                <span class="text-xs text-slate-500">Cap on the above, so a preload that can never succeed cannot wedge scanning. On timeout AppBuilder proceeds and logs a warning. Default 3600.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama model-load timeout (s)</label>
                                 <input type="number" name="ollama_preload_timeout_s" value="{{ settings.ollama_preload_timeout_s if settings.ollama_preload_timeout_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-400">How long a model may take to become <b>resident</b> (preload), separate from inference timeout. A cold load is disk&nbsp;→&nbsp;RAM plus a num_ctx-sized KV allocation, so on a CPU-only box a 14B at 32k can take well over 15&nbsp;min. Default 3600. Raise this rather than lowering num_ctx.</span>
+                                <span class="text-xs text-slate-500">How long a model may take to become <b>resident</b> (preload), separate from inference timeout. A cold load is disk&nbsp;→&nbsp;RAM plus a num_ctx-sized KV allocation, so on a CPU-only box a 14B at 32k can take well over 15&nbsp;min. Default 3600. Raise this rather than lowering num_ctx.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama context window (num_ctx)</label>
                                 <input type="number" name="ollama_num_ctx" value="{{ settings.ollama_num_ctx if settings.ollama_num_ctx is not none else 32768 }}" min="2048" step="1024" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-400">Ollama prompt context size — prevents "prompt longer than context length" 400s. Default 32768; raise for very large fixes.</span>
+                                <span class="text-xs text-slate-500">Ollama prompt context size — prevents "prompt longer than context length" 400s. Default 32768; raise for very large fixes.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama CPU threads (num_thread)</label>
                                 <input type="number" name="ollama_num_thread" value="{{ settings.ollama_num_thread if settings.ollama_num_thread is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-400">CPU threads for ollama inference. 0 = ollama default (~physical cores). Set to your allocated core count to speed big models.</span>
+                                <span class="text-xs text-slate-500">CPU threads for ollama inference. 0 = ollama default (~physical cores). Set to your allocated core count to speed big models.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Ollama max loaded models</label>
                                 <input type="number" name="ollama_max_loaded_models" value="{{ settings.ollama_max_loaded_models if settings.ollama_max_loaded_models is not none else 3 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-400">OLLAMA_MAX_LOADED_MODELS — models kept resident at once. Set ≥ your ensemble size. Applied by running Local LLM Setup (writes ollama's systemd env).</span>
+                                <span class="text-xs text-slate-500">OLLAMA_MAX_LOADED_MODELS — models kept resident at once. Set ≥ your ensemble size. Applied by running Local LLM Setup (writes ollama's systemd env).</span>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Per-Repo Test Commands (repo:cmd, repo:cmd)</label>
@@ -1787,7 +1791,7 @@
                     <!-- 4. Automation & Deployment -->
                     <section id="sec-automation" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-robot text-slate-400"></i>
+                            <i class="fas fa-robot text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Automation & Deployment</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1837,7 +1841,7 @@
                             <div class="flex items-center gap-3 mb-3">
                                 <input type="checkbox" name="skills_enabled" id="skills_enabled" {{ 'checked' if settings.get('skills_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="skills_enabled" class="text-sm font-semibold text-slate-700" title="Load repo-committed Skill recipes (add-simulation, dual-copy-guard, ...) so fix/build work follows the same boundaries a human invoking the skill would. On by default.">
-                                    Project Skills <span class="text-slate-400 font-normal">(recipes AppBuilder follows for fix/build work)</span>
+                                    Project Skills <span class="text-slate-500 font-normal">(recipes AppBuilder follows for fix/build work)</span>
                                 </label>
                             </div>
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -1949,11 +1953,11 @@
                                 <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600" title="A SEPARATE gate from Max Concurrent Fixes, applied PER POOL: this many jobs can run at once in Code, a SEPARATE this-many in Log, and a separate this-many in Review — not one shared total. Within a pool, each provider slot runs one job at a time; a busy slot is skipped for the next free one, and if every slot in the pool is busy the call waits and retries rather than failing.">Max Concurrent LLM Calls <span class="text-slate-400 font-normal">(per pool — Code / Log / Review each get this many, independently)</span></label>
+                                <label class="text-sm font-medium text-slate-600" title="A SEPARATE gate from Max Concurrent Fixes, applied PER POOL: this many jobs can run at once in Code, a SEPARATE this-many in Log, and a separate this-many in Review — not one shared total. Within a pool, each provider slot runs one job at a time; a busy slot is skipped for the next free one, and if every slot in the pool is busy the call waits and retries rather than failing.">Max Concurrent LLM Calls <span class="text-slate-500 font-normal">(per pool — Code / Log / Review each get this many, independently)</span></label>
                                 <input type="number" name="LLM_MAX_CONCURRENT" value="{{ settings.LLM_MAX_CONCURRENT }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Max Issues Per Cycle <span class="text-slate-400 font-normal">(per repo — rest defer to next scan)</span></label>
+                                <label class="text-sm font-medium text-slate-600">Max Issues Per Cycle <span class="text-slate-500 font-normal">(per repo — rest defer to next scan)</span></label>
                                 <input type="number" name="MAX_ISSUES_PER_CYCLE" value="{{ settings.MAX_ISSUES_PER_CYCLE }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
@@ -1996,7 +2000,7 @@
                     <!-- System Settings -->
                     <section id="sec-sso" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fab fa-microsoft text-slate-400"></i>
+                            <i class="fab fa-microsoft text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Microsoft Entra Sign-in (SSO)</h4>
                         </div>
                         <p class="text-xs text-slate-500 mb-2">
@@ -2005,14 +2009,14 @@
                             AppBuilder has no roles &mdash; so <strong>Allowed group</strong> below is the
                             only thing limiting who can get in.
                         </p>
-                        <p id="oidc-status" class="text-xs mb-4 text-slate-400">Loading&hellip;</p>
+                        <p id="oidc-status" class="text-xs mb-4 text-slate-500">Loading&hellip;</p>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2 md:col-span-2">
                                 <label class="flex items-center gap-2 text-sm font-medium text-slate-600">
                                     <input type="checkbox" id="oidc-enabled" class="rounded">
                                     Enable Microsoft sign-in
                                 </label>
-                                <p class="text-xs text-slate-400">Turning this off hides the "Sign in with Microsoft" button; local passwords keep working.</p>
+                                <p class="text-xs text-slate-500">Turning this off hides the "Sign in with Microsoft" button; local passwords keep working.</p>
                             </div>
                             <div class="space-y-2 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Allowed groups (admin groups)</label>
@@ -2024,10 +2028,10 @@
                                 <div id="oidc-group-chips" class="flex flex-wrap gap-2"></div>
                                 <input type="hidden" id="oidc-allowed-group">
                                 <details class="mt-1">
-                                    <summary class="text-xs text-slate-400 cursor-pointer select-none">Enter object IDs manually</summary>
+                                    <summary class="text-xs text-slate-500 cursor-pointer select-none">Enter object IDs manually</summary>
                                     <input type="text" id="oidc-allowed-group-manual" onchange="onOidcGroupManual(this)" class="w-full mt-2 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand font-mono text-xs" placeholder="comma-separated group object IDs">
                                 </details>
-                                <p class="text-xs text-slate-400">
+                                <p class="text-xs text-slate-500">
                                     Membership in <strong>any</strong> listed group grants access. Matching is by
                                     group <strong>object ID</strong>, never by name &mdash; which is why picking from
                                     the list is safer than typing.
@@ -2047,7 +2051,7 @@
                             <div class="space-y-2 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Redirect URI</label>
                                 <input type="text" id="oidc-redirect-uri" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="https://this-host/auth/oidc/callback">
-                                <p class="text-xs text-slate-400">Must match a redirect URI registered on the Entra app exactly.</p>
+                                <p class="text-xs text-slate-500">Must match a redirect URI registered on the Entra app exactly.</p>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Client certificate path</label>
@@ -2058,12 +2062,12 @@
                                 <input type="text" id="oidc-key-path" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="/etc/ab/oidc/client-key.pem">
                             </div>
                             <div class="space-y-2 md:col-span-2">
-                                <label class="text-sm font-medium text-slate-600">Client secret <span class="text-slate-400 font-normal">(only if not using a certificate)</span></label>
+                                <label class="text-sm font-medium text-slate-600">Client secret <span class="text-slate-500 font-normal">(only if not using a certificate)</span></label>
                                 <div class="flex gap-2">
                                     <input type="password" id="oidc-client-secret" autocomplete="new-password" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="Leave blank to keep the stored secret">
                                     <button type="button" onclick="abOidcSecretClear()" class="px-3 py-2 rounded-md text-sm font-medium bg-slate-100 hover:bg-slate-200">Clear</button>
                                 </div>
-                                <p class="text-xs text-slate-400">A certificate is preferred. Leaving this blank never wipes the stored secret.</p>
+                                <p class="text-xs text-slate-500">A certificate is preferred. Leaving this blank never wipes the stored secret.</p>
                             </div>
                         </div>
                         <div class="flex justify-end pt-6 mt-2">
@@ -2073,7 +2077,7 @@
 
                     <section id="sec-system" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-server text-slate-400"></i>
+                            <i class="fas fa-server text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">System Settings</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -2090,7 +2094,7 @@
                     <!-- Chat Agent -->
                     <section id="sec-chat" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-comment-dots text-slate-400"></i>
+                            <i class="fas fa-comment-dots text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Chat Agent</h4>
                         </div>
                         <p class="text-xs text-slate-500 mb-4">
@@ -2115,7 +2119,7 @@
                                         🧠 Multi-agent orchestration (split a request across LLMs in parallel, then merge)
                                     </label>
                                 </div>
-                                <span class="text-xs text-slate-400">Experimental. Best with two or more endpoints (e.g. a local CPU box + GPU box + a cloud provider) so agents run concurrently instead of queuing on one server. Falls back to the normal single-model chat on any failure.</span>
+                                <span class="text-xs text-slate-500">Experimental. Best with two or more endpoints (e.g. a local CPU box + GPU box + a cloud provider) so agents run concurrently instead of queuing on one server. Falls back to the normal single-model chat on any failure.</span>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Planner / router model</label>
@@ -2126,7 +2130,7 @@
                                     <option value="{{ _ppin }}" {{ 'selected' if settings.ORCHESTRATOR_PLANNER_PIN == _ppin else '' }}>{{ e.label or e.model }} ({{ e.provider }}){{ ' — disabled' if e.enabled == False else '' }}</option>
                                     {% endfor %}
                                 </select>
-                                <span class="text-xs text-slate-400">Applies to the planning turn only; sub-tasks still route per their own complexity (harder work → more capable models, simpler work → cheaper ones). Falls back to your Chat provider pin, then Auto.</span>
+                                <span class="text-xs text-slate-500">Applies to the planning turn only; sub-tasks still route per their own complexity (harder work → more capable models, simpler work → cheaper ones). Falls back to your Chat provider pin, then Auto.</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Parallel Agents</label>
@@ -2145,7 +2149,7 @@
                                     <option value="{{ _pin }}" {{ 'selected' if settings.chat_pin == _pin else '' }}>{{ e.label or e.model }} ({{ e.provider }}){{ ' — disabled' if e.enabled == False else '' }}</option>
                                     {% endfor %}
                                 </select>
-                                <span class="text-xs text-slate-400">Hard-pin chat to one endpoint — e.g. a cloud provider that's always online — so a slow local builder doesn't make chat slow. Auto lets the picker rank by capability/cost (latency-favoured for chat).</span>
+                                <span class="text-xs text-slate-500">Hard-pin chat to one endpoint — e.g. a cloud provider that's always online — so a slow local builder doesn't make chat slow. Auto lets the picker rank by capability/cost (latency-favoured for chat).</span>
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Max Tool Iterations per Turn</label>
@@ -2172,7 +2176,7 @@
                                 <input type="number" name="CHAT_HISTORY_WINDOW" value="{{ settings.CHAT_HISTORY_WINDOW }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
-                                <label class="text-sm font-medium text-slate-600">System Prompt <span class="text-slate-400 font-normal">(blank = default assistant persona)</span></label>
+                                <label class="text-sm font-medium text-slate-600">System Prompt <span class="text-slate-500 font-normal">(blank = default assistant persona)</span></label>
                                 <textarea name="CHAT_SYSTEM_PROMPT" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="You are a helpful assistant.">{{ settings.CHAT_SYSTEM_PROMPT }}</textarea>
                             </div>
                             <div class="space-y-2">
@@ -2192,7 +2196,7 @@
                     <!-- Scheduler -->
                     <section id="sec-scheduler" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-clock text-slate-400"></i>
+                            <i class="fas fa-clock text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Scheduler</h4>
                         </div>
 
@@ -2201,7 +2205,7 @@
                             <span id="sched-mode-dot" class="w-2.5 h-2.5 rounded-full bg-slate-300 flex-shrink-0"></span>
                             <div class="flex-1 min-w-0">
                                 <span id="sched-mode-label" class="font-bold text-slate-500">Loading…</span>
-                                <span id="sched-reason" class="text-slate-400 ml-2"></span>
+                                <span id="sched-reason" class="text-slate-500 ml-2"></span>
                             </div>
                             <div id="sched-usage-wrap" class="hidden flex items-center gap-2">
                                 <div class="w-24 h-2 bg-slate-200 rounded-full overflow-hidden">
@@ -2209,7 +2213,7 @@
                                 </div>
                                 <span id="sched-usage-text" class="text-slate-500 whitespace-nowrap"></span>
                             </div>
-                            <button type="button" onclick="refreshSchedStatus()" class="text-[10px] text-slate-400 hover:text-slate-600 flex-shrink-0">↻</button>
+                            <button type="button" onclick="refreshSchedStatus()" class="text-[10px] text-slate-500 hover:text-slate-600 flex-shrink-0">↻</button>
                         </div>
 
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -2219,21 +2223,21 @@
                                     <input type="checkbox" name="SCHEDULER_ENABLED" {{ 'checked' if settings.get('SCHEDULER_ENABLED') else '' }} class="w-4 h-4 text-primary-text rounded">
                                     <div>
                                         <p class="text-sm font-medium text-slate-700">Enable Scheduler</p>
-                                        <p class="text-xs text-slate-400">Enforce work-hours cap and daily budget</p>
+                                        <p class="text-xs text-slate-500">Enforce work-hours cap and daily budget</p>
                                     </div>
                                 </label>
                                 <label class="flex items-center gap-3 cursor-pointer">
                                     <input type="checkbox" name="SCHEDULER_WEEKEND_FULL" {{ 'checked' if settings.get('SCHEDULER_WEEKEND_FULL', True) else '' }} class="w-4 h-4 text-primary-text rounded">
                                     <div>
                                         <p class="text-sm font-medium text-slate-700">Full Speed on Weekends</p>
-                                        <p class="text-xs text-slate-400">Ignore work-hours cap Sat &amp; Sun</p>
+                                        <p class="text-xs text-slate-500">Ignore work-hours cap Sat &amp; Sun</p>
                                     </div>
                                 </label>
                                 <label class="flex items-center gap-3 cursor-pointer">
                                     <input type="checkbox" name="TRIAGE_ONLY_MODE" {{ 'checked' if settings.get('TRIAGE_ONLY_MODE') else '' }} class="w-4 h-4 text-primary-text rounded">
                                     <div>
                                         <p class="text-sm font-medium text-slate-700">Always Triage Only</p>
-                                        <p class="text-xs text-slate-400">Analyse &amp; label every issue but never push fix commits — lowest LLM usage</p>
+                                        <p class="text-xs text-slate-500">Analyse &amp; label every issue but never push fix commits — lowest LLM usage</p>
                                     </div>
                                 </label>
                             </div>
@@ -2241,17 +2245,17 @@
                             <!-- Critical label -->
                             <div class="space-y-2">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Critical Label Override</p>
-                                <p class="text-xs text-slate-400">Issues with this label bypass the work-hours cap and daily budget and are always fixed immediately.</p>
+                                <p class="text-xs text-slate-500">Issues with this label bypass the work-hours cap and daily budget and are always fixed immediately.</p>
                                 <input type="text" name="SCHEDULER_CRITICAL_LABEL" value="{{ settings.get('SCHEDULER_CRITICAL_LABEL', 'critical') }}" placeholder="e.g. critical" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
-                                <p class="text-[10px] text-slate-400">Leave blank to disable the override.</p>
+                                <p class="text-[10px] text-slate-500">Leave blank to disable the override.</p>
                             </div>
 
                             <!-- Bug label (priority tier below critical, above log-detected) -->
                             <div class="space-y-2">
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Bug Label Priority</p>
-                                <p class="text-xs text-slate-400">Human-filed bugs with this label bypass the work-hours window and are processed before auto log-detected errors (bugs get the per-cycle cap first). Feature requests are unaffected (they aren't auto-processed).</p>
+                                <p class="text-xs text-slate-500">Human-filed bugs with this label bypass the work-hours window and are processed before auto log-detected errors (bugs get the per-cycle cap first). Feature requests are unaffected (they aren't auto-processed).</p>
                                 <input type="text" name="SCHEDULER_BUG_LABEL" value="{{ settings.get('SCHEDULER_BUG_LABEL', 'Bug') }}" placeholder="e.g. Bug" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
-                                <p class="text-[10px] text-slate-400">Matches the label File-a-Bug applies (Bug). Leave blank to disable the priority tier.</p>
+                                <p class="text-[10px] text-slate-500">Matches the label File-a-Bug applies (Bug). Leave blank to disable the priority tier.</p>
                             </div>
 
                             <!-- Work hours -->
@@ -2262,13 +2266,13 @@
                                         <label class="text-xs text-slate-500 mb-1 block">Start Hour</label>
                                         <input type="number" name="SCHEDULER_WORK_START_HOUR" min="0" max="23" value="{{ settings.get('SCHEDULER_WORK_START_HOUR', 7) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                     </div>
-                                    <span class="text-slate-400 mt-4">→</span>
+                                    <span class="text-slate-500 mt-4">→</span>
                                     <div class="flex-1">
                                         <label class="text-xs text-slate-500 mb-1 block">End Hour</label>
                                         <input type="number" name="SCHEDULER_WORK_END_HOUR" min="0" max="23" value="{{ settings.get('SCHEDULER_WORK_END_HOUR', 18) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
                                     </div>
                                 </div>
-                                <p class="text-[10px] text-slate-400">e.g. 7 → 18 means 7 AM to 6 PM</p>
+                                <p class="text-[10px] text-slate-500">e.g. 7 → 18 means 7 AM to 6 PM</p>
                             </div>
 
                             <!-- Budget -->
@@ -2281,7 +2285,7 @@
                                 <div class="space-y-1">
                                     <label class="text-xs text-slate-500">Work-hours cap (% of daily budget)</label>
                                     <input type="number" name="SCHEDULER_WORK_CAP_PCT" min="1" max="100" value="{{ settings.get('SCHEDULER_WORK_CAP_PCT', 25) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
-                                    <p class="text-[10px] text-slate-400">25% of 50 = 12 fixes before AppBuilder goes quiet during work hours</p>
+                                    <p class="text-[10px] text-slate-500">25% of 50 = 12 fixes before AppBuilder goes quiet during work hours</p>
                                 </div>
                             </div>
 
@@ -2290,7 +2294,7 @@
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Off-Hours Poll Interval</p>
                                 <label class="text-xs text-slate-500">Seconds between scans outside work hours</label>
                                 <input type="number" name="POLL_INTERVAL_SECONDS" min="60" value="{{ settings.get('POLL_INTERVAL_SECONDS', 3600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
-                                <p class="text-[10px] text-slate-400">Default 3600s (1 hour).</p>
+                                <p class="text-[10px] text-slate-500">Default 3600s (1 hour).</p>
                             </div>
 
                             <!-- Work-hours poll interval -->
@@ -2298,7 +2302,7 @@
                                 <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Work-Hours Poll Interval</p>
                                 <label class="text-xs text-slate-500">Seconds between scans during work hours</label>
                                 <input type="number" name="SCHEDULER_WORK_POLL_INTERVAL" min="60" value="{{ settings.get('SCHEDULER_WORK_POLL_INTERVAL', 3600) }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand text-sm">
-                                <p class="text-[10px] text-slate-400">Default 3600s (1 hour). Used only during the configured work hours; otherwise the Off-Hours interval above applies.</p>
+                                <p class="text-[10px] text-slate-500">Default 3600s (1 hour). Used only during the configured work hours; otherwise the Off-Hours interval above applies.</p>
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
@@ -2313,13 +2317,13 @@
                          feature_drive.py / feature_boundary.py. -->
                     <section id="sec-feature-drive" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-magic text-slate-400"></i>
+                            <i class="fas fa-magic text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Feature Auto-Drive</h4>
                         </div>
                         <div class="flex items-center gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200 mb-4">
                             <input type="checkbox" name="feature_drive_enabled" id="feature_drive_enabled" {{ 'checked' if settings.get('feature_drive_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="feature_drive_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, LM feature requests that clear admin-approval are classified as build/flag/clarify each scan cycle. A 'build' verdict runs the mutating agent and opens a PR — it always still needs a human Approve+Merge unless auto-merge is separately enabled below.">
-                                Enable Feature Auto-Drive <span class="text-slate-400 font-normal">(classify + build — always opens a PR, never pushes directly to a branch)</span>
+                                Enable Feature Auto-Drive <span class="text-slate-500 font-normal">(classify + build — always opens a PR, never pushes directly to a branch)</span>
                             </label>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -2336,7 +2340,7 @@
                         <div class="flex items-center gap-3 mt-4">
                             <input type="checkbox" name="feature_drive_require_marker" id="feature_drive_require_marker" {{ 'checked' if settings.get('feature_drive_require_marker', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="feature_drive_require_marker" class="text-xs font-medium text-slate-700" title="On (default): only LM-filed, admin-approved feature requests are classified. Off: any open issue carrying the Intake Label in a selected repo is classified, whether or not it came through LM's approval gate.">
-                                Require LM approval marker <span class="text-slate-400 font-normal">(off widens intake beyond LM-approved requests — not recommended until the boundary list is tuned)</span>
+                                Require LM approval marker <span class="text-slate-500 font-normal">(off widens intake beyond LM-approved requests — not recommended until the boundary list is tuned)</span>
                             </label>
                         </div>
                         <div class="space-y-2 mt-4">
@@ -2354,7 +2358,7 @@
                             <input type="text" name="feature_drive_repos_extra" placeholder="Additional repos (comma-separated) — leave everything blank/unchecked to use all Monitored Repositories" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
                         </div>
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
-                            <label class="text-sm font-medium text-slate-600">Boundaries <span class="text-slate-400 font-normal">(things Feature Auto-Drive must never build without you — add/remove/adjust freely)</span></label>
+                            <label class="text-sm font-medium text-slate-600">Boundaries <span class="text-slate-500 font-normal">(things Feature Auto-Drive must never build without you — add/remove/adjust freely)</span></label>
                             <textarea name="feature_boundaries_json" rows="14" class="w-full p-2 text-xs font-mono rounded-lg outline-none focus:ring-2 focus:ring-brand bg-slate-50" spellcheck="false">{{ settings.feature_boundaries_json }}</textarea>
                             <span class="text-xs text-slate-500">
                                 A JSON array. Each entry: <code class="bg-slate-100 px-1 rounded">id</code> (stable slug), <code class="bg-slate-100 px-1 rounded">label</code>, <code class="bg-slate-100 px-1 rounded">rule</code> (quoted verbatim when something is flagged), <code class="bg-slate-100 px-1 rounded">paths</code> (glob list), <code class="bg-slate-100 px-1 rounded">keywords</code>, <code class="bg-slate-100 px-1 rounded">hard</code> (true = flag immediately, no LLM call needed), <code class="bg-slate-100 px-1 rounded">enabled</code>.
@@ -2469,7 +2473,7 @@
                         </div>
 
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
-                            <label class="text-sm font-semibold text-slate-700">Premium Escalation <span class="text-slate-400 font-normal">(the top-tier models AppBuilder keeps in reserve)</span></label>
+                            <label class="text-sm font-semibold text-slate-700">Premium Escalation <span class="text-slate-500 font-normal">(the top-tier models AppBuilder keeps in reserve)</span></label>
                             <p class="text-xs text-slate-500">When the ordinary remediation ladder has spent its attempts — including the Opus-class last turn — AppBuilder may take <strong>one more</strong> turn using only the models ticked below. Those models are excluded from every other turn, so routine work never reaches for them.</p>
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
                                 <div class="space-y-2">
@@ -2482,7 +2486,7 @@
                                 </div>
                             </div>
                             <div class="space-y-2 mt-2">
-                                <label class="text-sm font-medium text-slate-600">Premium escalation models <span class="text-slate-400 font-normal">(ticked = reserved for the escalation turn)</span></label>
+                                <label class="text-sm font-medium text-slate-600">Premium escalation models <span class="text-slate-500 font-normal">(ticked = reserved for the escalation turn)</span></label>
                                 {% if premium_model_options %}
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-40 overflow-y-auto">
                                     {% for m in premium_model_options %}
@@ -2499,7 +2503,7 @@
                         </div>
 
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
-                            <label class="text-sm font-semibold text-slate-700">Scheduled Promotion <span class="text-slate-400 font-normal">(opens dev→qa / qa→main PRs on a cadence — never merges)</span></label>
+                            <label class="text-sm font-semibold text-slate-700">Scheduled Promotion <span class="text-slate-500 font-normal">(opens dev→qa / qa→main PRs on a cadence — never merges)</span></label>
                             <div class="flex items-center gap-3">
                                 <input type="checkbox" name="promote_schedule_enabled" id="promote_schedule_enabled" {{ 'checked' if settings.get('promote_schedule_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                 <label for="promote_schedule_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, AppBuilder opens a promotion PR (via .github/workflows/promote.yml) for each hop below on the configured interval. It only OPENS the PR; your existing review/auto-merge gates still decide whether it merges.">
@@ -2569,7 +2573,7 @@
                     </div>
                     {% endfor %}
                 </nav>
-                <div class="p-2 flex-none text-[10px] text-slate-400 border-t border-slate-200">
+                <div class="p-2 flex-none text-[10px] text-slate-500 border-t border-slate-200">
                     Hover a chat to rename or delete it
                 </div>
             </aside>
@@ -2580,7 +2584,7 @@
                     <h3 class="text-lg font-bold text-navy flex items-center gap-2 truncate">
                         <i class="fas fa-comments text-primary-text"></i>
                         <span id="chat-title" class="truncate">{{ active_chat_title }}</span>
-                        <span class="text-xs text-slate-400 font-normal">(auto LLM, persists across reboots)</span>
+                        <span class="text-xs text-slate-500 font-normal">(auto LLM, persists across reboots)</span>
                     </h3>
                     <button onclick="clearChat()" class="text-sm text-red-600 hover:text-red-700 font-medium flex items-center gap-1 flex-none">
                         <i class="fas fa-eraser"></i> Clear
@@ -2731,7 +2735,7 @@
             <div class="hpe-card p-5">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-bold text-navy">Model Performance</h3>
-                    <span class="text-xs text-slate-400">tokens/sec while generating</span>
+                    <span class="text-xs text-slate-500">tokens/sec while generating</span>
                 </div>
                 <div id="tps-body" class="text-sm text-slate-500 italic">
                     No generations measured yet — numbers appear as each model does real work.
@@ -2812,11 +2816,11 @@
                 <div id="diag-hc-error" class="hidden mt-2 text-xs text-amber-700"><span class="font-semibold">Last connection error:</span> <span id="diag-hc-error-msg" class="font-mono">—</span></div>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                     <div class="text-xs">
-                        <div class="text-slate-500 font-semibold mb-1">mTLS client cert <span class="font-normal text-slate-400">(presented to the hub)</span></div>
+                        <div class="text-slate-500 font-semibold mb-1">mTLS client cert <span class="font-normal text-slate-500">(presented to the hub)</span></div>
                         <div id="diag-hc-client-cert" class="font-mono text-slate-700 space-y-0.5">—</div>
                     </div>
                     <div class="text-xs">
-                        <div class="text-slate-500 font-semibold mb-1">WebUI server cert <span class="font-normal text-slate-400">(what browsers + GitHub webhooks see)</span></div>
+                        <div class="text-slate-500 font-semibold mb-1">WebUI server cert <span class="font-normal text-slate-500">(what browsers + GitHub webhooks see)</span></div>
                         <div id="diag-hc-webui-cert" class="font-mono text-slate-700 space-y-0.5">—</div>
                     </div>
                 </div>
@@ -3218,7 +3222,7 @@
                 chip.appendChild(label);
                 const x = document.createElement('button');
                 x.type = 'button';
-                x.className = 'text-slate-400 hover:text-red-500 font-bold leading-none';
+                x.className = 'text-slate-500 hover:text-red-500 font-bold leading-none';
                 x.textContent = '\u00d7';
                 x.title = 'Remove ' + id;
                 x.onclick = () => _abOidcSetGroups(_abOidcGroups().filter(g => g !== id));
@@ -3530,7 +3534,7 @@
                 const tidP = document.createElement('p');
                 tidP.className = 'task-tid text-slate-500 font-mono text-[10px] break-all mt-0.5';
                 const elapsedP = document.createElement('p');
-                elapsedP.className = 'task-elapsed text-slate-400 font-mono text-[10px] mt-0.5';
+                elapsedP.className = 'task-elapsed text-slate-500 font-mono text-[10px] mt-0.5';
                 const stepP = document.createElement('p');
                 stepP.className = 'task-current-step text-slate-500 text-[11px] italic mt-1 truncate';
 
@@ -3652,7 +3656,7 @@
                 if (!resp.ok) {
                     if (resp.status === 404) {
                         document.getElementById('task-details-content').innerHTML =
-                            `<div class="text-slate-400 italic text-center py-8">Task completed or no longer active.</div>`;
+                            `<div class="text-slate-500 italic text-center py-8">Task completed or no longer active.</div>`;
                         clearInterval(detailsPollingInterval);
                         currentTaskId = null;
                     }
@@ -4362,7 +4366,7 @@
                 } else {
                     wrap.classList.add('hidden');
                     label.textContent = 'Scheduler disabled';
-                    label.className = 'font-bold text-slate-400';
+                    label.className = 'font-bold text-slate-500';
                     dot.className = 'w-2.5 h-2.5 rounded-full flex-shrink-0 bg-slate-300';
                     reason.textContent = '';
                 }
@@ -4443,7 +4447,7 @@
                         + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.rss_mb != null ? p.rss_mb : '—') + '</td>'
                         + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.cpu_percent != null ? p.cpu_percent : '—') + '</td>'
                         + '</tr>').join('')
-                        : '<tr><td colspan="4" class="py-2 text-xs text-slate-400">psutil not installed — process list unavailable</td></tr>';
+                        : '<tr><td colspan="4" class="py-2 text-xs text-slate-500">psutil not installed — process list unavailable</td></tr>';
                 }
             } catch (e) { /* diagnostics must never throw in the UI */ }
         }
@@ -4505,7 +4509,7 @@
                         // Throughput for THIS endpoint, keyed by ModelKey — the
                         // same (provider, base_url, model) reachable two ways is
                         // one figure. '—' when never measured, never 0.
-                        + '<td class="py-2 pr-3 text-xs tabular-nums ' + (_tpsFor(p.key) ? 'font-semibold text-slate-700' : 'text-slate-400') + '">'
+                        + '<td class="py-2 pr-3 text-xs tabular-nums ' + (_tpsFor(p.key) ? 'font-semibold text-slate-700' : 'text-slate-500') + '">'
                           + (_tpsFor(p.key) || '—') + '</td>'
                         + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + lat + '</td>'
                         + '<td class="py-2 pr-3">' + status + '</td>'
@@ -4581,7 +4585,7 @@
                         const el = document.getElementById(elId);
                         if (!el) return;
                         if (!c || !c.exists) { el.innerHTML = '<span class="text-red-600">not present (' + ((c && c.path) || '—') + ')</span>'; return; }
-                        if (c.parse_error) { el.innerHTML = 'present at ' + c.path + ' <span class="text-slate-400">(unparsed: ' + c.parse_error + ')</span>'; return; }
+                        if (c.parse_error) { el.innerHTML = 'present at ' + c.path + ' <span class="text-slate-500">(unparsed: ' + c.parse_error + ')</span>'; return; }
                         const ss = c.self_signed
                             ? '<span class="' + (selfSignedIsBad ? 'text-red-600' : 'text-amber-600') + ' font-bold">self-signed</span>'
                             : '<span class="text-primary-text font-bold">CA-issued</span>';
@@ -4675,7 +4679,7 @@
                 const log = (up.restart_log || []).slice().reverse();
                 logEl.innerHTML = log.length
                     ? log.map(e => '<div>' + (e.at || '') + ' &nbsp; <span class="text-slate-500">' + e.kind + '</span> &nbsp; ' + (e.message || '') + '</div>').join('')
-                    : '<div class="text-slate-400">No recent events.</div>';
+                    : '<div class="text-slate-500">No recent events.</div>';
             } catch (e) {
                 const logEl = document.getElementById('diag-restart-log');
                 if (logEl) logEl.innerHTML = '<div class="text-red-500">Error loading diagnostics: ' + e + '</div>';
@@ -4866,7 +4870,7 @@
                 body.className = '';
                 body.innerHTML =
                     '<div class="overflow-x-auto"><table class="w-full text-sm">' +
-                    '<thead><tr class="text-left text-xs uppercase tracking-wider text-slate-400 border-b border-slate-200">' +
+                    '<thead><tr class="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200">' +
                     '<th class="py-2 pr-3">Endpoint</th><th class="py-2 pr-3">Tier</th>' +
                     '<th class="py-2 pr-3" title="Declared speed class from the Model Registry. Latency-sensitive work (chat) is routed fastest-first on this, with measured tok/s breaking ties — so a brand-new fast endpoint is not penalised for having no samples yet.">Speed</th>' +
                     '<th class="py-2 pr-3 text-right">tok/s</th>' +
@@ -4893,7 +4897,7 @@
                         '</tr>';
                     }).join('') +
                     '</tbody></table>' +
-                    '<p class="text-[11px] text-slate-400 mt-3">Median tok/s and wire latency over completed generations only, so idle time ' +
+                    '<p class="text-[11px] text-slate-500 mt-3">Median tok/s and wire latency over completed generations only, so idle time ' +
                     'between calls is excluded. Endpoints are keyed by provider · model — the same model on two boxes is two rows.</p></div>';
             }).catch(() => { /* keep the last render on a transient fetch failure */ });
         }
@@ -4954,7 +4958,7 @@
                 el.innerHTML = rows.length ? rows.map(u =>
                     '<div class="flex items-center justify-between py-1 border-b border-slate-100">' +
                     '<span class="font-mono text-slate-700">' + _bfEsc(u.username) + '</span>' +
-                    '<span class="text-slate-400">last login: ' + _bfEsc(u.last_login || 'never') + '</span>' +
+                    '<span class="text-slate-500">last login: ' + _bfEsc(u.last_login || 'never') + '</span>' +
                     '<button type="button" class="text-red-600 hover:text-red-700 font-bold" ' +
                     'onclick="authDeleteUser(\'' + _bfEsc(u.username) + '\')">Remove</button></div>'
                 ).join('') : '<span class="italic">No accounts.</span>';
@@ -4997,7 +5001,7 @@
             if (!body) return;
             const preset = (document.getElementById('llmdiag-preset') || {}).value || null;
             if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
-            body.innerHTML = '<span class="text-slate-400 italic">Running the picker over the current endpoints…</span>';
+            body.innerHTML = '<span class="text-slate-500 italic">Running the picker over the current endpoints…</span>';
             if (summary) summary.textContent = '';
             try {
                 const r = await fetch('/api/llm/diag', {
@@ -5008,7 +5012,7 @@
                 if (d.error) { body.innerHTML = '<span class="text-red-600">' + _bfEsc(d.error) + '</span>'; return; }
                 const presets = d.presets || [];
                 if (!presets.length) {
-                    body.innerHTML = '<span class="text-slate-400 italic">No presets returned.</span>';
+                    body.innerHTML = '<span class="text-slate-500 italic">No presets returned.</span>';
                     return;
                 }
                 const statusPill = (st) => st === 'selected'
@@ -5017,10 +5021,10 @@
                         ? '<span class="px-2 py-0.5 rounded text-xs font-bold bg-sky-100 text-sky-700">ALT</span>'
                         : '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">EXCLUDED</span>');
                 const perfCell = (row) => {
-                    if (!row.n) return '<span class="text-slate-400">no samples</span>';
+                    if (!row.n) return '<span class="text-slate-500">no samples</span>';
                     const tps = row.tps != null ? row.tps.toFixed(1) + ' tok/s' : '—';
                     const lat = row.latency_ms != null ? Math.round(row.latency_ms) + ' ms' : '—';
-                    return '<span class="text-slate-600">' + tps + ' · ' + lat + '</span> <span class="text-slate-400">(n=' + row.n + ')</span>';
+                    return '<span class="text-slate-600">' + tps + ' · ' + lat + '</span> <span class="text-slate-500">(n=' + row.n + ')</span>';
                 };
                 const blocks = presets.map(p => {
                     const rows = (p.rows || []).map(row =>
@@ -5044,11 +5048,11 @@
                             '<th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Provider / model</th>' +
                             '<th class="px-3 py-2 text-center">Tier</th><th class="px-3 py-2 text-left">Perf</th>' +
                             '<th class="px-3 py-2 text-left">Reason</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-                        : '<div class="text-xs text-slate-400 italic mt-1">No candidates enumerated.</div>';
+                        : '<div class="text-xs text-slate-500 italic mt-1">No candidates enumerated.</div>';
                     return '<div class="mb-4">' +
                         '<div class="flex items-baseline justify-between gap-2">' +
                         '<div><span class="font-bold text-slate-700 font-mono">' + _bfEsc(p.label) + '</span>' +
-                        '<span class="text-xs text-slate-400 ml-2">' + _bfEsc(p.description || '') + '</span></div>' +
+                        '<span class="text-xs text-slate-500 ml-2">' + _bfEsc(p.description || '') + '</span></div>' +
                         '<div>→ ' + win + '</div></div>' + tbl + '</div>';
                 }).join('');
                 body.innerHTML = blocks;
@@ -5851,7 +5855,7 @@
             const twisty = document.createElement('button');
             twisty.type = 'button';
             twisty.title = 'Show or hide every field for this rule';
-            twisty.className = 'w-6 h-6 shrink-0 rounded text-slate-400 hover:bg-slate-100';
+            twisty.className = 'w-6 h-6 shrink-0 rounded text-slate-500 hover:bg-slate-100';
             twisty.textContent = abRegOpen.has(idx) ? '\u25be' : '\u25b8';
             twisty.addEventListener('click', () => {
                 if (abRegOpen.has(idx)) abRegOpen.delete(idx); else abRegOpen.add(idx);
@@ -5866,7 +5870,7 @@
 
             if (rule.label) {
                 const lab = document.createElement('span');
-                lab.className = 'text-xs text-slate-400';
+                lab.className = 'text-xs text-slate-500';
                 lab.textContent = rule.label;
                 head.appendChild(lab);
             }
@@ -6036,7 +6040,7 @@
 
             if (!shown) {
                 const empty = document.createElement('p');
-                empty.className = 'text-xs text-slate-400 p-4 text-center border border-dashed border-slate-200 rounded-lg';
+                empty.className = 'text-xs text-slate-500 p-4 text-center border border-dashed border-slate-200 rounded-lg';
                 empty.textContent = abRegRules.length
                     ? 'No rule matches that filter.'
                     : 'No curated rules yet — press "Add rule" to create one.';
@@ -6329,16 +6333,16 @@
         async function mmRefresh() {
             const list = document.getElementById('mm-list');
             if (!list) return;
-            list.innerHTML = '<span class="italic text-slate-400">Loading…</span>';
+            list.innerHTML = '<span class="italic text-slate-500">Loading…</span>';
             try {
                 const r = await fetch('/api/local-llm/models?base_url=' + encodeURIComponent(_mmBase()));
                 const d = await r.json();
                 const models = d.models || [];
-                if (!models.length) { list.innerHTML = '<span class="italic text-slate-400">No models found at this endpoint.</span>'; return; }
+                if (!models.length) { list.innerHTML = '<span class="italic text-slate-500">No models found at this endpoint.</span>'; return; }
                 list.innerHTML = models.map(m => {
                     const n = _mmEsc(m.name);
                     return `<div class="flex items-center justify-between py-1.5 border-b border-slate-100">
-                        <span class="font-mono text-slate-700">${n} <span class="text-slate-400">(${m.size_gb} GB)</span></span>
+                        <span class="font-mono text-slate-700">${n} <span class="text-slate-500">(${m.size_gb} GB)</span></span>
                         <button onclick="mmDelete('${n}')" class="btn-danger text-xs px-2 py-1 rounded font-bold">Delete</button>
                     </div>`;
                 }).join('');
