@@ -314,9 +314,9 @@
             </div>
             <div class="px-5 py-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
                 <button id="bf-confirm-cancel" type="button"
-                    class="px-4 py-2 rounded-lg text-xs font-semibold border border-slate-300 text-slate-600 hover:bg-slate-100 transition-all">Cancel</button>
+                    class="px-4 py-2 rounded-full text-xs font-semibold border border-slate-300 text-slate-600 hover:bg-slate-100 transition-all">Cancel</button>
                 <button id="bf-confirm-ok" type="button"
-                    class="px-4 py-2 rounded-lg text-xs font-semibold transition-all"></button>
+                    class="px-4 py-2 rounded-full text-xs font-semibold transition-all"></button>
             </div>
         </div>
     </div>
@@ -581,40 +581,40 @@
                 <div class="flex justify-between items-center flex-wrap gap-2">
                     <h3 class="text-lg font-bold text-navy whitespace-nowrap">Status</h3>
                     <div class="flex gap-2 items-center flex-wrap">
-                        <button onclick="retryAll(null)" class="btn-primary px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap">
+                        <button onclick="retryAll(null)" class="btn-primary px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap">
                             <i class="fas fa-redo-alt mr-1"></i> Retry All
                         </button>
-                        <button onclick="clearHistory()" class="btn-danger px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap">
+                        <button onclick="clearHistory()" class="btn-danger px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap">
                             <i class="fas fa-trash-alt mr-1"></i> Clear History
                         </button>
-                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (ab-dismissed) and clear the whole history">
+                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (ab-dismissed) and clear the whole history">
                             <i class="fas fa-trash-alt mr-1"></i> Dismiss All
                         </button>
                     </div>
                 </div>
                 <!-- Row 2: filters (pinned right) -->
                 <div class="flex items-center flex-nowrap gap-2">
-                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-brand/10 hover:bg-brand/20 text-primary-text border-brand" title="Active issues (closed hidden)">Active</button>
-                    <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
-                    <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
-                    <button data-filter="resolved" onclick="filterActivity('resolved')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Resolved</button>
-                    <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
-                    <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
-                    <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
-                    <button data-filter="feature_flagged" onclick="filterActivity('feature_flagged')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests crossing a boundary — need a human decision">Feature Flagged</button>
-                    <button data-filter="feature_needs_info" onclick="filterActivity('feature_needs_info')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests awaiting more detail from the requester">Feature Needs Info</button>
-                    <button data-filter="feature_built" onclick="filterActivity('feature_built')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests auto-built — PR open">Feature Built</button>
+                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-brand/10 hover:bg-brand/20 text-primary-text border-brand" title="Active issues (closed hidden)">Active</button>
+                    <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
+                    <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
+                    <button data-filter="resolved" onclick="filterActivity('resolved')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Resolved</button>
+                    <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
+                    <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
+                    <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
+                    <button data-filter="feature_flagged" onclick="filterActivity('feature_flagged')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests crossing a boundary — need a human decision">Feature Flagged</button>
+                    <button data-filter="feature_needs_info" onclick="filterActivity('feature_needs_info')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests awaiting more detail from the requester">Feature Needs Info</button>
+                    <button data-filter="feature_built" onclick="filterActivity('feature_built')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests auto-built — PR open">Feature Built</button>
                     </div>
                     <!-- PR filters on their own row: they are a different object
                          (pull requests, not issues) and wrapping them into the issue
                          row made the two sets read as one list. -->
                     <div class="flex items-center flex-nowrap gap-2 mt-1">
-                    <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs AppBuilder has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PR Pending</button>
-                    <button data-filter="pr_approved" onclick="filterActivity('pr_approved')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Approved"><i class="fas fa-code-branch mr-1"></i>PR Approved</button>
-                    <button data-filter="pr_merged" onclick="filterActivity('pr_merged')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human Merged"><i class="fas fa-code-branch mr-1"></i>PR Merged</button>
-                    <button data-filter="pr_auto_merged" onclick="filterActivity('pr_auto_merged')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature-drive PRs auto-merged unattended — no human clicked Approve/Merge"><i class="fas fa-robot mr-1"></i>PR Auto-Merged</button>
-                    <button data-filter="pr_denied" onclick="filterActivity('pr_denied')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Denied"><i class="fas fa-code-branch mr-1"></i>PR Denied</button>
-                    <button data-filter="pr_closed" onclick="filterActivity('pr_closed')" class="filter-btn px-2 py-0.5 rounded text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs closed without merging (e.g. superseded). Reachable only here — they are not a System Health sub-bucket."><i class="fas fa-code-branch mr-1"></i>PR Closed</button>
+                    <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs AppBuilder has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PR Pending</button>
+                    <button data-filter="pr_approved" onclick="filterActivity('pr_approved')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Approved"><i class="fas fa-code-branch mr-1"></i>PR Approved</button>
+                    <button data-filter="pr_merged" onclick="filterActivity('pr_merged')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human Merged"><i class="fas fa-code-branch mr-1"></i>PR Merged</button>
+                    <button data-filter="pr_auto_merged" onclick="filterActivity('pr_auto_merged')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature-drive PRs auto-merged unattended — no human clicked Approve/Merge"><i class="fas fa-robot mr-1"></i>PR Auto-Merged</button>
+                    <button data-filter="pr_denied" onclick="filterActivity('pr_denied')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Denied"><i class="fas fa-code-branch mr-1"></i>PR Denied</button>
+                    <button data-filter="pr_closed" onclick="filterActivity('pr_closed')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs closed without merging (e.g. superseded). Reachable only here — they are not a System Health sub-bucket."><i class="fas fa-code-branch mr-1"></i>PR Closed</button>
                     <i class="fas fa-history text-slate-500 ml-2"></i>
                 </div>
             </div>
@@ -642,27 +642,27 @@
                                      re-evaluates it, not a manual retry. Re-evaluate re-queues it for
                                      that classify pass now (e.g. after a classifier error). -->
                                 {% if info.status in ('feature_flagged', 'feature_classify_retry') %}
-                                <button onclick="reevaluateFeature('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 transition-colors" title="Re-queue for classification on the next feature-drive cycle (same boundary checks, build gates and PR review as before — nothing is built immediately)">Re-evaluate</button>
+                                <button onclick="reevaluateFeature('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 transition-colors" title="Re-queue for classification on the next feature-drive cycle (same boundary checks, build gates and PR review as before — nothing is built immediately)">Re-evaluate</button>
                                 {% endif %}
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                                 {% elif info.status == 'feature_built' %}
                                 {% if info.pr_url %}
                                 <a href="{{ info.pr_url }}" target="_blank" class="text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap bg-teal-100 hover:bg-teal-200 text-teal-700 border border-teal-200 transition-colors">View PR</a>
                                 {% endif %}
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                                 {% else %}
                                 {% if info.pipeline == 'fix_engine' and info.status not in ('processing', 'awaiting_review') %}
-                                <button onclick="reevaluateFeature('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 transition-colors" title="Feature request that was handed to the fix pipeline: re-queue it for the feature drive (classify, build agent, pre-PR guardrails)">Re-evaluate</button>
+                                <button onclick="reevaluateFeature('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 transition-colors" title="Feature request that was handed to the fix pipeline: re-queue it for the feature drive (classify, build agent, pre-PR guardrails)">Re-evaluate</button>
                                 {% endif %}
-                                <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap">Retry</button>
-                                <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when AppBuilder marked it fixed but the fix didn't actually land">Reopen</button>
+                                <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap">Retry</button>
+                                <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when AppBuilder marked it fixed but the fix didn't actually land">Reopen</button>
                                 {% if claude_enabled %}
-                                <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
+                                <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
                                 {% endif %}
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
+                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
                                 {% endif %}
                             </div>
                         </td>
@@ -824,19 +824,19 @@
                                 {% elif pr.merged %}
                                 <span class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
                                 {% elif pr.denied %}
-                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                 <span class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-red-100 text-red-700 border border-red-300"><i class="fas fa-ban mr-1"></i>DENIED</span>
                                 {% elif pr.closed %}
-                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                 <span class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
                                 {% else %}
-                                    <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
+                                    <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
                                     {% if pr.findings and pr.findings > 0 %}
                                     {# Human-triggered only — AppBuilder never applies a PR fix on its
                                        own. Generates a fix for the findings above, gates it through
                                        the same skeptical panel the bug/issue pipeline uses, and on
                                        approval pushes a new commit onto THIS PR's own branch. #}
-                                    <button onclick="fixPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-amber-500 text-white hover:bg-amber-600 border border-amber-600" title="Generate an AI fix for this PR's findings, gate it through the skeptical reviewer panel, and push it as a new commit onto this PR's branch. You will still Approve/Merge separately."><i class="fas fa-wrench mr-1"></i>Fix</button>
+                                    <button onclick="fixPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-amber-500 text-white hover:bg-amber-600 border border-amber-600" title="Generate an AI fix for this PR's findings, gate it through the skeptical reviewer panel, and push it as a new commit onto this PR's branch. You will still Approve/Merge separately."><i class="fas fa-wrench mr-1"></i>Fix</button>
                                     {% endif %}
                                     {% if pr.approved %}
                                     {# Approved → the human sign-off is done and Merge is unlocked. No
@@ -844,12 +844,12 @@
                                        approved signal (mirrors the dynamic approvePr() swap below), and
                                        this is the busiest row state, so dropping the redundant badge
                                        actually saves the space it needs. #}
-                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
+                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
                                     {% else %}
                                     {# Not approved yet → Merge is gated; only Approve (or Deny) is offered. #}
-                                    <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
+                                    <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
                                     {% endif %}
-                                    <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
+                                    <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
                                 {% endif %}
                             </div>
                         </td>
@@ -919,9 +919,9 @@
                     </p>
                 </div>
                 <div class="flex gap-2 flex-wrap">
-                    <button onclick="runLogAnalysis('self')" id="log-analysis-btn" class="py-1 px-3 text-xs btn-primary rounded font-bold"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</button>
-                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300">↻ Refresh</button>
-                    <button onclick="copyLogs()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300"><i class="fas fa-copy mr-1"></i>Copy</button>
+                    <button onclick="runLogAnalysis('self')" id="log-analysis-btn" class="py-1 px-3 text-xs btn-primary rounded-full font-bold"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</button>
+                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold border border-slate-300">↻ Refresh</button>
+                    <button onclick="copyLogs()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold border border-slate-300"><i class="fas fa-copy mr-1"></i>Copy</button>
                 </div>
             </div>
             <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
@@ -977,9 +977,9 @@
                     </p>
                 </div>
                 <div class="flex gap-2 flex-wrap">
-                    <button onclick="runLogAnalysis('hub')" id="log-analysis-btn" class="py-1 px-3 text-xs btn-primary rounded font-bold"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</button>
-                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300">↻ Refresh</button>
-                    <button onclick="showHubRaw()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold border border-slate-300">Debug Raw</button>
+                    <button onclick="runLogAnalysis('hub')" id="log-analysis-btn" class="py-1 px-3 text-xs btn-primary rounded-full font-bold"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</button>
+                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold border border-slate-300">↻ Refresh</button>
+                    <button onclick="showHubRaw()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold border border-slate-300">Debug Raw</button>
                 </div>
             </div>
             <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
@@ -1203,7 +1203,7 @@
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <div class="flex items-center justify-between gap-3">
                                     <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-500 font-normal">(routes Hub log errors to the right repo)</span></label>
-                                    <button type="button" onclick="autofillModuleRepoMap()" id="mrm-autofill-btn" class="btn-sec px-3 py-1 rounded font-bold text-xs whitespace-nowrap" title="Suggest entries from the repos you already monitor. Only fills ALIASES (module type differs from repo name) — names that already auto-match are left out. Never overwrites entries you have set.">Auto-fill</button>
+                                    <button type="button" onclick="autofillModuleRepoMap()" id="mrm-autofill-btn" class="btn-sec px-3 py-1 rounded-full font-bold text-xs whitespace-nowrap" title="Suggest entries from the repos you already monitor. Only fills ALIASES (module type differs from repo name) — names that already auto-match are left out. Never overwrites entries you have set.">Auto-fill</button>
                                 </div>
                                 <div id="mrm-autofill-note" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 text-slate-600"></div>
                                 <textarea name="module_repo_map" id="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
@@ -1240,7 +1240,7 @@
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -1329,7 +1329,7 @@
                                                     <input type="text" id="claude-cli-code" placeholder="Paste authorization code…"
                                                            class="flex-1 p-1.5 text-xs rounded border border-violet-300 outline-none focus:ring-2 focus:ring-violet-400 bg-white font-mono">
                                                     <button type="button" onclick="submitClaudeCode()"
-                                                            class="py-1 px-3 text-xs bg-violet-600 hover:bg-violet-700 text-white rounded font-bold transition-colors">Submit</button>
+                                                            class="py-1 px-3 text-xs bg-violet-600 hover:bg-violet-700 text-white rounded-full font-bold transition-colors">Submit</button>
                                                 </div>
                                             </div>
                                         </div>
@@ -1356,7 +1356,7 @@
                         <div class="mb-6">
                             <div class="flex items-center justify-between mb-3">
                                 <p class="text-xs font-bold text-slate-500">Step 2 — Provider / Model Entries</p>
-                                <button type="button" onclick="showAddEntry()" class="text-xs px-3 py-1 btn-primary rounded font-bold">+ Add Entry</button>
+                                <button type="button" onclick="showAddEntry()" class="text-xs px-3 py-1 btn-primary rounded-full font-bold">+ Add Entry</button>
                             </div>
 
                             <!-- Add entry form (hidden by default) -->
@@ -1389,8 +1389,8 @@
                                     </label>
                                 </div>
                                 <div class="flex gap-2">
-                                    <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs btn-primary rounded font-bold">Add</button>
-                                    <button type="button" onclick="document.getElementById('add-entry-form').classList.add('hidden')" class="px-3 py-1 text-xs btn-sec rounded font-bold">Cancel</button>
+                                    <button type="button" onclick="addEntry()" class="px-3 py-1 text-xs btn-primary rounded-full font-bold">Add</button>
+                                    <button type="button" onclick="document.getElementById('add-entry-form').classList.add('hidden')" class="px-3 py-1 text-xs btn-sec rounded-full font-bold">Cancel</button>
                                 </div>
                             </div>
 
@@ -1438,8 +1438,8 @@
                                             <input type="text" id="edit-apikey-{{ entry.id }}" title="Leave blank to keep the existing key; type to override the shared credential" value="" data-touched="0" oninput="this.dataset.touched='1'" placeholder="{{ '•••• already set — leave blank to keep, type to replace' if entry.has_key else 'API key (optional — overrides shared)' }}" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                         </div>
                                         <div class="flex gap-2">
-                                            <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs btn-primary rounded font-bold">Save</button>
-                                            <button type="button" onclick="cancelEdit('{{ entry.id }}')" class="px-3 py-1 text-xs btn-sec rounded font-bold">Cancel</button>
+                                            <button type="button" onclick="saveEntry('{{ entry.id }}')" class="px-3 py-1 text-xs btn-primary rounded-full font-bold">Save</button>
+                                            <button type="button" onclick="cancelEdit('{{ entry.id }}')" class="px-3 py-1 text-xs btn-sec rounded-full font-bold">Cancel</button>
                                         </div>
                                     </div>
                                 </div>
@@ -1458,7 +1458,7 @@
                         <div class="mb-6 p-4 rounded-lg bg-slate-50 border border-slate-200">
                             <p class="text-xs font-bold text-slate-500 mb-1">Step 3 &mdash; Model Registry (capability &amp; cost rules)</p>
                             <p class="text-xs text-slate-500 mb-3">Each <b>enabled</b> endpoint above is ranked per call by the registry: which model can do how hard a job, at what cost tier, with which capabilities. It now has its own tab with a labelled editor &mdash; every field is a dropdown, number or checkbox, so there is no syntax to guess at.</p>
-                            <button type="button" title="Open the Model Registry tab -- edit cost tier, capability rank, speed class and capability flags per rule with labelled controls" onclick="settingsTab('sec-model-registry')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-sliders-h mr-1"></i>Open Model Registry</button>
+                            <button type="button" title="Open the Model Registry tab -- edit cost tier, capability rank, speed class and capability flags per rule with labelled controls" onclick="settingsTab('sec-model-registry')" class="px-3 py-1.5 rounded-full text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-sliders-h mr-1"></i>Open Model Registry</button>
                             {% if registry_unclassified %}
                             <span class="ml-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">{{ registry_unclassified|length }} unclassified model(s) need a rule</span>
                             {% endif %}
@@ -1472,7 +1472,7 @@
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -1506,7 +1506,7 @@
                             (cost tier <span class="font-mono">unknown</span> &mdash; admitted only as a last resort). Add a rule for each to control how it is used:
                             <div class="mt-2 flex flex-wrap gap-2">
                                 {% for u in registry_unclassified %}
-                                <button type="button" title="Add a curated rule for {{ u.provider }} / {{ u.model }} prefilled with safe defaults, then tune it below" onclick="promoteRegistryStub('{{ u.provider }}', '{{ u.model }}')" class="px-2 py-1 rounded bg-white border border-amber-300 hover:bg-amber-100 font-mono text-xs">+ {{ u.provider }} / {{ u.model }}</button>
+                                <button type="button" title="Add a curated rule for {{ u.provider }} / {{ u.model }} prefilled with safe defaults, then tune it below" onclick="promoteRegistryStub('{{ u.provider }}', '{{ u.model }}')" class="px-2 py-1 rounded-full bg-white border border-amber-300 hover:bg-amber-100 font-mono text-xs">+ {{ u.provider }} / {{ u.model }}</button>
                                 {% endfor %}
                             </div>
                         </div>
@@ -1516,10 +1516,10 @@
 
                         <!-- Toolbar -->
                         <div class="flex flex-wrap items-center gap-2 mb-3">
-                            <button type="button" title="Append a new empty rule with safe defaults (cheap / medium / streaming) to the bottom of the list" onclick="abRegAdd()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-plus mr-1"></i>Add rule</button>
-                            <button type="button" title="Upsert free-tier catch-all rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" onclick="registrySetLocalFree()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Set local providers free</button>
-                            <button type="button" title="Expand every rule card so all fields are visible" onclick="abRegExpandAll(true)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Expand all</button>
-                            <button type="button" title="Collapse every rule card back to its one-line summary" onclick="abRegExpandAll(false)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Collapse all</button>
+                            <button type="button" title="Append a new empty rule with safe defaults (cheap / medium / streaming) to the bottom of the list" onclick="abRegAdd()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-plus mr-1"></i>Add rule</button>
+                            <button type="button" title="Upsert free-tier catch-all rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" onclick="registrySetLocalFree()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Set local providers free</button>
+                            <button type="button" title="Expand every rule card so all fields are visible" onclick="abRegExpandAll(true)" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Expand all</button>
+                            <button type="button" title="Collapse every rule card back to its one-line summary" onclick="abRegExpandAll(false)" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Collapse all</button>
                             <input id="registry-filter" type="search" placeholder="Filter by provider, match or label&hellip;" title="Show only rules whose provider, match glob, label or id contains this text. Filtering never changes what is saved." oninput="abRegRender()" class="ml-auto w-64 p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-brand">
                         </div>
 
@@ -1549,7 +1549,7 @@
                         <div id="registry-json-box" hidden class="mt-2">
                             <p class="text-xs text-slate-500 mb-2">This is the value that posts. The cards above rewrite it on every change; edit it directly and press <b>Apply JSON to editor</b> to pull your changes back into the cards. A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span> and <span class="font-mono">match</span>. Invalid JSON is rejected on save and the previous value is kept.</p>
                             <textarea id="model_registry_json" name="model_registry_json" rows="14" spellcheck="false" title="The raw model-registry rule list, as JSON. Normally maintained by the cards above." class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">{{ registry_rules_json }}</textarea>
-                            <button type="button" title="Re-parse the JSON above and rebuild the rule cards from it. Use after editing the JSON by hand." onclick="abRegApplyJson()" class="mt-2 px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Apply JSON to editor</button>
+                            <button type="button" title="Re-parse the JSON above and rebuild the rule cards from it. Use after editing the JSON by hand." onclick="abRegApplyJson()" class="mt-2 px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Apply JSON to editor</button>
                         </div>
 
                         <!-- Effective merged registry (read-only) -->
@@ -1589,7 +1589,7 @@
                         </div>
 
                         <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" title="Persist the registry (and every other settings tab) to config" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" title="Persist the registry (and every other settings tab) to config" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -1634,7 +1634,7 @@
                         <div class="flex items-center gap-3">
                             <button type="button" onclick="startLocalLLMSetup()"
                                     id="local-llm-setup-btn"
-                                    class="py-2 px-4 rounded-lg font-bold btn-primary transition-all duration-200 text-sm">
+                                    class="py-2 px-4 rounded-full font-bold btn-primary transition-all duration-200 text-sm">
                                 <i class="fas fa-bolt mr-2"></i>Setup Local LLM
                             </button>
                             <span id="local-llm-setup-state" class="text-xs text-slate-500"></span>
@@ -1650,7 +1650,7 @@
                             <p class="text-xs text-slate-500 mb-3">List, pull, and remove models on an Ollama endpoint. Point it at your local box (default) or a remote one (e.g. the M4) via the Endpoint field.</p>
                             <div class="flex flex-wrap gap-2 items-center mb-3">
                                 <input type="text" id="mm-baseurl" value="http://localhost:11434" placeholder="Endpoint (http://host:11434)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
-                                <button type="button" onclick="mmRefresh()" class="btn-sec px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-sync-alt mr-1"></i>List</button>
+                                <button type="button" onclick="mmRefresh()" class="btn-sec px-3 py-2 rounded-full text-xs font-bold whitespace-nowrap"><i class="fas fa-sync-alt mr-1"></i>List</button>
                             </div>
                             <div class="flex flex-wrap gap-2 items-center mb-1">
                                 <input type="text" id="mm-pull-model" list="mm-model-suggestions" placeholder="Model to pull (type or pick — e.g. qwen2.5-coder:14b)" class="flex-1 min-w-[220px] p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
@@ -1669,7 +1669,7 @@
                                     <option value="phi4"></option>
                                     <option value="nomic-embed-text"></option>
                                 </datalist>
-                                <button type="button" onclick="mmPull()" id="mm-pull-btn" class="btn-primary px-3 py-2 rounded-md text-xs font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
+                                <button type="button" onclick="mmPull()" id="mm-pull-btn" class="btn-primary px-3 py-2 rounded-full text-xs font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
                             </div>
                             <p class="text-xs text-slate-500 mb-3">Type any name from <span class="font-mono">ollama.com/library</span>, or click Pull on one below. Pull downloads from Ollama's cloud registry to the endpoint above.</p>
 
@@ -1682,7 +1682,7 @@
                                     ('deepseek-coder-v2:16b','~8.9 GB'), ('gemma2:27b','~16 GB') ] %}
                                 <div class="flex items-center justify-between py-1 px-2 rounded bg-slate-50 border border-slate-100">
                                     <span class="font-mono text-xs text-slate-700">{{ m }} <span class="text-slate-500">{{ sz }}</span></span>
-                                    <button type="button" onclick="mmPull('{{ m }}')" class="btn-sec text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
+                                    <button type="button" onclick="mmPull('{{ m }}')" class="btn-sec text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap"><i class="fas fa-download mr-1"></i>Pull</button>
                                 </div>
                                 {% endfor %}
                             </div>
@@ -1696,7 +1696,7 @@
                         </div>
 
                                             <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -1737,7 +1737,7 @@
                             <div class="space-y-2 col-span-1 md:col-span-2 border-t border-slate-200 pt-4 mt-2">
                                 <div class="flex items-center justify-between">
                                     <label class="text-sm font-medium text-slate-600">User Accounts <span class="text-slate-500 font-normal">(every account has full admin access)</span></label>
-                                    <button type="button" onclick="loadAuthUsers()" class="btn-sec px-3 py-1 rounded font-bold text-xs">Refresh</button>
+                                    <button type="button" onclick="loadAuthUsers()" class="btn-sec px-3 py-1 rounded-full font-bold text-xs">Refresh</button>
                                 </div>
                                 <div id="auth-users-list" class="text-xs text-slate-500 italic">Not loaded.</div>
                                 <div class="grid grid-cols-1 md:grid-cols-3 gap-2 pt-2">
@@ -1795,7 +1795,7 @@
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -1833,9 +1833,9 @@
                             <div id="hub-agent-message" class="text-xs text-slate-500 mb-2">{{ state.hub_agent_message }}</div>
                             <div class="flex items-center gap-2">
                                 <button type="button" onclick="hubAgentReregister()"
-                                        class="px-3 py-1 text-xs btn-primary rounded font-bold">Re-register</button>
+                                        class="px-3 py-1 text-xs btn-primary rounded-full font-bold">Re-register</button>
                                 <button type="button" onclick="hubAgentRefresh()"
-                                        class="px-3 py-1 text-xs btn-sec rounded font-bold">Refresh</button>
+                                        class="px-3 py-1 text-xs btn-sec rounded-full font-bold">Refresh</button>
                             </div>
                             <p class="text-xs text-slate-500 mt-2">
                                 Approve <code class="bg-slate-100 px-1 rounded">ab</code> in the Hub WebUI → Setup → Spoke Approvals
@@ -1900,9 +1900,9 @@
                                            placeholder="{% if settings.llm_proxy_api_key_configured %}•••••••••• already set — leave blank to keep it{% else %}Required — set a key to enable the API{% endif %}"
                                            class="flex-1 p-2 text-sm rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                     <button type="button" onclick="abProxyKeyGenerate()" title="Generate a random 32-byte key in your browser and put it in the field. Copy it before saving — it is never shown again."
-                                            class="px-3 py-2 text-xs font-bold rounded-md border border-slate-300 hover:bg-slate-100 whitespace-nowrap">Generate</button>
+                                            class="px-3 py-2 text-xs font-bold rounded-full border border-slate-300 hover:bg-slate-100 whitespace-nowrap">Generate</button>
                                     <button type="button" onclick="abProxyKeyClear()" title="Explicitly remove the stored key. The API then refuses every request until a new key is set."
-                                            class="px-3 py-2 text-xs font-bold rounded-md border border-red-300 text-red-600 hover:bg-red-50 whitespace-nowrap">Clear</button>
+                                            class="px-3 py-2 text-xs font-bold rounded-full border border-red-300 text-red-600 hover:bg-red-50 whitespace-nowrap">Clear</button>
                                 </div>
                                 <p class="text-xs text-slate-500 leading-relaxed">
                                     Clients send it as <code>x-api-key</code> or <code>Authorization: Bearer</code>
@@ -2004,7 +2004,7 @@
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -2033,7 +2033,7 @@
                                 <label class="text-sm font-medium text-slate-600">Allowed groups (admin groups)</label>
                                 <div class="flex gap-2">
                                     <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand hidden"></select>
-                                    <button type="button" id="oidc-group-btn" onclick="loadOidcGroupPicker()" class="px-3 py-2 rounded-md text-sm font-medium bg-slate-100 hover:bg-slate-200 whitespace-nowrap">Pick from Entra</button>
+                                    <button type="button" id="oidc-group-btn" onclick="loadOidcGroupPicker()" class="px-3 py-2 rounded-full text-sm font-medium bg-slate-100 hover:bg-slate-200 whitespace-nowrap">Pick from Entra</button>
                                 </div>
                                 <p id="oidc-group-msg" class="text-xs text-amber-600 hidden"></p>
                                 <div id="oidc-group-chips" class="flex flex-wrap gap-2"></div>
@@ -2076,13 +2076,13 @@
                                 <label class="text-sm font-medium text-slate-600">Client secret <span class="text-slate-500 font-normal">(only if not using a certificate)</span></label>
                                 <div class="flex gap-2">
                                     <input type="password" id="oidc-client-secret" autocomplete="new-password" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="Leave blank to keep the stored secret">
-                                    <button type="button" onclick="abOidcSecretClear()" class="px-3 py-2 rounded-md text-sm font-medium bg-slate-100 hover:bg-slate-200">Clear</button>
+                                    <button type="button" onclick="abOidcSecretClear()" class="px-3 py-2 rounded-full text-sm font-medium bg-slate-100 hover:bg-slate-200">Clear</button>
                                 </div>
                                 <p class="text-xs text-slate-500">A certificate is preferred. Leaving this blank never wipes the stored secret.</p>
                             </div>
                         </div>
                         <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveOidcConfig(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save SSO settings</button>
+                            <button type="button" onclick="saveOidcConfig(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save SSO settings</button>
                         </div>
                     </section>
 
@@ -2098,7 +2098,7 @@
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -2200,7 +2200,7 @@
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -2317,7 +2317,7 @@
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -2547,7 +2547,7 @@
                         </div>
 
                         <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-md text-sm font-bold btn-primary">Save</button>
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
 
@@ -2614,7 +2614,7 @@
                 <div class="flex gap-2 mt-4 flex-none">
                     <textarea id="chat-input" rows="2" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
                         class="flex-grow p-3 rounded-lg resize-none text-sm"></textarea>
-                    <button id="chat-send-btn" onclick="sendChat()" class="btn-primary px-6 py-2 rounded-lg font-medium flex items-center gap-2 self-stretch">
+                    <button id="chat-send-btn" onclick="sendChat()" class="btn-primary px-6 py-2 rounded-full font-medium flex items-center gap-2 self-stretch">
                         <i class="fas fa-paper-plane"></i> Send
                     </button>
                 </div>
@@ -2658,7 +2658,7 @@
                     </div>
                     <button onclick="promoteBranch('dev','qa')" id="promote-dev-qa"
                         title="Open a pull request promoting dev into qa. Starts the promotion only — it does not merge."
-                        class="flex-none border border-brand text-primary-text hover:bg-primary hover:text-white text-xs font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                        class="flex-none border border-brand text-primary-text hover:bg-primary hover:text-white text-xs font-semibold px-4 py-2 rounded-full transition-all whitespace-nowrap">
                         <i class="fas fa-arrow-right mr-1"></i>Promote
                     </button>
                 </div>
@@ -2669,7 +2669,7 @@
                     </div>
                     <button onclick="promoteBranch('qa','main')" id="promote-qa-main"
                         title="Open a pull request promoting qa into main. Starts the promotion only — it does not merge."
-                        class="flex-none border border-brand text-primary-text hover:bg-primary hover:text-white text-xs font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                        class="flex-none border border-brand text-primary-text hover:bg-primary hover:text-white text-xs font-semibold px-4 py-2 rounded-full transition-all whitespace-nowrap">
                         <i class="fas fa-arrow-right mr-1"></i>Promote
                     </button>
                 </div>
@@ -2685,7 +2685,7 @@
                     </div>
                     <button onclick="promoteBranch('dev','main')" id="promote-dev-main"
                         title="OVERRIDE: open a pull request promoting dev straight into main, skipping qa entirely. Requires typed confirmation. Opens a PR only — it does not merge."
-                        class="flex-none border border-red-500 bg-red-500/10 text-red-700 hover:bg-red-500 hover:text-white text-xs font-semibold px-4 py-2 rounded-lg transition-all whitespace-nowrap">
+                        class="flex-none border border-red-500 bg-red-500/10 text-red-700 hover:bg-red-500 hover:text-white text-xs font-semibold px-4 py-2 rounded-full transition-all whitespace-nowrap">
                         <i class="fas fa-exclamation-triangle mr-1"></i>Override
                     </button>
                 </div>
@@ -2699,7 +2699,7 @@
                  topbar now (AppBuilder | Diagnostics), so only the action remains. -->
             <div class="flex items-center justify-end">
                 <button id="diag-copy-btn" onclick="copyDiagnostics()"
-                        class="btn-sec px-3 py-1.5 rounded font-bold text-xs flex items-center gap-2"
+                        class="btn-sec px-3 py-1.5 rounded-full font-bold text-xs flex items-center gap-2"
                         title="Copy the full raw diagnostics JSON to the clipboard">
                     <i class="fas fa-copy"></i> <span id="diag-copy-label">Copy raw data</span>
                 </button>
@@ -2731,7 +2731,7 @@
                             <option value="feature_build">feature_build</option>
                             <option value="batch_summary">batch_summary</option>
                         </select></label>
-                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded font-bold text-xs">Run dry-run picker</button>
+                    <button onclick="runLlmDiag()" id="llmdiag-btn" class="btn-primary px-4 py-2 rounded-full font-bold text-xs">Run dry-run picker</button>
                     <span id="llmdiag-summary" class="text-xs text-slate-500"></span>
                 </div>
                 <div id="llmdiag-body" class="text-sm text-slate-500 italic">Not run yet — click Run. This is a free, read-only computation.</div>
@@ -2762,8 +2762,8 @@
                 <div id="diag-stale-banner" class="hidden mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm font-medium flex items-center justify-between gap-3">
                     <span><i class="fas fa-exclamation-triangle mr-2"></i><span id="diag-stale-msg">Running code is stale — restart needed</span></span>
                     <div class="flex gap-2">
-                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs">Restart now</button>
-                        <button onclick="diagAction('/update_now', 'Checking…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs">Check for updates</button>
+                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded-full font-bold text-xs">Restart now</button>
+                        <button onclick="diagAction('/update_now', 'Checking…')" class="btn-primary px-3 py-1.5 rounded-full font-bold text-xs">Check for updates</button>
                     </div>
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
@@ -2957,8 +2957,8 @@
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-bold text-navy">Update &amp; Restart</h3>
                     <div class="flex gap-2">
-                        <button onclick="diagAction('/update_now', 'Checking…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs"><i class="fas fa-cloud-download-alt mr-1"></i>Check for updates</button>
-                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded-md font-bold text-xs">Restart now</button>
+                        <button onclick="diagAction('/update_now', 'Checking…')" class="btn-primary px-3 py-1.5 rounded-full font-bold text-xs"><i class="fas fa-cloud-download-alt mr-1"></i>Check for updates</button>
+                        <button onclick="diagAction('/restart', 'Restarting…')" class="btn-primary px-3 py-1.5 rounded-full font-bold text-xs">Restart now</button>
                     </div>
                 </div>
                 <div class="text-xs text-slate-500 grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
@@ -2981,39 +2981,39 @@
             <div class="flex items-center gap-2">
                 <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')" class="inline">
                     <button type="submit" title="Check for Updates"
-                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all whitespace-nowrap">
+                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
                         <i class="fas fa-cloud-download-alt mr-1"></i>Updates
                     </button>
                 </form>
                 <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')" class="inline">
                     <button type="submit" title="Check for Issues Now"
-                        class="text-xs opacity-70 hover:opacity-100 border border-brand hover:border-brand text-primary-text px-2 py-0.5 rounded transition-all whitespace-nowrap">
+                        class="text-xs opacity-70 hover:opacity-100 border border-brand hover:border-brand text-primary-text px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
                         <i class="fas fa-search mr-1"></i>Scan Now
                     </button>
                 </form>
                 <form action="/restart" method="post" onsubmit="handleFormSubmit(event, '/restart')" class="inline">
                     <button type="submit" title="Restart AppBuilder"
-                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all whitespace-nowrap">
+                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
                         <i class="fas fa-sync-alt mr-1"></i>Restart
                     </button>
                 </form>
                 <form action="/trigger_hub_update" method="post" onsubmit="handleFormSubmit(event, '/trigger_hub_update')" class="inline">
                     <button type="submit" title="Trigger Hub Update"
-                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all whitespace-nowrap">
+                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
                         <i class="fas fa-network-wired mr-1"></i>Hub Update
                     </button>
                 </form>
                 <span class="border-l border-slate-600 h-4 mx-1"></span>
                 <button onclick="toggleBlackout()" id="blackout-btn" title="Triage only — no fix commits pushed"
-                    class="text-xs px-2 py-0.5 rounded transition-all whitespace-nowrap {% if state.blackout %}opacity-100 border border-violet-400 text-violet-300{% else %}opacity-70 hover:opacity-100 border border-slate-500 hover:border-white{% endif %}">
+                    class="text-xs px-2 py-0.5 rounded-full transition-all whitespace-nowrap {% if state.blackout %}opacity-100 border border-violet-400 text-violet-300{% else %}opacity-70 hover:opacity-100 border border-slate-500 hover:border-white{% endif %}">
                     <i class="fas fa-ban mr-1"></i>{% if state.blackout %}Blackout ON{% else %}Blackout{% endif %}
                 </button>
                 <button onclick="togglePause()" id="pause-btn"
-                    class="text-xs px-2 py-0.5 rounded transition-all whitespace-nowrap {% if state.paused %}opacity-100 border border-green-400 text-green-300{% else %}opacity-70 hover:opacity-100 border border-orange-400 text-orange-300 hover:border-orange-300{% endif %}">
+                    class="text-xs px-2 py-0.5 rounded-full transition-all whitespace-nowrap {% if state.paused %}opacity-100 border border-green-400 text-green-300{% else %}opacity-70 hover:opacity-100 border border-orange-400 text-orange-300 hover:border-orange-300{% endif %}">
                     {% if state.paused %}<i class="fas fa-play mr-1"></i>Resume{% else %}<i class="fas fa-pause mr-1"></i>Stop{% endif %}
                 </button>
                 <button onclick="toggleRefreshPause()" id="refresh-pause-btn" title="Pause / resume page auto-refresh"
-                    class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all whitespace-nowrap">
+                    class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
                     <i class="fas fa-pause mr-1"></i>Pause Refresh
                 </button>
                 <span class="text-xs opacity-60 ml-2">v{{ state.version }}</span>
@@ -4090,7 +4090,7 @@
                     // one (Reprocess + this + Deny), so the badge would just cost space
                     // for no new information.
                     if (btn) btn.outerHTML =
-                        `<button onclick="mergePr('${repo}', ${number}, this)" class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
+                        `<button onclick="mergePr('${repo}', ${number}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
                     showToast('Approved ' + repo + ' #' + number, 'success');
                 } else {
                     showToast('Approve failed: ' + (d.message || resp.status), 'error');
@@ -6354,7 +6354,7 @@
                     const n = _mmEsc(m.name);
                     return `<div class="flex items-center justify-between py-1.5 border-b border-slate-100">
                         <span class="font-mono text-slate-700">${n} <span class="text-slate-500">(${m.size_gb} GB)</span></span>
-                        <button onclick="mmDelete('${n}')" class="btn-danger text-xs px-2 py-1 rounded font-bold">Delete</button>
+                        <button onclick="mmDelete('${n}')" class="btn-danger text-xs px-2 py-1 rounded-full font-bold">Delete</button>
                     </div>`;
                 }).join('');
             } catch (e) { list.innerHTML = '<span class="text-red-600">Failed to list: ' + _mmEsc(String(e)) + '</span>'; }
