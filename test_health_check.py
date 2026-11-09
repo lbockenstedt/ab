@@ -71,3 +71,16 @@ def test_scan_health_rejects_error_reply_and_reports_why(monkeypatch):
     res = hc.scan_health({}, force=True)
     assert "Unknown HUB_REQUEST type" in res["error"] and res["running"] is False
     assert hc.status_of(res) == "unavailable"
+
+
+def test_findings_carry_measurements_for_the_fixer():
+    report = {"host": {"cpus": 2, "load": [0.5], "mem_used_pct": 40, "disk_used_pct": 30},
+              "spoke_names": {"s1": "mipbe-netbox"},
+              "timeouts_by_spoke": {"s1": {"NETBOX_GET_IPS": 6}},
+              "perf": {"commands": [{"key": "NETBOX_GET_IPS", "spoke": "s1", "count": 20,
+                                     "slow": 9, "avg_s": 12.5, "max_s": 40.0}]}}
+    logs = ["x NETBOX_GET_IPS took 41s", "unrelated"]
+    f = [x for x in hc.evaluate(report, logs) if x["kind"] == "timeouts"][0]
+    text = "\n".join(f["evidence"])
+    assert "avg 12.5s" in text and "load 0.5 on 2 CPUs" in text and "took 41s" in text
+    assert "unrelated" not in text
