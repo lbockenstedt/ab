@@ -1057,7 +1057,7 @@
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in (SSO)</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-system" onclick="settingsTab('sec-system')">System</button>
+                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-monitoring" onclick="settingsTab('sec-monitoring')">Monitoring</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
                 <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-feature-drive" onclick="settingsTab('sec-feature-drive')">Feature Auto-Drive</button>
@@ -1157,36 +1157,19 @@
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Self-Diagnosis Repository (Where AppBuilder files its own bugs)</label>
                                 <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. lbockenstedt/ab">
-                                <div class="flex items-center gap-3 mt-2">
-                                    <input type="checkbox" name="self_log_scan_enabled" id="self_log_scan_enabled" {{ 'checked' if settings.self_log_scan_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
-                                    <label for="self_log_scan_enabled" class="text-xs font-medium text-slate-700" title="On by default: AppBuilder scans its own logs for errors and files them in the self-diagnosis repo. Turn off to stop self-monitoring.">
-                                        Self-monitor AppBuilder logs (file issues for AppBuilder's own errors)
-                                    </label>
-                                </div>
-                                <div class="flex items-center gap-3 mt-2">
-                                    <input type="checkbox" name="pr_review_enabled" id="pr_review_enabled" {{ 'checked' if settings.pr_review_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
-                                    <label for="pr_review_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, AppBuilder PRE-REVIEWS open PRs on monitored repos: it posts parity/dual-copy findings as a COMMENT (never approves/denies, never edits the branch) + a non-blocking ab/review status. A human is still the sole approver.">
-                                        Pre-review open PRs (comment parity/drift findings — never approves/denies)
-                                    </label>
-                                </div>
-                                <div class="flex items-center gap-3 mt-2 ml-6">
-                                    <input type="checkbox" name="pr_review_llm_enabled" id="pr_review_llm_enabled" {{ 'checked' if settings.pr_review_llm_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
-                                    <label for="pr_review_llm_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review on). Runs the SAME cross-provider skeptical reviewer panel the AI-fix pipeline uses (≥0.80 confidence gate) on the PR diff and adds an advisory verdict + confidence + critique to the review comment. The prompt also weights merge-safety defects — Jinja dict-method render crashes (x.items), template/JS syntax errors, conflict markers. Advisory only — a human still approves/denies. Uses your configured LLM provider slots.">
-                                        └ LLM reviewer panel + confidence score (same engine as AI fixes; flags render crashes / bugs parity can't)
-                                    </label>
-                                </div>
-                                <div class="flex items-center gap-3 mt-2 ml-6">
-                                    <input type="checkbox" name="pr_review_state_logic_enabled" id="pr_review_state_logic_enabled" {{ 'checked' if settings.pr_review_state_logic_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
-                                    <label for="pr_review_state_logic_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review on; independent of the LLM reviewer panel above). Runs a SECOND, narrow-scope panel pass that checks ONLY two defect shapes: a status/enum value conflating distinct states (e.g. a warning silently read as a failure), and new logic placed after an early-return/guard that skips it on the path it was meant to cover. Advisory only. Uses your configured LLM provider slots (an extra pass = extra cost per PR).">
-                                        └ State-logic / control-flow panel (narrow: status-conflation + unreachable-new-code only)
-                                    </label>
-                                </div>
-                                <div class="flex items-center gap-3 mt-2 ml-6">
-                                    <input type="checkbox" name="pr_test_regression_enabled" id="pr_test_regression_enabled" {{ 'checked' if settings.pr_test_regression_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
-                                    <label for="pr_test_regression_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review + QA testing both on; independent of the LLM panels above). ACTUALLY CLONES AND RUNS this repo's test suite for the PR's head branch AND its base branch, inside the same Docker sandbox verify_fix uses, and flags tests that fail on head but NOT on base — a real, reproducible regression, not a heuristic guess. Pre-existing failures are excluded. This is real code execution against PR-authored content (a different risk/cost class from the other, pure-static Tier-1 checks) — enable only on repos you're comfortable running untrusted branch code against in the sandbox.">
-                                        └ Test-regression check (runs the test suite on head vs. base, flags NEW failures only — real code execution)
-                                    </label>
-                                </div>
+                            </div>
+                                                    </div>
+                    </section>
+
+                    <!-- 2. LLM Configuration -->
+                    <section id="sec-llm" data-settings-section hidden>
+                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                            <i class="fas fa-brain text-slate-500"></i>
+                            <h4 class="text-sm font-bold text-slate-500">LLM Configuration</h4>
+                        </div>
+
+                        <div class="mb-6 space-y-2">
+                            <p class="text-xs font-bold text-slate-500 mb-1">Cost controls</p>
                                 <div class="flex items-center gap-3 mt-2">
                                     <input type="checkbox" name="batch_enabled" id="batch_enabled" {{ 'checked' if settings.batch_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
                                     <label for="batch_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, CLOUD LLM calls (non-streaming, non-tool) route through the Anthropic/Gemini Batch API — ~50% cheaper but SLOWER (block-and-wait, minutes-to-hours). Needs a direct anthropic/google provider slot + API key; falls back to a normal call if batch fails. Local (ollama) calls are unaffected.">
@@ -1199,56 +1182,6 @@
                                         Anthropic prompt caching (cache the stable prefix — ~10% on cached tokens)
                                     </label>
                                 </div>
-                            </div>
-                            <div class="space-y-2 col-span-1 md:col-span-3">
-                                <div class="flex items-center justify-between gap-3">
-                                    <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-500 font-normal">(routes Hub log errors to the right repo)</span></label>
-                                    <button type="button" onclick="autofillModuleRepoMap()" id="mrm-autofill-btn" class="btn-sec px-3 py-1 rounded-full font-bold text-xs whitespace-nowrap" title="Suggest entries from the repos you already monitor. Only fills ALIASES (module type differs from repo name) — names that already auto-match are left out. Never overwrites entries you have set.">Auto-fill</button>
-                                </div>
-                                <div id="mrm-autofill-note" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 text-slate-600"></div>
-                                <textarea name="module_repo_map" id="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
-                                <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
-                            </div>
-                            <div class="space-y-3 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
-                                <label class="text-sm font-semibold text-slate-700">AppBuilder Sources <span class="text-slate-500 font-normal">(turn noisy sources on one at a time)</span></label>
-                                <div class="flex items-center gap-3">
-                                    <input type="checkbox" name="bug_reports_enabled" id="bug_reports_enabled" {{ 'checked' if settings.get('bug_reports_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
-                                    <label for="bug_reports_enabled" class="text-xs font-medium text-slate-700" title="File &amp; auto-fix BUG reports submitted via the LM WebUI. On by default.">BugFixes from LM — file &amp; fix bug reports from the LM WebUI</label>
-                                </div>
-                                <div class="flex items-center gap-3">
-                                    <input type="checkbox" name="feature_requests_enabled" id="feature_requests_enabled" {{ 'checked' if settings.get('feature_requests_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
-                                    <label for="feature_requests_enabled" class="text-xs font-medium text-slate-700" title="File FEATURE requests from the LM WebUI (enhancement issues; never auto-implemented).">Feature Requests from LM — file feature requests from the LM WebUI</label>
-                                </div>
-                                <div class="flex items-center gap-3">
-                                    <input type="checkbox" name="fix_logdetected_enabled" id="fix_logdetected_enabled" {{ 'checked' if settings.get('fix_logdetected_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
-                                    <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-500">(Bug &amp; Critical always fix)</span></label>
-                                </div>
-                                <label class="text-xs font-medium text-slate-600 block mt-2">Hub-log auto-filing — per module <span class="text-slate-500 font-normal">(none checked = OFF; enable one at a time)</span></label>
-                                {% if log_module_options %}
-                                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
-                                    {% for m in log_module_options %}
-                                    <label class="flex items-center gap-2 text-sm text-slate-700 min-w-0" title="{{ m }}">
-                                        <input type="checkbox" name="enabled_log_modules" value="{{ m }}" {% if m in settings.get('enabled_log_modules', []) %}checked{% endif %} class="rounded border-slate-300 focus:ring-brand flex-shrink-0">
-                                        <span class="truncate">{{ m }}</span>
-                                    </label>
-                                    {% endfor %}
-                                </div>
-                                <span class="text-xs text-slate-500">Only checked modules have their Hub-log errors filed as issues. Add modules in the Module → Repo Map above to control them here.</span>
-                                {% else %}
-                                <span class="text-xs text-slate-500 block">No module→repo mappings yet — add <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs above, then choose which modules' logs to file here.</span>
-                                {% endif %}
-                            </div>
-                        </div>
-                                            <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
-                        </div>
-                    </section>
-
-                    <!-- 2. LLM Configuration -->
-                    <section id="sec-llm" data-settings-section hidden>
-                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-brain text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">LLM Configuration</h4>
                         </div>
 
                         <!-- Step A: Credentials Vault -->
@@ -1708,6 +1641,33 @@
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div class="space-y-2 col-span-1 md:col-span-2">
+                                <label class="text-sm font-semibold text-slate-700">PR pre-review</label>
+                                <div class="flex items-center gap-3 mt-2">
+                                    <input type="checkbox" name="pr_review_enabled" id="pr_review_enabled" {{ 'checked' if settings.pr_review_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_review_enabled" class="text-xs font-medium text-slate-700" title="Off by default. When on, AppBuilder PRE-REVIEWS open PRs on monitored repos: it posts parity/dual-copy findings as a COMMENT (never approves/denies, never edits the branch) + a non-blocking ab/review status. A human is still the sole approver.">
+                                        Pre-review open PRs (comment parity/drift findings — never approves/denies)
+                                    </label>
+                                </div>
+                                <div class="flex items-center gap-3 mt-2 ml-6">
+                                    <input type="checkbox" name="pr_review_llm_enabled" id="pr_review_llm_enabled" {{ 'checked' if settings.pr_review_llm_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_review_llm_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review on). Runs the SAME cross-provider skeptical reviewer panel the AI-fix pipeline uses (≥0.80 confidence gate) on the PR diff and adds an advisory verdict + confidence + critique to the review comment. The prompt also weights merge-safety defects — Jinja dict-method render crashes (x.items), template/JS syntax errors, conflict markers. Advisory only — a human still approves/denies. Uses your configured LLM provider slots.">
+                                        └ LLM reviewer panel + confidence score (same engine as AI fixes; flags render crashes / bugs parity can't)
+                                    </label>
+                                </div>
+                                <div class="flex items-center gap-3 mt-2 ml-6">
+                                    <input type="checkbox" name="pr_review_state_logic_enabled" id="pr_review_state_logic_enabled" {{ 'checked' if settings.pr_review_state_logic_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_review_state_logic_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review on; independent of the LLM reviewer panel above). Runs a SECOND, narrow-scope panel pass that checks ONLY two defect shapes: a status/enum value conflating distinct states (e.g. a warning silently read as a failure), and new logic placed after an early-return/guard that skips it on the path it was meant to cover. Advisory only. Uses your configured LLM provider slots (an extra pass = extra cost per PR).">
+                                        └ State-logic / control-flow panel (narrow: status-conflation + unreachable-new-code only)
+                                    </label>
+                                </div>
+                                <div class="flex items-center gap-3 mt-2 ml-6">
+                                    <input type="checkbox" name="pr_test_regression_enabled" id="pr_test_regression_enabled" {{ 'checked' if settings.pr_test_regression_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_test_regression_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review + QA testing both on; independent of the LLM panels above). ACTUALLY CLONES AND RUNS this repo's test suite for the PR's head branch AND its base branch, inside the same Docker sandbox verify_fix uses, and flags tests that fail on head but NOT on base — a real, reproducible regression, not a heuristic guess. Pre-existing failures are excluded. This is real code execution against PR-authored content (a different risk/cost class from the other, pure-static Tier-1 checks) — enable only on repos you're comfortable running untrusted branch code against in the sandbox.">
+                                        └ Test-regression check (runs the test suite on head vs. base, flags NEW failures only — real code execution)
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="space-y-2 col-span-1 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">QA Service URL <span class="text-primary-text font-bold">(primary)</span></label>
                                 <input type="text" name="QA_API_URL" value="{{ settings.QA_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. http://qa-server:8080">
                                 <span class="text-xs text-slate-500">URL of the QA service API. When set, AppBuilder calls <code class="bg-slate-100 px-1 rounded">POST /api/run?module=&lt;repo&gt;</code> after each fix instead of running tests locally.</span>
@@ -2086,18 +2046,79 @@
                         </div>
                     </section>
 
-                    <section id="sec-system" data-settings-section hidden>
+
+                    <!-- Monitoring & Logs -->
+                    <section id="sec-monitoring" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-server text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">System Settings</h4>
+                            <i class="fas fa-heart-pulse text-slate-500"></i>
+                            <h4 class="text-sm font-bold text-slate-500">Monitoring, Logs &amp; Auto-Fix</h4>
                         </div>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Log File Path</label>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <label class="text-sm font-semibold text-slate-700">AppBuilder's own logs</label>
+                                <div class="flex items-center gap-3 mt-2">
+                                    <input type="checkbox" name="self_log_scan_enabled" id="self_log_scan_enabled" {{ 'checked' if settings.self_log_scan_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="self_log_scan_enabled" class="text-xs font-medium text-slate-700" title="On by default: AppBuilder scans its own logs for errors and files them in the self-diagnosis repo. Turn off to stop self-monitoring.">
+                                        Self-monitor AppBuilder logs (file issues for AppBuilder's own errors)
+                                    </label>
+                                </div>
+                                <label class="text-sm font-medium text-slate-600 block mt-2">Log File Path</label>
                                 <input type="text" name="LOG_FILE_PATH" value="{{ settings.LOG_FILE_PATH }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="/var/log/ab/ab.log">
+                            </div>
+<div class="space-y-2 col-span-1 md:col-span-3">
+                                <div class="flex items-center justify-between gap-3">
+                                    <label class="text-sm font-medium text-slate-600">Module → Repo Map <span class="text-slate-500 font-normal">(routes Hub log errors to the right repo)</span></label>
+                                    <button type="button" onclick="autofillModuleRepoMap()" id="mrm-autofill-btn" class="btn-sec px-3 py-1 rounded-full font-bold text-xs whitespace-nowrap" title="Suggest entries from the repos you already monitor. Only fills ALIASES (module type differs from repo name) — names that already auto-match are left out. Never overwrites entries you have set.">Auto-fill</button>
+                                </div>
+                                <div id="mrm-autofill-note" class="hidden text-xs rounded p-2 bg-slate-50 border border-slate-200 text-slate-600"></div>
+                                <textarea name="module_repo_map" id="module_repo_map" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="module=owner/repo, module2=owner/repo2">{% set mrm = settings.module_repo_map %}{% if mrm is mapping %}{% for k,v in mrm.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}{% elif mrm %}{{ mrm }}{% endif %}</textarea>
+                                <span class="text-xs text-slate-500">Comma or newline separated <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs. Errors from Hub with a matching module are filed against that repo.</span>
+                            </div>
+                            <div class="space-y-3 col-span-1 md:col-span-3 border-t border-slate-200 pt-4 mt-2">
+                                <label class="text-sm font-semibold text-slate-700">AppBuilder Sources <span class="text-slate-500 font-normal">(turn noisy sources on one at a time)</span></label>
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="bug_reports_enabled" id="bug_reports_enabled" {{ 'checked' if settings.get('bug_reports_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="bug_reports_enabled" class="text-xs font-medium text-slate-700" title="File &amp; auto-fix BUG reports submitted via the LM WebUI. On by default.">BugFixes from LM — file &amp; fix bug reports from the LM WebUI</label>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="feature_requests_enabled" id="feature_requests_enabled" {{ 'checked' if settings.get('feature_requests_enabled', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="feature_requests_enabled" class="text-xs font-medium text-slate-700" title="File FEATURE requests from the LM WebUI (enhancement issues; never auto-implemented).">Feature Requests from LM — file feature requests from the LM WebUI</label>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="fix_logdetected_enabled" id="fix_logdetected_enabled" {{ 'checked' if settings.get('fix_logdetected_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-500">(Bug &amp; Critical always fix)</span></label>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="health_check_enabled" id="health_check_enabled" {{ 'checked' if health_check_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="health_check_enabled" class="text-xs font-medium text-slate-700" title="Periodically review the LM hub's performance telemetry and logs and file one deduped automated-fix issue per problem.">Hub health check <span class="text-slate-500">(performance, errors, capacity)</span></label>
+                                </div>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
+                                    {% for f in health_check_fields %}
+                                    <label class="text-xs text-slate-600 min-w-0">{{ f.key }}
+                                        <input type="number" step="{{ f.step }}" min="0" name="{{ f.key }}" value="{{ f.value }}" class="w-full p-1 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                                <label class="text-xs font-medium text-slate-600 block mt-2">Hub-log auto-filing — per module <span class="text-slate-500 font-normal">(none checked = OFF; enable one at a time)</span></label>
+                                {% if log_module_options %}
+                                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200 max-h-56 overflow-y-auto">
+                                    {% for m in log_module_options %}
+                                    <label class="flex items-center gap-2 text-sm text-slate-700 min-w-0" title="{{ m }}">
+                                        <input type="checkbox" name="enabled_log_modules" value="{{ m }}" {% if m in settings.get('enabled_log_modules', []) %}checked{% endif %} class="rounded border-slate-300 focus:ring-brand flex-shrink-0">
+                                        <span class="truncate">{{ m }}</span>
+                                    </label>
+                                    {% endfor %}
+                                </div>
+                                <span class="text-xs text-slate-500">Only checked modules have their Hub-log errors filed as issues. Add modules in the Module → Repo Map above to control them here.</span>
+                                {% else %}
+                                <span class="text-xs text-slate-500 block">No module→repo mappings yet — add <code class="bg-slate-100 px-1 rounded">module=owner/repo</code> pairs above, then choose which modules' logs to file here.</span>
+                                {% endif %}
                             </div>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
+                        </div>
+                        <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
