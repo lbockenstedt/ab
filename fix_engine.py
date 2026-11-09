@@ -5937,9 +5937,16 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 # Reuse an open PR for this branch, or create one.
                 base_branch, _ = integration_branch(config, repo_obj)
 
-                existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
+                existing_pr = (None if target_branch == base_branch
+                               else find_existing_pull_request(repo_obj, target_branch, base_branch))
 
-                if existing_pr:
+                if target_branch == base_branch:
+                    # Low-confidence fixes are pushed to the integration branch
+                    # itself, so there is nothing to open a PR from: GitHub
+                    # rejects dev -> dev with "No commits between dev and dev",
+                    # which used to fail an issue whose fix had already landed.
+                    pr = None
+                elif existing_pr:
                     pr = existing_pr
                     logger.info(f"Found existing open PR for {target_branch} -> {base_branch}: {pr.html_url}")
                 else:
@@ -5976,8 +5983,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             raise ge
 
                 # Report the PR.
-                commit_type = "Pull Request"
-                detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
+                if pr is None:
+                    commit_type = f"Commit to {base_branch}"
+                    detail_msg = (f"The fix was verified and pushed to the {base_branch} integration branch "
+                                  f"(confidence below the direct-merge threshold, so it is promoted "
+                                  f"{base_branch} -> qa -> main rather than via a PR).")
+                else:
+                    commit_type = "Pull Request"
+                    detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
 
 
             # Summarise the change for the success comment.
