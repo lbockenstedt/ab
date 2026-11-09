@@ -779,8 +779,9 @@ def _acquire_worker_singleton():
         return True
 
 
-# Only the lock holder starts the background workers.
-if _acquire_worker_singleton():
+# Only the lock holder starts the background workers. Tests set
+# AB_DISABLE_WORKERS: the updater hard-resets the checkout and restarts.
+if not os.environ.get("AB_DISABLE_WORKERS") and _acquire_worker_singleton():
     # Start each background worker as a daemon thread.
     threading.Thread(target=connectivity_worker, daemon=True).start()
     threading.Thread(target=heartbeat_worker, daemon=True).start()

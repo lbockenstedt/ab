@@ -2946,8 +2946,12 @@ async def settings_page(request: Request):
         "log_module_options": log_module_options,
         "health_check_fields": [
             {"key": k, "value": config.get(k, v), "step": "any" if isinstance(v, float) else "1"}
-            for k, v in __import__("health_check").DEFAULTS.items()
-            if k not in ("health_check_enabled", "health_check_interval_s")],
+            for k, v in {**__import__("health_check").DEFAULTS,
+                         **__import__("gh_actions_health").DEFAULTS}.items()
+            if k not in ("health_check_enabled", "health_check_interval_s",
+                         "gh_outage_backoff_enabled")],
+        "gh_outage_backoff_enabled": bool(config.get("gh_outage_backoff_enabled", True)),
+        "fleet_checks_enabled": bool(config.get("fleet_checks_enabled", True)),
         "health_check_interval_min": round(float(config.get("health_check_interval_s", 1800)) / 60, 1),
         "health_check_enabled": bool(config.get("health_check_enabled", True)),
         "state": state,
@@ -3527,9 +3531,14 @@ async def save_settings(request: Request):
     # malformed number falls back to the built-in default instead of failing the save.
     import health_check as _hc
     config_data["health_check_enabled"] = data.get("health_check_enabled") == "on"
+    # GitHub Actions outage backoff (gh_actions_health.py): on/off + its minutes.
+    import gh_actions_health as _gha
+    config_data["gh_outage_backoff_enabled"] = data.get("gh_outage_backoff_enabled") == "on"
+    # Fleet code rules gate (fleet_checks.py) for fixes, PR reviews and features.
+    config_data["fleet_checks_enabled"] = data.get("fleet_checks_enabled") == "on"
     _have = load_config()
-    for _k, _dv in _hc.DEFAULTS.items():
-        if _k == "health_check_enabled":
+    for _k, _dv in {**_hc.DEFAULTS, **_gha.DEFAULTS}.items():
+        if _k in ("health_check_enabled", "gh_outage_backoff_enabled"):
             continue
         _src, _mul = (("health_check_interval_min", 60) if _k == "health_check_interval_s" else (_k, 1))
         try:

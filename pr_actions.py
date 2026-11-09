@@ -172,8 +172,14 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
         return "unknown", ""
     runs = payload.get("check_runs")
     runs = [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else []
-    # No check runs at all is "unknown", never "success".
+    # No check runs at all is "unknown", never "success" -- unless the runs
+    # failed to start (zero jobs): that is a GitHub Actions outage, not a verdict.
     if not runs:
+        import gh_actions_health
+        stuck = gh_actions_health.infra_failed_runs(repo_name, head_sha, token)
+        if stuck:
+            gh_actions_health.note_infra_failure(len(stuck))
+            return "infra", "%d workflow run(s) never started (GitHub Actions outage)" % len(stuck)
         return "unknown", ""
 
     # cancelled / stale / startup_failure / action_required never produced a
@@ -578,6 +584,25 @@ def merge_pr(gh, repo_name, number):
                 # Append the explanation to the refusal reason.
                 if detail:
                     why = "%s -- %s" % (why, detail)
+            # A required check missing because GitHub Actions never started the
+            # run is an outage, not a policy problem: retry later instead of
+            # recording a block only a human can clear.
+            if _expects_missing_check(why):
+                import gh_actions_health
+                token = _github_token()
+                stuck = gh_actions_health.infra_failed_runs(repo_name, pr.head.sha, token)
+                if stuck:
+                    gh_actions_health.note_infra_failure(len(stuck))
+                    down, _ = gh_actions_health.outage(load_config())
+                    rerun = 0 if down else gh_actions_health.rerun_infra_failed(
+                        repo_name, pr.head.sha, token)
+                    msg = (f"PR #{number}: required checks never started (GitHub Actions "
+                           f"outage); " + (f"re-ran {rerun} run(s)" if rerun else "backing off")
+                           + " -- retrying the merge later.")
+                    logger.info("pr_actions: %s #%s — %s", repo_name, number, msg)
+                    update_pr_review(repo_name, number, merge_blocked_reason=None)
+                    return 409, {"status": "error", "blocked": True, "retryable": True,
+                                 "released_checks": 0, "infra": True, "message": msg}
             # Record the refusal once on the review record and return a non-retryable error.
             logger.warning("pr_actions: %s #%s merge refused by GitHub — %s",
                            repo_name, number, why)

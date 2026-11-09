@@ -31,6 +31,7 @@ DEFAULTS = {
     "hc_loop_lag_s": 1.0,
     "hc_repeat_error_min": 25,         # identical (normalised) ERROR lines in the log tail
     "hc_vault_gets_min": 200,          # Azure Key Vault GETs in the log tail
+    "hc_queue_rejected_min": 5,        # commands a spoke refused because its queue was full
     "hc_max_issues_per_run": 5,
 }
 
@@ -54,6 +55,10 @@ _HINT = {
     "host": "Find the process or loop driving the resource use and bound it.",
     "loop_lag": ("The hub event loop is saturated: look for blocking calls or CPU-heavy work "
                  "on the loop and move it to a thread or a background task."),
+    "queue": ("A spoke's command queue is saturated: find which command fills it (by_type "
+              "inflight/avg_s), make that handler faster or move its long work to a background "
+              "task, and stop the hub re-sending it while it is still in flight. Diagnose live "
+              "with POST /admin/ops/spoke-queue."),
     "repeat_error": "One error repeats many times: fix the cause, or log it once per interval.",
     "vault": "Cache secret reads with a TTL instead of fetching on every cycle.",
     "slow_query": "Add the missing index, narrow the query, or move the work to the background.",
@@ -130,6 +135,27 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
                                     _module_for_command(cmd),
                                     [f"{n} request timeouts since the hub started"],
                                     f"`{cmd}` to `{spoke}` times out repeatedly."))
+
+    # Spoke command queues: refusals because the queue was full, or pinned at the cap.
+    for spoke, q in (report.get("spoke_queues") or {}).items():
+        rejected = int(q.get("rejected_full") or 0)
+        cap = int(q.get("max_inflight") or 0)
+        full = cap > 0 and int(q.get("inflight") or 0) >= cap
+        if rejected < c["hc_queue_rejected_min"] and not full:
+            continue
+        # The busiest command names the owning module and leads the evidence.
+        by_type = q.get("by_type") or {}
+        busiest = sorted(by_type.items(), key=lambda kv: (-(kv[1].get("inflight") or 0),
+                                                          -(kv[1].get("rejected") or 0)))
+        top = busiest[0][0] if busiest else ""
+        out.append(_finding(
+            "queue", f"{spoke}:queue", f"command queue saturated on {spoke}", "high",
+            _module_for_command(top),
+            [f"in flight {q.get('inflight')} of {cap}, refused (queue full) {rejected}, "
+             f"dropped stale {q.get('dropped_stale', 0)}, backpressure {q.get('backpressure_level', 0)}"]
+            + [f"{name}: inflight {v.get('inflight')}, rejected {v.get('rejected')}, "
+               f"avg {v.get('avg_s')}s, max {v.get('max_s')}s" for name, v in busiest[:5]],
+            f"`{spoke}` is refusing or backing up hub commands."))
 
     errs: Counter = Counter()
     sample: Dict[str, str] = {}
