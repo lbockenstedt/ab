@@ -296,11 +296,16 @@ def _run_guardrails(checkout_path, repo_git, repo_name, issue, issue_id, config,
     return True, "passed", "", review_conf
 
 
+def _identity(prior) -> dict:
+    """Carry a record's title/link across a status change."""
+    return {k: v for k, v in (prior or {}).items() if k in ("title", "issue_url") and v}
+
+
 def _mark_failed(issue_id, reason):
     """Record the issue as a failed feature build, with the reason, and refresh the counters."""
     # Overwrite the issue's record with the failure status and save.
     processed = load_processed()
-    processed[issue_id] = {"status": "feature_failed", "reason": reason,
+    processed[issue_id] = {**_identity(processed.get(issue_id)), "status": "feature_failed", "reason": reason,
                            "timestamp": datetime.now().isoformat()}
     save_processed(processed)
     recompute_issue_counters(processed)
@@ -312,7 +317,7 @@ def _mark_built(issue_id, pr_url, extra=None):
     """
     # Overwrite the issue's record with the built status and save.
     processed = load_processed()
-    processed[issue_id] = {**(extra or {}), "status": "feature_built", "pr_url": pr_url,
+    processed[issue_id] = {**_identity(processed.get(issue_id)), **(extra or {}), "status": "feature_built", "pr_url": pr_url,
                            "timestamp": datetime.now().isoformat()}
     save_processed(processed)
     recompute_issue_counters(processed)
@@ -345,7 +350,9 @@ def _flag_incomplete(gh_repo, issue, reason, flag_kind="build_incomplete", extra
     # Record the issue as flagged for a human and refresh the counters.
     processed = load_processed()
     issue_id = f"{gh_repo.full_name}:{issue.number}"
-    processed[issue_id] = {**(extra or {}), "status": "feature_flagged", "flag_kind": flag_kind,
+    processed[issue_id] = {**_identity(processed.get(issue_id)),
+                           "title": (issue.title or "")[:200], "issue_url": getattr(issue, "html_url", "") or "",
+                           **(extra or {}), "status": "feature_flagged", "flag_kind": flag_kind,
                            "reason": reason, "timestamp": datetime.now().isoformat()}
     save_processed(processed)
     recompute_issue_counters(processed)
