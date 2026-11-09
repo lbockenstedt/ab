@@ -764,6 +764,14 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
         issue_body += format_undefined_name_context(undefined_verified)
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: undefined-name context skipped (%s)", e)
+    # The specialist agents matching this PR (same files people pick with
+    # /agent), so the panel checks the change against that work's checklist.
+    try:
+        import skills_loader
+        issue_body += "\n\n" + skills_loader.agents_context(
+            "%s\n%s\n%s" % (pr.title or "", pr.body or "", "\n".join(f.filename for f in files)))
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: agent context skipped (%s)", e)
     # Run the panel; any error skips the review.
     try:
         # builder_n=0 → no builder to exclude, so EVERY configured provider reviews

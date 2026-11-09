@@ -14,6 +14,7 @@ Config: skills_enabled (default True), skills_repo (default "lbockenstedt/lm"),
 Defensive: never raises out — a skills-loader problem must not break a scan/fix.
 """
 # re parses the YAML frontmatter at the top of each SKILL.md.
+import json
 import re
 # threading.Lock guards the shared cache against concurrent loads.
 import threading
@@ -122,6 +123,9 @@ def load_skills(gh, config, force=False):
                 pass
             # Record the skill under its directory name.
             skills[name] = skill
+        # The fleet custom agents (.github/agents/*.agent.md) -- the same files a
+        # person selects with /agent in Copilot -- load alongside the skills.
+        skills.update(_load_agents(repo, config.get("agents_path", ".github/agents")))
         # Replace the cache with the freshly loaded set and note when it was loaded.
         with _LOCK:
             _CACHE["skills"] = skills
@@ -134,6 +138,78 @@ def load_skills(gh, config, force=False):
     except Exception as e:  # noqa: BLE001
         logger.info("skills_loader: load failed (%s) — keeping last-known %d", e, len(_CACHE["skills"]))
         return _CACHE["skills"]
+
+
+def _frontmatter_value(body, key):
+    """One scalar from a markdown file's YAML frontmatter (also nested one level,
+    e.g. ``ab-match`` under ``metadata:``); "" when absent."""
+    m = re.search(r"^---\s*\n(.*?)\n---", body or "", re.S)
+    if not m:
+        return ""
+    vm = re.search(r"^\s*%s:\s*(.*)$" % re.escape(key), m.group(1), re.M)
+    if not vm:
+        return ""
+    val = vm.group(1).strip()
+    # YAML double-quoted escapes ("\\b") match JSON's; single quotes are literal.
+    if val.startswith('"'):
+        try:
+            return json.loads(val)
+        except ValueError:
+            return val.strip('"')
+    return val.strip("'")
+
+
+def _load_agents(repo, path):
+    """{name: entry} for every ``*.agent.md`` under ``path`` in ``repo``.
+
+    Entries share the skill shape (so skill_instructions() works on them) plus
+    kind="agent" and ``match``, the ``metadata.ab-match`` regex AB uses to pick
+    the agent for an issue or PR."""
+    out = {}
+    try:
+        entries = repo.get_contents(path)
+    except Exception:  # noqa: BLE001 - no agents dir yet
+        return out
+    for f in entries if isinstance(entries, list) else [entries]:
+        if not f.name.endswith(".agent.md"):
+            continue
+        try:
+            body = (f.decoded_content or b"").decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            continue
+        name = f.name[:-len(".agent.md")]
+        out[name] = {"name": name, "kind": "agent", "instructions": body, "reference": "",
+                     "description": _parse_description(body),
+                     "match": _frontmatter_value(body, "ab-match")}
+    return out
+
+
+def matching_agents(text, max_agents=2):
+    """Names of loaded agents whose ``ab-match`` regex matches ``text`` (an
+    issue or PR title + body), best first (most matches), at most max_agents."""
+    scored = []
+    for name, s in _CACHE["skills"].items():
+        pat = s.get("match") if s.get("kind") == "agent" else ""
+        if not pat:
+            continue
+        try:
+            hits = len(re.findall(pat, text or "", re.I))
+        except re.error:
+            continue
+        if hits:
+            scored.append((-hits, name))
+    return [name for _, name in sorted(scored)[:max_agents]]
+
+
+def agents_context(text, max_chars=20000):
+    """Full instructions of the agents matching ``text``, for a fix/build/review
+    prompt: the same checklist a person gets by picking that agent in Copilot.
+    Empty string when nothing matches."""
+    parts = []
+    for name in matching_agents(text):
+        parts.append("## Specialist agent \"%s\" -- follow its checklist\n%s"
+                     % (name, _CACHE["skills"][name]["instructions"]))
+    return "\n\n".join(parts)[:max_chars]
 
 
 def get_loaded():
