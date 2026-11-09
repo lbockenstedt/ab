@@ -1734,6 +1734,18 @@ def _maybe_auto_merge(gh, repo, pr, config):
             except Exception as e:  # noqa: BLE001 — never let this break a merge
                 logger.warning("pr_review: CI check skipped for %s: %s", key, e)
                 _ci_state, _ci_details = "unknown", ""
+            # Checks never started (GitHub Actions outage): hold quietly and
+            # re-run them once Actions is back, instead of asking a human.
+            if _ci_state == "infra":
+                import gh_actions_health
+                should_merge = False
+                down, why = gh_actions_health.outage(config)
+                if not down:
+                    n = gh_actions_health.rerun_infra_failed(
+                        repo.full_name, pr_meta.get("head_sha"),
+                        config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", ""))
+                    why = "GitHub Actions never started the checks; re-ran %d run(s)" % n
+                reason = "waiting on GitHub Actions — %s" % why
             # Failing CI: hold the merge and ask for a human.
             if _ci_state == "failure":
                 should_merge = False
@@ -1780,11 +1792,12 @@ def _maybe_auto_merge(gh, repo, pr, config):
             update_pr_review(repo.full_name, pr.number, auto_merged=True,
                              auto_merge_refusal=None)
             logger.info("pr_review: auto-merge succeeded for %s", key)
-        elif result.get("released_checks"):
+        elif result.get("released_checks") or result.get("infra"):
             # Not a refusal to record: the PR was blocked on a check that had
             # never reported because its workflow run was parked, and merge_pr
             # just released it. Stay quiet and let the next poll merge it --
             # recording this as auto_merge_refusal would suppress that retry.
+            # Same for "infra": GitHub Actions never started the checks.
             logger.info("pr_review: auto-merge deferred for %s — %s",
                         key, result.get("message"))
         elif result.get("retryable") is False:
