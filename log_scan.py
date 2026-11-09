@@ -377,7 +377,11 @@ _SELF_SCAN_NOISE = re.compile(
     # "at <endpoint> after N attempts" wording so an unrelated message that
     # merely contains "429" is still reported.
     r'|LLM 429 at \S+ after \d+ attempts'
-    r'|LLM HTTPError 429 at \S+',
+    r'|LLM HTTPError 429 at \S+'
+    # (6) transient GitHub server errors (500/502/503/504). An external outage
+    # that the next poll simply retries; triage can only ever ask the reporter
+    # for "timestamps and endpoints", so these ended up non-actionable.
+    r'|Git[Hh]ub(?:Exception)?\b[^\n]{0,80}\b(?:500|502|503|504)\b',
     re.IGNORECASE,
 )
 

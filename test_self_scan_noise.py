@@ -98,6 +98,9 @@ def main():
          "log": "[INFO] Reviewer (copilot) reply had no parseable verdict — retrying once"},
         {"module": "ab-core",
          "log": "[WARNING] Reviewer (ollama-local) deferred — LLM providers cooling down: 429"},
+        # (6) transient GitHub 5xx — external, retried on the next poll.
+        {"module": "ab-core",
+         "log": "[ERROR] GithubException: 502 {'message': 'Server Error'} creating issue"},
         # (4) terminal pipeline OUTCOMES — the decision is already recorded on
         # the issue and shown in the status table (ab#198/#199/#203/#210).
         {"module": "ab-core",
