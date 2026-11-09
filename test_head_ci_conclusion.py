@@ -41,6 +41,26 @@ def _quiet_logger():
     return log
 
 
+@pytest.fixture(autouse=True)
+def _fake_gha(monkeypatch):
+    """The no-runs path asks gh_actions_health whether runs failed to start."""
+    monkeypatch.setitem(sys.modules, "gh_actions_health", _FakeGha)
+
+
+class _FakeGha:
+    """Stands in for gh_actions_health: which runs never started."""
+    stuck = []
+    noted = 0
+
+    @classmethod
+    def infra_failed_runs(cls, repo, sha, token):
+        return list(cls.stuck)
+
+    @classmethod
+    def note_infra_failure(cls, n=1):
+        cls.noted += n
+
+
 class _Resp:
     def __init__(self, status_code=200, payload=None, raises=False):
         self.status_code = status_code
@@ -230,3 +250,19 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_runs_that_never_started_are_infra_not_unknown():
+    """A GitHub Actions outage leaves zero check runs AND zero-job failed
+    workflow runs. That must read as "infra" (wait), not "unknown" (go ahead)."""
+    head_ci = _load()
+    _FakeGha.stuck, _FakeGha.noted = [11, 12], 0
+    _FakeRequests.next_error = None
+    _FakeRequests.next_response = _Resp(payload={"check_runs": []})
+    try:
+        state, detail = head_ci("lbockenstedt/lm", "a" * 40, "tok")
+    finally:
+        _FakeGha.stuck = []
+    assert state == "infra"
+    assert "2" in detail
+    assert _FakeGha.noted == 2

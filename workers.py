@@ -1620,13 +1620,20 @@ def run_scan_cycle():
         state["status"] = "Scanning"
         from pr_review import scan_open_prs  # PR pre-review — gated by pr_review_enabled (default off)
         from feature_drive import scan_feature_requests  # feature auto-drive — gated by feature_drive_enabled (default off)
+        # During a GitHub Actions outage every push lands a PR whose checks can
+        # never run, so back off the work that commits, opens PRs or merges.
+        # Hub-log scanning (files issues only) keeps going.
+        import gh_actions_health
+        gh_down, gh_why = gh_actions_health.outage(config)
+        state["gh_backoff"] = gh_why if gh_down else ""
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [
-                executor.submit(main.scan_hub_logs, Github(token), config),
-                executor.submit(scan_repo_issues, Github(token), config, processed),
-                executor.submit(scan_open_prs, Github(token), config),
-                executor.submit(scan_feature_requests, Github(token), config),
-            ]
+            futures = [executor.submit(main.scan_hub_logs, Github(token), config)]
+            if not gh_down:
+                futures += [
+                    executor.submit(scan_repo_issues, Github(token), config, processed),
+                    executor.submit(scan_open_prs, Github(token), config),
+                    executor.submit(scan_feature_requests, Github(token), config),
+                ]
             for future in futures:
                 future.result()
         # Performance/health review of the hub (interval-gated, default on).
@@ -1636,7 +1643,7 @@ def run_scan_cycle():
         except Exception as _he:  # noqa: BLE001
             logger.debug(f"health check skipped: {_he}")
         # Cycle done.
-        state["status"] = "Idle"
+        state["status"] = ("Backing off: %s" % gh_why) if gh_down else "Idle"
         state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     # Failure: log it, show it, and close any task still marked running.
     except Exception as e:

@@ -185,6 +185,8 @@ class Harness:
         fix_engine.review_fix = self.review_fix
         fix_engine.verify_fix = self.verify_fix
         fix_engine.prepare_environment = lambda p: None
+        fix_engine.fleet_gate = lambda *a, **kw: ""
+        fix_engine.FLEET_FEEDBACK = "%s"
         # Verification runs the repo's tests, which write into the repo; the
         # real pair snapshots the worktree and reverts only what the test run
         # touched, so the fix is never clobbered.
@@ -222,6 +224,7 @@ class Harness:
             "check_secrets": lambda f: [],
             "find_missing_tooltips_in_files": lambda f: [],
             "check_undefined_names": lambda r, f, s: [],
+            "_fleet_findings": lambda *a, **kw: [],
             "_review_one": lambda *a, **kw: None,
             # fix_one_pr now short-circuits to the description-repair path when
             # the panel's objection is about the PR body. These cases all carry

@@ -316,3 +316,11 @@ def test_no_findings_is_not_treated_as_all_external():
     should, reason, _ = _should_remediate()(
         _rec(errors=0, warnings=0, tier1_external=0), {})
     assert "twin" not in reason.lower()
+
+
+def test_cross_repo_twin_table():
+    """Aruba client and probe_signatures changes point at their twin repo."""
+    f = check_parity("lbockenstedt/lm", ["core/src/simulations/aruba.py"])
+    assert any(x.get("twin", {}).get("path") == "lm-spoke/src/aruba.py" for x in f)
+    f = check_parity("lbockenstedt/ab", ["probe_signatures.py"])
+    assert any(x.get("twin", {}).get("repo") == "lbockenstedt/lm" for x in f)
