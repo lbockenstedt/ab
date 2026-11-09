@@ -842,11 +842,15 @@ def gate(repo_path, repo_full_name, config):
 
 
 def rules_text():
-    """The fleet code rules (fleet_rules.md) for prompts; "" if missing."""
+    """The fleet rules for prompts: ``.github/fleet-rules.md``, the copy that
+    sync-fleet-files.yml keeps identical to lm's canonical file. "" if missing.
+
+    The editor-facing HTML comment header is dropped; the model only needs the
+    rules themselves."""
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "fleet_rules.md"), encoding="utf-8") as fh:
-            return fh.read().strip()
+                               ".github", "fleet-rules.md"), encoding="utf-8") as fh:
+            return re.sub(r"<!--.*?-->\s*", "", fh.read(), flags=re.S).strip()
     except OSError:
         return ""
 

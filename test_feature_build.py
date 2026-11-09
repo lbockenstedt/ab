@@ -42,7 +42,7 @@ def _load_ns():
         "_build_prompt", "_materialize_skill", "_changed_files", "_docs_touched",
         "_non_doc_files", "_run_build_agent", "_mark_failed", "_mark_built",
         "_identity", "_flag_incomplete", "build_feature", "_handoff_to_fix_pipeline",
-        "_build_mode", "_syntax_errors", "_run_guardrails",
+        "_build_mode", "_syntax_errors", "_run_guardrails", "_agents_block",
     }
     want_assigns = {"_FEATURE_DRIVE_MARKER", "_BUILD_JSON_SCHEMA", "_BUILD_SYSTEM", "_DOCS_NUDGE_TMPL",
                     "_BUILD_SYSTEM_TOOLS", "_GUARDRAIL_FEEDBACK_TMPL", "_GATE_LABELS"}
@@ -112,6 +112,8 @@ def _load_ns():
             return dict(self._files.get(name, {}))
         def skill_instructions(self, name):
             return self._instructions.get(name, "")
+        def agents_context(self, text):
+            return ""
 
     _llm_holder = {"responses": []}  # list of return values, consumed in order; last repeats
 

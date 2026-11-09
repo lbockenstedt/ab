@@ -5329,10 +5329,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # Inject the project skills ("agents") so the fix follows their recipes +
             # boundaries (dual-copy rules, add-simulation touch-points, etc.).
             try:
-                from skills_loader import skills_context as _skills_ctx
+                from skills_loader import skills_context as _skills_ctx, agents_context as _agents_ctx
                 _sk = _skills_ctx()
                 if _sk:
                     fix_body += "\n\n" + _sk
+                # Full checklist of any specialist agent matching this issue.
+                _ag = _agents_ctx("%s\n%s" % (issue.title or "", issue.body or ""))
+                if _ag:
+                    fix_body += "\n\n" + _ag
             except Exception:
                 pass
             # The fleet code rules, so the fix follows them from the start.
