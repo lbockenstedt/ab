@@ -346,6 +346,400 @@ def check_js_syntax(items):
     return out
 
 
+def _removed(patch):
+    """Removed lines of a unified diff, without the '-' marker."""
+    return [ln[1:] for ln in (patch or "").splitlines()
+            if ln.startswith("-") and not ln.startswith("---")]
+
+
+def _added_linenos(patch):
+    """New-file line numbers of the added lines in a unified diff."""
+    # Walk each hunk from its '+start' and count new-side lines.
+    out, n = set(), 0
+    for line in (patch or "").splitlines():
+        m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
+        if m:
+            n = int(m.group(1))
+        elif line.startswith("+") and not line.startswith("+++"):
+            out.add(n)
+            n += 1
+        elif line.startswith(" "):
+            n += 1
+    return out
+
+
+# lm WebUI ratchets (core/tests/test_webui_ratchets.py): counts may only go down.
+_RATCHETS = (
+    ("escapeHtml() calls", re.compile(r"\bescapeHtml\("), "build markup with safeHtml"),
+    ("inline event handlers", re.compile(r"\son[a-z]+=[\"']"), "wire events with data-action / delegate()"),
+    ("window globals", re.compile(r"^\s*window\.\w+\s*=[^=]"), "export from the module or register the view"),
+)
+
+
+def check_webui_ratchet(files, repo_full_name=""):
+    """lm WebUI: no net new escapeHtml calls, inline handlers or window globals."""
+    if _short(repo_full_name) != "lm":
+        return []
+    webui = [f for f in files if (f.filename.startswith("WebUI/") and "/assets/" not in f.filename
+                                  and (f.filename.endswith(".js") or f.filename == "WebUI/index.html"))]
+    out = []
+    for label, rx, fix in _RATCHETS:
+        net, where = 0, set()
+        for f in webui:
+            added = sum(len(rx.findall(ln)) for ln in _added(getattr(f, "patch", None)))
+            net += added - sum(len(rx.findall(ln)) for ln in _removed(getattr(f, "patch", None)))
+            if added:
+                where.add(f.filename)
+        if net > 0:
+            out.append(_f("error", "WebUI ratchet: %d new %s" % (net, label),
+                          "%s add %s; the lm ratchet test fails on any net increase. Instead, %s "
+                          "(docs/webui.md)." % (", ".join("`%s`" % w for w in sorted(where)), label, fix)))
+    return out
+
+
+_UI_FILE = re.compile(r"(^|/)(WebUI|static|templates)/.*\.(js|html)$")
+_UI_ID = re.compile(r"\$\{([^}]*\b(?:spoke_id|agent_id|spokeId|agentId|uuid|guid|registration_id|"
+                    r"instance_id)\b[^}]*)\}")
+
+
+def _in_attribute(prefix):
+    """True when the text before a match leaves an attribute value open (x="..., x='...)."""
+    for q in ('"', "'"):
+        i = prefix.rfind("=" + q)
+        if i >= 0 and q not in prefix[i + 2:]:
+            return True
+    return False
+
+
+def check_ui_uuids(files):
+    """WebUI text shows human names, never UUIDs/ids (attributes and URLs are fine)."""
+    out = []
+    for f in _live(files):
+        if not _UI_FILE.search(f.filename) or _TEST_RE.search(f.filename):
+            continue
+        hits = []
+        for ln in _added(getattr(f, "patch", None)):
+            if re.search(r"fetch\(|api\w*\(|encodeURIComponent|console\.|/api/", ln):
+                continue
+            for m in _UI_ID.finditer(ln):
+                # Ids inside attribute values (data-id="${...}", onclick args) are not shown.
+                if ("`" in m.group(1) or "<" in m.group(1) or _in_attribute(ln[:m.start()])
+                        or re.search(r"(?i)name|label|title", m.group(1))):
+                    continue
+                hits.append(m.group(1).strip())
+        if hits:
+            out.append(_f("warning", "UUID/id shown in the UI in `%s`" % f.filename,
+                          "Renders %s as text. Show the human name (spoke/agent name lookup); "
+                          "UUIDs belong only on diagnostic pages."
+                          % ", ".join("`${%s}`" % h for h in sorted(set(hits))[:5])))
+    return out[:_MAX_FINDINGS_PER_RULE]
+
+
+_FIRST_SPOKE = re.compile(r"\bget_spoke_by_type\(")
+_FIRST_ROW = re.compile(r"\b(?:sites|tenants|spokes|tenant_list|site_list|site_rows|tenant_rows)\[0\]|"
+                        r"next\(iter\((?:sites|tenants|spokes)\b")
+
+
+def check_first_pick(files):
+    """No 'first site / first tenant' fallbacks (tenant leaks); first-spoke picks get a note."""
+    out = []
+    for f in _live(files):
+        if not f.filename.endswith(".py") or _TEST_RE.search(f.filename):
+            continue
+        if f.filename.endswith(("access.py", "hub_spoke_registry.py")):
+            continue
+        added = [ln.strip() for ln in _added(getattr(f, "patch", None)) if not ln.lstrip().startswith("#")]
+        rows = [ln for ln in added if _FIRST_ROW.search(ln)]
+        if rows:
+            out.append(_f("warning", "First-match fallback in `%s`" % f.filename,
+                          "`%s` takes the first site/tenant/spoke. A tenant must never land in "
+                          "another tenant's site: match by the record's own tenant, or fail "
+                          "instead of guessing." % rows[0][:120]))
+        spokes = [ln for ln in added if _FIRST_SPOKE.search(ln)]
+        if spokes:
+            out.append(_f("advisory", "First connected spoke picked in `%s`" % f.filename,
+                          "`%s` returns the first spoke of the type. Tenant-bound spokes own their "
+                          "data: for tenant-facing work use `access.scoped_spoke_of_type(hub, tenant, "
+                          "type)`, and loop over every spoke for fleet-wide work." % spokes[0][:120]))
+    return out[:_MAX_FINDINGS_PER_RULE]
+
+
+_LOG_CALL = re.compile(r"\b(?:logger|logging|log|_log)\.(?:debug|info|warning|warn|error|exception|critical)\(|\bprint\(")
+_FSTR = re.compile(r"""\b[fF][rR]?("([^"\\]|\\.)*"|'([^'\\]|\\.)*')""")
+_STR_LIT = re.compile(r"""(?:(?<!\w)[rbuRBU]{1,2})?("([^"\\]|\\.)*"|'([^'\\]|\\.)*')""")
+# Secret-valued identifiers; counts/flags/references named after a secret are fine.
+_SECRET_ARG = re.compile(r"(?i)\b\w*(?:api_?key|api_?secret|client_?secret|password|passwd|passphrase|"
+                         r"secret_?key|shared_?secret|auth_?token|access_?token|bearer_?token|"
+                         r"private_?key|psk|secret|token)\b")
+_SECRET_SAFE = re.compile(r"(?i)(_(set|ref|id|name|names|field|fields|len|count|present|configured|"
+                          r"masked|hint|url|path|file|key_id|bucket|type|kind|source|expires?|age|ttl)$|"
+                          r"^(has|is|mask|max|num|n|len)_|tokens$|_tokens_)")
+
+
+def check_secret_logging(files):
+    """Log calls must not print secret values."""
+    out = []
+    for f in _live(files):
+        if not f.filename.endswith(".py") or _TEST_RE.search(f.filename):
+            continue
+        hits = []
+        for ln in _added(getattr(f, "patch", None)):
+            call = _LOG_CALL.search(ln)
+            if not call or "mask" in ln.lower() or "redact" in ln.lower():
+                continue
+            # Keep f-string interpolations, drop other string literals, then look at arguments.
+            code = _FSTR.sub(lambda m: " " + " ".join(re.findall(r"\{([^{}]*)\}", m.group(0))) + " ",
+                             ln[call.end():])
+            code = _STR_LIT.sub("''", code)
+            for m in _SECRET_ARG.finditer(code):
+                if not _SECRET_SAFE.search(m.group(0)):
+                    hits.append(m.group(0))
+        if hits:
+            out.append(_f("error", "Secret written to a log in `%s`" % f.filename,
+                          "Logs %s. Never log secrets; log whether it is set, or mask it "
+                          "(including secrets nested in command payloads)."
+                          % ", ".join("`%s`" % h for h in sorted(set(hits))[:5])))
+    return out[:_MAX_FINDINGS_PER_RULE]
+
+
+_BLOCKING = {("time", "sleep"), ("subprocess", "run"), ("subprocess", "call"),
+             ("subprocess", "check_output"), ("subprocess", "check_call"),
+             ("requests", "get"), ("requests", "post"), ("requests", "put"),
+             ("requests", "delete"), ("requests", "patch"), ("requests", "request"),
+             ("json", "dump"), ("shutil", "copytree"), ("shutil", "rmtree")}
+_BLOCKING_NAMES = {"urlopen"}
+
+
+def check_async_blocking(items):
+    """No blocking calls added directly inside ``async def`` (items: path, text, added line numbers)."""
+    import ast
+    out = []
+    for path, text, added in items:
+        if not path.endswith(".py") or text is None or _TEST_RE.search(path) or not added:
+            continue
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        hits = []
+
+        def walk(node, fn_name):
+            # Calls in this async body; nested defs/lambdas run elsewhere (to_thread etc.).
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                    continue
+                if isinstance(child, ast.Call) and child.lineno in added:
+                    fn = child.func
+                    name = (fn.value.id, fn.attr) if (isinstance(fn, ast.Attribute)
+                                                      and isinstance(fn.value, ast.Name)) else None
+                    if name in _BLOCKING or (isinstance(fn, ast.Name) and fn.id in _BLOCKING_NAMES) \
+                            or (isinstance(fn, ast.Attribute) and fn.attr == "urlopen"):
+                        hits.append("%s() in %s (line %d)" % (".".join(name) if name else
+                                                              getattr(fn, "attr", getattr(fn, "id", "?")),
+                                                              fn_name, child.lineno))
+                walk(child, fn_name)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef):
+                walk(node, node.name)
+        if hits:
+            out.append(_f("warning", "Blocking call on the event loop in `%s`" % path,
+                          "%s. Run it with `asyncio.to_thread` (or an async client) so one slow "
+                          "call does not stall every spoke and page." % "; ".join(hits[:5])))
+    return out[:_MAX_FINDINGS_PER_RULE]
+
+
+def check_full_files(files, fetch):
+    """Rules that need whole files at the new revision: node --check and
+    blocking calls in async code. ``fetch(path)`` returns the text or None."""
+    items = []
+    for f in _live(files)[:25]:
+        if f.filename.endswith((".js", ".py")):
+            items.append((f.filename, fetch(f.filename), _added_linenos(getattr(f, "patch", None))))
+    out = check_js_syntax([(p, t) for p, t, _ in items])
+    return out + check_async_blocking(items)
+
+
+def _repo_defs(repo_path):
+    """{normalised body dump: [(path, name)]} for every function in the repo (>= 4 statements)."""
+    import ast
+    names = subprocess.run(["git", "-C", repo_path, "ls-files", "*.py"], capture_output=True,
+                           text=True, timeout=30).stdout.splitlines()
+    index = {}
+    for rel in names[:4000]:
+        if _TEST_RE.search(rel):
+            continue
+        try:
+            with open(os.path.join(repo_path, rel), encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = node.body[1:] if (node.body and isinstance(node.body[0], ast.Expr)
+                                         and isinstance(getattr(node.body[0], "value", None), ast.Constant)
+                                         and isinstance(node.body[0].value.value, str)) else node.body
+                if len(body) >= 4:
+                    key = ast.dump(ast.Module(body=body, type_ignores=[]))
+                    index.setdefault(key, []).append((rel, node.name))
+    return index
+
+
+def check_copies_and_dead_code(repo_path, files):
+    """Worktree only: new functions that copy an existing one, or that nothing calls."""
+    out = []
+    new_defs = []
+    for f in _live(files):
+        if _TEST_RE.search(f.filename) or not f.filename.endswith((".py", ".js")):
+            continue
+        rows = _new_side(getattr(f, "patch", None))
+        for i, (added, text) in enumerate(rows):
+            m = added and (re.match(r"\s*(?:async\s+)?def\s+(\w+)\s*\(", text or "")
+                           or re.match(r"\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(", text or ""))
+            if not m or m.group(1).startswith(("_test", "test_", "__")):
+                continue
+            prev = rows[i - 1][1] if i else ""
+            if (prev or "").lstrip().startswith("@"):
+                continue  # decorated: registered as a route/handler
+            new_defs.append((f.filename, m.group(1)))
+    # Dead code: the name appears nowhere else in the repo.
+    dead = []
+    for path, name in new_defs[:40]:
+        hits = subprocess.run(["git", "-C", repo_path, "grep", "-c", "-w", "--", name],
+                              capture_output=True, text=True, timeout=30).stdout
+        total = sum(int(r.rsplit(":", 1)[-1]) for r in hits.splitlines() if ":" in r)
+        if total <= 1:
+            dead.append("`%s` (%s)" % (name, path))
+    if dead:
+        out.append(_f("warning", "New function(s) nothing calls",
+                      "%s. Remove dead code, or wire it in." % ", ".join(dead[:8])))
+    # Copies: a new Python function whose body equals an existing one.
+    py_new = {(p, n) for p, n in new_defs if p.endswith(".py")}
+    if py_new:
+        copies = []
+        for key, where in _repo_defs(repo_path).items():
+            mine = [w for w in where if w in py_new]
+            other = [w for w in where if w not in py_new]
+            if mine and other:
+                copies.append("`%s` (%s) copies `%s` (%s)" % (mine[0][1], mine[0][0], other[0][1], other[0][0]))
+        if copies:
+            out.append(_f("warning", "Copied function(s) instead of a shared helper",
+                          "%s. Call or move the existing helper instead of copying it." % "; ".join(copies[:5])))
+    return out
+
+
+_JS_FUNC = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(")
+_JS_COMMENT = re.compile(r"^\s*(?://|/\*|\*)")
+
+
+def check_js_comments(files):
+    """Every new WebUI/JS function has a comment (// or JSDoc) just above it."""
+    out = []
+    for f in _live(files):
+        if not f.filename.endswith(".js") or _TEST_RE.search(f.filename) or "/assets/" in f.filename:
+            continue
+        rows = _new_side(getattr(f, "patch", None))
+        missing = []
+        for i, (added, text) in enumerate(rows):
+            m = added and _JS_FUNC.match(text or "")
+            if not m:
+                continue
+            # Walk up past blank lines to the line above the function.
+            k = i - 1
+            while k >= 0 and rows[k][1] is not None and not rows[k][1].strip():
+                k -= 1
+            above = rows[k][1] if k >= 0 else None
+            # A hunk break above means the line is not visible: give it the benefit of the doubt.
+            if above is not None and not _JS_COMMENT.match(above):
+                missing.append(m.group(1))
+        if missing:
+            out.append(_f("warning", "Function(s) without a comment in `%s`" % f.filename,
+                          "%s. Put a one-line `//` comment (or JSDoc) above each function saying "
+                          "what it does." % ", ".join("`%s`" % n for n in missing[:8])))
+    return out[:_MAX_FINDINGS_PER_RULE]
+
+
+_STEP_MIN_LINES = 15
+_TRIPLE = re.compile(r"\"\"\"|'''")
+
+
+def check_step_comments(files):
+    """New Python functions longer than ~15 code lines have at least one step comment."""
+    out = []
+    for f in _live(files):
+        if not f.filename.endswith(".py") or _TEST_RE.search(f.filename):
+            continue
+        rows = _new_side(getattr(f, "patch", None))
+        bare = []
+        for i, (added, text) in enumerate(rows):
+            m = added and re.match(r"(\s*)(?:async\s+)?def\s+(\w+)\s*\(", text or "")
+            if not m:
+                continue
+            indent, code, commented, in_doc = len(m.group(1)), 0, False, False
+            # Skip the rest of a multi-line signature (up to the line ending with ':').
+            start, depth = i, 0
+            while start < len(rows) and rows[start][1] is not None:
+                depth += rows[start][1].count("(") - rows[start][1].count(")")
+                if depth <= 0 and rows[start][1].rstrip().endswith(":"):
+                    break
+                start += 1
+            # Body: the added lines after the def that are indented deeper than it.
+            for added2, body in rows[start + 1:]:
+                if body is None or not added2:
+                    break
+                if not body.strip():
+                    continue
+                if len(body) - len(body.lstrip()) <= indent:
+                    break
+                # Docstrings (single- or multi-line) are not code.
+                quotes = len(_TRIPLE.findall(body))
+                if in_doc or quotes:
+                    if quotes % 2:
+                        in_doc = not in_doc
+                    continue
+                if body.strip().startswith("#") or " #" in body:
+                    commented = True
+                    break
+                code += 1
+            if not commented and code > _STEP_MIN_LINES:
+                bare.append("%s (%d lines)" % (m.group(2), code))
+        if bare:
+            out.append(_f("warning", "Long function(s) without step comments in `%s`" % f.filename,
+                          "%s. Add a short comment before each step so the next reader can follow it."
+                          % ", ".join("`%s`" % b for b in bare[:6])))
+    return out[:_MAX_FINDINGS_PER_RULE]
+
+
+_DOC_FILE = re.compile(r"\.md$")
+_FORM_FIELD = re.compile(r"""<(?:input|select|textarea)\b[^>]*\bname=["'](\w+)["']""")
+
+
+def check_docs_updated(files):
+    """User-visible additions (new routes, new WebUI pages, new form fields) come with a doc update."""
+    files = list(files or [])
+    if any(_DOC_FILE.search(f.filename) for f in files if getattr(f, "status", "") != "removed"):
+        return []
+    why = []
+    for f in _live(files):
+        if _TEST_RE.search(f.filename):
+            continue
+        added = _added(getattr(f, "patch", None))
+        # New API routes.
+        if f.filename.endswith(".py"):
+            routes = [re.search(r"\(\s*[\"']([^\"']+)", ln) for ln in added if _ROUTE_DEF.match(ln)]
+            why += ["route `%s`" % r.group(1) for r in routes if r]
+        # New WebUI pages and form fields.
+        if f.filename.endswith((".js", ".html")):
+            if getattr(f, "status", "") == "added" and _UI_FILE.search(f.filename):
+                why.append("new page `%s`" % f.filename)
+            why += ["field `%s`" % m.group(1) for ln in added for m in _FORM_FIELD.finditer(ln)]
+    if not why:
+        return []
+    return [_f("warning", "User-visible change without a documentation update",
+               "Adds %s but no docs/*.md, README or MODULE_REQUIREMENTS.md changed. Document what it "
+               "does and how to use it." % ", ".join(sorted(set(why))[:6]))]
+
+
 def check_fleet_rules(files, repo_full_name="", head_ref=None, config=None):
     """Run every diff rule; returns findings (never raises)."""
     cfg = config or {}
@@ -359,7 +753,14 @@ def check_fleet_rules(files, repo_full_name="", head_ref=None, config=None):
                lambda: check_version_file(files, head_ref),
                lambda: check_docstrings(files),
                lambda: check_ssrf(files),
-               lambda: check_tenant_scope(files, repo_full_name, vault_repos)):
+               lambda: check_tenant_scope(files, repo_full_name, vault_repos),
+               lambda: check_webui_ratchet(files, repo_full_name),
+               lambda: check_ui_uuids(files),
+               lambda: check_first_pick(files),
+               lambda: check_secret_logging(files),
+               lambda: check_js_comments(files),
+               lambda: check_step_comments(files),
+               lambda: check_docs_updated(files)):
         try:
             out += fn()
         except Exception:  # noqa: BLE001 -- one bad rule must not hide the others
@@ -387,22 +788,27 @@ def local_diff_files(repo_path):
 
 
 def check_worktree(repo_path, repo_full_name="", config=None):
-    """All rules (plus node --check) on a local worktree's uncommitted changes."""
+    """All rules on a local worktree's uncommitted changes, including the
+    whole-file rules and the copied/dead-code scan."""
     try:
         files = local_diff_files(repo_path)
     except Exception:  # noqa: BLE001
         return []
     out = check_fleet_rules(files, repo_full_name, None, config)
-    # Syntax-check changed JS from disk.
-    items = []
-    for f in files:
-        if f.filename.endswith(".js") and f.status != "removed":
-            try:
-                with open(os.path.join(repo_path, f.filename), encoding="utf-8") as fh:
-                    items.append((f.filename, fh.read()))
-            except OSError:
-                pass
-    return out + check_js_syntax(items)
+
+    def _read(rel):
+        # The changed file as it is on disk now.
+        try:
+            with open(os.path.join(repo_path, rel), encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return None
+    try:
+        out += check_full_files(files, _read)
+        out += check_copies_and_dead_code(repo_path, files)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def gate(repo_path, repo_full_name, config):

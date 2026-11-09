@@ -107,8 +107,8 @@ def _basename(path):
 
 
 def _fleet_findings(repo, files, head_sha, head_ref, config):
-    """Fleet code rules on the PR diff, plus ``node --check`` on changed JS
-    (full file at the head commit). Never raises."""
+    """Fleet code rules on the PR diff, plus the whole-file rules (``node
+    --check``, blocking calls in async code) at the head commit. Never raises."""
     # Off switch; promotions carry code already checked on dev.
     if not (config or {}).get("fleet_checks_enabled", True):
         return []
@@ -118,10 +118,8 @@ def _fleet_findings(repo, files, head_sha, head_ref, config):
         import fleet_checks
         from lint_python import _fetch_full_content
         out = fleet_checks.check_fleet_rules(files, repo.full_name, head_ref, config)
-        js = [f.filename for f in files
-              if f.filename.endswith(".js") and getattr(f, "status", "") != "removed"][:25]
-        out += fleet_checks.check_js_syntax(
-            [(p, _fetch_full_content(repo, p, head_sha)) for p in js])
+        out += fleet_checks.check_full_files(
+            files, lambda p: _fetch_full_content(repo, p, head_sha))
         return out
     except Exception as e:  # noqa: BLE001
         logger.debug("pr_review: fleet checks skipped: %s", e)
