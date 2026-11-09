@@ -493,9 +493,16 @@ async def health_check():
 
 @router.get("/api/hub-health-check")
 async def hub_health_check_last():
-    """Findings and filed issues from the last hub health review."""
+    """Dashboard payload from the last hub health review: findings, filed issues, host
+    gauges, worst routes/commands, status, schedule and recent history."""
     import health_check as _hc
-    return _hc.last_result()
+    from main import load_config
+    return _hc.dashboard(load_config())
+
+
+@router.get("/health")
+async def health_dashboard_page(request: Request):
+    return templates.TemplateResponse(request=request, name="index.html", context={"view": "health"})
 
 
 @router.post("/api/hub-health-check")

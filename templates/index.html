@@ -332,7 +332,7 @@
             <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
             <h1 class="text-white text-xl font-bold tracking-tight shrink-0">AppBuilder</h1>
             <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
-            <span class="text-white/80 text-base font-semibold tracking-tight truncate">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}Logs{% elif view == 'hub-logs' %}Hub Logs{% elif view == 'settings' %}Settings{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'release' %}Release Management{% elif view == 'chat' %}Chat{% else %}AppBuilder{% endif %}</span>
+            <span class="text-white/80 text-base font-semibold tracking-tight truncate">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}Logs{% elif view == 'hub-logs' %}Hub Logs{% elif view == 'health' %}Hub Health{% elif view == 'settings' %}Settings{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'release' %}Release Management{% elif view == 'chat' %}Chat{% else %}AppBuilder{% endif %}</span>
         </div>
         <!-- Hub agent connection status — mirrors LM's header status pattern
              (w-2 h-2 rounded-full, green/amber/red/slate by agent state) with a
@@ -468,6 +468,9 @@
             </a>
             <a href="/logs" class="nav-item {{ 'active' if view == 'logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-list-ul w-4 text-center"></i>Logs
+            </a>
+            <a href="/health" class="nav-item {{ 'active' if view == 'health' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
+                <i class="fas fa-heart-pulse w-4 text-center"></i>Hub Health
             </a>
             <a href="/hub-logs" class="nav-item {{ 'active' if view == 'hub-logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
                 <i class="fas fa-network-wired w-4 text-center"></i>Hub Logs
@@ -959,6 +962,109 @@
             </div>
             <pre id="system-logs-text" class="hidden">{{ logs }}</pre>
         </div>
+        {% endif %}
+
+        {% if view == 'health' %}
+        <div id="hc-root" class="space-y-4">
+            <div class="hpe-card rounded-2xl p-5 flex flex-wrap items-center justify-between gap-3">
+                <div class="flex items-center gap-3">
+                    <span id="hc-badge" class="px-3 py-1 rounded-full text-sm font-bold bg-slate-200 text-slate-700">Loading…</span>
+                    <span id="hc-sub" class="text-xs text-slate-500"></span>
+                </div>
+                <button type="button" id="hc-run" onclick="hcRun(this)" title="Run the hub health review now and file issues for any findings" class="px-4 py-2 rounded-full text-xs font-bold btn-primary">Run now</button>
+            </div>
+            <div id="hc-gauges" class="grid grid-cols-2 md:grid-cols-5 gap-3"></div>
+            <div class="hpe-card rounded-2xl p-5">
+                <h3 class="text-sm font-bold text-navy mb-2">Findings</h3>
+                <div id="hc-findings" class="space-y-2 text-sm"></div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="hpe-card rounded-2xl p-5"><h3 class="text-sm font-bold text-navy mb-2">Slowest pages</h3><div id="hc-routes" class="text-xs"></div></div>
+                <div class="hpe-card rounded-2xl p-5"><h3 class="text-sm font-bold text-navy mb-2">Slowest spoke commands</h3><div id="hc-commands" class="text-xs"></div></div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="hpe-card rounded-2xl p-5"><h3 class="text-sm font-bold text-navy mb-2">Issues filed last run</h3><div id="hc-filed" class="text-xs"></div></div>
+                <div class="hpe-card rounded-2xl p-5"><h3 class="text-sm font-bold text-navy mb-2">History (newest first)</h3><div id="hc-history" class="text-xs"></div></div>
+            </div>
+            <p class="text-xs text-slate-500">Schedule and thresholds are under Settings → Monitoring. History is kept in memory and resets when AppBuilder restarts.</p>
+        </div>
+        <script>
+        (function () {
+            const COLORS = {healthy: 'bg-emerald-100 text-emerald-800', degraded: 'bg-amber-100 text-amber-800',
+                            critical: 'bg-red-100 text-red-800', unavailable: 'bg-slate-300 text-slate-800',
+                            pending: 'bg-slate-200 text-slate-700'};
+            const $ = id => document.getElementById(id);
+            function el(tag, cls, text) {
+                const e = document.createElement(tag);
+                if (cls) e.className = cls;
+                if (text !== undefined) e.textContent = text;
+                return e;
+            }
+            function fill(id, nodes, empty) {
+                const box = $(id);
+                box.replaceChildren();
+                if (!nodes.length) box.appendChild(el('span', 'text-slate-500', empty));
+                nodes.forEach(n => box.appendChild(n));
+            }
+            const ago = ts => { const s = Math.max(0, Date.now() / 1000 - ts); return s < 90 ? Math.round(s) + 's ago' : s < 5400 ? Math.round(s / 60) + 'm ago' : Math.round(s / 3600) + 'h ago'; };
+            function gauge(label, value, unit, warn) {
+                const g = el('div', 'hpe-card rounded-2xl p-3');
+                g.appendChild(el('div', 'text-xs text-slate-500', label));
+                g.appendChild(el('div', 'text-xl font-bold ' + (warn ? 'text-red-700' : 'text-navy'), value == null ? '–' : value + unit));
+                return g;
+            }
+            function rows(list, cols) {
+                return list.map(item => {
+                    const [left, right] = cols(item);
+                    const d = el('div', 'flex justify-between gap-3 py-1 border-b border-slate-100');
+                    d.append(el('span', 'truncate', left), el('span', 'text-slate-500 whitespace-nowrap', right));
+                    return d;
+                });
+            }
+            function render(d) {
+                const b = $('hc-badge');
+                b.textContent = d.status.toUpperCase();
+                b.className = 'px-3 py-1 rounded-full text-sm font-bold ' + (COLORS[d.status] || COLORS.pending);
+                const bits = [];
+                if (d.ts) bits.push('Last run ' + ago(d.ts));
+                if (!d.enabled) bits.push('health check is OFF');
+                else bits.push('every ' + Math.round(d.interval_s / 60) + ' min');
+                if (d.next_run_ts) bits.push('next ~' + new Date(d.next_run_ts * 1000).toLocaleTimeString());
+                if (d.error) bits.push('error: ' + d.error);
+                $('hc-sub').textContent = bits.join(' · ');
+                const h = (d.report || {}).host || {}, t = d.thresholds || {};
+                const cpus = h.cpus || 1, load = (h.load || [null])[0];
+                $('hc-gauges').replaceChildren(
+                    gauge('Load / CPU', load == null ? null : (load / cpus).toFixed(2), '', load != null && load / cpus >= t.hc_load_per_cpu),
+                    gauge('Memory', h.mem_used_pct, '%', h.mem_used_pct >= t.hc_mem_pct),
+                    gauge('Disk', h.disk_used_pct, '%', h.disk_used_pct >= t.hc_disk_pct),
+                    gauge('Event-loop lag', (d.report || {}).loop_lag_s, 's', (d.report || {}).loop_lag_s >= t.hc_loop_lag_s),
+                    gauge('Open findings', (d.findings || []).length, '', (d.findings || []).length > 0));
+                fill('hc-findings', (d.findings || []).map(f => {
+                    const row = el('div', 'p-2 rounded border border-slate-200');
+                    row.appendChild(el('div', 'font-semibold ' + (f.severity === 'high' ? 'text-red-700' : 'text-amber-700'), '[' + f.severity + '] ' + f.title + '  (' + f.module + ')'));
+                    (f.evidence || []).slice(0, 2).forEach(e => row.appendChild(el('div', 'text-xs text-slate-500 font-mono truncate', e)));
+                    return row;
+                }), d.error ? 'No data — ' + d.error : 'No findings. All checks are within thresholds.');
+                const r = d.report || {};
+                fill('hc-routes', rows(r.routes || [], x => [x.key, x.slow + '/' + x.count + ' slow · avg ' + x.avg_s + 's · max ' + x.max_s + 's']), 'None recorded.');
+                fill('hc-commands', rows(r.commands || [], x => [x.key + ' @ ' + x.spoke, x.slow + '/' + x.count + ' slow · avg ' + x.avg_s + 's · max ' + x.max_s + 's']), 'None recorded.');
+                fill('hc-filed', rows(d.filed || [], x => [x.title, x.ok ? 'filed/folded' : 'failed: ' + x.detail]), 'Nothing filed.');
+                fill('hc-history', rows((d.history || []).slice().reverse().slice(0, 24), x => [new Date(x.ts * 1000).toLocaleTimeString() + ' — ' + x.findings + ' finding(s), ' + x.high + ' high', 'load ' + x.load + ' · mem ' + x.mem + '% · disk ' + x.disk + '% · lag ' + x.lag + 's']), 'No runs yet.');
+            }
+            async function load() {
+                try { render(await fetch('/api/hub-health-check').then(r => r.json())); }
+                catch (e) { $('hc-sub').textContent = 'Failed to load: ' + e; }
+            }
+            window.hcRun = async function (btn) {
+                btn.disabled = true; btn.textContent = 'Running…';
+                try { await fetch('/api/hub-health-check', {method: 'POST'}); await load(); }
+                finally { btn.disabled = false; btn.textContent = 'Run now'; }
+            };
+            load();
+            setInterval(load, 60000);
+        })();
+        </script>
         {% endif %}
 
         {% if view == 'hub-logs' %}
