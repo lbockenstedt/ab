@@ -32,6 +32,9 @@ DEFAULTS = {
     "hc_repeat_error_min": 25,         # identical (normalised) ERROR lines in the log tail
     "hc_vault_gets_min": 200,          # Azure Key Vault GETs in the log tail
     "hc_queue_rejected_min": 5,        # commands a spoke refused because its queue was full
+    "hc_autorack_problems_min": 1,     # devices whose rack-from-name placement fails
+    "hc_netbox_dupe_groups_min": 1,    # duplicate NetBox device groups (serial/MAC)
+    "hc_dhcp_declined_min": 5,         # DECLINEd addresses held in one DHCP scope
     "hc_max_issues_per_run": 5,
 }
 
@@ -59,6 +62,16 @@ _HINT = {
               "inflight/avg_s), make that handler faster or move its long work to a background "
               "task, and stop the hub re-sending it while it is still in flight. Diagnose live "
               "with POST /admin/ops/spoke-queue."),
+    "autorack": ("Rack-from-name placement failed. The name (e.g. N31-R44) must win: check "
+                 "netbox_autorack.plan() for device height detection (2U/half-width from the "
+                 "device type), slot freeing and controller/host pairing before blaming data. "
+                 "Do not ask the user to rack it by hand."),
+    "netbox_dupes": ("Duplicate NetBox devices share a serial or MAC: find which sync path "
+                     "created the second record (it should have matched by serial/MAC first) "
+                     "and fix the match; the dedupe merge only cleans up after it."),
+    "dhcp_declines": ("Clients are DECLINEing offered addresses (ARP conflict). Check for the "
+                      "decline probation/auto-release working, a stale reservation or a static IP "
+                      "in the pool; if it is a network-side cause (proxy-ARP, loop) say so in the issue."),
     "repeat_error": "One error repeats many times: fix the cause, or log it once per interval.",
     "vault": "Cache secret reads with a TTL instead of fetching on every cycle.",
     "slow_query": "Add the missing index, narrow the query, or move the work to the background.",
@@ -156,6 +169,34 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
             + [f"{name}: inflight {v.get('inflight')}, rejected {v.get('rejected')}, "
                f"avg {v.get('avg_s')}s, max {v.get('max_s')}s" for name, v in busiest[:5]],
             f"`{spoke}` is refusing or backing up hub commands."))
+
+    # Data quality: auto-rack failures, NetBox duplicates, DHCP declines.
+    fleet = report.get("fleet") or {}
+    ar = fleet.get("autorack") or {}
+    problems = int(ar.get("conflicts") or 0) + int(ar.get("cannot") or 0)
+    if ar and problems >= c["hc_autorack_problems_min"]:
+        out.append(_finding(
+            "autorack", "autorack", "devices cannot be auto-racked from their names", "medium", "ipam",
+            [f"{ar.get('conflicts', 0)} conflict(s), {ar.get('cannot', 0)} cannot place, of "
+             f"{ar.get('named', '?')} rack-named devices"]
+            + [f"{x.get('name')}: wanted {x.get('wanted') or '?'}, now {x.get('current') or '?'} "
+               f"- {x.get('reason') or ''}" for x in ar.get("sample") or []],
+            "The auto-rack sweep could not place devices where their names ask."))
+    dd = fleet.get("netbox_duplicates") or {}
+    if dd and int(dd.get("groups") or 0) >= c["hc_netbox_dupe_groups_min"]:
+        out.append(_finding(
+            "netbox_dupes", "dupes", "duplicate devices in NetBox", "medium", "ipam",
+            [f"{dd['groups']} duplicate group(s) among {dd.get('scanned', '?')} devices"]
+            + [f"{x.get('name')} (key {x.get('key')}): {x.get('duplicates')} extra record(s)"
+               for x in dd.get("sample") or []],
+            "The same device exists more than once in NetBox."))
+    bad = [d for d in fleet.get("dhcp_declines") or []
+           if int(d.get("declined") or 0) >= c["hc_dhcp_declined_min"]]
+    if bad:
+        out.append(_finding(
+            "dhcp_declines", "declines", "DHCP addresses stuck declined", "medium", "dhcp",
+            [f"{d.get('subnet')}: {d.get('declined')} declined of {d.get('total')}" for d in bad[:10]],
+            "Addresses are being DECLINEd and held out of the pool."))
 
     errs: Counter = Counter()
     sample: Dict[str, str] = {}

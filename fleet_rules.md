@@ -24,3 +24,23 @@ These are the rules every change to the LM fleet must follow. They come from the
     - Customisations survive a reinstall.
 12. **Twins stay in step.** When a file has a twin (hub↔spoke copies, linux↔windows scripts, pipeline files), change both copies the same way.
 13. **VERSION is bot-owned.** Never edit `VERSION` files; the promotion workflow bumps them. Branch flow is dev → qa → main.
+14. **Vendor responses are untrusted.**
+    - Check the HTTP status and the body, e.g. `result: failed` inside a 200.
+    - Reconnect when a session expires.
+    - Make anything you push JSON-safe (datetimes, sets, bytes).
+15. **Sync is idempotent.**
+    - Before creating, look the record up by its natural key (serial, MAC, primary IP, name in the same site).
+    - Never match across tenants.
+    - Don't skip a repair pass just because the record looks unchanged.
+16. **Don't block the event loop.**
+    - In `async def`, wrap sleeps, subprocesses, sync HTTP and file I/O in `asyncio.to_thread`.
+    - Bound fan-out with a semaphore or queue.
+    - Never start a new poll while the last one is still running.
+17. **WebUI hygiene.**
+    - Cancel or ignore stale async renders when the user navigates away.
+    - Build markup with `safeHtml`; wire events with `data-action` and `delegate()`.
+    - No new `escapeHtml(`, inline `on*=` handlers or `window.x =` globals; the ratchet test fails on any increase.
+18. **Never log secrets.** Log whether a secret is set, or mask it. This includes secrets nested in command payloads.
+19. **Share, don't copy.**
+    - Call or move the existing helper instead of pasting it.
+    - When you replace code, delete the old path. Leave no dead functions behind.

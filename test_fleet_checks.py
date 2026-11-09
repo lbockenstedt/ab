@@ -136,3 +136,74 @@ def test_worktree_gate(tmp_path):
     assert any(f["title"] == "Database storage in `b.py`" for f in out)
     assert fc.blocking(out) and "Database storage" in fc.as_feedback(out)
 
+
+
+# --- rework rules (mined from a month of fix-up commits) --------------------
+def _diff(name, added=(), removed=()):
+    body = ["@@ -1,%d +1,%d @@" % (len(removed), len(added))]
+    body += ["-" + r for r in removed] + ["+" + a for a in added]
+    return F(filename=name, patch="\n".join(body), status="modified")
+
+
+def test_webui_ratchet_counts_net_change_across_files():
+    """Moving an escapeHtml call is fine; adding one, an inline handler or a window global is not."""
+    moved = [_diff("WebUI/js/a.js", removed=["x = escapeHtml(a)"]),
+             _diff("WebUI/js/b.js", added=["y = escapeHtml(a)"])]
+    assert fc.check_webui_ratchet(moved, "o/lm") == []
+    added = [_diff("WebUI/js/a.js", added=["h = `<b onclick=\"go()\">${escapeHtml(n)}</b>`",
+                                            "window.goThere = go"])]
+    titles = sorted(f["title"] for f in fc.check_webui_ratchet(added, "o/lm"))
+    assert titles == ["WebUI ratchet: 1 new escapeHtml() calls", "WebUI ratchet: 1 new inline event handlers",
+                      "WebUI ratchet: 1 new window globals"]
+    assert fc.check_webui_ratchet(added, "o/netbox") == []
+
+
+def test_ui_uuid_flags_text_but_not_attributes_or_names():
+    shown = [_file("WebUI/js/a.js", "row += `<td>${esc(s.spoke_id)}</td>`")]
+    assert [f["level"] for f in fc.check_ui_uuids(shown)] == ["warning"]
+    fine = [_file("WebUI/js/a.js", "row += `<tr data-id=\"${s.spoke_id}\"><td>${esc(s.name)}</td>`",
+                  "fetch(`/api/spokes/${s.spoke_id}`)",
+                  "row += `<td>${esc(spokeName(s.spoke_id))}</td>`")]
+    assert fc.check_ui_uuids(fine) == []
+
+
+def test_first_pick_warns_on_first_site_and_notes_first_spoke():
+    out = fc.check_first_pick([_file("core/src/routes/x.py", "site = sites[0]",
+                                     "sid = hub.get_spoke_by_type('ipam')")])
+    assert sorted(f["level"] for f in out) == ["advisory", "warning"]
+    assert fc.check_first_pick([_file("core/src/access.py", "site = sites[0]")]) == []
+
+
+def test_secret_logging_is_an_error_but_set_flags_are_fine():
+    bad = [_file("src/x.py", "logger.info(f'login with {password}')", "print('key', api_key)")]
+    out = fc.check_secret_logging(bad)
+    assert out[0]["level"] == "error" and "password" in out[0]["detail"] and "api_key" in out[0]["detail"]
+    ok = [_file("src/x.py", "logger.info('password set: %s', password_set)",
+                "logger.info('token %s', mask(token))", "logger.info('password is required')")]
+    assert fc.check_secret_logging(ok) == []
+
+
+def test_async_blocking_only_flags_added_calls_in_async_bodies():
+    text = ("import time, asyncio\n"
+            "async def poll():\n"
+            "    time.sleep(1)\n"
+            "    await asyncio.to_thread(lambda: time.sleep(1))\n"
+            "def sync():\n"
+            "    time.sleep(1)\n")
+    out = fc.check_async_blocking([("src/x.py", text, {3, 4, 6})])
+    assert len(out) == 1 and "time.sleep() in poll (line 3)" in out[0]["detail"]
+    assert fc.check_async_blocking([("src/x.py", text, {6})]) == []
+
+
+def test_copies_and_dead_code_in_a_worktree(tmp_path):
+    import subprocess
+    body = "    a = 1\n    b = 2\n    c = a + b\n    return c\n"
+    (tmp_path / "old.py").write_text("def helper():\n" + body + "\nhelper()\n")
+    (tmp_path / "new.py").write_text("def copied():\n" + body + "\ncopied()\n\ndef unused():\n    return 1\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    files = [_file("new.py", "def copied():", "def unused():")]
+    titles = {f["title"]: f["detail"] for f in fc.check_copies_and_dead_code(str(tmp_path), files)}
+    assert "`unused` (new.py)" in titles["New function(s) nothing calls"]
+    assert "copied" not in titles["New function(s) nothing calls"]
+    assert "copies `helper` (old.py)" in titles["Copied function(s) instead of a shared helper"]

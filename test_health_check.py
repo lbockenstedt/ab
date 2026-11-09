@@ -97,3 +97,19 @@ def test_saturated_spoke_queue_is_reported_against_its_module():
     f = [x for x in evaluate(rep, []) if x["kind"] == "queue"]
     assert len(f) == 1 and f[0]["module"] == "ipam" and f[0]["severity"] == "high"
     assert "NETBOX_SYNC_DEVICE" in " ".join(f[0]["evidence"])
+
+
+def test_fleet_data_quality_findings():
+    """Auto-rack failures, NetBox duplicates and DHCP declines each file one finding."""
+    from health_check import evaluate
+    rep = {"host": {}, "fleet": {
+        "autorack": {"named": 10, "conflicts": 1, "cannot": 1,
+                     "sample": [{"name": "srv-N31-R44", "wanted": "R44 U31 front", "reason": "2U"}]},
+        "netbox_duplicates": {"groups": 2, "scanned": 50, "sample": [{"name": "ilo1", "key": "SN", "duplicates": 1}]},
+        "dhcp_declines": [{"subnet": "10.21.0.0/24", "declined": 12, "total": 200},
+                          {"subnet": "10.22.0.0/24", "declined": 1, "total": 200}]}}
+    by_kind = {f["kind"]: f for f in evaluate(rep, [])}
+    assert by_kind["autorack"]["module"] == "ipam" and "srv-N31-R44" in " ".join(by_kind["autorack"]["evidence"])
+    assert by_kind["netbox_dupes"]["module"] == "ipam"
+    assert by_kind["dhcp_declines"]["evidence"] == ["10.21.0.0/24: 12 declined of 200"]
+    assert evaluate({"host": {}, "fleet": {"autorack": {"conflicts": 0, "cannot": 0}}}, []) == []

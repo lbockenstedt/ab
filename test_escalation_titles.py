@@ -43,6 +43,32 @@ def test_empty_analysis():
     assert _summary_fn()("") == ""
 
 
+def _recent_fn():
+    import logging
+    from datetime import datetime
+    tree = ast.parse(open("log_scan.py").read())
+    keep = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "recent_deploy_changes"]
+    ns = {"datetime": datetime, "logger": logging.getLogger("t")}
+    exec(compile(ast.Module(body=keep, type_ignores=[]), "log_scan.py", "exec"), ns)
+    return ns["recent_deploy_changes"]
+
+
+def test_post_deploy_watch_lists_recent_commits_on_the_deployed_branch():
+    from types import SimpleNamespace as N
+    seen = {}
+
+    class Repo:
+        default_branch = "main"
+
+        def get_commits(self, sha, since):
+            seen.update(sha=sha, since=since)
+            return [N(sha="abcdef1234", commit=N(message="nw: dedupe rows\n\nbody"))]
+
+    out = _recent_fn()(Repo(), {"post_deploy_window_h": 2})
+    assert out == ["- `abcdef12` nw: dedupe rows"] and seen["sha"] == "main"
+    assert _recent_fn()(Repo(), {"post_deploy_window_h": 0}) == []
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

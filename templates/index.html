@@ -2054,6 +2054,10 @@
                                 <label class="text-sm font-medium text-slate-600">Prod Verification Days</label>
                                 <input type="number" name="PROD_VERIFICATION_DAYS" value="{{ settings.PROD_VERIFICATION_DAYS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600" title="A hub-escalated error filed within this many hours of a deploy lists the commits that just shipped and is labelled regression-suspect. 0 turns it off.">Post-Deploy Watch (hours)</label>
+                                <input type="number" name="post_deploy_window_h" value="{{ settings.post_deploy_window_h }}" min="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
                         </div>
                         <div class="space-y-2 pt-6">
                             <label class="text-sm font-medium text-slate-600">Trigger Labels</label>
