@@ -1629,6 +1629,12 @@ def run_scan_cycle():
             ]
             for future in futures:
                 future.result()
+        # Performance/health review of the hub (interval-gated, default on).
+        try:
+            from health_check import scan_health
+            scan_health(config)
+        except Exception as _he:  # noqa: BLE001
+            logger.debug(f"health check skipped: {_he}")
         # Cycle done.
         state["status"] = "Idle"
         state["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
