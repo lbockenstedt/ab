@@ -45,6 +45,7 @@ import repo_tools
 import llm_client
 from model_selection import LlmRequirements, select_model
 import skills_loader
+import fleet_checks
 import feature_boundary
 from branch_policy import auto_branch_name, integration_branch, may_force_push
 from github_ops import _ensure_label
@@ -114,6 +115,7 @@ _GUARDRAIL_FEEDBACK_TMPL = (
 # Human-readable names for each failed check, used in the feedback prompt.
 _GATE_LABELS = {
     "syntax": "syntax check",
+    "fleet_rules": "fleet code rules",
     "review_rejected": "skeptical reviewer panel",
     "tests_failed": "repository test suite",
 }
@@ -136,6 +138,7 @@ def _build_prompt(issue_title, issue_body, skill_name, skill_text, boundaries_bl
         f"## Feature request (issue body)\n{issue_body}\n\n"
         f"## Recipe to follow — skill \"{skill_name}\"\n{skill_text}\n\n"
         f"## Boundaries — do NOT touch any of these even incidentally\n{boundaries_block or '(none configured)'}\n"
+        + ("\n" + fleet_checks.rules_text() + "\n" if fleet_checks.rules_text() else "")
     )
 
 
@@ -259,6 +262,10 @@ def _run_guardrails(checkout_path, repo_git, repo_name, issue, issue_id, config,
     errors = _syntax_errors(checkout_path, changed)
     if errors:
         return False, "syntax", "\n".join(errors), None
+    # Fleet code rules (vault, storage, deps, docstrings, ...).
+    fleet = fleet_checks.gate(checkout_path, repo_name, config)
+    if fleet:
+        return False, "fleet_rules", fleet, None
 
     # Run the reviewer panel unless reviews are turned off in config.
     review_conf = None

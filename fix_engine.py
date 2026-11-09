@@ -3561,6 +3561,12 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             body = str(code) if len(str(code)) <= 8000 else _trunc(str(code), 8000)
             fix_details += f"\n--- FILE: {path} ---\n{body}\n"
 
+    # The fleet code rules, for checklist item 5 ("" if unavailable).
+    try:
+        import fleet_checks as _fc
+        _rules_block = (_fc.rules_text() + "\n\n") if _fc.rules_text() else ""
+    except Exception:  # noqa: BLE001
+        _rules_block = ""
     # Reviewer prompt: the issue, the change, the checklist, and confidence/verdict rules.
     prompt = (
         f"Issue Description: {issue_body}\n\n"
@@ -3570,7 +3576,16 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         "1. Does it actually fix the described issue?\n"
         "2. Does it introduce new bugs or regressions?\n"
         "3. Is the code quality acceptable?\n"
-        "4. Are there any obvious edge cases missed?\n\n"
+        "4. Are there any obvious edge cases missed?\n"
+        "5. Does it follow the FLEET CODE RULES below? In particular: credentials "
+        "through the Credential Vault (backend AND WebUI picker), JSON-only storage, "
+        "tenant scope / no UUIDs in the UI, nothing hard-coded, generic not "
+        "vendor-specific, docstrings, few dependencies.\n"
+        "6. Is the logic in the right place (spoke does the work, hub relays), and "
+        "are hub<->spoke wire changes backward-compatible and reversible?\n"
+        "A rule breach is a defect: lower confidence below 0.90 unless the issue "
+        "text explicitly asks for it.\n\n"
+        + _rules_block +
         "NOTE: Small, targeted changes that correct obvious typos or naming mismatches are considered high-signal; "
         "if they correctly address the issue without regressions, they SHOULD be approved.\n\n"
         "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}\n"
@@ -4423,6 +4438,16 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
 
 # Complexity ranks from cheapest to most capable.
 _COMPLEXITY_RANK_ORDER = ("trivial", "small", "medium", "large")
+
+
+FLEET_FEEDBACK = ("Your previous fix broke the fleet code rules below. Keep the fix, "
+                  "but also satisfy every rule:\n%s")
+
+
+def fleet_gate(repo_path, repo_full_name, config):
+    """Fleet code rules on the uncommitted worktree change (see fleet_checks.gate)."""
+    import fleet_checks
+    return fleet_checks.gate(repo_path, repo_full_name, config)
 
 
 def next_attempt_requirements(prev_reqs, failure_kind, tried_key, config):
@@ -5310,6 +5335,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     fix_body += "\n\n" + _sk
             except Exception:
                 pass
+            # The fleet code rules, so the fix follows them from the start.
+            try:
+                import fleet_checks as _fc
+                if _fc.rules_text():
+                    fix_body += "\n\n" + _fc.rules_text()
+            except Exception:  # noqa: BLE001
+                pass
             # Reopened + previously fixed → prepend "what changed since our fix" so the
             # builder triages from the regression cause, not from zero.
             if was_reopened:
@@ -5496,6 +5528,22 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     # The fix applied: review it (unless review is turned off).
                     else:
                         critique = ""
+                        # Fleet code rules first (vault, storage, deps,
+                        # docstrings, ...): deterministic, so a breach goes
+                        # straight back to the builder before any panel cost.
+                        _fleet = fleet_gate(path, repo_name, config)
+                        if _fleet:
+                            logger.warning(f"Fleet rules failed for {issue_id}: {_fleet[:400]}")
+                            error_context = FLEET_FEEDBACK % _fleet
+                            last_failure = {"kind": "review_rejected", "detail": _fleet,
+                                            "confidence": 0.0}
+                            try:
+                                repo_git.git.reset("--hard", "HEAD")
+                                repo_git.git.clean("-fd")
+                            except Exception:  # noqa: BLE001
+                                pass
+                            reqs = next_attempt_requirements(reqs, "review_rejected", built_key, config)
+                            continue
                         if config.get("skip_review", False):
                             logger.info("Skeptical Reviewer bypassed by configuration.")
                             review_conf = confidence

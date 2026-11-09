@@ -32,7 +32,9 @@ import sys
 logger = logging.getLogger(__name__)
 
 # Ruff rules to run and limits on how much work one review may do.
-_RUFF_RULES = "F821,F822,F823"  # undefined name / undefined in __all__ / used-before-assignment
+# undefined name / undefined in __all__ / used-before-assignment, plus syntax
+# errors (E9), broken comparisons (F63) and misplaced statements (F7).
+_RUFF_RULES = "F821,F822,F823,E9,F63,F7"
 _MAX_FILES = 25
 _MAX_FILE_BYTES = 300_000  # skip pathological/generated files; ruff would time out uselessly
 _TIMEOUT_S = 10
@@ -218,7 +220,8 @@ def check_undefined_names_verified(repo, files, head_sha):
             line = (d.get("location") or {}).get("row")
             findings.append({
                 "level": "error",
-                "title": "Undefined name in `%s`%s" % (path, (" (line %s)" % line) if line else ""),
+                "title": "%s in `%s`%s" % ("Undefined name" if code.startswith("F82") else "Python error",
+                                            path, (" (line %s)" % line) if line else ""),
                 "detail": "ruff %s: %s. Checked against the FULL file at this PR's head "
                           "commit (not just the diff), so this is a real undefined-name "
                           "hit, not a diff-visibility artifact." % (code or "?", msg or "undefined name"),
