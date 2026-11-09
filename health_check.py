@@ -233,7 +233,8 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
             why = ("not connected/approved" if report is None and client is None else
                    report.get("message") if isinstance(report, dict) and report.get("message")
                    else "no reply within 30s")
-            _last.update(error="hub health report unavailable: %s" % why, findings=[], filed=[])
+            _last.update(error="hub health report unavailable: %s" % why, findings=[], filed=[],
+                         running=False, duration_s=round(time.time() - now, 1))
             return last_result()
         lines = [e.get("log", "") for e in get_hub_logs(max_per_module=3000)]
         findings = evaluate(report, lines, cfg)
