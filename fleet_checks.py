@@ -628,6 +628,118 @@ def check_copies_and_dead_code(repo_path, files):
     return out
 
 
+_JS_FUNC = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(")
+_JS_COMMENT = re.compile(r"^\s*(?://|/\*|\*)")
+
+
+def check_js_comments(files):
+    """Every new WebUI/JS function has a comment (// or JSDoc) just above it."""
+    out = []
+    for f in _live(files):
+        if not f.filename.endswith(".js") or _TEST_RE.search(f.filename) or "/assets/" in f.filename:
+            continue
+        rows = _new_side(getattr(f, "patch", None))
+        missing = []
+        for i, (added, text) in enumerate(rows):
+            m = added and _JS_FUNC.match(text or "")
+            if not m:
+                continue
+            # Walk up past blank lines to the line above the function.
+            k = i - 1
+            while k >= 0 and rows[k][1] is not None and not rows[k][1].strip():
+                k -= 1
+            above = rows[k][1] if k >= 0 else None
+            # A hunk break above means the line is not visible: give it the benefit of the doubt.
+            if above is not None and not _JS_COMMENT.match(above):
+                missing.append(m.group(1))
+        if missing:
+            out.append(_f("warning", "Function(s) without a comment in `%s`" % f.filename,
+                          "%s. Put a one-line `//` comment (or JSDoc) above each function saying "
+                          "what it does." % ", ".join("`%s`" % n for n in missing[:8])))
+    return out[:_MAX_FINDINGS_PER_RULE]
+
+
+_STEP_MIN_LINES = 15
+_TRIPLE = re.compile(r"\"\"\"|'''")
+
+
+def check_step_comments(files):
+    """New Python functions longer than ~15 code lines have at least one step comment."""
+    out = []
+    for f in _live(files):
+        if not f.filename.endswith(".py") or _TEST_RE.search(f.filename):
+            continue
+        rows = _new_side(getattr(f, "patch", None))
+        bare = []
+        for i, (added, text) in enumerate(rows):
+            m = added and re.match(r"(\s*)(?:async\s+)?def\s+(\w+)\s*\(", text or "")
+            if not m:
+                continue
+            indent, code, commented, in_doc = len(m.group(1)), 0, False, False
+            # Skip the rest of a multi-line signature (up to the line ending with ':').
+            start, depth = i, 0
+            while start < len(rows) and rows[start][1] is not None:
+                depth += rows[start][1].count("(") - rows[start][1].count(")")
+                if depth <= 0 and rows[start][1].rstrip().endswith(":"):
+                    break
+                start += 1
+            # Body: the added lines after the def that are indented deeper than it.
+            for added2, body in rows[start + 1:]:
+                if body is None or not added2:
+                    break
+                if not body.strip():
+                    continue
+                if len(body) - len(body.lstrip()) <= indent:
+                    break
+                # Docstrings (single- or multi-line) are not code.
+                quotes = len(_TRIPLE.findall(body))
+                if in_doc or quotes:
+                    if quotes % 2:
+                        in_doc = not in_doc
+                    continue
+                if body.strip().startswith("#") or " #" in body:
+                    commented = True
+                    break
+                code += 1
+            if not commented and code > _STEP_MIN_LINES:
+                bare.append("%s (%d lines)" % (m.group(2), code))
+        if bare:
+            out.append(_f("warning", "Long function(s) without step comments in `%s`" % f.filename,
+                          "%s. Add a short comment before each step so the next reader can follow it."
+                          % ", ".join("`%s`" % b for b in bare[:6])))
+    return out[:_MAX_FINDINGS_PER_RULE]
+
+
+_DOC_FILE = re.compile(r"\.md$")
+_FORM_FIELD = re.compile(r"""<(?:input|select|textarea)\b[^>]*\bname=["'](\w+)["']""")
+
+
+def check_docs_updated(files):
+    """User-visible additions (new routes, new WebUI pages, new form fields) come with a doc update."""
+    files = list(files or [])
+    if any(_DOC_FILE.search(f.filename) for f in files if getattr(f, "status", "") != "removed"):
+        return []
+    why = []
+    for f in _live(files):
+        if _TEST_RE.search(f.filename):
+            continue
+        added = _added(getattr(f, "patch", None))
+        # New API routes.
+        if f.filename.endswith(".py"):
+            routes = [re.search(r"\(\s*[\"']([^\"']+)", ln) for ln in added if _ROUTE_DEF.match(ln)]
+            why += ["route `%s`" % r.group(1) for r in routes if r]
+        # New WebUI pages and form fields.
+        if f.filename.endswith((".js", ".html")):
+            if getattr(f, "status", "") == "added" and _UI_FILE.search(f.filename):
+                why.append("new page `%s`" % f.filename)
+            why += ["field `%s`" % m.group(1) for ln in added for m in _FORM_FIELD.finditer(ln)]
+    if not why:
+        return []
+    return [_f("warning", "User-visible change without a documentation update",
+               "Adds %s but no docs/*.md, README or MODULE_REQUIREMENTS.md changed. Document what it "
+               "does and how to use it." % ", ".join(sorted(set(why))[:6]))]
+
+
 def check_fleet_rules(files, repo_full_name="", head_ref=None, config=None):
     """Run every diff rule; returns findings (never raises)."""
     cfg = config or {}
@@ -645,7 +757,10 @@ def check_fleet_rules(files, repo_full_name="", head_ref=None, config=None):
                lambda: check_webui_ratchet(files, repo_full_name),
                lambda: check_ui_uuids(files),
                lambda: check_first_pick(files),
-               lambda: check_secret_logging(files)):
+               lambda: check_secret_logging(files),
+               lambda: check_js_comments(files),
+               lambda: check_step_comments(files),
+               lambda: check_docs_updated(files)):
         try:
             out += fn()
         except Exception:  # noqa: BLE001 -- one bad rule must not hide the others

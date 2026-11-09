@@ -107,7 +107,8 @@ def test_ssrf_and_tenant_scope():
                 "async def save(request: Request, tenant=Depends(get_tenant_id)):",
                 '    """Save."""',
                 "    url = body.get('webhook_url')",
-                "    if not safe_external_url(url): raise HTTPException(400)")]
+                "    if not safe_external_url(url): raise HTTPException(400)"),
+          _file("docs/x.md", "## Save")]
     assert fc.check_fleet_rules(ok, "o/lm") == []
 
 
@@ -207,3 +208,30 @@ def test_copies_and_dead_code_in_a_worktree(tmp_path):
     assert "`unused` (new.py)" in titles["New function(s) nothing calls"]
     assert "copied" not in titles["New function(s) nothing calls"]
     assert "copies `helper` (old.py)" in titles["Copied function(s) instead of a shared helper"]
+
+
+# --- comments and docs ------------------------------------------------------
+def test_js_function_needs_a_comment_above():
+    rows = F(filename="WebUI/js/a.js", status="modified", patch="\n".join([
+        "@@ -1,1 +1,6 @@", " const x = 1;", "+function bare() {}", "+", "+// Opens the rack view.",
+        "+function documented() {}", "+/** JSDoc */", "+async function alsoFine() {}"]))
+    out = fc.check_js_comments([rows])
+    assert len(out) == 1 and "`bare`" in out[0]["detail"] and "documented" not in out[0]["detail"]
+
+
+def test_long_python_function_needs_step_comments():
+    sig = ["def long_one(a,", "             b):", '    """Doc."""']
+    body = ["    x%d = %d" % (n, n) for n in range(16)]
+    assert len(fc.check_step_comments([_file("src/x.py", *sig, *body)])) == 1
+    commented = sig + ["    # Build the values."] + body
+    assert fc.check_step_comments([_file("src/x.py", *commented)]) == []
+    assert fc.check_step_comments([_file("src/x.py", *sig, *body[:15])]) == []
+
+
+def test_new_route_or_field_needs_a_doc_update():
+    code = [_file("core/src/routes/x.py", '@app.get("/api/x")'),
+            _file("WebUI/js/s.js", '<input type="number" name="window_h">')]
+    out = fc.check_docs_updated(code)
+    assert len(out) == 1 and "route `/api/x`" in out[0]["detail"] and "field `window_h`" in out[0]["detail"]
+    assert fc.check_docs_updated(code + [_file("docs/x.md", "## X")]) == []
+    assert fc.check_docs_updated([_file("core/src/x.py", "y = 1")]) == []

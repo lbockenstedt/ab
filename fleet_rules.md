@@ -3,7 +3,7 @@
 These are the rules every change to the LM fleet must follow. They come from the owner's working sessions. Breaking one of them is a defect, even when the code works.
 
 1. **Readable and small.** Use the fewest lines that stay clear, and plain Python wherever possible. When code repeats, move it into a shared helper.
-2. **Documented.** Every function has a docstring and short step comments.
+2. **Documented.** Every Python function has a docstring, and every JS function a `//` comment above it. A function longer than about 15 lines has short step comments. A new route, WebUI page or form field comes with a docs/*.md (or README / MODULE_REQUIREMENTS.md) update.
 3. **Few dependencies.** Don't add packages unless there's no reasonable alternative. There is no npm or Node build; the WebUI is plain JavaScript.
 4. **JSON storage only.** Store state in plain JSON files. No SQLite, ORM, YAML, XML or CSV storage.
 5. **Nothing hard-coded.** No lab hostnames, IPs, tenants, sites or vendor lists. Read them from config or discover them.
