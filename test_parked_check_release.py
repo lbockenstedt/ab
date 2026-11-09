@@ -233,3 +233,20 @@ def test_workflow_release_step_approves_every_parked_run(wf):
     assert re.search(r'case " \$approved "', step), \
         "the loop does not dedupe, so it would re-approve the same run every poll"
     assert "quiet" in step, "the loop has no quiet-period exit"
+
+
+def test_missing_check_during_an_actions_outage_is_retryable():
+    """Checks that never started (zero-job runs) must not be written off as a
+    permanent refusal -- the merge has to retry once Actions recovers."""
+    body = _extract("merge_pr")
+    seg = body[:body.index("merge_blocked_reason=why")]
+    assert "infra_failed_runs" in seg
+    assert '"infra": True' in seg
+
+
+def test_pr_review_holds_on_infra_and_does_not_record_it():
+    body = _extract("_maybe_auto_merge", REVIEW_SRC)
+    assert '_ci_state == "infra"' in body
+    assert 'result.get("infra")' in body
+    assert body.index('result.get("infra")') < \
+        body.index('result.get("retryable") is False')
