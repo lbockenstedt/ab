@@ -2935,6 +2935,10 @@ async def settings_page(request: Request):
         "premium_models_set": premium_models_set,
         "premium_models_extra": premium_models_extra,
         "log_module_options": log_module_options,
+        "health_check_fields": [
+            {"key": k, "value": config.get(k, v), "step": "any" if isinstance(v, float) else "1"}
+            for k, v in __import__("health_check").DEFAULTS.items() if k != "health_check_enabled"],
+        "health_check_enabled": bool(config.get("health_check_enabled", True)),
         "state": state,
     })
 
@@ -3508,6 +3512,20 @@ async def save_settings(request: Request):
     # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical
     # always fix). Stops the fixer churning on log-scraped issues.
     config_data["fix_logdetected_enabled"] = data.get("fix_logdetected_enabled") == "on"
+    # Hub health check (health_check.py): on/off plus every threshold. A blank or
+    # malformed number falls back to the built-in default instead of failing the save.
+    import health_check as _hc
+    config_data["health_check_enabled"] = data.get("health_check_enabled") == "on"
+    for _k, _dv in _hc.DEFAULTS.items():
+        if _k == "health_check_enabled":
+            continue
+        try:
+            _n = float(str(data.get(_k) or "").strip())
+            if _n <= 0:
+                raise ValueError
+            config_data[_k] = _n if isinstance(_dv, float) else int(_n)
+        except ValueError:
+            config_data[_k] = _dv
     # Per-module hub-log auto-filing: only CHECKED modules have their errors
     # filed as issues. Empty = OFF for every module (the default) → enable one at
     # a time. getlist so repeated checkbox values aren't collapsed by dict(form_data).
