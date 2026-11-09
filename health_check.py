@@ -170,7 +170,7 @@ def render_issue(f: Dict[str, Any]) -> Dict[str, str]:
     return {"analysis": analysis, "log_slice": "\n".join(f["evidence"])}
 
 
-_last: Dict[str, Any] = {"ts": 0.0, "findings": [], "filed": [], "error": "", "report": {}}
+_last: Dict[str, Any] = {"ts": 0.0, "findings": [], "filed": [], "error": "", "report": {}, "running": False, "duration_s": 0.0}
 _history: List[Dict[str, Any]] = []
 HISTORY_MAX = 96
 
@@ -222,13 +222,19 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
             return last_result()
         if now - _last["ts"] < float(cfg["health_check_interval_s"]):
             return last_result()
-    _last["ts"] = now
+    if _last.get("running"):
+        return last_result()
+    _last.update(ts=now, running=True)
     try:
         from log_scan import _get_hub_agent_client, file_escalated_issue, get_hub_logs
         client = _get_hub_agent_client()
         report = client.request_sync("GET_HEALTH_REPORT", {}, timeout=30) if client else None
-        if not report:
-            _last.update(error="hub health report unavailable", findings=[], filed=[])
+        if not (isinstance(report, dict) and "host" in report):
+            why = ("not connected/approved" if report is None and client is None else
+                   report.get("message") if isinstance(report, dict) and report.get("message")
+                   else "no reply within 30s")
+            _last.update(error="hub health report unavailable: %s" % why, findings=[], filed=[],
+                         running=False, duration_s=round(time.time() - now, 1))
             return last_result()
         lines = [e.get("log", "") for e in get_hub_logs(max_per_module=3000)]
         findings = evaluate(report, lines, cfg)
@@ -248,4 +254,6 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         logger.warning("health check failed: %s", e)
         _last["error"] = str(e)
+    finally:
+        _last.update(running=False, duration_s=round(time.time() - now, 1))
     return last_result()
