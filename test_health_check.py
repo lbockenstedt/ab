@@ -84,3 +84,16 @@ def test_findings_carry_measurements_for_the_fixer():
     text = "\n".join(f["evidence"])
     assert "avg 12.5s" in text and "load 0.5 on 2 CPUs" in text and "took 41s" in text
     assert "unrelated" not in text
+
+
+def test_saturated_spoke_queue_is_reported_against_its_module():
+    """A spoke refusing commands (queue full) is a high finding owned by its module."""
+    from health_check import evaluate
+    rep = {"host": {}, "spoke_queues": {
+        "netbox-1": {"inflight": 8, "max_inflight": 8, "rejected_full": 40,
+                     "by_type": {"NETBOX_SYNC_DEVICE": {"inflight": 7, "rejected": 38,
+                                                        "avg_s": 20.0, "max_s": 90.0}}},
+        "nw-1": {"inflight": 1, "max_inflight": 8, "rejected_full": 0, "by_type": {}}}}
+    f = [x for x in evaluate(rep, []) if x["kind"] == "queue"]
+    assert len(f) == 1 and f[0]["module"] == "ipam" and f[0]["severity"] == "high"
+    assert "NETBOX_SYNC_DEVICE" in " ".join(f[0]["evidence"])
