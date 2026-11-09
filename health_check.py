@@ -170,11 +170,45 @@ def render_issue(f: Dict[str, Any]) -> Dict[str, str]:
     return {"analysis": analysis, "log_slice": "\n".join(f["evidence"])}
 
 
-_last: Dict[str, Any] = {"ts": 0.0, "findings": [], "filed": [], "error": ""}
+_last: Dict[str, Any] = {"ts": 0.0, "findings": [], "filed": [], "error": "", "report": {}}
+_history: List[Dict[str, Any]] = []
+HISTORY_MAX = 96
+
+
+def _snapshot(report: Dict[str, Any]) -> Dict[str, Any]:
+    """The parts of a hub report the dashboard shows: host gauges and the worst offenders."""
+    perf = report.get("perf") or {}
+    worst = lambda rows: sorted(rows or [], key=lambda r: r.get("max_s", 0), reverse=True)[:10]  # noqa: E731
+    return {"host": report.get("host") or {}, "loop_lag_s": report.get("loop_lag_s") or 0,
+            "routes": worst(perf.get("routes")), "commands": worst(perf.get("commands")),
+            "timeouts": {(report.get("spoke_names") or {}).get(sid) or sid: cmds
+                         for sid, cmds in (report.get("timeouts_by_spoke") or {}).items()}}
+
+
+def status_of(result: Dict[str, Any]) -> str:
+    """unavailable (no report) | critical (any high finding) | degraded | healthy | pending."""
+    if result.get("error"):
+        return "unavailable"
+    if not result.get("ts"):
+        return "pending"
+    sev = {f.get("severity") for f in result.get("findings") or []}
+    return "critical" if "high" in sev else "degraded" if sev else "healthy"
 
 
 def last_result() -> Dict[str, Any]:
     return dict(_last)
+
+
+def dashboard(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Everything the Health page renders: last result, status, schedule, history, thresholds."""
+    cfg = dict(DEFAULTS)
+    cfg.update({k: v for k, v in (config or {}).items() if k in DEFAULTS and v is not None})
+    res = last_result()
+    interval = float(cfg["health_check_interval_s"])
+    return {**res, "status": status_of(res), "enabled": bool(cfg["health_check_enabled"]),
+            "interval_s": interval,
+            "next_run_ts": (res["ts"] + interval) if res.get("ts") and cfg["health_check_enabled"] else None,
+            "history": list(_history), "thresholds": {k: v for k, v in cfg.items() if k.startswith("hc_")}}
 
 
 def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
@@ -204,7 +238,13 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
             ok, detail = file_escalated_issue(f["module"], r["log_slice"], r["analysis"],
                                               verdict="health-check", config=config)
             filed.append({"title": f["title"], "module": f["module"], "ok": ok, "detail": detail})
-        _last.update(error="", findings=findings, filed=filed)
+        _last.update(error="", findings=findings, filed=filed, report=_snapshot(report))
+        host = report.get("host") or {}
+        _history.append({"ts": now, "findings": len(findings),
+                         "high": sum(1 for f in findings if f["severity"] == "high"),
+                         "load": (host.get("load") or [0])[0], "mem": host.get("mem_used_pct") or 0,
+                         "disk": host.get("disk_used_pct") or 0, "lag": report.get("loop_lag_s") or 0})
+        del _history[:-HISTORY_MAX]
     except Exception as e:  # noqa: BLE001
         logger.warning("health check failed: %s", e)
         _last["error"] = str(e)

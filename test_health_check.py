@@ -42,3 +42,15 @@ def test_scan_health_respects_disable_and_interval():
     hc._last.update(ts=0.0)
     assert hc.scan_health({"health_check_enabled": False}) == hc.last_result()
     assert hc._last["ts"] == 0.0
+
+
+def test_dashboard_status_and_history():
+    hc._last.update(ts=0.0, findings=[], error="")
+    hc._history.clear()
+    assert hc.dashboard({})["status"] == "pending"
+    assert hc.status_of({"ts": 1, "findings": [{"severity": "medium"}]}) == "degraded"
+    assert hc.status_of({"ts": 1, "findings": [{"severity": "high"}]}) == "critical"
+    assert hc.status_of({"ts": 1, "findings": [], "error": "x"}) == "unavailable"
+    snap = hc._snapshot({"host": {"cpus": 2}, "perf": {"routes": [{"max_s": 1}, {"max_s": 9}]},
+                         "timeouts_by_spoke": {"s1": {"A": 2}}, "spoke_names": {"s1": "nw"}})
+    assert snap["routes"][0]["max_s"] == 9 and snap["timeouts"] == {"nw": {"A": 2}}
