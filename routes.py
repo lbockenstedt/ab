@@ -510,7 +510,9 @@ async def hub_health_check_run():
     """Run the hub health review now (ignores the interval) and file issues."""
     import health_check as _hc
     from main import load_config
-    return await asyncio.to_thread(_hc.scan_health, load_config(), True)
+    import threading
+    threading.Thread(target=_hc.scan_health, args=(load_config(), True), daemon=True).start()
+    return {"status": "started"}
 
 
 @router.post("/api/llm/diag")
@@ -2944,7 +2946,9 @@ async def settings_page(request: Request):
         "log_module_options": log_module_options,
         "health_check_fields": [
             {"key": k, "value": config.get(k, v), "step": "any" if isinstance(v, float) else "1"}
-            for k, v in __import__("health_check").DEFAULTS.items() if k != "health_check_enabled"],
+            for k, v in __import__("health_check").DEFAULTS.items()
+            if k not in ("health_check_enabled", "health_check_interval_s")],
+        "health_check_interval_min": round(float(config.get("health_check_interval_s", 1800)) / 60, 1),
         "health_check_enabled": bool(config.get("health_check_enabled", True)),
         "state": state,
     })
@@ -3523,16 +3527,18 @@ async def save_settings(request: Request):
     # malformed number falls back to the built-in default instead of failing the save.
     import health_check as _hc
     config_data["health_check_enabled"] = data.get("health_check_enabled") == "on"
+    _have = load_config()
     for _k, _dv in _hc.DEFAULTS.items():
         if _k == "health_check_enabled":
             continue
+        _src, _mul = (("health_check_interval_min", 60) if _k == "health_check_interval_s" else (_k, 1))
         try:
-            _n = float(str(data.get(_k) or "").strip())
+            _n = float(str(data.get(_src) or "").strip()) * _mul
             if _n <= 0:
                 raise ValueError
             config_data[_k] = _n if isinstance(_dv, float) else int(_n)
         except ValueError:
-            config_data[_k] = _dv
+            config_data[_k] = _have.get(_k, _dv)
     # Per-module hub-log auto-filing: only CHECKED modules have their errors
     # filed as issues. Empty = OFF for every module (the default) → enable one at
     # a time. getlist so repeated checkbox values aren't collapsed by dict(form_data).

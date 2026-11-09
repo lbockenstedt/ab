@@ -54,3 +54,20 @@ def test_dashboard_status_and_history():
     snap = hc._snapshot({"host": {"cpus": 2}, "perf": {"routes": [{"max_s": 1}, {"max_s": 9}]},
                          "timeouts_by_spoke": {"s1": {"A": 2}}, "spoke_names": {"s1": "nw"}})
     assert snap["routes"][0]["max_s"] == 9 and snap["timeouts"] == {"nw": {"A": 2}}
+
+
+def test_scan_health_rejects_error_reply_and_reports_why(monkeypatch):
+    import sys
+    import types
+
+    class _Client:
+        def request_sync(self, *a, **k):
+            return {"status": "error", "message": "Unknown HUB_REQUEST type"}
+
+    fake = types.SimpleNamespace(_get_hub_agent_client=lambda: _Client(),
+                                 file_escalated_issue=None, get_hub_logs=lambda **k: [])
+    monkeypatch.setitem(sys.modules, "log_scan", fake)
+    hc._last.update(ts=0.0, running=False)
+    res = hc.scan_health({}, force=True)
+    assert "Unknown HUB_REQUEST type" in res["error"] and res["running"] is False
+    assert hc.status_of(res) == "unavailable"
