@@ -31,8 +31,6 @@ def _load():
     fn = next(n for n in tree.body
               if isinstance(n, ast.FunctionDef) and n.name == "head_ci_conclusion")
     ns = {"requests": _FakeRequests, "logger": _quiet_logger()}
-    # The no-runs path asks gh_actions_health whether runs failed to start.
-    sys.modules["gh_actions_health"] = _FakeGha
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<head_ci>", "exec"), ns)
     return ns["head_ci_conclusion"]
 
@@ -41,6 +39,12 @@ def _quiet_logger():
     log = types.SimpleNamespace()
     log.debug = lambda *a, **k: None
     return log
+
+
+@pytest.fixture(autouse=True)
+def _fake_gha(monkeypatch):
+    """The no-runs path asks gh_actions_health whether runs failed to start."""
+    monkeypatch.setitem(sys.modules, "gh_actions_health", _FakeGha)
 
 
 class _FakeGha:
