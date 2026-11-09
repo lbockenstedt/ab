@@ -396,3 +396,15 @@ def main():
 if __name__ == "__main__":
     print("Running feature_drive classify/flag/clarify self-test...")
     sys.exit(main())
+
+
+def test_mark_built_and_failed_keep_title(monkeypatch):
+    import feature_build as fb
+    store = {"o/r:1": {"status": "feature_flagged", "title": "Add X", "issue_url": "u"}}
+    monkeypatch.setattr(fb, "load_processed", lambda: store)
+    monkeypatch.setattr(fb, "save_processed", lambda p: None)
+    monkeypatch.setattr(fb, "recompute_issue_counters", lambda p: None)
+    fb._mark_built("o/r:1", "http://pr")
+    assert store["o/r:1"]["title"] == "Add X" and store["o/r:1"]["status"] == "feature_built"
+    fb._mark_failed("o/r:1", "boom")
+    assert store["o/r:1"]["title"] == "Add X" and store["o/r:1"]["issue_url"] == "u"
