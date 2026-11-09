@@ -41,7 +41,7 @@ def _load_ns():
     want_funcs = {
         "_build_prompt", "_materialize_skill", "_changed_files", "_docs_touched",
         "_non_doc_files", "_run_build_agent", "_mark_failed", "_mark_built",
-        "_flag_incomplete", "build_feature", "_handoff_to_fix_pipeline",
+        "_identity", "_flag_incomplete", "build_feature", "_handoff_to_fix_pipeline",
         "_build_mode", "_syntax_errors", "_run_guardrails",
     }
     want_assigns = {"_FEATURE_DRIVE_MARKER", "_BUILD_JSON_SCHEMA", "_BUILD_SYSTEM", "_DOCS_NUDGE_TMPL",
