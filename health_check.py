@@ -35,6 +35,9 @@ DEFAULTS = {
     "hc_autorack_problems_min": 1,     # devices whose rack-from-name placement fails
     "hc_netbox_dupe_groups_min": 1,    # duplicate NetBox device groups (serial/MAC)
     "hc_dhcp_declined_min": 5,         # DECLINEd addresses held in one DHCP scope
+    "hc_azure_enabled": True,          # review the Azure VMs too (needs CHAT_AZURE_ENABLED)
+    "hc_azure_credits_min": 30.0,      # burstable VM below this many CPU credits is throttled
+    "hc_azure_credits_cpu_pct": 15.0,  # ...and busy at least this much
     "hc_max_issues_per_run": 5,
 }
 
@@ -317,15 +320,23 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
         from log_scan import _get_hub_agent_client, file_escalated_issue, get_hub_logs
         client = _get_hub_agent_client()
         report = client.request_sync("GET_HEALTH_REPORT", {}, timeout=30) if client else None
+        import azure_health
+        azure_findings = azure_health.findings(cfg)
         if not (isinstance(report, dict) and "host" in report):
             why = ("not connected/approved" if report is None and client is None else
                    report.get("message") if isinstance(report, dict) and report.get("message")
                    else "no reply within 30s")
-            _last.update(error="hub health report unavailable: %s" % why, findings=[], filed=[],
+            filed = []
+            for f in azure_findings[: int(cfg["hc_max_issues_per_run"])]:
+                r = render_issue(f)
+                ok, detail = file_escalated_issue(f["module"], r["log_slice"], r["analysis"],
+                                                  verdict="health-check", config=config)
+                filed.append({"title": f["title"], "module": f["module"], "ok": ok, "detail": detail})
+            _last.update(error="hub health report unavailable: %s" % why, findings=azure_findings, filed=filed,
                          running=False, duration_s=round(time.time() - now, 1))
             return last_result()
         lines = [e.get("log", "") for e in get_hub_logs(max_per_module=3000)]
-        findings = evaluate(report, lines, cfg)
+        findings = evaluate(report, lines, cfg) + azure_findings
         filed = []
         for f in findings[: int(cfg["hc_max_issues_per_run"])]:
             r = render_issue(f)

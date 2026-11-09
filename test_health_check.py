@@ -113,3 +113,41 @@ def test_fleet_data_quality_findings():
     assert by_kind["netbox_dupes"]["module"] == "ipam"
     assert by_kind["dhcp_declines"]["evidence"] == ["10.21.0.0/24: 12 declined of 200"]
     assert evaluate({"host": {}, "fleet": {"autorack": {"conflicts": 0, "cannot": 0}}}, []) == []
+
+
+def test_azure_vm_findings_credits_agent_power():
+    import azure_health as az
+    vms = [{"name": "LM-NETBOX", "size": "Standard_B2als_v2", "power": "VM running", "agent": "Ready",
+            "credits": 0.7, "cpu_pct": 30.0},
+           {"name": "LM-IDLE", "size": "Standard_B1s", "power": "VM running", "agent": "Ready",
+            "credits": 5.0, "cpu_pct": 1.0},
+           {"name": "LM-AB", "size": "Standard_B1ms", "power": "VM running", "agent": "Not Ready",
+            "credits": 288.0, "cpu_pct": 17.0},
+           {"name": "LM-OFF", "size": "Standard_D2s_v5", "power": "VM deallocated", "agent": "",
+            "credits": None, "cpu_pct": None}]
+    kinds = {(f["kind"], f["key"]) for f in az.evaluate(vms)}
+    assert kinds == {("azure_credits", "LM-NETBOX"), ("azure_agent", "LM-AB"), ("azure_power", "LM-OFF")}
+    assert az.evaluate(None) == [] and az.findings({}) == []
+
+
+def test_azure_collect_reads_vms_through_read_only_az(monkeypatch):
+    import az_console
+    import azure_health as az
+    import json as _j
+    calls = []
+
+    def fake(argv, config, timeout=120):
+        calls.append(argv)
+        assert az_console.vet_az_args(argv)[0], argv
+        if argv[:2] == ["vm", "list"]:
+            return {"exit_code": 0, "stdout": _j.dumps([{"name": "A", "id": "/r/A", "size": "Standard_B2s"}])}
+        if argv[:2] == ["vm", "get-instance-view"]:
+            return {"exit_code": 0, "stdout": _j.dumps({"power": "VM running", "agent": "Ready"})}
+        return {"exit_code": 0, "stdout": _j.dumps([{"n": "CPU Credits Remaining", "v": 4.0},
+                                                      {"n": "Percentage CPU", "v": 40.0}])}
+    import az_console
+    monkeypatch.setattr(az_console, "run_az", fake)
+    got = az.collect({"CHAT_AZURE_ENABLED": True})
+    assert got == [{"name": "A", "size": "Standard_B2s", "power": "VM running", "agent": "Ready",
+                    "credits": 4.0, "cpu_pct": 40.0}]
+    assert az.collect({}) is None
