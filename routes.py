@@ -491,6 +491,21 @@ async def health_check():
     return {"status": "ok"}
 
 
+@router.get("/api/hub-health-check")
+async def hub_health_check_last():
+    """Findings and filed issues from the last hub health review."""
+    import health_check as _hc
+    return _hc.last_result()
+
+
+@router.post("/api/hub-health-check")
+async def hub_health_check_run():
+    """Run the hub health review now (ignores the interval) and file issues."""
+    import health_check as _hc
+    from main import load_config
+    return await asyncio.to_thread(_hc.scan_health, load_config(), True)
+
+
 @router.post("/api/llm/diag")
 async def llm_diag_run(request: Request):
     """Dry-run the model picker for every requirement preset and report which
