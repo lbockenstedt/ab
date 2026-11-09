@@ -110,3 +110,53 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _load_agent_ns():
+    """The agent helpers, extracted by source like _load_ns (no app boot)."""
+    import json
+    import re
+    src = open("skills_loader.py").read()
+    tree = ast.parse(src)
+    names = ("_frontmatter_value", "matching_agents", "agents_context")
+    segs = [ast.get_source_segment(src, n) for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name in names]
+    ns = {"_CACHE": {"skills": {}}, "re": re, "json": json}
+    exec("\n\n".join(segs), ns)
+    return ns
+
+
+def test_agents_route_by_ab_match():
+    """An agent's metadata.ab-match (YAML-escaped) picks it for matching issue
+    text only; skills and non-matching text get nothing."""
+    ns = _load_agent_ns()
+    body = ('---\nname: vault\ndescription: d\nmetadata:\n'
+            '  ab-match: "vault|\\\\b(api[ _-]?keys?|tokens?)\\\\b"\n---\nCHECKLIST')
+    match = ns["_frontmatter_value"](body, "ab-match")
+    assert match == r"vault|\b(api[ _-]?keys?|tokens?)\b"
+    ns["_CACHE"]["skills"] = {
+        "vault": {"kind": "agent", "match": match, "instructions": "CHECKLIST"},
+        "netbox": {"kind": "agent", "match": "netbox", "instructions": "NB"},
+        "a-skill": {"instructions": "vault vault"},
+    }
+    assert ns["matching_agents"]("Add an API key field") == ["vault"]
+    assert ns["matching_agents"]("LLM max_tokens error") == []
+    assert ns["matching_agents"]("netbox vault netbox") == ["netbox", "vault"]
+    assert "CHECKLIST" in ns["agents_context"]("store it in the vault")
+    assert ns["agents_context"]("fix a typo") == ""
+
+
+def test_fleet_agents_parse():
+    """Every fleet agent in a side-by-side lm checkout has a description and a
+    compilable ab-match (skipped when lm isn't checked out next to ab)."""
+    import glob
+    import re
+    import pytest
+    files = glob.glob("../lm/.github/agents/*.agent.md")
+    if not files:
+        pytest.skip("no ../lm checkout")
+    ns = _load_agent_ns()
+    for f in files:
+        body = open(f).read()
+        assert ns["_frontmatter_value"](body, "description"), f
+        re.compile(ns["_frontmatter_value"](body, "ab-match"))

@@ -2221,7 +2221,7 @@
                                 </div>
                                 <div class="flex items-center gap-3">
                                     <input type="checkbox" name="fleet_checks_enabled" id="fleet_checks_enabled" {{ 'checked' if fleet_checks_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
-                                    <label for="fleet_checks_enabled" class="text-xs font-medium text-slate-700" title="Check every fix, PR and feature diff against the fleet code rules (fleet_rules.md): secrets in the vault with a WebUI picker, JSON-only storage, no new deps, nothing hard-coded, docstrings, SSRF guard, tenant scope, JS syntax. Breaches send the change back for another attempt and block auto-merge.">Enforce fleet code rules <span class="text-slate-500">(vault, storage, deps, docstrings, tenant)</span></label>
+                                    <label for="fleet_checks_enabled" class="text-xs font-medium text-slate-700" title="Check every fix, PR and feature diff against the fleet code rules (.github/fleet-rules.md, synced from lm): secrets in the vault with a WebUI picker, JSON-only storage, no new deps, nothing hard-coded, docstrings, SSRF guard, tenant scope, JS syntax. Breaches send the change back for another attempt and block auto-merge.">Enforce fleet code rules <span class="text-slate-500">(vault, storage, deps, docstrings, tenant)</span></label>
                                 </div>
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
                                     <label class="text-xs text-slate-600 min-w-0">Check every (minutes)

@@ -139,7 +139,18 @@ def _build_prompt(issue_title, issue_body, skill_name, skill_text, boundaries_bl
         f"## Recipe to follow — skill \"{skill_name}\"\n{skill_text}\n\n"
         f"## Boundaries — do NOT touch any of these even incidentally\n{boundaries_block or '(none configured)'}\n"
         + ("\n" + fleet_checks.rules_text() + "\n" if fleet_checks.rules_text() else "")
+        + _agents_block(issue_title, issue_body)
     )
+
+
+def _agents_block(issue_title, issue_body):
+    """The checklists of the specialist agents matching this request, as a
+    prompt section ("" when none match or agents aren't loaded)."""
+    try:
+        text = skills_loader.agents_context("%s\n%s" % (issue_title, issue_body))
+    except AttributeError:  # an older skills_loader without agent support
+        return ""
+    return "\n" + text + "\n" if text else ""
 
 
 def _materialize_skill(skills_root, skill_name):
