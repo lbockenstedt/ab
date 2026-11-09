@@ -69,6 +69,12 @@ _TERMINAL_STATUSES = {"feature_flagged", "feature_built", "feature_failed"}
 # re-classified next cycle, up to feature_classify_max_attempts, before being
 # parked for a human with flag_kind="classifier_error".
 _CLASSIFY_RETRY_STATUS = "feature_classify_retry"
+
+
+def _meta(issue) -> dict:
+    """Human-readable identity of a feature request, stored on its record so the
+    dashboard can say WHICH feature a row is about (rows are keyed repo:number)."""
+    return {"title": (issue.title or "")[:200], "issue_url": getattr(issue, "html_url", "") or ""}
 # The only prior statuses feature_drive (re-)classifies. Anything else was
 # written by the standard fix pipeline after a hand-off and is owned by it.
 _RECLASSIFY_STATUSES = {"feature_needs_info", _CLASSIFY_RETRY_STATUS}
@@ -458,6 +464,10 @@ def scan_feature_requests(gh, config):
                 # This issue's prior record and whether it is a classifier-error retry.
                 issue_id = f"{repo_name}:{issue.number}"
                 prior = processed.get(issue_id) or {}
+                if prior and not prior.get("title"):
+                    # Backfill records written before titles were stored.
+                    prior = processed[issue_id] = {**prior, **_meta(issue)}
+                    save_processed(processed)
                 retrying = _is_classifier_error_record(prior)
                 # Finished issues are skipped unless they are retrying a classifier error.
                 if prior.get("status") in _TERMINAL_STATUSES and not retrying:
@@ -493,6 +503,7 @@ def scan_feature_requests(gh, config):
                     max_attempts = max(1, int(config.get("feature_classify_max_attempts") or 3))
                     attempts = int(prior.get("attempts") or 0) + 1 if retrying else 1
                     rec = {
+                        **_meta(issue),
                         "status": _CLASSIFY_RETRY_STATUS,
                         "reason": result["reason"],
                         "last_error": result["classifier_error"],
@@ -532,6 +543,7 @@ def scan_feature_requests(gh, config):
                 if result["verdict"] == "flag":
                     _flag_issue(repo_obj, issue, result, force_comment=retrying)
                     processed[issue_id] = {
+                        **_meta(issue),
                         "status": "feature_flagged",
                         "flag_kind": "boundary",
                         "boundary_ids": result["boundary_ids"],
@@ -545,6 +557,7 @@ def scan_feature_requests(gh, config):
                 elif result["verdict"] == "clarify":
                     _clarify_issue(repo_obj, issue, result)
                     processed[issue_id] = {
+                        **_meta(issue),
                         "status": "feature_needs_info",
                         "questions": result["questions"],
                         "timestamp": datetime.now().isoformat(),
