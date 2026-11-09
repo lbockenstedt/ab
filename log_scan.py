@@ -1640,6 +1640,27 @@ def _escalation_summary_line(analysis):
     return ""
 
 
+def recent_deploy_changes(repo_obj, config=None, now=None):
+    """Post-deploy watch: commits that reached the deployed branch in the last
+    ``post_deploy_window_h`` hours (default 6), newest first, as markdown lines.
+    A new error right after a deploy most likely comes from one of these."""
+    from datetime import timedelta, timezone
+    cfg = config or {}
+    hours = float(cfg.get("post_deploy_window_h", 6) or 0)
+    if hours <= 0:
+        return []
+    branch = cfg.get("post_deploy_branch") or getattr(repo_obj, "default_branch", None) or "main"
+    since = (now or datetime.now(timezone.utc)) - timedelta(hours=hours)
+    lines = []
+    try:
+        for c in repo_obj.get_commits(sha=branch, since=since)[:15]:
+            title = ((c.commit.message or "").splitlines() or [""])[0][:100]
+            lines.append("- `%s` %s" % (c.sha[:8], title))
+    except Exception as e:  # noqa: BLE001 - attribution is best effort
+        logger.debug(f"recent_deploy_changes skipped for {getattr(repo_obj, 'full_name', '?')}: {e}")
+    return lines
+
+
 def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config=None):
     """Tier-2 deep-triage entry point. The LM hub's per-module log sentinel flagged a
     real problem and shipped {module, offending log slice, its analysis} down to us.
@@ -1674,9 +1695,19 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
             f"### Offending log lines\n```\n{(log_slice or '')[:6000]}\n```\n"
         )
         # File it (or match an existing issue).
-        error_data = {"module": module, "title": title, "body": body, "repo": repo_name}
         repo_obj = gh.get_repo(repo_name)
-        issue = create_automated_issue(gh, monitored_repos, repo_obj, error_data)
+        # Post-deploy watch: a fresh error right after a deploy points at what changed.
+        recent = recent_deploy_changes(repo_obj, config)
+        labels = None
+        if recent:
+            body += ("\n### Recent changes (possible cause)\nDeployed to `%s` in the last %sh; "
+                     "start the trace here:\n%s\n" % (config.get("post_deploy_branch")
+                                                        or getattr(repo_obj, "default_branch", "main"),
+                                                        config.get("post_deploy_window_h", 6),
+                                                        "\n".join(recent)))
+            labels = ["automated-fix", "log-detected", "regression-suspect"]
+        error_data = {"module": module, "title": title, "body": body, "repo": repo_name}
+        issue = create_automated_issue(gh, monitored_repos, repo_obj, error_data, labels=labels)
         if issue is None:
             return True, f"deduped/no-op in {repo_name}"
         return True, f"{repo_name}#{getattr(issue, 'number', '?')}"
