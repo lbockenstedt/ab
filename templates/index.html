@@ -976,6 +976,7 @@
                 </div>
                 <button type="button" id="hc-run" onclick="hcRun(this)" title="Run the hub health review now and file issues for any findings" class="px-4 py-2 rounded-full text-xs font-bold btn-primary">Run now</button>
             </div>
+            <div id="hc-error" class="hidden text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"></div>
             <div id="hc-gauges" class="grid grid-cols-2 md:grid-cols-5 gap-3"></div>
             <div class="hpe-card rounded-2xl p-5">
                 <h3 class="text-sm font-bold text-navy mb-2">Findings</h3>
@@ -1029,11 +1030,12 @@
                 b.textContent = d.status.toUpperCase();
                 b.className = 'px-3 py-1 rounded-full text-sm font-bold ' + (COLORS[d.status] || COLORS.pending);
                 const bits = [];
-                if (d.ts) bits.push('Last run ' + ago(d.ts));
+                if (d.running) bits.push('running…');
+                if (d.ts) bits.push('Last run ' + ago(d.ts) + (d.duration_s ? ' (took ' + d.duration_s + 's)' : ''));
                 if (!d.enabled) bits.push('health check is OFF');
                 else bits.push('every ' + Math.round(d.interval_s / 60) + ' min');
                 if (d.next_run_ts) bits.push('next ~' + new Date(d.next_run_ts * 1000).toLocaleTimeString());
-                if (d.error) bits.push('error: ' + d.error);
+                const eb = $('hc-error'); eb.textContent = d.error || ''; eb.classList.toggle('hidden', !d.error);
                 $('hc-sub').textContent = bits.join(' · ');
                 const h = (d.report || {}).host || {}, t = d.thresholds || {};
                 const cpus = h.cpus || 1, load = (h.load || [null])[0];
@@ -1061,7 +1063,15 @@
             }
             window.hcRun = async function (btn) {
                 btn.disabled = true; btn.textContent = 'Running…';
-                try { await fetch('/api/hub-health-check', {method: 'POST'}); await load(); }
+                try {
+                    await fetch('/api/hub-health-check', {method: 'POST'});
+                    for (let i = 0; i < 90; i++) {
+                        await new Promise(r => setTimeout(r, 2000));
+                        const d = await fetch('/api/hub-health-check').then(r => r.json());
+                        render(d);
+                        if (!d.running) break;
+                    }
+                }
                 finally { btn.disabled = false; btn.textContent = 'Run now'; }
             };
             load();
@@ -2202,6 +2212,9 @@
                                     <label for="health_check_enabled" class="text-xs font-medium text-slate-700" title="Periodically review the LM hub's performance telemetry and logs and file one deduped automated-fix issue per problem.">Hub health check <span class="text-slate-500">(performance, errors, capacity)</span></label>
                                 </div>
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 p-3 rounded-lg bg-slate-50 border border-slate-200">
+                                    <label class="text-xs text-slate-600 min-w-0">Check every (minutes)
+                                        <input type="number" step="any" min="1" name="health_check_interval_min" value="{{ health_check_interval_min }}" class="w-full p-1 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                    </label>
                                     {% for f in health_check_fields %}
                                     <label class="text-xs text-slate-600 min-w-0">{{ f.key }}
                                         <input type="number" step="{{ f.step }}" min="0" name="{{ f.key }}" value="{{ f.value }}" class="w-full p-1 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
