@@ -157,6 +157,27 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
         out.append(_finding("slow_query", "q", "long-running database queries", "medium", "hub",
                             slow_q[:5], "Slow queries were logged."))
 
+    # Give the fixer measurements to work from: the host's state when the
+    # problem was seen, the same command's timing, and the log lines naming it.
+    ctx = (f"host at report time: load {load} on {int(cpus)} CPUs, memory "
+           f"{host.get('mem_used_pct', '?')}%, disk {host.get('disk_used_pct', '?')}%, "
+           f"event-loop lag {report.get('loop_lag_s') or 0}s")
+    for f in out:
+        if f["kind"] in ("slow_route", "slow_command", "timeouts"):
+            f["evidence"].append(ctx)
+        if f["kind"] == "timeouts":
+            spoke, _, cmd = f["key"].partition(":")
+            r = next((r for r in perf.get("commands") or []
+                      if r["key"] == cmd and spoke in (r.get("spoke"), names.get(r.get("spoke")))), None)
+            if r:
+                f["evidence"].append(f"{cmd} timing on this spoke: {r['count']} calls, avg "
+                                     f"{r['avg_s']}s, max {r['max_s']}s, {r['slow']} slow")
+        needle = f["key"].split(":")[-1] if f["kind"] in ("slow_route", "slow_command", "timeouts") else ""
+        if needle:
+            hits = [ln[:240] for ln in log_lines or [] if needle in ln][-5:]
+            if hits:
+                f["evidence"].append("recent log lines mentioning it:")
+                f["evidence"].extend(hits)
     rank = {"high": 0, "medium": 1, "low": 2}
     out.sort(key=lambda f: rank.get(f["severity"], 3))
     return out
