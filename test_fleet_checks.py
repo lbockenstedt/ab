@@ -235,3 +235,28 @@ def test_new_route_or_field_needs_a_doc_update():
     assert len(out) == 1 and "route `/api/x`" in out[0]["detail"] and "field `window_h`" in out[0]["detail"]
     assert fc.check_docs_updated(code + [_file("docs/x.md", "## X")]) == []
     assert fc.check_docs_updated([_file("core/src/x.py", "y = 1")]) == []
+
+
+def test_cli_diffs_since_base_and_fails_only_on_errors(tmp_path, capsys):
+    """CI entry point: rules run on base...HEAD; errors exit 1, a bad base skips."""
+    import subprocess
+    run = lambda *a: subprocess.run(["git", "-C", str(tmp_path), *a], check=True,
+                                    capture_output=True, text=True).stdout.strip()
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (tmp_path / "a.py").write_text('def f():\n    """F."""\n    return 1\n')
+    run("add", "-A")
+    run("commit", "-qm", "init")
+    base = run("rev-parse", "HEAD")
+    # A committed change (not a worktree edit) that logs a secret: an error.
+    (tmp_path / "b.py").write_text('def g(password):\n    """G."""\n    print("pw", password)\n')
+    run("add", "-A")
+    run("commit", "-qm", "leak")
+    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x"]) == 1
+    out = capsys.readouterr().out
+    assert "::error title=" in out and "1 error(s)" in out
+    # New branch push (all-zero before) and an unknown sha are skipped, not failed.
+    assert fc.main(["--base", "0" * 40, "--path", str(tmp_path)]) == 0
+    assert fc.main(["--base", "f" * 40, "--path", str(tmp_path)]) == 0
+    assert "skipped" in capsys.readouterr().out

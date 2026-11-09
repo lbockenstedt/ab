@@ -109,6 +109,17 @@ def _live(files):
             if getattr(f, "status", "") != "removed" and getattr(f, "filename", "")]
 
 
+
+def _parse(text):
+    """ast.parse without SyntaxWarnings (e.g. a bad escape in the scanned file)
+    leaking onto CI output, where they read like failures of this tool."""
+    import ast
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(text)
+
+
 def check_vault_secrets(files, repo_full_name="", vault_repos=("lm",)):
     """A new secret field must go through the Credential Vault (hub repos).
 
@@ -518,7 +529,7 @@ def check_async_blocking(items):
         if not path.endswith(".py") or text is None or _TEST_RE.search(path) or not added:
             continue
         try:
-            tree = ast.parse(text)
+            tree = _parse(text)
         except SyntaxError:
             continue
         hits = []
@@ -571,7 +582,7 @@ def _repo_defs(repo_path):
             continue
         try:
             with open(os.path.join(repo_path, rel), encoding="utf-8") as fh:
-                tree = ast.parse(fh.read())
+                tree = _parse(fh.read())
         except (OSError, SyntaxError, ValueError):
             continue
         for node in ast.walk(tree):
@@ -768,11 +779,16 @@ def check_fleet_rules(files, repo_full_name="", head_ref=None, config=None):
     return out
 
 
-def local_diff_files(repo_path):
-    """File-like objects for a worktree's uncommitted changes (incl. new files)."""
-    # Make new files visible to `git diff` without staging their content.
-    subprocess.run(["git", "-C", repo_path, "add", "-A", "-N"], capture_output=True, timeout=30)
-    names = subprocess.run(["git", "-C", repo_path, "diff", "HEAD", "--name-status"],
+def local_diff_files(repo_path, base=None):
+    """File-like objects for a worktree's uncommitted changes (incl. new files),
+    or, with ``base``, for the commits from ``base`` to HEAD (CI)."""
+    if base:
+        span = ["%s...HEAD" % base]
+    else:
+        # Make new files visible to `git diff` without staging their content.
+        subprocess.run(["git", "-C", repo_path, "add", "-A", "-N"], capture_output=True, timeout=30)
+        span = ["HEAD"]
+    names = subprocess.run(["git", "-C", repo_path, "diff", *span, "--name-status"],
                            capture_output=True, text=True, timeout=30).stdout
     out = []
     for row in names.splitlines():
@@ -780,21 +796,21 @@ def local_diff_files(repo_path):
         if len(parts) < 2:
             continue
         status, name = parts[0], parts[-1]
-        patch = subprocess.run(["git", "-C", repo_path, "diff", "HEAD", "--", name],
+        patch = subprocess.run(["git", "-C", repo_path, "diff", *span, "--", name],
                                capture_output=True, text=True, timeout=30).stdout
-        out.append(SimpleNamespace(filename=name, patch=patch,
-                                   status="removed" if status.startswith("D") else "modified"))
+        kind = "removed" if status.startswith("D") else "added" if status.startswith("A") else "modified"
+        out.append(SimpleNamespace(filename=name, patch=patch, status=kind))
     return out
 
 
-def check_worktree(repo_path, repo_full_name="", config=None):
-    """All rules on a local worktree's uncommitted changes, including the
-    whole-file rules and the copied/dead-code scan."""
+def check_worktree(repo_path, repo_full_name="", config=None, base=None, head_ref=None):
+    """All rules on a local worktree's uncommitted changes (or the commits since
+    ``base``), including the whole-file rules and the copied/dead-code scan."""
     try:
-        files = local_diff_files(repo_path)
+        files = local_diff_files(repo_path, base)
     except Exception:  # noqa: BLE001
         return []
-    out = check_fleet_rules(files, repo_full_name, None, config)
+    out = check_fleet_rules(files, repo_full_name, head_ref, config)
 
     def _read(rel):
         # The changed file as it is on disk now.
@@ -844,3 +860,41 @@ def as_feedback(findings):
     """Render findings as correction feedback for the model."""
     return "\n".join("- [%s] %s: %s" % (f["level"].upper(), f["title"], f["detail"])
                      for f in findings)
+
+
+def main(argv=None):
+    """CI entry point: run every rule on the commits since --base, print GitHub
+    annotations and a step summary, and exit 1 only on error-level findings."""
+    import argparse
+    ap = argparse.ArgumentParser(description=main.__doc__)
+    ap.add_argument("--base", required=True, help="commit to diff from (PR base or push 'before')")
+    ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
+    ap.add_argument("--head-ref", default=os.environ.get("GITHUB_HEAD_REF", ""))
+    ap.add_argument("--path", default=".")
+    args = ap.parse_args(argv)
+    # A new branch (all-zero 'before') or a base we don't have: nothing to compare.
+    known = subprocess.run(["git", "-C", args.path, "cat-file", "-e", args.base + "^{commit}"],
+                           capture_output=True).returncode == 0
+    if not args.base.strip("0") or not known:
+        print("fleet rules: no usable base (%s); skipped" % args.base)
+        return 0
+    findings = check_worktree(args.path, args.repo, {}, base=args.base, head_ref=args.head_ref)
+    # One annotation per finding; GitHub shows them on the run and the PR.
+    kind = {"error": "error", "warning": "warning"}
+    for f in findings:
+        detail = f["detail"].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+        print("::%s title=%s::%s" % (kind.get(f["level"], "notice"), f["title"].replace(",", ";"), detail))
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write("## Fleet code rules\n\n")
+            fh.write(as_feedback(findings) + "\n" if findings else "No findings.\n")
+    errors = [f for f in findings if f["level"] == "error"]
+    print("fleet rules: %d error(s), %d warning(s), %d note(s)" % (
+        len(errors), len([f for f in findings if f["level"] == "warning"]),
+        len([f for f in findings if f["level"] not in ("error", "warning")])))
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
