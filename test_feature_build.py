@@ -158,6 +158,7 @@ def _load_ns():
         "find_existing_pull_request": find_existing_pull_request,
         "_authenticated_remote": _authenticated_remote,
         "skills_loader": _FakeSkillsLoader(),
+        "fleet_checks": __import__("fleet_checks"),
         "feature_boundary": real_feature_boundary,  # pure/standalone — used for real
         # branch_policy's helpers are pure functions of their arguments, so the
         # real ones are used rather than stubs — same rationale as

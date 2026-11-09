@@ -106,6 +106,28 @@ def _basename(path):
     return path.rsplit("/", 1)[-1]
 
 
+def _fleet_findings(repo, files, head_sha, head_ref, config):
+    """Fleet code rules on the PR diff, plus ``node --check`` on changed JS
+    (full file at the head commit). Never raises."""
+    # Off switch; promotions carry code already checked on dev.
+    if not (config or {}).get("fleet_checks_enabled", True):
+        return []
+    if (head_ref or "").startswith(("promote/", "backmerge/")):
+        return []
+    try:
+        import fleet_checks
+        from lint_python import _fetch_full_content
+        out = fleet_checks.check_fleet_rules(files, repo.full_name, head_ref, config)
+        js = [f.filename for f in files
+              if f.filename.endswith(".js") and getattr(f, "status", "") != "removed"][:25]
+        out += fleet_checks.check_js_syntax(
+            [(p, _fetch_full_content(repo, p, head_sha)) for p in js])
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("pr_review: fleet checks skipped: %s", e)
+        return []
+
+
 def check_parity(repo_full_name, changed):
     """Deterministic dual-copy/parity findings for a PR's changed-file set.
 
@@ -217,6 +239,26 @@ def check_parity(repo_full_name, changed):
                 "detail": "This PR changes the hub `core/src/simulations/sim_quota.py`; its spoke twin "
                           "`lm-spoke/src/sim_quota.py` is in the **cs** repo.",
                 "twin": {"repo": "%s/cs" % owner, "path": "lm-spoke/src/sim_quota.py"},
+            })
+
+    # ---- more cross-repo twins (table-driven) ------------------------------
+    # (this repo, path here, twin repo, twin path): changing one side should
+    # come with a matching PR on the other.
+    _TWINS = (
+        ("lm", "core/src/simulations/aruba.py", "cs", "lm-spoke/src/aruba.py"),
+        ("cs", "lm-spoke/src/aruba.py", "lm", "core/src/simulations/aruba.py"),
+        ("lm", "core/src/security/probe_signatures.py", "ab", "probe_signatures.py"),
+        ("ab", "probe_signatures.py", "lm", "core/src/security/probe_signatures.py"),
+    )
+    _short = repo.rsplit("/", 1)[-1]
+    for here_repo, here, twin_repo, twin in _TWINS:
+        if _short == here_repo and here in changed:
+            findings.append({
+                "level": "advisory",
+                "title": "%s twin lives in the %s repo" % (_basename(here), twin_repo),
+                "detail": "This PR changes `%s`; its twin `%s` is in the **%s** repo. "
+                          "Keep the two in step with a matching PR." % (here, twin, twin_repo),
+                "twin": {"repo": "%s/%s" % (owner, twin_repo), "path": twin},
             })
 
     # ---- dns / dhcp: standalone repos are RETIRED --------------------------
@@ -704,6 +746,10 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
         "in a <script>, leftover merge-conflict markers.\n"
         "3) Undefined names, obvious logic errors, security issues.\n"
         "4) INTENT vs DIFF FIDELITY — Extract the PR's stated INTENT from the description and compare it against the actual DIFF: Does the diff faithfully and completely implement the stated intent? Does the diff introduce unstated side effects, scope creep, or contradict the stated intent? If the PR description lacks a clear intent statement, or if the code deviates from the stated intent, flag it and lower confidence.\n"
+        "5) FLEET CODE RULES — the rules listed in this prompt (vault for every "
+        "credential incl. a WebUI vault picker, JSON-only storage, tenant scope, no "
+        "UUIDs in the UI, nothing hard-coded, generic, docstrings, few deps, twins "
+        "kept in step).\n"
         "Reject (lower confidence) if any such defect is present.")
     # Add where getattr'd names are really defined in the repo.
     try:
@@ -1889,6 +1935,8 @@ def _review_one(gh, repo, pr, config, force=False):
     findings += _undef_findings
     _step("checking for unattended mutation")
     findings += check_unattended_mutation(files)
+    _step("checking fleet code rules (vault, storage, deps, docstrings, JS syntax)")
+    findings += _fleet_findings(repo, files, head_sha, _head_ref, config)
     # Find our comment and decide whether it is already up to date.
     existing = _find_marker_comment(pr)
     _desc = _desc_digest(pr)
@@ -2299,6 +2347,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         findings += check_secrets(files)
         findings += find_missing_tooltips_in_files(files)
         findings += check_undefined_names(repo, files, head_sha)
+        findings += _fleet_findings(repo, files, head_sha, branch, config)
 
         # The saved critiques from both panels.
         rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}
@@ -2528,6 +2577,17 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         return False, last_failure
                     continue
 
+                # Fleet code rules on AB's own edit (diff vs the PR head).
+                from fix_engine import fleet_gate, FLEET_FEEDBACK
+                _fleet = fleet_gate(path, repo_full_name, config)
+                if _fleet:
+                    logger.warning("fix_one_pr: fleet rules failed for %s#%s (attempt %s/%s): %s",
+                                   repo_full_name, number, attempt, max_attempts, _fleet[:400])
+                    last_failure = "Generated fix broke fleet code rules: %s" % _fleet
+                    error_context = FLEET_FEEDBACK % _fleet
+                    if is_last:
+                        return False, last_failure
+                    continue
                 # Have the review panel judge the fix; an offline panel stops here.
                 review = review_fix(path, fix_body, fixes, task_id=lock_id, builder_n=0, repo=repo, head_sha=head_sha)
                 if isinstance(review, dict) and review.get("status") == "queue_for_retry":

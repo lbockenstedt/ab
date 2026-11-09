@@ -2951,6 +2951,7 @@ async def settings_page(request: Request):
             if k not in ("health_check_enabled", "health_check_interval_s",
                          "gh_outage_backoff_enabled")],
         "gh_outage_backoff_enabled": bool(config.get("gh_outage_backoff_enabled", True)),
+        "fleet_checks_enabled": bool(config.get("fleet_checks_enabled", True)),
         "health_check_interval_min": round(float(config.get("health_check_interval_s", 1800)) / 60, 1),
         "health_check_enabled": bool(config.get("health_check_enabled", True)),
         "state": state,
@@ -3533,6 +3534,8 @@ async def save_settings(request: Request):
     # GitHub Actions outage backoff (gh_actions_health.py): on/off + its minutes.
     import gh_actions_health as _gha
     config_data["gh_outage_backoff_enabled"] = data.get("gh_outage_backoff_enabled") == "on"
+    # Fleet code rules gate (fleet_checks.py) for fixes, PR reviews and features.
+    config_data["fleet_checks_enabled"] = data.get("fleet_checks_enabled") == "on"
     _have = load_config()
     for _k, _dv in {**_hc.DEFAULTS, **_gha.DEFAULTS}.items():
         if _k in ("health_check_enabled", "gh_outage_backoff_enabled"):
