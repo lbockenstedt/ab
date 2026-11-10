@@ -34,6 +34,8 @@ DEFAULTS = {
     "hc_queue_rejected_min": 5,        # commands a spoke refused because its queue was full
     "hc_autorack_problems_min": 1,     # devices whose rack-from-name placement fails
     "hc_netbox_dupe_groups_min": 1,    # duplicate NetBox device groups (serial/MAC)
+    "hc_netbox_writes_per_h": 4000,    # NetBox changelog writes per hour
+    "hc_netbox_flap_objects_min": 10,  # devices whose field flips back to an earlier value
     "hc_dhcp_declined_min": 5,         # DECLINEd addresses held in one DHCP scope
     "hc_azure_enabled": True,          # review the Azure VMs too (needs CHAT_AZURE_ENABLED)
     "hc_azure_credits_min": 30.0,      # burstable VM below this many CPU credits is throttled
@@ -76,6 +78,10 @@ _HINT = {
     "netbox_dupes": ("Duplicate NetBox devices share a serial or MAC: find which sync path "
                      "created the second record (it should have matched by serial/MAC first) "
                      "and fix the match; the dedupe merge only cleans up after it."),
+    "netbox_churn": ("A feeder is rewriting NetBox constantly or flip-flopping a field. Use the "
+                     "top fields/sample to find the writer (nw discovery, cppm endpoint sync, "
+                     "sync_nw_device), make it compare before writing, and pick one canonical "
+                     "value deterministically instead of 'first answer wins'."),
     "dhcp_declines": ("Clients are DECLINEing offered addresses (ARP conflict). Check for the "
                       "decline probation/auto-release working, a stale reservation or a static IP "
                       "in the pool; if it is a network-side cause (proxy-ARP, loop) say so in the issue."),
@@ -199,6 +205,23 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
             + [f"{x.get('name')} (key {x.get('key')}): {x.get('duplicates')} extra record(s)"
                for x in dd.get("sample") or []],
             "The same device exists more than once in NetBox."))
+    ch = fleet.get("netbox_churn") or {}
+    fl = ch.get("flapping") or {}
+    wph = int(ch.get("writes_per_hour") or 0)
+    nflap = int(fl.get("objects") or 0)
+    if ch and (nflap >= c["hc_netbox_flap_objects_min"] or wph >= c["hc_netbox_writes_per_h"]):
+        out.append(_finding(
+            "netbox_churn", "churn",
+            "NetBox is flapping fields" if nflap >= c["hc_netbox_flap_objects_min"]
+            else "NetBox write rate is very high", "high", "ipam",
+            [f"~{wph} changelog writes/hour (last {int(ch.get('window_s') or 0) // 60} min"
+             f"{', sample capped' if ch.get('capped') else ''}); {nflap} device(s) flipped a field "
+             f"back to an earlier value; {ch.get('stub_creates', 0)} DEVICE-<mac> stub creates",
+             "changes by kind: " + ", ".join(f"{k} {v}" for k, v in (ch.get("by_kind") or {}).items()),
+             "most-changed device fields: " + ", ".join(f"{k} {v}" for k, v in ch.get("top_fields") or [])]
+            + [f"{x.get('name')}.{x.get('field')}: " + " -> ".join(x.get("values") or [])
+               for x in fl.get("sample") or []],
+            "Feeders are writing NetBox far more than the data changes."))
     bad = [d for d in fleet.get("dhcp_declines") or []
            if int(d.get("declined") or 0) >= c["hc_dhcp_declined_min"]]
     if bad:
