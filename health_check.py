@@ -34,6 +34,8 @@ DEFAULTS = {
     "hc_queue_rejected_min": 5,        # commands a spoke refused because its queue was full
     "hc_autorack_problems_min": 1,     # devices whose rack-from-name placement fails
     "hc_netbox_dupe_groups_min": 1,    # duplicate NetBox device groups (serial/MAC)
+    "hc_command_rate_per_h": 300,      # a read command (GET/LIST) called this often per hour
+    "hc_command_rate_min_uptime_s": 900,  # ...once the hub has been up this long
     "hc_netbox_writes_per_h": 4000,    # NetBox changelog writes per hour
     "hc_netbox_flap_objects_min": 10,  # devices whose field flips back to an earlier value
     "hc_dhcp_declined_min": 5,         # DECLINEd addresses held in one DHCP scope
@@ -78,6 +80,10 @@ _HINT = {
     "netbox_dupes": ("Duplicate NetBox devices share a serial or MAC: find which sync path "
                      "created the second record (it should have matched by serial/MAC first) "
                      "and fix the match; the dedupe merge only cleans up after it."),
+    "call_rate": ("A read command is hitting a spoke far more often than data changes. Serve it "
+                  "from the hub cache (refreshed in the background on a floor of minutes) or the "
+                  "spoke's TTL cache; find the caller by grepping the command name and make it "
+                  "read the cache (fleet-rules 4.8)."),
     "netbox_churn": ("A feeder is rewriting NetBox constantly or flip-flopping a field. Use the "
                      "top fields/sample to find the writer (nw discovery, cppm endpoint sync, "
                      "sync_nw_device), make it compare before writing, and pick one canonical "
@@ -205,6 +211,17 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
             + [f"{x.get('name')} (key {x.get('key')}): {x.get('duplicates')} extra record(s)"
                for x in dd.get("sample") or []],
             "The same device exists more than once in NetBox."))
+    if (perf.get("uptime_s") or 0) >= c["hc_command_rate_min_uptime_s"]:
+        for r in perf.get("command_rates") or []:
+            if r.get("per_hour", 0) >= c["hc_command_rate_per_h"]:
+                spoke = names.get(r.get("spoke"), r.get("spoke"))
+                out.append(_finding(
+                    "call_rate", f"{spoke}:{r['key']}",
+                    f"{r['key']} is called very often on {spoke}", "medium",
+                    _module_for_command(r["key"]),
+                    [f"{r['count']} calls, about {r['per_hour']:.0f} per hour "
+                     f"(limit {c['hc_command_rate_per_h']}), hub up {int(perf['uptime_s']) // 60} min"],
+                    "A read command is being re-sent far more often than a cache would need."))
     ch = fleet.get("netbox_churn") or {}
     fl = ch.get("flapping") or {}
     wph = int(ch.get("writes_per_hour") or 0)
