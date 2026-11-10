@@ -489,6 +489,18 @@ def find_global_duplicate_issue(gh_current, monitored_repos, error_data):
     return None, None, False
 
 
+# Text that marks hub security-monitor output: the Security / ThreatMonitor
+# loggers and their event wording.
+_SECURITY_MONITOR_MARKERS = (" - security - ", " - threatmonitor - ", "security anomaly",
+                             "threat block", "honeypot")
+
+
+def _mentions_security_monitor(text):
+    """True if ``text`` quotes hub security-monitor output (never filed publicly)."""
+    low = str(text or "").lower()
+    return any(m in low for m in _SECURITY_MONITOR_MARKERS)
+
+
 def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, labels=None, raw=False):
     """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos.
 
@@ -537,6 +549,14 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                 f"Skipping automated issue creation: 'title' field is missing or empty. "
                 f"Body was: {str(body_text)[:120]!r}"
             )
+            return None
+
+        # Never file security-monitor output: these repos are public, and an issue
+        # that quotes a decoy hit or tripwire tells attackers they exist. The hub
+        # already withholds these lines from AB; this is the backstop.
+        if _mentions_security_monitor(f"{title_text}\n{body_text}"):
+            logger.warning(f"Not filing a GitHub issue that quotes security-monitor "
+                           f"output (public repo): {str(title_text)[:80]!r}")
             return None
 
         # Normalise to strings (the LLM might return non-string types).
