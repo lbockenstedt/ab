@@ -28,6 +28,13 @@ def test_slow_route_command_and_timeouts_become_findings_with_owning_module():
     assert all(f["fingerprint"] == f["title"] for f in got.values())
 
 
+def test_self_update_route_is_not_reported_as_slow():
+    rep = _report(perf={"slow_route_s": 3, "slow_command_s": 5, "commands": [],
+                        "routes": [{"key": "POST /admin/ops/self-update", "count": 1,
+                                    "slow": 1, "avg_s": 14.0, "max_s": 14.0}]})
+    assert hc.evaluate(rep, []) == []
+
+
 def test_host_pressure_and_log_patterns():
     rep = _report(host={"load": [9.0], "cpus": 4, "mem_used_pct": 95, "disk_used_pct": 50})
     lines = ["2026-11-08 10:00:%02d,1 ERROR boom id=%d" % (i % 60, i) for i in range(30)]

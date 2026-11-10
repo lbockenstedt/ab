@@ -2212,6 +2212,10 @@
                                     <label for="fix_logdetected_enabled" class="text-xs font-medium text-slate-700" title="Attempt AUTO-FIXES for log-detected / automated-fix issues. Off by default so the fixer doesn't churn on log-scraped issues. Bug + Critical always fix.">Auto-fix log-detected issues <span class="text-slate-500">(Bug &amp; Critical always fix)</span></label>
                                 </div>
                                 <div class="flex items-center gap-3">
+                                    <input type="checkbox" name="escalation_specific_titles" id="escalation_specific_titles" {{ 'checked' if settings.get('escalation_specific_titles', True) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="escalation_specific_titles" class="text-xs font-medium text-slate-700" title="Title hub-escalated log issues after the line that names the problem, skipping the analysis boilerplate (&quot;Is there a problem? Yes.&quot;, ---). Off restores the old first-line title, which folded unrelated problems into one issue.">Specific titles for hub log alerts <span class="text-slate-500">(keeps unrelated problems in separate issues)</span></label>
+                                </div>
+                                <div class="flex items-center gap-3">
                                     <input type="checkbox" name="health_check_enabled" id="health_check_enabled" {{ 'checked' if health_check_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="health_check_enabled" class="text-xs font-medium text-slate-700" title="Periodically review the LM hub's performance telemetry and logs and file one deduped automated-fix issue per problem.">Hub health check <span class="text-slate-500">(performance, errors, capacity)</span></label>
                                 </div>
