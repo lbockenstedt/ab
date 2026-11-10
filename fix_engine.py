@@ -1083,6 +1083,18 @@ SANDBOX_ENV_PASSTHROUGH = ("TZ", "TERM")
 # the sandbox deliberately has none).
 SPOKE_CORE_URL = "https://github.com/lbockenstedt/lm.git"
 SPOKE_CORE_DIRNAME = "_lm"
+
+# The fleet's local smoke test (lm .github/scripts/smoke.sh): the steps and
+# test command it reads from the repo's own ci.yml are the ones CI runs, and
+# every developer's pre-push hook runs it. AB runs the same script in the
+# sandbox before pushing, so a fix is tested the way CI will test it and CI is
+# only the backstop. lm's .github is sparse-cloned into this directory on each
+# prepare_environment (public repo, no credential), from the branch the
+# developers' sibling lm checkouts track.
+SMOKE_HELPERS_DIRNAME = ".ab-smoke"
+SMOKE_LM_REF = "dev"
+SMOKE_SCRIPT = ".github/scripts/smoke.sh"
+SMOKE_CI_FILE = os.path.join(".github", "workflows", "ci.yml")
 _SPOKE_CORE_IMPORT_RE = re.compile(
     r"^\s*(?:from|import)\s+(?:core\.src\.base_spoke|core\.src|base_spoke)\b", re.M)
 
@@ -1096,7 +1108,7 @@ def _needs_spoke_core(repo_path):
         return False
     # Directories not worth scanning.
     skip = {".git", "node_modules", "venv", ".venv", "__pycache__",
-            SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME}
+            SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME, SMOKE_HELPERS_DIRNAME}
     # Walk the repo's Python files looking for a BaseSpoke import.
     try:
         for root, dirs, names in os.walk(repo_path):
@@ -1976,7 +1988,7 @@ def _exclude_sandbox_venv(repo_path):
                 existing = f.read()
         # Append an entry for the venv and _lm folders if not already listed.
         present = existing.split()
-        for name in (SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME):
+        for name in (SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME, SMOKE_HELPERS_DIRNAME):
             entry = f"/{name}/"
             if entry not in present:
                 with open(exclude, "a") as f:
@@ -2078,7 +2090,7 @@ def _python_requirement_files(repo_path):
     # Folders not worth scanning.
     found = []
     skip = {".git", "node_modules", "venv", ".venv", "__pycache__",
-            SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME}
+            SANDBOX_VENV_DIRNAME, SPOKE_CORE_DIRNAME, SMOKE_HELPERS_DIRNAME}
     # Collect every requirements*.txt file in the repo.
     try:
         for root, dirs, names in os.walk(repo_path):
@@ -2090,6 +2102,23 @@ def _python_requirement_files(repo_path):
         logger.warning(f"Could not scan {repo_path} for requirements files: {e}")
     # Return them in a stable order.
     return sorted(found)
+
+
+def _smoke_available(repo_path):
+    """True when verify_fix can run the fleet smoke test: the repo has a CI
+    workflow to read and prepare_environment fetched the script."""
+    return (os.path.isfile(os.path.join(repo_path, SMOKE_CI_FILE))
+            and os.path.isfile(os.path.join(repo_path, SMOKE_HELPERS_DIRNAME, SMOKE_SCRIPT)))
+
+
+def _smoke_command(*flags):
+    """The sandboxed smoke.sh invocation. Fleet rules are skipped because AB
+    already gates the change on them in-process (fleet_checks.gate), and fetch
+    because the sandbox has no git credential. The venv is the sandbox's own."""
+    return (f'SMOKE_HELPERS="$PWD/{SMOKE_HELPERS_DIRNAME}/.github" '
+            f'SMOKE_VENV="$PWD/{SANDBOX_VENV_DIRNAME}" '
+            f"bash {SMOKE_HELPERS_DIRNAME}/{SMOKE_SCRIPT} --no-fleet-rules --no-fetch"
+            + "".join(f" {f}" for f in flags))
 
 
 def prepare_environment(repo_path):
@@ -2109,12 +2138,14 @@ def prepare_environment(repo_path):
     _exclude_sandbox_venv(repo_path)
 
     # Spoke repos need the lm core checked out (sparse, shallow) as their CI does.
+    # .github too: ab's CI checks it out for its tests of lm's reusable
+    # workflows, which otherwise skip; the other spokes never read it.
     if _needs_spoke_core(repo_path):
         logger.info("Repo imports BaseSpoke but does not contain it; "
                     "checking out lm core into %s (as its CI does)..." % SPOKE_CORE_DIRNAME)
         clone = (f"git clone --depth 1 --filter=blob:none --sparse {SPOKE_CORE_URL} "
                  f"{SPOKE_CORE_DIRNAME} && "
-                 f"git -C {SPOKE_CORE_DIRNAME} sparse-checkout set core")
+                 f"git -C {SPOKE_CORE_DIRNAME} sparse-checkout set core .github")
         result = run_sandboxed_command(clone, repo_path, network=True,
                                        timeout=SANDBOX_INSTALL_TIMEOUT)
         # Sandbox failure or a failed clone stops preparation.
@@ -2127,6 +2158,23 @@ def prepare_environment(repo_path):
             detail = (result.stderr or result.stdout or "").strip()[-2000:]
             return (f"{VERIFICATION_INFRA_PREFIX} could not check out the lm core dependency "
                     f"(rc {result.returncode}): {detail}")
+
+    # The fleet smoke test, for repos with a CI workflow. Re-fetched every
+    # time so a fix is tested with the current script. Best-effort: without it
+    # verify_fix falls back to its detected test command.
+    if os.path.isfile(os.path.join(repo_path, SMOKE_CI_FILE)):
+        d = SMOKE_HELPERS_DIRNAME
+        fetch = (f"rm -rf {d} && git clone -q --depth 1 --filter=blob:none --sparse "
+                 f"-b {SMOKE_LM_REF} {SPOKE_CORE_URL} {d} && "
+                 f"git -C {d} sparse-checkout set .github")
+        result = run_sandboxed_command(fetch, repo_path, network=True,
+                                       timeout=SANDBOX_INSTALL_TIMEOUT)
+        if _sandbox_infra_failure(result):
+            return f"{VERIFICATION_INFRA_PREFIX} {result.stderr}"
+        if result.returncode != 0:
+            logger.warning("Could not fetch the fleet smoke test (rc %s); verify_fix will "
+                           "use the detected test command: %s", result.returncode,
+                           (result.stderr or result.stdout or "").strip()[-500:])
 
     # All requirements files in the repo.
     reqs = _python_requirement_files(repo_path)
@@ -2179,6 +2227,16 @@ def prepare_environment(repo_path):
             detail = (result.stderr or result.stdout or "").strip()[-2000:]
             return (f"{VERIFICATION_INFRA_PREFIX} could not build the sandbox venv or install "
                     f"the test runner (rc {result.returncode}): {detail}")
+        if _smoke_available(repo_path):
+            # The smoke test's own setup: the extra pip packages its ci.yml
+            # installs (pytest-asyncio, websockets, ruff ...), into the same
+            # venv, under the install timeout rather than the test one.
+            result = run_sandboxed_command(_smoke_command("--setup-only"), repo_path,
+                                           network=True, timeout=SANDBOX_INSTALL_TIMEOUT)
+            if _sandbox_infra_failure(result) or result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()[-2000:]
+                return (f"{VERIFICATION_INFRA_PREFIX} smoke test setup failed "
+                        f"(rc {result.returncode}): {detail}")
         return None
     # Go and Makefile projects: best-effort installs.
     elif "go.mod" in files:
@@ -5026,12 +5084,32 @@ def _qa_service_verify(repo_name, config, timeout=120):
 
 
 def verify_fix(repo_path, repo_name, config):
-    """Run the tests for a fixed repo (QA service, then configured or detected local tests).
+    """Run the tests for a fixed repo: the fleet smoke test when the repo has a
+    CI workflow, else the QA service, then configured or detected local tests.
     Returns (passed, error_text).
     """
     logger.info(f"Verifying fix in {repo_path}...")
 
-    # Priority 1: QA service API (when QA_API_URL is configured).
+    # Priority 1: the fleet smoke test -- the checks and tests CI runs, read
+    # from the repo's own ci.yml (see SMOKE_HELPERS_DIRNAME).
+    if _smoke_available(repo_path):
+        logger.info(f"Running the fleet smoke test for {repo_name}")
+        result = run_sandboxed_command(_smoke_command(), repo_path)
+        if _sandbox_infra_failure(result):
+            logger.error(f"Cannot verify (sandbox failure): {result.stderr}")
+            return False, f"{VERIFICATION_INFRA_PREFIX} {result.stderr}"
+        if result.returncode == 0:
+            logger.info(f"Smoke test passed for {repo_name}")
+            return True, None
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode == 2:
+            # smoke.sh exits 2 for its own setup problems (no python, missing
+            # helper), never for a failing check or test.
+            return False, f"{VERIFICATION_INFRA_PREFIX} smoke test could not run: {output[-2000:]}"
+        logger.error(f"Smoke test failed for {repo_name}:\n{output}")
+        return False, output
+
+    # Priority 2: QA service API (when QA_API_URL is configured).
     if config.get("QA_API_URL"):
         passed, summary = _qa_service_verify(repo_name, config)
         if passed is not None:
@@ -5044,7 +5122,7 @@ def verify_fix(repo_path, repo_name, config):
         else:
             logger.warning(f"QA service unreachable ({summary}), falling back to local tests")
 
-    # Priority 2: per-repo explicit test command from config.
+    # Priority 3: per-repo explicit test command from config.
     repo_tests = config.get("repo_tests", {})
     test_cmd = repo_tests.get(repo_name)
     # Log the per-repo command, or fall back to an external QA repo or auto-detection.
