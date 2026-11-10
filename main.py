@@ -254,6 +254,10 @@ def _local_health_url() -> str:
 # HTML templates for the web UI.
 template_path = os.path.join(os.getcwd(), "templates")
 templates = Jinja2Templates(directory=template_path)
+# Self-update rewrites templates/ ~40s before the restart. Without this, the old
+# process hot-reloads the NEW templates and 500s on globals it doesn't define
+# ("'feed_counts' is undefined"); each process keeps the templates it loaded.
+templates.env.auto_reload = False
 
 
 # ---------------------------------------------------------------------------
