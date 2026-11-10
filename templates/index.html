@@ -2687,6 +2687,26 @@
                         </div>
 
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Model policy <span class="text-slate-500 font-normal">(which models handle hub health-check findings)</span></label>
+                            <p class="text-xs text-slate-500">Health-check findings are diagnosis problems, so these stages use stronger models than ordinary issues. Each field is a comma-separated list of model names or wildcards. <strong>When a new model is released, add its name or a wildcard here</strong>; leave a field blank to go back to the default.</p>
+                            {% for st in model_stages %}
+                            <div class="space-y-1 mt-2">
+                                <label class="text-sm font-medium text-slate-600" for="{{ st.field }}">{{ st.label }}</label>
+                                <input type="text" id="{{ st.field }}" name="{{ st.field }}" value="{{ st.value }}" title="{{ st.help }}" placeholder="{{ st.default }}" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
+                                <p class="text-xs text-slate-500">{{ st.help }} Default: <code>{{ st.default }}</code>.</p>
+                                {% if st.models %}
+                                <div class="flex flex-wrap gap-1">
+                                    {% for m in st.models %}
+                                    <button type="button" class="px-2 py-0.5 text-xs rounded bg-slate-100 hover:bg-slate-200 border border-slate-200" title="Add {{ m }} to this list" onclick="var i=document.getElementById('{{ st.field }}');i.value=i.value.trim()?i.value.replace(/[,\s]+$/,'')+', {{ m }}':'{{ m }}';">+ {{ m }}</button>
+                                    {% endfor %}
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                            <p class="text-xs text-amber-700">If none of the configured models match a list, AppBuilder logs a warning and uses the normal model pool rather than stopping.</p>
+                        </div>
+
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
                             <label class="text-sm font-semibold text-slate-700">Scheduled Promotion <span class="text-slate-500 font-normal">(opens dev→qa / qa→main PRs on a cadence — never merges)</span></label>
                             <div class="flex items-center gap-3">
                                 <input type="checkbox" name="promote_schedule_enabled" id="promote_schedule_enabled" {{ 'checked' if settings.get('promote_schedule_enabled', False) else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">

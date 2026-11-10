@@ -15,6 +15,18 @@ from fastapi import APIRouter
 # Router that main.app includes.
 router = APIRouter()
 
+
+def _model_stage_rows(config, model_options):
+    """Rows for Settings -> Model policy: one editable pattern list per stage."""
+    import stage_models
+    rows = []
+    for key, (cfg_key, default, label, help_) in stage_models.STAGES.items():
+        rows.append({"stage": key, "field": f"model_stage_{key}", "label": label, "help": help_,
+                     "value": ", ".join(stage_models.patterns(config, key)),
+                     "default": ", ".join(default), "models": model_options})
+    return rows
+
+
 # Shared config, state, helpers and workers re-exported by main.
 from main import (
     CHAT_CONFIG_DEFAULTS,
@@ -2945,6 +2957,7 @@ async def settings_page(request: Request):
         "premium_model_options": premium_model_options,
         "premium_models_set": premium_models_set,
         "premium_models_extra": premium_models_extra,
+        "model_stages": _model_stage_rows(config, premium_model_options),
         "log_module_options": log_module_options,
         "health_check_fields": [
             {"key": k, "value": config.get(k, v), "step": "any" if isinstance(v, float) else "1"}
@@ -3526,6 +3539,17 @@ async def save_settings(request: Request):
     # only because the GET renders the effective defaults ALREADY TICKED, so
     # saving an unrelated setting cannot empty this by omission.
     config_data["pr_remediate_premium_model_allowlist"] = list(dict.fromkeys(_prem))
+    # Model policy: blank or equal-to-default clears the override so new defaults flow.
+    import stage_models as _sm
+    for _k, (_ck, _dflt, _l, _h) in _sm.STAGES.items():
+        _raw = data.get(f"model_stage_{_k}")
+        if _raw is None:
+            continue
+        _pats = list(_sm._split(_raw))
+        if not _pats or tuple(_pats) == tuple(_dflt):
+            config_data.pop(_ck, None)
+        else:
+            config_data[_ck] = _pats
 
     # Auto-FIX log-detected / automated-fix issues (default OFF; Bug + Critical
     # always fix). Stops the fixer churning on log-scraped issues.
