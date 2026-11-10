@@ -514,7 +514,7 @@ async def hub_health_check_last():
 
 @router.get("/health")
 async def health_dashboard_page(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html", context={"view": "health", "state": state})
+    return templates.TemplateResponse(request=request, name="index.html", context={"view": "health"})
 
 
 @router.post("/api/hub-health-check")
