@@ -3564,6 +3564,9 @@ async def save_settings(request: Request):
     config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
     # Chat tools on or off.
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
+    # Azure fleet access (chat tools + the Azure VM health check) and its mutation gate.
+    config_data["CHAT_AZURE_ENABLED"] = data.get("CHAT_AZURE_ENABLED") == "on"
+    config_data["CHAT_AZURE_ALLOW_MUTATION"] = data.get("CHAT_AZURE_ALLOW_MUTATION") == "on"
     # Multi-agent orchestration (default off): a chat request is planned into a
     # sub-task DAG whose independent parts run in parallel across distinct
     # endpoints, then merged. The two bounds are clamped to >=1.
