@@ -158,3 +158,16 @@ def test_azure_collect_reads_vms_through_read_only_az(monkeypatch):
     assert got == [{"name": "A", "size": "Standard_B2s", "power": "VM running", "agent": "Ready",
                     "credits": 4.0, "cpu_pct": 40.0}]
     assert az.collect({}) is None
+
+
+def test_netbox_churn_flagged_and_quiet_when_normal():
+    churn = {"writes_per_hour": 6000, "window_s": 1800, "capped": True, "stub_creates": 40,
+             "by_kind": {"dcim.device update": 2700}, "top_fields": [["switch_ip", 2400]],
+             "flapping": {"objects": 25, "sample": [{"name": "d1", "field": "switch_ip",
+                                                      "values": ["A", "B", "A"]}]}}
+    out = hc.evaluate(_report(fleet={"netbox_churn": churn}), [])
+    f = [x for x in out if x["kind"] == "netbox_churn"]
+    assert len(f) == 1 and f[0]["severity"] == "high" and "d1.switch_ip: A -> B -> A" in f[0]["evidence"][-1]
+    calm = dict(churn, writes_per_hour=300, flapping={"objects": 0})
+    assert not [x for x in hc.evaluate(_report(fleet={"netbox_churn": calm}), [])
+                if x["kind"] == "netbox_churn"]
