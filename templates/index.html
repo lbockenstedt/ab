@@ -2280,6 +2280,20 @@
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <div class="flex items-center gap-2">
+                                    <input type="checkbox" name="CHAT_AZURE_ENABLED" id="CHAT_AZURE_ENABLED" {{ 'checked' if settings.CHAT_AZURE_ENABLED else '' }} title="Lets the chat agent and the Hub Health check read the LM Azure VMs (power, guest agent, CPU credits) through the secretless service-principal login. Only works on LM-AB." class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="CHAT_AZURE_ENABLED" class="text-xs font-medium text-slate-700">
+                                        Azure fleet access (diagnose the LM VMs; feeds the Azure VM health check)
+                                    </label>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <input type="checkbox" name="CHAT_AZURE_ALLOW_MUTATION" id="CHAT_AZURE_ALLOW_MUTATION" {{ 'checked' if settings.CHAT_AZURE_ALLOW_MUTATION else '' }} title="Off = read-only. On = az and VM shell commands may change things (restart, resize, run scripts); the service principal's RBAC is the only limit." class="w-4 h-4 text-primary-text focus:ring-brand">
+                                    <label for="CHAT_AZURE_ALLOW_MUTATION" class="text-xs font-medium text-slate-700">
+                                        Allow Azure changes (restart / resize / run commands) — off keeps it read-only
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <div class="flex items-center gap-2">
                                     <input type="checkbox" name="ORCHESTRATOR_ENABLED" id="ORCHESTRATOR_ENABLED" {{ 'checked' if settings.ORCHESTRATOR_ENABLED else '' }} title="When on, a chat request is planned into a small DAG of sub-tasks and the independent parts run at the SAME TIME, each on the best available LLM (your CPU box, GPU box, and cloud working in parallel), then merged. Off = one model answers the whole request." class="w-4 h-4 text-primary-text focus:ring-brand">
                                     <label for="ORCHESTRATOR_ENABLED" class="text-xs font-medium text-slate-700">
                                         🧠 Multi-agent orchestration (split a request across LLMs in parallel, then merge)
