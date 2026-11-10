@@ -171,3 +171,15 @@ def test_netbox_churn_flagged_and_quiet_when_normal():
     calm = dict(churn, writes_per_hour=300, flapping={"objects": 0})
     assert not [x for x in hc.evaluate(_report(fleet={"netbox_churn": calm}), [])
                 if x["kind"] == "netbox_churn"]
+
+
+def test_read_command_called_too_often_is_flagged():
+    perf = {"slow_route_s": 3, "slow_command_s": 5, "routes": [], "commands": [], "uptime_s": 7200,
+            "command_rates": [{"spoke": "netbox-spoke", "key": "NETBOX_GET_PREFIXES", "count": 1400,
+                               "per_hour": 700.0},
+                              {"spoke": "netbox-spoke", "key": "NETBOX_GET_RACKS", "count": 20,
+                               "per_hour": 10.0}]}
+    f = [x for x in hc.evaluate(_report(perf=perf), []) if x["kind"] == "call_rate"]
+    assert len(f) == 1 and f[0]["module"] == "ipam" and "NETBOX_GET_PREFIXES" in f[0]["title"]
+    perf["uptime_s"] = 120  # too soon after a restart to judge a rate
+    assert not [x for x in hc.evaluate(_report(perf=perf), []) if x["kind"] == "call_rate"]
