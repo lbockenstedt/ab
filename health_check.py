@@ -41,6 +41,10 @@ DEFAULTS = {
     "hc_max_issues_per_run": 5,
 }
 
+# Routes that are slow by design (they run a long job inside the request), so
+# a slow response is not a problem to file (lm#1747).
+_SLOW_ROUTE_EXEMPT = frozenset({"POST /admin/ops/self-update"})
+
 # Command prefix -> MODULE_TYPE_REPO key (log_scan) of the repo that owns it.
 _PREFIX_MODULE = {
     "NETBOX": "ipam", "NW": "nw", "TRUENAS": "storage", "PXMX": "hypervisor",
@@ -126,6 +130,8 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
                             [f"event-loop lag {report['loop_lag_s']}s"], "The hub loop is saturated."))
 
     for r in perf.get("routes") or []:
+        if r["key"] in _SLOW_ROUTE_EXEMPT:
+            continue
         if r["slow"] >= c["hc_slow_route_min_hits"] or r["max_s"] >= c["hc_slow_route_max_s"]:
             out.append(_finding(
                 "slow_route", r["key"], f"slow page {r['key']}", "medium", "hub",
