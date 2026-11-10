@@ -28,11 +28,7 @@ Flat and large (~100 top-level modules). Orientation points: `agent_orchestrator
 driver), `fix_engine.py`, `chat.py`, `batch.py`, `auth.py`, `app_state.py`, `config_store.py`,
 `claude_cli_native_tools.py`, the `feature_*.py` family (allowlist/boundary/build/drive), and
 the `check_*.py` guards (test regressions, tooltips, unattended mutation).
-`docs/LLM_REDESIGN_HANDOFF.md` carries in-flight redesign context.
-Tests live in `tests/`: run `pytest -q` from the repo root (`pytest.ini` sets
-`testpaths = tests` and puts the root on the import path). Tests that read the
-promotion workflows go through `tests/_workflows.py`: triggers and inputs from
-ab's thin `promote.yml`/`backmerge.yml`, logic from lm's `*-reusable.yml`.
+`LLM_REDESIGN_HANDOFF.md` carries in-flight redesign context.
 
 ## ab-specific gotchas
 
