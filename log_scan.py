@@ -1339,11 +1339,11 @@ def scan_bugs(gh_current, config, hub_logs):
             continue
         # Context fields to include in the issue.
         ctx = report.get("context") or {}
-        # Build a clean, public-safe issue body.
+        # Build a clean, public-safe issue body (no LM username: GitHub is outside LM).
         ctx_lines = []
         if isinstance(ctx, dict):
             for k in ("currentView", "currentSubView", "currentTenant", "url",
-                      "hubVersion", "webuiVersion", "username", "userAgent"):
+                      "hubVersion", "webuiVersion", "userAgent"):
                 v = ctx.get(k)
                 if v:
                     ctx_lines.append(f"- **{k}**: {v}")

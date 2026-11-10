@@ -29,6 +29,10 @@ TARGETS = {
     "prepare_environment",
     "_needs_spoke_core",
     "_spoke_core_pythonpath",
+    "_smoke_available",
+    "_smoke_command",
+    "_exclude_spoke_core_from_pytest",
+    "verify_fix",
 }
 
 # Pulled from the source rather than restated here: a test that hard-codes the
@@ -42,6 +46,7 @@ CONSTANTS = {
     "VERIFICATION_INFRA_PREFIX",
     "SPOKE_CORE_URL", "SPOKE_CORE_DIRNAME", "_SPOKE_CORE_IMPORT_RE",
     "_CAP_CLEAR_ARGV",
+    "SMOKE_HELPERS_DIRNAME", "SMOKE_LM_REF", "SMOKE_SCRIPT", "SMOKE_CI_FILE",
 }
 
 
@@ -458,6 +463,85 @@ def test_unknown_project_installs_nothing(tmp_path):
     assert _capture_prepare(tmp_path, ["README.md"]) == []
 
 
+# ── fleet smoke test (lm .github/scripts/smoke.sh) ──────────────────────────
+
+def _smoke_repo(tmp_path, with_script=True):
+    """A Python repo with a CI workflow; with_script simulates the helper clone."""
+    for name in ("requirements.txt", ".github/workflows/ci.yml"):
+        p = tmp_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("")
+    os.makedirs(tmp_path / ".git" / "info", exist_ok=True)
+    script = tmp_path / ".ab-smoke" / ".github" / "scripts" / "smoke.sh"
+    if with_script:
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("")
+    return tmp_path
+
+
+def _run_with(fn_name, results, *args):
+    seen = []
+    queued = list(results)
+
+    def runner(c, p, network=True, timeout=None):
+        seen.append((c, timeout))
+        return queued.pop(0) if queued else FakeCompleted("out", "", 0)
+
+    ns = dict(MOD)
+    ns["run_sandboxed_command"] = runner
+    fn = types.FunctionType(MOD[fn_name].__code__, ns, fn_name)
+    return seen, fn(*args)
+
+
+def test_prepare_fetches_smoke_helpers_then_runs_its_setup(tmp_path):
+    repo = _smoke_repo(tmp_path)
+    seen, out = _run_with("prepare_environment", [], str(repo))
+    assert out is None
+    cmds = [c for c, _ in seen]
+    assert "sparse-checkout set .github" in cmds[0] and "-b dev" in cmds[0]
+    assert "smoke.sh --no-fleet-rules --no-fetch --setup-only" in cmds[-1]
+    assert seen[-1][1] == MOD["SANDBOX_INSTALL_TIMEOUT"]
+    with open(repo / ".git" / "info" / "exclude") as f:
+        assert "/.ab-smoke/" in f.read()
+
+
+def test_failed_smoke_setup_is_infra_not_a_code_defect(tmp_path):
+    repo = _smoke_repo(tmp_path)
+    ok = FakeCompleted("", "", 0)
+    _, out = _run_with("prepare_environment",
+                       [ok, ok, FakeCompleted("", "pip failed", 1)], str(repo))
+    assert MOD["is_verification_infra_failure"](out)
+
+
+def test_verify_runs_the_smoke_test_first(tmp_path):
+    repo = _smoke_repo(tmp_path)
+    seen, out = _run_with("verify_fix", [FakeCompleted("SMOKE PASSED", "", 0)],
+                          str(repo), "lbockenstedt/kvm", {"QA_API_URL": "http://qa"})
+    assert out == (True, None)
+    assert len(seen) == 1 and "smoke.sh --no-fleet-rules --no-fetch" in seen[0][0]
+
+
+def test_smoke_failure_is_fed_back_as_a_test_failure(tmp_path):
+    repo = _smoke_repo(tmp_path)
+    _, (ok, msg) = _run_with("verify_fix", [FakeCompleted("1 failed\nSMOKE FAILED at: tests", "", 1)],
+                             str(repo), "lbockenstedt/kvm", {})
+    assert not ok and "SMOKE FAILED" in msg
+    assert not MOD["is_verification_infra_failure"](msg)
+
+
+def test_smoke_setup_problem_is_infra(tmp_path):
+    repo = _smoke_repo(tmp_path)
+    _, (ok, msg) = _run_with("verify_fix", [FakeCompleted("no python3 found", "", 2)],
+                             str(repo), "lbockenstedt/kvm", {})
+    assert not ok and MOD["is_verification_infra_failure"](msg)
+
+
+def test_without_the_smoke_script_verify_uses_the_detected_command(tmp_path):
+    repo = _smoke_repo(tmp_path, with_script=False)
+    seen, _ = _run_with("verify_fix", [], str(repo), "lbockenstedt/kvm", {})
+    assert [c for c, _ in seen] == ["python3 -m pytest"]
+
+
 # ── discard_verification_artifacts ──────────────────────────────────────────
 
 import subprocess as _sp
@@ -825,7 +909,7 @@ def test_prepare_checks_out_lm_core_for_a_spoke(tmp_path):
     seen, out = _invoke_prepare(tmp_path, ["requirements.txt"])
     assert out is None
     assert MOD["SPOKE_CORE_URL"] in seen[0][0]
-    assert "sparse-checkout set core" in seen[0][0]
+    assert "sparse-checkout set core .github" in seen[0][0]
     assert seen[0][1] is True, "the checkout needs network"
 
 

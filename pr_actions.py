@@ -124,11 +124,11 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
     """The CI verdict for *head_sha* as ``(state, details)``, where state is one
     of ``success``/``failure``/``pending``/``unknown``.
 
-    AppBuilder cannot run a repo's tests itself: ``fix_engine.verify_fix``
-    executes them through ``run_sandboxed_command``, which needs Docker, and the
-    host has none — so ``qa_enabled`` is off and every generated fix is pushed
-    unverified. GitHub Actions is therefore the ONLY ground truth available for
-    whether a fix actually works, and nothing was reading it: the sole Actions
+    With ``qa_enabled`` on, ``fix_engine.verify_fix`` runs the fleet smoke test
+    (the checks and tests CI runs) in the sandbox before a fix is pushed; with
+    it off, every generated fix is pushed unverified. Either way GitHub Actions
+    is the final ground truth for whether a fix actually works, and nothing was
+    reading it: the sole Actions
     call in this module releases PARKED runs and never looks at a conclusion.
     The result was a fixer flying blind — it would push a fix that broke the
     suite, get told nothing, and spend its remediation budget re-fixing the
