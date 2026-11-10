@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from github import Github
-from app_state import mark_pr_approved, update_pr_review
+from app_state import activity_feed_items, mark_pr_approved, update_pr_review
 from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
 from fastapi import APIRouter
@@ -1028,31 +1028,6 @@ async def pr_review_fix(request: Request):
     # Run it in the background and return straight away.
     threading.Thread(target=run_fix, daemon=True).start()
     return {"status": "triggered", "message": f"Generating a fix for {repo_name}#{number}…"}
-
-
-# Statuses that need no further action; only these age out of the Activity Feed.
-_FEED_AGED_STATUSES = ("closed", "resolved", "fixed", "verified")
-
-
-def activity_feed_items(processed, now=None, days=7):
-    """Issues for the dashboard Activity Feed. Finished issues show for `days`
-    days; anything still needing action (pending verification, failed,
-    non-actionable, feature_*) always shows, so the sidebar counts — derived
-    from the whole store — always have rows to filter to."""
-    now = now or datetime.now()
-    items = {}
-    for issue_id, info in (processed or {}).items():
-        if info.get("status") not in _FEED_AGED_STATUSES:
-            items[issue_id] = info
-            continue
-        try:
-            age_days = (now - datetime.fromisoformat(info.get("timestamp", "{}"))).days
-        except (TypeError, ValueError):
-            items[issue_id] = info
-            continue
-        if age_days < days:
-            items[issue_id] = info
-    return items
 
 
 @router.get("/")

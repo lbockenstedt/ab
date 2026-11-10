@@ -42,20 +42,17 @@ def _load_ns():
 
     segs = []
     for node in app_tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "recompute_issue_counters":
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "recompute_issue_counters", "activity_feed_items", "feed_counts"):
             segs.append(ast.get_source_segment(app_state_src, node))
         if isinstance(node, ast.Assign):
             for t in node.targets:
-                if getattr(t, "id", "") == "_RESOLVED_STATUSES":
+                if getattr(t, "id", "") in ("_RESOLVED_STATUSES", "_FEED_AGED_STATUSES",
+                                            "FEED_WINDOW_DAYS", "FEED_BUCKETS"):
                     segs.append(ast.get_source_segment(app_state_src, node))
     for node in routes_tree.body:
         if isinstance(node, ast.AsyncFunctionDef) and node.name in (
                 "delete_issue", "clear_history", "delete_all_issues"):
-            segs.append(ast.get_source_segment(routes_src, node))
-        if isinstance(node, ast.FunctionDef) and node.name == "activity_feed_items":
-            segs.append(ast.get_source_segment(routes_src, node))
-        if isinstance(node, ast.Assign) and any(
-                getattr(t, "id", "") == "_FEED_AGED_STATUSES" for t in node.targets):
             segs.append(ast.get_source_segment(routes_src, node))
         if isinstance(node, ast.FunctionDef) and node.name == "_close_issue_on_github":
             # Replaced by a stub below — real one hits the GitHub API.
@@ -211,6 +208,35 @@ def main():
                  feed_pv == state["pending_verification_count"] == 1)
     ok &= _check("feed: old closed/resolved age out; active, recent and unparseable stay",
                  sorted(feed) == ["o/r:bad", "o/r:f", "o/r:new", "o/r:pv"])
+
+    # ── going forward the sidebar counts come from feed_counts(), computed at
+    # render time from the same rows the feed lists: every count must equal
+    # the rows its filter click shows, however old the issues are.
+    store.update({
+        "o/r:fx": {"status": "fixed", "timestamp": now.isoformat()},
+        "o/r:apv": {"status": "awaiting_prod_verification", "timestamp": old},
+        "o/r:na": {"status": "non-actionable", "timestamp": old},
+        "o/r:ff": {"status": "feature_classify_retry", "timestamp": old},
+    })
+    counts = ns["feed_counts"](store, now=now)
+    rows = ns["activity_feed_items"](store, now=now)
+    for bucket, statuses in ns["FEED_BUCKETS"].items():
+        shown = sum(1 for i in rows.values() if i.get("status") in statuses)
+        ok &= _check(f"feed_counts[{bucket!r}] == rows its filter shows ({shown})",
+                     counts[bucket] == shown)
+    ok &= _check("feed_counts: aged closed/resolved drop out of the counts too",
+                 counts["closed"] == 2 and counts["resolved"] == 2)
+
+    # ── the template must render every sidebar count from feed_counts(), and
+    # every bucket must have a goFilter click wired to it.
+    html = open("templates/index.html").read()
+    for bucket in ns["FEED_BUCKETS"]:
+        ok &= _check(f"sidebar: {bucket!r} count is feed_counts()-driven and clickable",
+                     "{{ _fc['%s'] }}" % bucket in html and "goFilter('%s')" % bucket in html)
+    ok &= _check("sidebar: no stale state.*_count badges remain",
+                 not any("{{ state.%s_count }}" % k in html for k in (
+                     "success", "failure", "closed", "pending_verification", "non_actionable",
+                     "feature_flagged", "feature_needs_info", "feature_built")))
 
     print()
     if ok:
