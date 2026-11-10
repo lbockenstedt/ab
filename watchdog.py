@@ -228,45 +228,6 @@ def check_updater_staleness():
     # The updater looks alive.
     return False
 
-# At most one stale-code restart per this many seconds, so a restart that
-# doesn't take (or a stamp that can't be written) can't become a restart loop.
-STALE_CODE_RESTART_INTERVAL = 1800
-_last_stale_code_restart = 0.0
-
-def disk_commit(app_dir="/opt/ab"):
-    """Return the commit checked out on disk, or None."""
-    try:
-        res = subprocess.run(["git", "-C", app_dir, "rev-parse", "HEAD"],
-                             capture_output=True, text=True, timeout=10)
-        return res.stdout.strip() or None
-    except Exception:
-        return None
-
-def check_running_code_stale(now=None):
-    """Force a restart if the running process is on an older commit than disk.
-
-    The update_pending path only covers updates the updater pulled itself and
-    whose restart it saw through. If code lands on disk any other way (or that
-    restart silently fails), the old process keeps running while Jinja
-    hot-reloads the NEW templates from disk — so pages break with errors like
-    "'feed_counts' is undefined". Returns True if a restart was spawned.
-    """
-    global _last_stale_code_restart
-    now = time.time() if now is None else now
-    if not is_service_active() or now - _last_stale_code_restart < STALE_CODE_RESTART_INTERVAL:
-        return False
-    started_at = read_startup_time()
-    if started_at is None or (datetime.now() - started_at).total_seconds() < STARTUP_GRACE_SECONDS:
-        return False
-    running, on_disk = read_startup_stamp(), disk_commit()
-    if not running or running == "unknown" or not on_disk or running == on_disk:
-        return False
-    logger.warning("WATCHDOG: running on %s but disk is on %s. Restarting to load it.",
-                   running[:7], on_disk[:7])
-    _last_stale_code_restart = now
-    spawn_restart()
-    return True
-
 def spawn_restart():
     """Detached `systemctl restart ab` that survives this process dying. The
     service runs as svc_bg, so non-root invokes the race-free root helper via
@@ -594,13 +555,6 @@ def main():
                 time.sleep(12)  # let systemd stop+start (RestartSec=10)
         except Exception as e:  # noqa: BLE001
             logger.error(f"updater staleness check failed: {e}")
-        # Restart a process left running old code (no update_pending to say so).
-        if not os.path.exists(UPDATE_PENDING_FILE):
-            try:
-                if check_running_code_stale():
-                    time.sleep(12)  # let systemd stop+start (RestartSec=10)
-            except Exception as e:  # noqa: BLE001
-                logger.error(f"stale-code check failed: {e}")
         # A new commit was pulled and is waiting to be verified.
         if os.path.exists(UPDATE_PENDING_FILE):
             # Which commit is pending.
