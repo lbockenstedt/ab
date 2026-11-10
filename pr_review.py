@@ -1763,11 +1763,9 @@ def _maybe_auto_merge(gh, repo, pr, config):
         # ceiling, so this can only defer a merge, never block it forever.
         if should_merge:
             # Ground truth beats opinion. The panels review the DIFF; they never
-            # see whether the suite still passes, and AppBuilder cannot run it
-            # itself (verify_fix needs Docker, which the host lacks, so
-            # qa_enabled is off and fixes are pushed unverified). GitHub Actions
-            # is the only evidence that a fix works, so refuse to merge a head
-            # whose checks actually failed.
+            # see whether the suite still passes. verify_fix runs the smoke test
+            # before a push only when qa_enabled is on, and CI is the backstop
+            # either way, so refuse to merge a head whose checks actually failed.
             #
             # Blocks on "failure" ONLY. "pending" and "unknown" are explicitly
             # allowed through: holding on them would gate every merge on checks
@@ -2472,9 +2470,9 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             #
             # The panel critique is the only feedback the fixer has ever had,
             # and it is an opinion about the DIFF — it cannot mention a failing
-            # test because the panel never runs one. AppBuilder cannot run them
-            # either (verify_fix needs Docker, which the host lacks, so
-            # qa_enabled is off and every fix below is pushed unverified). So a
+            # test because the panel never runs one, and with qa_enabled off
+            # verify_fix does not run them either (every fix below is pushed
+            # unverified). So a
             # fix that broke the suite produced no signal anywhere: the next
             # scan re-reviewed the same diff, the panel named the same logic,
             # and the budget drained re-fixing that while the actual breakage
