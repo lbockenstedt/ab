@@ -120,9 +120,10 @@ def test_render_bug_explanation_title_first_trace_on_top():
     text = rs.render_explanation(_sess(BUG, [{"kind": "user", "text": "delete broken"}]))
     assert text.splitlines()[0] == BUG["title"]
     top = text[:1500]
-    for needle in ("Request trace", "`alice`", "tenant `t1`", "ldap", "10.0.0.5",
-                   "2026-10-22T00:00:00Z", "11111111-2222-3333-4444-555555555555"):
+    for needle in ("Request trace", "tenant `t1`", "2026-10-22T00:00:00Z"):
         assert needle in top
+    for leak in ("alice", "ldap", "10.0.0.5", "11111111-2222-3333-4444-555555555555"):
+        assert leak not in text, leak
     for needle in ("### Steps to reproduce", "1. Open Simulations → Sites", "### Expected",
                    "### Actual", "**Frequency:** always", "### Evidence",
                    "lm: `WebUI/sim-views.js`", "**User:** delete broken"):
@@ -230,7 +231,7 @@ def test_flow_interview_submit_and_mark_filed(mgr):
     rep = out["report"]
     assert rep["type"] == "bug" and rep["severity"] == "high" and rep["title"] == BUG["title"]
     assert rep["explanation"].startswith(BUG["title"]) and "`ldap`" not in rep["explanation"][:40]
-    assert "10.0.0.5" in rep["explanation"][:1500] and sid in rep["explanation"][:1500]
+    assert "10.0.0.5" not in rep["explanation"] and sid not in rep["explanation"]
     assert rep["spec"]["intent"] == "bug" and rep["session_id"] == sid
     with pytest.raises(RuntimeError):
         mgr.reply(OWNER, sid, "more")
