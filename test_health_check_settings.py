@@ -29,3 +29,8 @@ def test_missing_or_bad_input_keeps_stored_value():
     _run(ns["save_settings"](_FakeRequest(_base_pairs(hc_mem_pct="junk"))))
     cfg = ns["_config_holder"]["config"]
     assert cfg["health_check_interval_s"] == 7200 and cfg["hc_mem_pct"] == 80.0
+
+
+def test_specific_titles_checkbox_saves_both_ways():
+    assert _save(escalation_specific_titles="on")["escalation_specific_titles"] is True
+    assert _save()["escalation_specific_titles"] is False
