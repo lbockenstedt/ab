@@ -31,6 +31,7 @@ caught here too.
 import ast
 import asyncio
 import threading
+from datetime import datetime, timedelta
 
 
 def _load_ns():
@@ -50,6 +51,11 @@ def _load_ns():
     for node in routes_tree.body:
         if isinstance(node, ast.AsyncFunctionDef) and node.name in (
                 "delete_issue", "clear_history", "delete_all_issues"):
+            segs.append(ast.get_source_segment(routes_src, node))
+        if isinstance(node, ast.FunctionDef) and node.name == "activity_feed_items":
+            segs.append(ast.get_source_segment(routes_src, node))
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", "") == "_FEED_AGED_STATUSES" for t in node.targets):
             segs.append(ast.get_source_segment(routes_src, node))
         if isinstance(node, ast.FunctionDef) and node.name == "_close_issue_on_github":
             # Replaced by a stub below — real one hits the GitHub API.
@@ -101,7 +107,7 @@ def _load_ns():
         "_close_issue_on_github": _close_issue_on_github,
         "_close_issue_on_github_with_retry": _close_issue_on_github_with_retry,
         "threading": threading, "JSONResponse": _JSONResponse,
-        "Request": _FakeRequest,
+        "Request": _FakeRequest, "datetime": datetime,
     }
     exec("\n\n".join(segs), ns)
     ns["_store"] = _store
@@ -185,6 +191,26 @@ def main():
                        if i.get("status") in ("feature_flagged", "feature_classify_retry"))
     ok &= _check("recompute: feed rows match the Feature Flagged badge",
                  feed_flagged == state["feature_flagged_count"] == 3)
+
+    # ── the dashboard feed keeps only the last 7 days, but the badges count the
+    # whole store: an issue pending verification for 8+ days was counted
+    # ("Pending Verif. 1") yet had no row to filter to. Only finished issues
+    # may age out of the feed.
+    now = datetime(2026, 11, 10, 12, 0)
+    old = (now - timedelta(days=30)).isoformat()
+    store = {"o/r:pv": {"status": "pending_verification", "timestamp": old},
+             "o/r:f": {"status": "failed", "timestamp": old},
+             "o/r:c": {"status": "closed", "timestamp": old},
+             "o/r:r": {"status": "resolved", "timestamp": old},
+             "o/r:new": {"status": "closed", "timestamp": now.isoformat()},
+             "o/r:bad": {"status": "closed", "timestamp": "garbage"}}
+    recompute(store)
+    feed = ns["activity_feed_items"](store, now=now)
+    feed_pv = sum(1 for i in feed.values() if i.get("status") == "pending_verification")
+    ok &= _check("feed: an old pending-verification issue still has a row for its badge",
+                 feed_pv == state["pending_verification_count"] == 1)
+    ok &= _check("feed: old closed/resolved age out; active, recent and unparseable stay",
+                 sorted(feed) == ["o/r:bad", "o/r:f", "o/r:new", "o/r:pv"])
 
     print()
     if ok:

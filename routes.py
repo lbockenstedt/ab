@@ -1030,20 +1030,35 @@ async def pr_review_fix(request: Request):
     return {"status": "triggered", "message": f"Generating a fix for {repo_name}#{number}…"}
 
 
+# Statuses that need no further action; only these age out of the Activity Feed.
+_FEED_AGED_STATUSES = ("closed", "resolved", "fixed", "verified")
+
+
+def activity_feed_items(processed, now=None, days=7):
+    """Issues for the dashboard Activity Feed. Finished issues show for `days`
+    days; anything still needing action (pending verification, failed,
+    non-actionable, feature_*) always shows, so the sidebar counts — derived
+    from the whole store — always have rows to filter to."""
+    now = now or datetime.now()
+    items = {}
+    for issue_id, info in (processed or {}).items():
+        if info.get("status") not in _FEED_AGED_STATUSES:
+            items[issue_id] = info
+            continue
+        try:
+            age_days = (now - datetime.fromisoformat(info.get("timestamp", "{}"))).days
+        except (TypeError, ValueError):
+            items[issue_id] = info
+            continue
+        if age_days < days:
+            items[issue_id] = info
+    return items
+
+
 @router.get("/")
 async def dashboard(request: Request):
     """Show the dashboard with recent issues and the sorted PR reviews."""
-    # Keep issues processed in the last 7 days (or with a bad timestamp).
-    recent_processed = {}
-    if state["processed"]:
-        now = datetime.now()
-        for issue_id, info in state["processed"].items():
-            try:
-                ts = datetime.fromisoformat(info.get("timestamp", "{}"))
-                if (now - ts).days < 7:
-                    recent_processed[issue_id] = info
-            except:
-                recent_processed[issue_id] = info
+    recent_processed = activity_feed_items(state["processed"])
 
     # Sort PR reviews by priority: Not Approved -> Approved -> Terminal (Merged/Denied)
     # Stable two-pass sort to maintain recency within each group.
