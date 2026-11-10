@@ -43,6 +43,11 @@ def test_empty_analysis():
     assert _summary_fn()("") == ""
 
 
+def test_rule_lines_are_skipped():
+    assert _summary_fn()("---\n****\nKea control socket refuses connections") == \
+        "Kea control socket refuses connections"
+
+
 def _recent_fn():
     import logging
     from datetime import datetime

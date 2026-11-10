@@ -1682,9 +1682,11 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
                      or resolve_module_repo(module, monitored_repos, config))
         if not repo_name:
             return False, f"no repo maps to module {module!r} (add a module_repo_map entry)"
-        # Title summary from the analysis.
+        # Title summary from the analysis. On by default: the analysis always
+        # opens with boilerplate, and titling on it folded unrelated problems
+        # into one issue (lm#1027, lm#1228). False restores the old title.
         first_line = next((ln.strip() for ln in (analysis or "").splitlines() if ln.strip()), "")
-        if config.get("escalation_specific_titles", False):
+        if config.get("escalation_specific_titles", True):
             first_line = _escalation_summary_line(analysis)
         summary = " ".join(first_line.split())[:90] or f"{module} log problem"
         # Build the issue title and body.
