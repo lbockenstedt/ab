@@ -182,7 +182,7 @@ def test_issue_body_has_feature_marker_and_scopes_touchpoints():
                        {"kind": "assistant", "text": "ok"}]}
     body = ss.render_issue_body(sess, "cs", "o/cs", ["o/lm#2 (url)"])
     assert body.startswith("<!-- report-type: feature -->")
-    assert "<!-- ab-sim-session: abc -->" in body
+    assert "ab-sim-session" not in body and "abc" not in body and "u1" not in body
     mine = body.split("## Touch-points in this repo (cs)")[1].split("##")[0]
     assert "dns_fail_lrb.sh" in mine and "sim-views.js" not in mine
     assert "NOT built here" in body and "o/lm#2" in body
@@ -528,9 +528,10 @@ def test_modify_submit_dedicated_labelled_issue_with_audit(mgr):
     head = issue.body[:1500]                               # what pr_template quotes into the PR
     for needle in ("<!-- report-type: feature -->", "<!-- ab-sim-modify: dns_fail -->",
                    "dedicated PR", "user override", "Works as built", "Lab DNS drops above 500",
-                   "Requested by (LM user):** `alice`", "Submitted by (LM user):** `admin1`",
-                   "sso, 10.0.0.5", sid):
+                   "Requested via:** LM → Simulations → Assistant"):
         assert needle in head, needle
+    for leak in ("alice", "admin1", "10.0.0.5", sid):
+        assert leak not in issue.body, leak
     recs = [json.loads(l) for l in open(os.path.join(mgr.base_dir, "audit.jsonl"))]
     r = recs[-1]
     assert r["session"] == sid and r["intent"] == "modify" and r["target"] == "dns_fail"
@@ -543,7 +544,7 @@ def test_create_submit_records_user_and_duplicate_of(mgr):
     mgr.submit(dict(OWNER, auth_type="local"), sid)
     for _repo, title, labels, issue in mgr._gh.created:
         assert ss.MODIFY_LABEL not in labels and title.startswith("Simulation: ")
-        assert "Requested by (LM user):** `alice`" in issue.body[:1500]
+        assert "Requested via:** LM" in issue.body[:1500] and "alice" not in issue.body
         assert "Duplicated from:** `dns_fail`" in issue.body
     assert os.path.isfile(os.path.join(mgr.base_dir, "audit.jsonl"))
 
@@ -632,9 +633,10 @@ def test_remove_submit_dedicated_labelled_issue_with_audit(mgr):
     assert title.startswith("Simulation removal (existing `dns_fail`)")
     head = issue.body[:1500]
     for needle in ("<!-- ab-sim-remove: dns_fail -->", "dedicated PR", "Nobody uses it.",
-                   "Requested by (LM user):** `alice`", "Submitted by (LM user):** `admin1`",
-                   "sso, 10.0.0.5", sid):
+                   "Requested via:** LM → Simulations → Assistant"):
         assert needle in head, needle
+    for leak in ("alice", "admin1", "10.0.0.5", sid):
+        assert leak not in issue.body, leak
     r = [json.loads(l) for l in open(os.path.join(mgr.base_dir, "audit.jsonl"))][-1]
     assert r["intent"] == "remove" and r["remove_reason"] == "Nobody uses it."
 
