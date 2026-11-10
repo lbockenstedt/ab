@@ -516,6 +516,11 @@ async def detect_https_probe(request: Request, call_next):
 # surface used by routes.py and the sibling modules resolves unchanged.
 from app_state import *  # noqa: E402,F401,F403
 
+# The System Health sidebar renders on every view; it calls feed_counts() so its
+# counts are computed from the same rows the Activity Feed lists.
+templates.env.globals["feed_counts"] = feed_counts  # noqa: F405
+import app_state as _app_state  # noqa: E402
+templates.env.globals["feed_resolved_statuses"] = list(_app_state.FEED_BUCKETS["resolved"])
 # Stamp which commit this process booted on, before any worker starts, so the watchdog
 # can detect stale-running code and the Diagnostics panel can show running vs disk versions.
 write_startup_stamp()

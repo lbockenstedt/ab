@@ -592,6 +592,56 @@ processed_init = load_processed()
 _RESOLVED_STATUSES = ("fixed", "verified", "awaiting_prod_verification", "resolved")
 
 
+# Statuses that need no further action; only these age out of the Activity Feed.
+_FEED_AGED_STATUSES = ("closed", "resolved", "fixed", "verified")
+FEED_WINDOW_DAYS = 7
+
+
+def activity_feed_items(processed, now=None, days=FEED_WINDOW_DAYS):
+    """Issues the dashboard Activity Feed lists. Finished issues show for `days`
+    days; anything still needing action (pending verification, failed,
+    non-actionable, feature_*) always shows."""
+    now = now or datetime.now()
+    items = {}
+    for issue_id, info in (processed or {}).items():
+        if info.get("status") not in _FEED_AGED_STATUSES:
+            items[issue_id] = info
+            continue
+        try:
+            age_days = (now - datetime.fromisoformat(info.get("timestamp", "{}"))).days
+        except (TypeError, ValueError):
+            items[issue_id] = info
+            continue
+        if age_days < days:
+            items[issue_id] = info
+    return items
+
+
+# Sidebar bucket -> statuses its Activity Feed filter matches (goFilter/filterActivity
+# in index.html). Keep the two in step: each count is exactly the rows its click shows.
+FEED_BUCKETS = {
+    "resolved": _RESOLVED_STATUSES,
+    "failed": ("failed",),
+    "closed": ("closed",),
+    "pending_verification": ("pending_verification",),
+    "non-actionable": ("non-actionable",),
+    "feature_flagged": ("feature_flagged", "feature_classify_retry"),
+    "feature_needs_info": ("feature_needs_info",),
+    "feature_built": ("feature_built",),
+}
+
+
+def feed_counts(processed=None, now=None):
+    """System Health sidebar counts, computed at render time from the SAME rows
+    the Activity Feed lists, so a count can never point at an empty filter —
+    no matter how long an issue sits, or whether a counter write was missed."""
+    if processed is None:
+        processed = state["processed"]
+    vals = list(activity_feed_items(processed, now=now).values())
+    return {bucket: sum(1 for i in vals if i.get("status") in statuses)
+            for bucket, statuses in FEED_BUCKETS.items()}
+
+
 # Counters are DERIVED from the processed store (the single source of truth) so a
 # reopen → re-close cycle can never double-count (the old running-increment model
 # drifted: an issue closed, reopened, then re-closed was tallied twice). Reopened
@@ -744,6 +794,8 @@ __all__ = [
     "feature_needs_info_count",
     "feature_built_count",
     "recompute_issue_counters",
+    "activity_feed_items",
+    "feed_counts",
     "update_task_state",
     "_task_state_lock",
     "_chat_lock",

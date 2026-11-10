@@ -1,6 +1,6 @@
 """AI fix pipeline: issue analysis, sandboxed fix generation/application, verification, and per-issue orchestration (extracted from main.py)."""
 # Standard library and third-party modules used across the pipeline (git = GitPython).
-import base64, contextlib, fnmatch, git, json, os, re, requests, shutil, tempfile, threading, time, traceback
+import base64, contextlib, dataclasses, fnmatch, git, json, os, re, requests, shutil, tempfile, threading, time, traceback
 from datetime import datetime
 # PyGithub client and its API error type.
 from github import Github, GithubException
@@ -1885,8 +1885,15 @@ def identify_files_to_fix(repo_path, issue_body, error_context=None, retarget=Fa
     llm_files = []
     try:
         from model_selection import LlmRequirements
+        import stage_models
         reqs = LlmRequirements(complexity="small", needs_structured_output=True,
                                min_context_tokens=len(prompt) // 4)
+        # Health-check findings need the stronger file-finding models (Settings -> Model policy).
+        if stage_models.is_diagnostic(issue_body):
+            _cfg = load_config()
+            reqs = dataclasses.replace(
+                reqs, complexity="medium",
+                exclude_models=stage_models.exclusions(_cfg, "diag_identify", reqs.exclude_models))
         res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.",
                        requirements=reqs)
         llm_files = _first_json_array_of_strings(res or "") or []
@@ -4412,7 +4419,12 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
         # issue fixing, retries that escalate complexity -- funnels through this
         # call, so the floor cannot be sidestepped by whichever caller built the
         # requirements.
-        _fix_excl = _fix_model_exclusions(config, requirements.exclude_models or ())
+        import stage_models
+        if stage_models.is_diagnostic(issue_body):
+            # Health-check findings: the stage's own model list replaces the ordinary write floor.
+            _fix_excl = stage_models.exclusions(config, "diag_fix", requirements.exclude_models or ())
+        else:
+            _fix_excl = _fix_model_exclusions(config, requirements.exclude_models or ())
         if _fix_excl != tuple(requirements.exclude_models or ()):
             requirements = dataclasses.replace(requirements, exclude_models=_fix_excl)
         # Ask for the fix.

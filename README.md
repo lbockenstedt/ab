@@ -4,6 +4,21 @@
 
 See [`docs/ab.md`](docs/ab.md) for the complete architecture reference and [`docs/architecture-topology.md`](docs/architecture-topology.md) for fleet topology.
 
+## Repository layout
+
+| Path | What it holds |
+| :--- | :--- |
+| `*.py` (root) | The application: one flat set of modules. Start at `main.py` (FastAPI app), `routes.py`, `agent_orchestrator.py`, `fix_engine.py`, `pr_review.py`; `AGENTS.md` has the full orientation. |
+| `tests/` | pytest suite. Run `pytest -q` from the repo root; `pytest.ini` points it here and puts the root on the import path. |
+| `templates/` | The WebUI (`index.html`). |
+| `scripts/` | Operator and maintenance scripts. |
+| `docs/` | AppBuilder docs (`docs/ab.md`) and copies of the fleet pages from `lm/docs`. |
+| `.github/` | CI (`workflows/ci.yml`), the thin `promote`/`backmerge` callers, promotion scripts and fleet-owned agents. |
+| `.claude/` | Fleet-owned skills, synced from lm; edit them in lm. |
+| `install.sh`, `setup.sh`, `update.sh`, `uninstall.sh`, `lm-os-update`, `Dockerfile` | Install, update and packaging. |
+| `config.json.example`, `.env.example` | Templates for the runtime config (the real files are never committed). |
+| `VERSION` | Bot-owned version; promotion bumps it. Never edit by hand. |
+
 ## Core Capabilities & Architecture
 
 1. **Dual-Panel Review Engine (`reviewers.py`):**
