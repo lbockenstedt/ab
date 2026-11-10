@@ -90,4 +90,4 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/_lm:${{ github.workspace }}/_lm/core/src
         # pytest.ini: testpaths = tests, pythonpath = . (the app modules).
-        run: pytest -q
+        run: pytest -x -q
