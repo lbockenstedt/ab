@@ -354,25 +354,20 @@ def render_explanation(sess):
     """The report text stored through /api/bug-report. The first line is the
     title; the trace block follows immediately so it sits at the TOP of the
     GitHub issue body (pr_template.from_issue quotes only the first 1500 chars)."""
-    # Gather the spec, the requester, the submitter and the session id.
+    # Gather the spec, the requester's tenant and the submit time.
     spec = sess.get("spec") or {}
     owner = sess.get("owner") or {}
     sub = sess.get("submitted_by") or {}
     bug = spec.get("intent") == "bug"
-    sid = sess.get("id")
-    # Header: title, then the trace block (who asked, who submitted, which session).
+    # Header: title, then the trace block. No user names, IPs, auth type or
+    # session ids: this text becomes a GitHub issue, outside LM.
     lines = [
         spec.get("title") or ("Bug report" if bug else "Feature request"),
         "",
         "**Request trace** — captured by the AppBuilder Request Assistant (LM → 🐞 Bug/Feature Request)",
-        f"- **Requested by (LM user):** `{owner.get('user') or '?'}`"
-        + (f" (tenant `{owner.get('tenant')}`)" if owner.get("tenant") else ""),
-        f"- **Submitted by (LM user):** `{sub.get('user') or owner.get('user') or '?'}`"
-        + (f" ({sub.get('auth_type')}" + (f", {sub.get('ip')}" if sub.get("ip") else "") + ")"
-           if sub.get("auth_type") else (f" ({sub.get('ip')})" if sub.get("ip") else ""))
-        + (f" at {sub.get('at')}" if sub.get("at") else ""),
-        f"- **Assistant session:** `{sid}`",
-        f"<!-- ab-request-session: {sid} -->",
+        "- **Requested via:** LM"
+        + (f" (tenant `{owner.get('tenant')}`)" if owner.get("tenant") else "")
+        + (f", submitted {sub.get('at')}" if sub.get("at") else ""),
         "",
         f"## {'Bug report' if bug else 'Feature request'}",
         f"**Module / page:** {spec.get('module') or ', '.join(spec.get('affected') or []) or '?'}  ",

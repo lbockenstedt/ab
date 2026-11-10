@@ -509,18 +509,16 @@ def event_from_cli(obj, workspace=""):
 
 def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
     """The feature-request issue body for one repo. Carries the marker
-    feature_drive's intake requires and the session id for traceability."""
+    feature_drive's intake requires. No user names, IPs, auth type or session
+    ids: GitHub is outside LM, and the local audit.jsonl records who asked."""
     # The spec, the requester, and the touch-points in this repo versus others.
     spec = sess.get("spec") or {}
     owner = sess.get("owner") or {}
     mine = [t for t in spec.get("touchpoints", []) if t.get("repo") == repo_short]
     others = [t for t in spec.get("touchpoints", []) if t.get("repo") != repo_short]
     sub = sess.get("submitted_by") or {}
-    # Markers the feature intake and session tracking rely on.
-    lines = [
-        "<!-- report-type: feature -->",
-        f"<!-- ab-sim-session: {sess.get('id')} -->",
-    ]
+    # The marker the feature intake relies on.
+    lines = ["<!-- report-type: feature -->"]
     # Modifying an existing sim: a warning header with the diagnosis and reasons.
     if spec.get("intent") == "modify":
         lines += [
@@ -546,17 +544,12 @@ def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
             "- **User's reason for removing it:** " + (spec.get("remove_reason") or "")[:400],
             "",
         ]
-    # Who asked and submitted, which skill to use, and this issue's scope.
+    # Where it came from, which skill to use, and this issue's scope.
     ui = spec.get("intent") == "ui"
     lines += [
-        f"**Requested by (LM user):** `{owner.get('user') or '?'}`"
+        "**Requested via:** LM → Simulations → Assistant"
         + (f" (tenant `{owner.get('tenant')}`)" if owner.get("tenant") else "")
-        + " via LM → Simulations → Assistant",
-        f"**Submitted by (LM user):** `{sub.get('user') or owner.get('user') or '?'}`"
-        + (f" ({sub.get('auth_type')}" + (f", {sub.get('ip')}" if sub.get("ip") else "") + ")"
-           if sub.get("auth_type") else "")
-        + (f" at {sub.get('at')}" if sub.get("at") else "")
-        + f" · session `{sess.get('id')}`",
+        + (f", submitted {sub.get('at')}" if sub.get("at") else ""),
         ("**Skill:** dual-copy-guard — cosmetic Simulations UI change only: edit both "
          "sim-views.js copies identically; no backend, API or client-script change"
          if ui else "**Skill:** add-simulation"),
