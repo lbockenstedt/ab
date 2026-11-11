@@ -278,7 +278,7 @@ def test_cli_allows_version_brought_forward_from_main(tmp_path):
     (tmp_path / "VERSION").write_text("1.0.1\n")
     run("commit", "-qam", "promote: qa -> main")
     run("update-ref", "refs/remotes/origin/main", "HEAD")
-    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x"]) == 0
+    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x", "--head-ref", ""]) == 0
     (tmp_path / "VERSION").write_text("9.9.9\n")
     run("commit", "-qam", "hand edit")
-    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x"]) == 1
+    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x", "--head-ref", ""]) == 1
