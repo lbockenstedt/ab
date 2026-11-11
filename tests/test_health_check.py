@@ -183,3 +183,20 @@ def test_read_command_called_too_often_is_flagged():
     assert len(f) == 1 and f[0]["module"] == "ipam" and "NETBOX_GET_PREFIXES" in f[0]["title"]
     perf["uptime_s"] = 120  # too soon after a restart to judge a rate
     assert not [x for x in hc.evaluate(_report(perf=perf), []) if x["kind"] == "call_rate"]
+
+
+def test_stale_spoke_versions_file_one_finding():
+    """Spokes the hub could not bring up to date reach AB as one finding."""
+    rep = {"host": {}, "fleet": {
+        "stale_versions": [{"spoke": "dns-1", "version": "9", "latest": "2.42", "stale_s": 4000}]}}
+    by_kind = {f["kind"]: f for f in hc.evaluate(rep, [])}
+    assert list(by_kind) == ["stale_version"]
+    assert by_kind["stale_version"]["module"] == "hub"
+    assert by_kind["stale_version"]["evidence"] == [
+        "dns-1: running 9, latest 2.42, out of date for 66 min"]
+
+
+def test_no_stale_versions_no_finding():
+    """No stale spokes means no stale_version finding."""
+    rep = {"host": {}, "fleet": {"stale_versions": []}}
+    assert "stale_version" not in {f["kind"] for f in hc.evaluate(rep, [])}
