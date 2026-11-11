@@ -74,6 +74,60 @@ def test_post_deploy_watch_lists_recent_commits_on_the_deployed_branch():
     assert _recent_fn()(Repo(), {"post_deploy_window_h": 0}) == []
 
 
+def _fns(*names):
+    tree = ast.parse(open("log_scan.py").read())
+    keep = [n for n in tree.body
+            if (isinstance(n, ast.FunctionDef) and n.name in names)
+            or (isinstance(n, ast.Assign) and any(getattr(t, "id", "") in ("_OPERATIONAL_FAULT", "OPS_ALERT_LABEL")
+                                                  for t in n.targets))]
+    ns = {"re": re}
+    exec(compile(ast.Module(body=keep, type_ignores=[]), "log_scan.py", "exec"), ns)
+    return ns
+
+
+SLICE_A = """2026-11-10 23:11:39 - Hub - ERROR - Request Timeout: [SPOKE_GET_QUEUE_STATS] req=38da01db from ab after 8.0s
+2026-11-10 23:12:27 - Hub - ERROR - Request Timeout: [NETBOX_GET_DEVICES] req=41059bf6 from mipbe-lmagent-netbox (48f15d31) after 8.0s
+2026-11-10 23:12:28 - Hub - INFO - cycle done
+2026-11-10 23:12:29 - Hub - ERROR - Request Timeout: [NETBOX_GET_DEVICES] req=b6db167b from mipbe-lmagent-netbox (48f15d31) after 8.0s"""
+
+SLICE_B = """2026-11-11 05:11:39 - Hub - ERROR - Request Timeout: [NETBOX_GET_DEVICES] req=0c11aa92 from mipbe-lmagent-netbox (48f15d31) after 30.0s
+2026-11-11 05:11:41 - Hub - ERROR - Request Timeout: [NETBOX_GET_DEVICES] req=77de0f13 from mipbe-lmagent-netbox (48f15d31) after 30.0s"""
+
+
+def test_same_fault_in_two_slices_gets_the_same_signature():
+    """The sentinel's prose differs on every run (lm#1800, #1802, #1809, ...);
+    the masked log line does not, so dedup can fold the repeats."""
+    sig = _fns("_mask_ids", "_slice_signature")["_slice_signature"]
+    assert sig(SLICE_A) == sig(SLICE_B) == \
+        "Request Timeout: [NETBOX_GET_DEVICES] req=# from mipbe-lmagent-netbox (#) after #s"
+
+
+def test_slice_without_errors_has_no_signature():
+    sig = _fns("_mask_ids", "_slice_signature")["_slice_signature"]
+    assert sig("2026-11-10 - Hub - INFO - all good") == ""
+
+
+def test_operational_faults_are_recognised():
+    ops = _fns("is_operational_fault")["is_operational_fault"]
+    for title in ("Request Timeout: [NETBOX_GET_DEVICES] req=# from x after #s",
+                  "Health check: NW_GET_MAC_TABLE keeps timing out on agent-dxp",
+                  "Health check: slow command NW_GET_ARP on agent-dxp",
+                  "Curl request failed for https://#: curl: (#) Connection timed out after # ms",
+                  "HTTP error # for GET https://#/api/endpoint: 403 Forbidden",
+                  "All OAuth# attempts failed",
+                  "Let's Encrypt certificate renewal failed"):
+        assert ops(title), title
+
+
+def test_code_faults_still_go_to_the_fixer():
+    ops = _fns("is_operational_fault")["is_operational_fault"]
+    for title in ("Health check: excessive Key Vault reads",
+                  "Health check: NETBOX_GET_DEVICES is called very often on netbox",
+                  "UNCAUGHT EXCEPTION: 'feed_counts' is undefined",
+                  "KeyError: 'device_id' in nw_discovery_sync"):
+        assert not ops(title), title
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

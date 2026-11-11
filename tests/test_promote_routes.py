@@ -589,6 +589,26 @@ def test_one_repo_failing_does_not_abort_the_rest():
     assert "o/b" in res["message"]
 
 
+def test_a_repo_without_promote_yml_is_skipped_not_failed():
+    """GitHub answers 404 for a repo with no promote.yml (lbockenstedt/amt is
+    empty). That logged an ERROR every promotion, which the log scanner filed
+    as issues (ab#485, #506). It is not a failure: skip it quietly."""
+    class _NotFound(Exception):
+        status = 404
+
+    class _NoWorkflowOnB(_FanWorkflow):
+        def create_dispatch(self, ref, inputs):
+            if self.current_repo == "o/b":
+                raise _NotFound()
+            return super().create_dispatch(ref, inputs)
+
+    wf = _NoWorkflowOnB()
+    res, wf, log = _call(_all_payload(), workflow=wf, repos=_ALL)
+    assert res["status"] == "success"
+    assert res["succeeded"] == 2 and res["failed"] == 0
+    assert not any("promote failed" in r for r in log.records)
+
+
 def test_all_repos_reports_error_when_every_repo_fails():
     wf = _FanWorkflow(fail_repos=set(_ALL))
     res, wf, _ = _call(_all_payload(), workflow=wf, repos=_ALL)

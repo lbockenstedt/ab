@@ -101,6 +101,9 @@ def main():
         # (6) transient GitHub 5xx — external, retried on the next poll.
         {"module": "ab-core",
          "log": "[ERROR] GithubException: 502 {'message': 'Server Error'} creating issue"},
+        # a candidate fix rejected by the smoke test (ab#503, #507)
+        {"module": "ab-core",
+         "log": "[ERROR] Smoke test failed for lbockenstedt/nw:\nFAILED tests/test_x.py"},
         # (4) terminal pipeline OUTCOMES — the decision is already recorded on
         # the issue and shown in the status table (ab#198/#199/#203/#210).
         {"module": "ab-core",
@@ -180,6 +183,8 @@ def main():
           any("insufficient privilege" in t for t in kept_texts))
     check("product 'manual retry' error preserved",
           any("SNMP walk" in t for t in kept_texts))
+    check("candidate-fix smoke failure dropped",
+          not any("Smoke test failed for" in t for t in kept_texts))
     check("handled 429 exhaustion dropped",
           not any("after 6 attempts" in t or "after 4 attempts" in t for t in kept_texts))
     check("handled 429 backoff line dropped",

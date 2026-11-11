@@ -1074,6 +1074,10 @@ def scan_repo_issues(gh_current, config, processed):
                         if any(lbl.name == "ab-dismissed" for lbl in issue.labels):
                             logger.debug(f"Skipping {repo_name}#{issue.number} — 'ab-dismissed' label present.")
                             continue
+                        # Operational faults (log_scan.OPS_ALERT_LABEL) need a person or a
+                        # device fixed, not a code edit; the fixer only failed on them.
+                        if any(lbl.name == "ops-alert" for lbl in issue.labels):
+                            continue
 
                         # Skip LM-filed feature requests — feature_drive.py owns these via its
                         # own single-label query (see that module's docstring for why it can't
