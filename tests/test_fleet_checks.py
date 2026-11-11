@@ -260,3 +260,25 @@ def test_cli_diffs_since_base_and_fails_only_on_errors(tmp_path, capsys):
     assert fc.main(["--base", "0" * 40, "--path", str(tmp_path)]) == 0
     assert fc.main(["--base", "f" * 40, "--path", str(tmp_path)]) == 0
     assert "skipped" in capsys.readouterr().out
+
+
+def test_cli_allows_version_brought_forward_from_main(tmp_path):
+    """A dev push that fast-forwards over promoted commits carries main's
+    VERSION bump; only a VERSION that matches neither qa nor main is an error."""
+    import subprocess
+    run = lambda *a: subprocess.run(["git", "-C", str(tmp_path), *a], check=True,
+                                    capture_output=True, text=True).stdout.strip()
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (tmp_path / "VERSION").write_text("1.0.0\n")
+    run("add", "-A")
+    run("commit", "-qm", "init")
+    base = run("rev-parse", "HEAD")
+    (tmp_path / "VERSION").write_text("1.0.1\n")
+    run("commit", "-qam", "promote: qa -> main")
+    run("update-ref", "refs/remotes/origin/main", "HEAD")
+    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x", "--head-ref", ""]) == 0
+    (tmp_path / "VERSION").write_text("9.9.9\n")
+    run("commit", "-qam", "hand edit")
+    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x", "--head-ref", ""]) == 1
