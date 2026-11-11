@@ -360,15 +360,25 @@ async def require_login(request: Request, call_next):
     return await call_next(request)
 
 
+SLOW_REQUEST_SECONDS = 5.0
+
+
 # Registered as HTTP middleware: logs each request at debug level.
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Log each request and its response status; log failures except malformed bodies."""
+    """Log each request and its response status; log failures except malformed bodies.
+    Requests slower than SLOW_REQUEST_SECONDS are logged at WARNING so UI stalls
+    can be traced to a route."""
     logger.debug(f"Incoming request: {request.method} {request.url}")
+    t0 = time.monotonic()
     # Pass the request on and log the response status.
     try:
         response = await call_next(request)
         logger.debug(f"Response status: {response.status_code} for {request.url}")
+        took = time.monotonic() - t0
+        if took >= SLOW_REQUEST_SECONDS:
+            logger.warning("Slow request: %s %s took %.1fs (status %s)",
+                           request.method, request.url.path, took, response.status_code)
         return response
     except Exception as e:
         # This middleware is INNER to catch_exceptions_mid, so it logs first.
