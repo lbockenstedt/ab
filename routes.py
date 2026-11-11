@@ -924,12 +924,18 @@ async def promote_branch(request: Request):
             url = await _dispatch(name)
             results.append({"repo": name, "ok": True, "url": url})
         except Exception as e:  # noqa: BLE001
+            if getattr(e, "status", None) == 404:
+                # No promote.yml (or an empty repo such as lbockenstedt/amt):
+                # nothing to promote, as in promote_ops.run_scheduled_promotions.
+                logger.info("promote: %s has no promote.yml — skipped", name)
+                results.append({"repo": name, "ok": False, "skipped": True, "error": "no promote.yml"})
+                continue
             logger.error("promote failed for %s (%s -> %s): %s", name, source, target, e)
             results.append({"repo": name, "ok": False, "error": str(e)})
 
     # Split the results and log the totals.
     done = [r for r in results if r["ok"]]
-    failed = [r for r in results if not r["ok"]]
+    failed = [r for r in results if not r["ok"] and not r.get("skipped")]
     logger.warning("promote: %s -> %s dispatched via UI for %d/%d repos%s",
                    source, target, len(done), len(results),
                    " (OVERRIDE, skips qa)" if is_override else "")

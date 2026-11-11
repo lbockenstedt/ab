@@ -367,6 +367,9 @@ _SELF_SCAN_NOISE = re.compile(
     r'|Reviewers rejected the fix'
     r'|Held for human review'
     r'|AI returned no edits after'
+    # A candidate fix failing the smoke test is the verifier rejecting it, not a
+    # new fault (ab#503, #507 asked the fixer to fix its own rejected attempt).
+    r'|Smoke test failed for [\w.-]+/[\w.-]+:'
     # (5) provider rate-limiting that the LLM client already fully absorbs.
     # On the final 429 the client honours Retry-After (_parse_retry_after),
     # trips the global breaker (_llm_cb_trip, _RATELIMIT_COOLDOWN_SECONDS),
@@ -1640,6 +1643,46 @@ def _escalation_summary_line(analysis):
     return ""
 
 
+def _mask_ids(text):
+    """Text with UUIDs, hex ids, IPs and numbers replaced by '#', so two
+    occurrences of the same fault compare equal."""
+    text = re.sub(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "#", text, flags=re.I)
+    text = re.sub(r"\b(?=[0-9a-f]*\d)[0-9a-f]{6,}\b", "#", text, flags=re.I)
+    return re.sub(r"\d+(?:\.\d+)*", "#", text)
+
+
+def _slice_signature(log_slice):
+    """The most frequent ERROR/CRITICAL message in the log slice, with the
+    timestamp, logger name and ids stripped. The sentinel's prose analysis is
+    worded differently on every run, so titling on it filed the same NetBox
+    timeout as seven separate issues (lm#1800, #1802, #1809, ...); the log
+    line itself is stable, so dedup can fold repeats into one issue."""
+    counts = {}
+    for ln in (log_slice or "").splitlines():
+        m = re.search(r"\b(?:ERROR|CRITICAL)\b\s*-?\s*(.+)", ln)
+        if m:
+            sig = " ".join(_mask_ids(m.group(1)).split())
+            counts[sig] = counts.get(sig, 0) + 1
+    return max(counts, key=counts.get) if counts else ""
+
+
+# Faults in the environment, not the code: a device that does not answer, a
+# rejected credential, a certificate, a slow or timed-out remote call. The code
+# fixer cannot fix these (it ends in "no edits", "non-actionable" or a rejected
+# guess), so they are filed once with the ops-alert label, which the fixer skips.
+_OPERATIONAL_FAULT = re.compile(
+    r"time[sd]?[ -]?out|timing out|connection (?:refused|reset)|unreachable|no route to host"
+    r"|name resolution|could not resolve|\b40[13]\b|forbidden|unauthori[sz]ed|oauth"
+    r"|certificate|let'?s encrypt|slow command|disk is nearly full|memory is nearly full",
+    re.I)
+OPS_ALERT_LABEL = "ops-alert"
+
+
+def is_operational_fault(title):
+    """True when an escalation's title names an environment fault (see _OPERATIONAL_FAULT)."""
+    return bool(_OPERATIONAL_FAULT.search(title or ""))
+
+
 def recent_deploy_changes(repo_obj, config=None, now=None):
     """Post-deploy watch: commits that reached the deployed branch in the last
     ``post_deploy_window_h`` hours (default 6), newest first, as markdown lines.
@@ -1688,6 +1731,10 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
         first_line = next((ln.strip() for ln in (analysis or "").splitlines() if ln.strip()), "")
         if config.get("escalation_specific_titles", True):
             first_line = _escalation_summary_line(analysis)
+            # Health-check titles are already fixed text; sentinel prose is not,
+            # so title those on the stable log line instead (see _slice_signature).
+            if not first_line.startswith("Health check:"):
+                first_line = _slice_signature(log_slice) or first_line
         summary = " ".join(first_line.split())[:90] or f"{module} log problem"
         # Build the issue title and body.
         title = f"Hub log alert ({module}): {summary}"
@@ -1696,6 +1743,12 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
             f"### Analysis\n{analysis or '(none)'}\n\n"
             f"### Offending log lines\n```\n{(log_slice or '')[:6000]}\n```\n"
         )
+        operational = is_operational_fault(summary)
+        if operational:
+            body += ("\n### Operational fault\nThis looks like an environment problem (a device or "
+                     "service not answering, a rejected credential, a certificate), not a code bug, "
+                     f"so the code fixer skips it (`{OPS_ALERT_LABEL}` label). Repeats are added here "
+                     "as comments. Remove the label to send it to the fixer.\n")
         # File it (or match an existing issue).
         repo_obj = gh.get_repo(repo_name)
         # Post-deploy watch: a fresh error right after a deploy points at what changed.
@@ -1708,6 +1761,8 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
                                                         config.get("post_deploy_window_h", 6),
                                                         "\n".join(recent)))
             labels = ["automated-fix", "log-detected", "regression-suspect"]
+        if operational:
+            labels = [OPS_ALERT_LABEL, "log-detected"]
         error_data = {"module": module, "title": title, "body": body, "repo": repo_name}
         issue = create_automated_issue(gh, monitored_repos, repo_obj, error_data, labels=labels)
         if issue is None:
