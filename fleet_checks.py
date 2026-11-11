@@ -803,6 +803,21 @@ def local_diff_files(repo_path, base=None):
     return out
 
 
+def _promoted_version(repo_path, name):
+    """True when ``name`` is a VERSION file that matches qa or main. A dev push
+    that fast-forwards over promoted commits carries the bot's VERSION bump."""
+    if os.path.basename(name) != "VERSION":
+        return False
+
+    def _show(rev):
+        # The file's content at ``rev``, or None when it isn't there.
+        r = subprocess.run(["git", "-C", repo_path, "show", "%s:%s" % (rev, name)],
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout if r.returncode == 0 else None
+    head = _show("HEAD")
+    return head is not None and head in (_show("origin/qa"), _show("origin/main"))
+
+
 def check_worktree(repo_path, repo_full_name="", config=None, base=None, head_ref=None):
     """All rules on a local worktree's uncommitted changes (or the commits since
     ``base``), including the whole-file rules and the copied/dead-code scan."""
@@ -810,6 +825,8 @@ def check_worktree(repo_path, repo_full_name="", config=None, base=None, head_re
         files = local_diff_files(repo_path, base)
     except Exception:  # noqa: BLE001
         return []
+    if base:
+        files = [f for f in files if not _promoted_version(repo_path, f.filename)]
     out = check_fleet_rules(files, repo_full_name, head_ref, config)
 
     def _read(rel):
