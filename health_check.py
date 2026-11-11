@@ -91,6 +91,10 @@ _HINT = {
     "dhcp_declines": ("Clients are DECLINEing offered addresses (ARP conflict). Check for the "
                       "decline probation/auto-release working, a stale reservation or a static IP "
                       "in the pool; if it is a network-side cause (proxy-ARP, loop) say so in the issue."),
+    "stale_version": ("Spokes stay out of date long after an update. Check the hub's spoke_versions "
+                      "cache (only a real .NN / MAJOR.MINOR reply may be stored), that the hub asks "
+                      "GET_VERSION after a spoke reconnects, and the spoke's SPOKE_UPDATE log for a "
+                      "failed pull or restart. Fix the code path; do not just re-push updates."),
     "repeat_error": "One error repeats many times: fix the cause, or log it once per interval.",
     "vault": "Cache secret reads with a TTL instead of fetching on every cycle.",
     "slow_query": "Add the missing index, narrow the query, or move the work to the background.",
@@ -246,6 +250,14 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
             "dhcp_declines", "declines", "DHCP addresses stuck declined", "medium", "dhcp",
             [f"{d.get('subnet')}: {d.get('declined')} declined of {d.get('total')}" for d in bad[:10]],
             "Addresses are being DECLINEd and held out of the pool."))
+
+    stale = [s for s in fleet.get("stale_versions") or [] if isinstance(s, dict)]
+    if stale:
+        out.append(_finding(
+            "stale_version", "versions", "spokes stuck on an old version", "medium", "hub",
+            [f"{s.get('spoke')}: running {s.get('version')}, latest {s.get('latest')}, "
+             f"out of date for {int(s.get('stale_s') or 0) // 60} min" for s in stale[:10]],
+            "Spokes are not reaching the latest version after updates."))
 
     errs: Counter = Counter()
     sample: Dict[str, str] = {}
