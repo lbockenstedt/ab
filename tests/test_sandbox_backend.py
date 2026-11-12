@@ -516,9 +516,17 @@ def test_failed_smoke_setup_is_infra_not_a_code_defect(tmp_path):
 def test_verify_runs_the_smoke_test_first(tmp_path):
     repo = _smoke_repo(tmp_path)
     seen, out = _run_with("verify_fix", [FakeCompleted("SMOKE PASSED", "", 0)],
-                          str(repo), "lbockenstedt/kvm", {"QA_API_URL": "http://qa"})
+                          str(repo), "lbockenstedt/kvm", {})
     assert out == (True, None)
     assert len(seen) == 1 and "smoke.sh --no-fleet-rules --no-fetch" in seen[0][0]
+
+
+def test_a_configured_per_repo_command_wins_over_the_smoke_test(tmp_path):
+    repo = _smoke_repo(tmp_path)
+    seen, out = _run_with("verify_fix", [FakeCompleted("ok", "", 0)], str(repo),
+                          "lbockenstedt/kvm", {"repo_tests": {"lbockenstedt/kvm": "pytest -q tests"}})
+    assert out == (True, None)
+    assert [c for c, _ in seen] == ["pytest -q tests"]
 
 
 def test_smoke_failure_is_fed_back_as_a_test_failure(tmp_path):
