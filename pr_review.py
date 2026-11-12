@@ -1446,8 +1446,9 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
                         "(opt-in, defaults to none) — main (or any unlisted branch) is "
                         "never eligible, regardless of author or confidence" % _base_ref)
 
-    # Already merged: nothing to do.
-    if rec.get("merged") or rec.get("auto_merged"):
+    # Already merged, by AB or by someone else (a human or a promotion script
+    # that merged first): nothing to do, and nothing "held" to report.
+    if rec.get("merged") or rec.get("auto_merged") or pr_meta.get("merged"):
         # Keep the literal (must equal _IDEMPOTENT_MERGED_REASON): test_feature_automerge_gate
         # execs this function standalone, so it cannot reference module constants.
         return False, "already merged (idempotent no-op)"
@@ -1748,6 +1749,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
             "is_feature_drive": bool(marker_match),
             "draft": bool(getattr(pr, "draft", False)),
             "state": (pr.state or "open"),
+            "merged": bool(getattr(pr, "merged", False)),
             "mergeable": mergeable,
             # Proves `rec` was actually written for THIS commit (see the
             # head-freshness check in _automerge_decision) — PR #261 review finding.
