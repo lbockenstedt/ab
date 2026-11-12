@@ -2520,6 +2520,8 @@ def ensure_config_defaults(config):
     # PR auto-fix on, up to 3 tries.
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
+    # Promotion-PR fast lane: review new promotion-PR heads every 5 min (0 = off).
+    config.setdefault("pr_review_fast_interval_s", 300)
     # Premium escalation: one extra remediation turn, past the ordinary
     # ceiling above, restricted to the top-tier models. Capped by a COUNT
     # because cost -- not capability -- is the binding constraint here.
@@ -2597,6 +2599,8 @@ async def settings_page(request: Request):
     # Narrow state-logic/control-flow panel on PR pre-review (advisory) — a SECOND,
     # independent opt-in sub-option (see pr_review._state_logic_review).
     config.setdefault("pr_review_state_logic_enabled", False)
+    # Promotion-PR fast lane cadence (pr_review.scan_promotion_prs); 0 = off.
+    config.setdefault("pr_review_fast_interval_s", 300)
     # Same PR defaults as ensure_config_defaults.
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
@@ -3179,6 +3183,8 @@ async def save_settings(request: Request):
         "promote_schedule_qa_to_main_hours": lambda v: max(0, int(v)) if str(v).strip().lstrip("-").isdigit() else 0,
         "promote_schedule_check_interval_min": lambda v: max(1, int(v)) if str(v).strip().isdigit() else 30,
         "promote_schedule_repo": lambda v: (v.strip() if v and v.strip() else "__all__"),
+        # Promotion-PR fast lane cadence in seconds (pr_review.scan_promotion_prs); 0 = off.
+        "pr_review_fast_interval_s": lambda v: max(0, int(v)) if str(v).strip().isdigit() else 300,
     }
 
 
