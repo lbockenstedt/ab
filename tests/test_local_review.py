@@ -7,6 +7,9 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
+
+import types
 
 import pytest
 
@@ -48,6 +51,69 @@ def test_change_covers_commits_uncommitted_edits_and_new_files(tmp_path):
     assert "+z = 1" in files["new file.py"]
 
 
+def test_importing_ab_leaves_no_files_in_the_repo_under_review(tmp_path):
+    """AB's import writes config.json and ab.log into the working directory;
+    run from inside a repo, they must not appear there (they would join the
+    reviewed change as untracked files)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(str(repo), "init", "-q")
+    out = tmp_path / "out"
+    out.mkdir()
+    _replies(out, ["p/m"], **{"panel1-p%2Fm": ("Approve", 0.95), "panel2-p%2Fm": ("Approve", 0.95)})
+
+    # A passing gate proves AB was imported (gate() needs fix_engine).
+    run = _script(["--gate", str(out)], repo)
+
+    assert run.returncode == 0, run.stderr
+    assert sorted(os.listdir(repo)) == [".git"]
+
+
+def _script(args, cwd):
+    """Run local_review.py as the skill does, from ``cwd``."""
+    script = os.path.join(os.path.dirname(__file__), "..", "scripts", "local_review.py")
+    return subprocess.run([sys.executable, script, *args], cwd=cwd, capture_output=True,
+                          text=True, timeout=120, env=dict(os.environ, AB_DISABLE_WORKERS="1"))
+
+
+def test_nothing_to_review_has_its_own_exit_code(tmp_path):
+    """"No change" (exit 3) must not read as "reviewer models unknown" (exit 4)."""
+    repo = str(tmp_path)
+    _git(repo, "init", "-q")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    run = _script([repo, "--base", "HEAD", "--out", str(tmp_path / "out")], repo)
+    assert run.returncode == 3 and "no change since HEAD" in run.stderr
+
+
+def test_a_merge_commit_reaches_abs_merge_only_context(tmp_path):
+    """AB reads each commit's parents from GitHub; the local PR must carry them
+    too, or AB's merge-only context never applies to a local back-merge."""
+    import main  # noqa: F401
+    import pr_review
+    repo = str(tmp_path)
+    _git(repo, "init", "-q", "-b", "dev")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    _git(repo, "checkout", "-q", "-b", "main")
+    (tmp_path / "f.txt").write_text("x\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "on main")
+    base = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    _git(repo, "checkout", "-q", "dev")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "back-merge main", "main")
+
+    commits = local_review._commits(repo, base)
+    pr = types.SimpleNamespace(get_commits=lambda: commits)
+
+    assert [len(c.parents) for c in commits] == [2]
+    assert "MERGE-ONLY PR" in pr_review._merge_only_context(pr)
+
+    # A hand edit not yet committed is reviewed too, so it is not merge-only.
+    (tmp_path / "f.txt").write_text("edited\n")
+    commits = local_review._commits(repo, base)
+    assert pr_review._merge_only_context(pr) == ""
+
+
 def test_reviewer_models_come_from_abs_latest_review(monkeypatch):
     """The panel models are read from AB's most recently updated review
     comment, not hard-coded; other comments that merely quote a seat label
@@ -64,7 +130,8 @@ def test_reviewer_models_come_from_abs_latest_review(monkeypatch):
                           "**Reviewer (copilot/model-a)** — Approve")},
                 {"body": "<!-- ab-pr-review -->\n**Reviewer (copilot/stale-model)**"}]
     monkeypatch.setattr(local_review, "_gh_json", gh)
-    assert local_review._reviewer_models("owner/repo") == ["model-a", "model-b"]
+    seats = ["copilot/model-a", "copilot/model-b"]
+    assert local_review._reviewer_seats("owner/repo") == {"panel1": seats, "panel2": seats}
     assert "sort=updated" in calls[0][1]
 
 
@@ -75,12 +142,61 @@ def test_no_reviewer_models_is_an_error_not_an_empty_panel(monkeypatch, reply):
     import main  # noqa: F401
     monkeypatch.setattr(local_review, "_gh_json", lambda *a: reply)
     with pytest.raises(RuntimeError):
-        local_review._reviewer_models("owner/repo")
+        local_review._reviewer_seats("owner/repo")
+
+
+def test_the_newest_ab_review_wins_across_repos(monkeypatch):
+    """The target repo's own last review can be older than AB's latest panel."""
+    import main  # noqa: F401
+    replies = {"owner/repo": [{"updated_at": "2026-01-01T00:00:00Z",
+                               "body": "<!-- ab-pr-review -->\n**Reviewer (copilot/old)**"}],
+               "lbockenstedt/ab": [{"updated_at": "2026-02-01T00:00:00Z",
+                                    "body": "<!-- ab-pr-review -->\n**Reviewer (copilot/new)**"}]}
+    monkeypatch.setattr(local_review, "_slug", lambda path: "lbockenstedt/ab")
+    monkeypatch.setattr(local_review, "_gh_json", lambda _api, url: replies[url.split("/")[1] + "/" + url.split("/")[2]])
+    assert local_review._reviewer_seats("owner/repo")["panel1"] == ["copilot/new"]
+
+
+def test_each_panel_is_gated_on_its_own_seats(monkeypatch, tmp_path, capsys):
+    """AB seats each panel separately; a seat on only one panel must not count
+    as a failed reviewer on the other, which would change that panel's verdict."""
+    import main  # noqa: F401
+    import pr_review
+    body = ("<!-- ab-pr-review -->\n**Reviewer (copilot/a)**\n**Reviewer (copilot/b)**\n"
+            + pr_review._STATE_PANEL_HEADER + "\n**Reviewer (copilot/a)**\n**Reviewer (copilot/c)**")
+    monkeypatch.setattr(local_review, "_gh_json", lambda *a: [{"body": body}])
+    seats = local_review._reviewer_seats("owner/repo")
+    assert seats == {"panel1": ["copilot/a", "copilot/b"], "panel2": ["copilot/a", "copilot/c"]}
+
+    _replies(tmp_path, seats, **{"panel1-copilot%2Fa": ("Approve", 0.95),
+                                 "panel1-copilot%2Fb": ("Approve", 0.95),
+                                 "panel2-copilot%2Fa": ("Approve", 0.95),
+                                 "panel2-copilot%2Fc": ("Approve", 0.95)})
+    passed, out = _gate(tmp_path, capsys)
+    assert passed is True
+    assert out["panel1"]["failed"] == [] and out["panel2"]["failed"] == []
+
+
+def test_seats_keep_provider_and_slashed_model_ids(tmp_path, capsys):
+    """Two providers running the same model are two seats, as in AB, and a
+    model ID with a slash still maps to one flat vote file per seat, never
+    shared with another seat."""
+    seats = ["copilot/vendor/m", "openrouter/vendor/m", "copilot/vendor_m"]
+    files = {local_review.vote_file(str(tmp_path), p, s) for p in ("panel1", "panel2") for s in seats}
+    assert len(files) == 6 and all(os.path.dirname(f) == str(tmp_path / "votes") for f in files)
+    _replies(tmp_path, seats[:2], **{"panel1-copilot%2Fvendor%2Fm": ("Approve", 0.95),
+                                     "panel2-copilot%2Fvendor%2Fm": ("Approve", 0.95)})
+    passed, out = _gate(tmp_path, capsys)
+    assert passed is True
+    assert out["panel1"] == {"votes": 1, "failed": ["openrouter/vendor/m"],
+                             "confidence": 0.95, "verdict": "Approve"}
 
 
 def _replies(folder, models, **votes):
     """Lay out a --out folder as the skill does: reviewers.json plus
-    votes/<panel>-<model>.txt for each reply (a str is saved verbatim)."""
+    vote_file() for each reply (a str is saved verbatim)."""
+    if isinstance(models, list):
+        models = {"panel1": models, "panel2": models}
     (folder / "reviewers.json").write_text(json.dumps(models))
     (folder / "votes").mkdir()
     for name, vote in votes.items():
@@ -151,3 +267,12 @@ def test_no_agents_loaded_is_reported_not_treated_as_no_match(monkeypatch):
                         lambda gh, cfg: {"a": {"name": "a", "kind": "agent"}})
     monkeypatch.setattr(skills_loader, "agents_context", lambda text: "")
     assert local_review._agents_context("x") == ("", None)
+
+
+def test_a_new_round_drops_the_last_rounds_votes(tmp_path):
+    """Old replies must not be gated as votes on the new change."""
+    old = tmp_path / "votes" / "panel2-x.txt"
+    old.parent.mkdir()
+    old.write_text('{"verdict": "Approve", "confidence": 0.99}')
+    local_review._fresh_votes(str(tmp_path))
+    assert (tmp_path / "votes").is_dir() and not old.exists()
