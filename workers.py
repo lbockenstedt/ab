@@ -1053,10 +1053,12 @@ def _github_issue_status(gh_current, issue_id, repos):
     return "open"
 
 
-def sync_github_issue_state(gh_current, limit=GITHUB_SYNC_PER_CYCLE):
+def sync_github_issue_state(gh_current, limit=GITHUB_SYNC_PER_CYCLE, shared=None):
     """Check up to ``limit`` waiting records against GitHub, least recently
     checked first. Closed or gone -> "closed"; open with the ops-alert label ->
-    "ops-alert", which takes it out of the Failed/Non-Actionable buckets."""
+    "ops-alert", which takes it out of the Failed/Non-Actionable buckets.
+    ``shared`` is the cycle's in-memory store; it gets the same updates, so a
+    later save of it does not undo them."""
     processed = load_processed()
     waiting = [k for k, v in processed.items() if v.get("status") in _GITHUB_SYNC_STATUSES]
     waiting.sort(key=lambda k: processed[k].get("github_checked_at") or processed[k].get("timestamp") or "")
@@ -1088,6 +1090,8 @@ def sync_github_issue_state(gh_current, limit=GITHUB_SYNC_PER_CYCLE):
             rec["status_before_ops_alert"] = rec["status"]
             rec["status"] = "ops-alert"
             changed.append(issue_id)
+        if shared is not None:
+            shared[issue_id] = rec
     save_processed(processed)
     if changed:
         logger.info(f"GitHub state sync: updated {len(changed)} record(s): {', '.join(changed)}")
@@ -1259,7 +1263,7 @@ def scan_repo_issues(gh_current, config, processed):
             except Exception as e:
                 logger.exception(f"Unexpected error while processing {repo_name}: {e}")
         try:
-            sync_github_issue_state(gh_current)
+            sync_github_issue_state(gh_current, shared=processed)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"GitHub state sync failed: {e}")
     except Exception as e:

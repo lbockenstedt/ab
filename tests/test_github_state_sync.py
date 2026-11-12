@@ -80,3 +80,14 @@ def test_lookups_are_bounded_and_rotate_oldest_first(monkeypatch):
     _, saved, _ = _run(monkeypatch, saved, gh, limit=2)
     assert sorted(k for k, v in saved.items() if v.get("github_checked_at")) == \
         ["o/lm:1", "o/lm:2", "o/lm:3", "o/lm:4"]
+
+
+def test_sync_updates_the_cycles_shared_store(monkeypatch):
+    # RepoScan's in-memory store is saved again later in the cycle; without
+    # the shared update that save put the stale "failed" status back.
+    shared = {"o/r:1": {"status": "failed", "timestamp": "2026-11-01"}}
+    monkeypatch.setattr(workers, "load_processed", lambda: copy.deepcopy(shared))
+    monkeypatch.setattr(workers, "save_processed", lambda p: None)
+    monkeypatch.setattr(workers, "recompute_issue_counters", lambda p: None)
+    workers.sync_github_issue_state(Gh({1: _issue("closed")}), shared=shared)
+    assert shared["o/r:1"]["status"] == "closed"
