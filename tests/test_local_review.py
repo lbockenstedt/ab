@@ -168,6 +168,14 @@ def test_each_panel_is_gated_on_its_own_seats(monkeypatch, tmp_path, capsys):
     seats = local_review._reviewer_seats("owner/repo")
     assert seats == {"panel1": ["copilot/a", "copilot/b"], "panel2": ["copilot/a", "copilot/c"]}
 
+    # Panel 2 waits for panel 1, so the newest review often has no panel 2
+    # seats; they come from the newest review that has them, not panel 1's.
+    newer = {"updated_at": "2026-02-01T00:00:00Z", "body": "<!-- ab-pr-review -->\n**Reviewer (copilot/d)**"}
+    monkeypatch.setattr(local_review, "_gh_json",
+                        lambda *a: [newer, {"updated_at": "2026-01-01T00:00:00Z", "body": body}])
+    assert local_review._reviewer_seats("owner/repo") == {"panel1": ["copilot/d"],
+                                                          "panel2": ["copilot/a", "copilot/c"]}
+
     _replies(tmp_path, seats, **{"panel1-copilot%2Fa": ("Approve", 0.95),
                                  "panel1-copilot%2Fb": ("Approve", 0.95),
                                  "panel2-copilot%2Fa": ("Approve", 0.95),
@@ -222,6 +230,35 @@ def test_gate_uses_abs_panel_verdict(tmp_path, capsys):
     assert out["panel1"]["verdict"] == "Approve" and out["panel2"]["verdict"] == "Reject"
 
 
+def test_panel_2_is_skipped_until_panel_1_approves(tmp_path, capsys):
+    """As in AB, panel 2 waits for panel 1's Approve: its replies are not read
+    (none need be run) and the gate fails on panel 1 alone."""
+    _replies(tmp_path, ["a", "b", "c"],
+             **{"panel1-a": ("Reject", 0.5), "panel1-b": ("Reject", 0.5),
+                "panel1-c": ("Approve", 0.9), "panel2-a": ("Approve", 0.99)})
+    passed, out = _gate(tmp_path, capsys)
+    assert passed is False
+    assert out["panel1"]["verdict"] == "Reject" and out["panel2"]["verdict"] == "skipped"
+
+
+def test_panel_2_is_pending_after_panel_1_approves_until_it_is_run(tmp_path, capsys):
+    """Panel 1 Approves and no panel-2 reply exists yet: that is the cue to run
+    panel 2, not a panel whose reviewers all failed."""
+    _replies(tmp_path, ["a"], **{"panel1-a": ("Approve", 0.95)})
+    passed, out = _gate(tmp_path, capsys)
+    assert passed is False
+    assert out["panel1"]["verdict"] == "Approve" and out["panel2"]["verdict"] == "pending"
+
+
+def test_panel_1_with_no_reply_files_failed_it_is_not_pending(tmp_path, capsys):
+    """Only panel 2 waits on a prerequisite; panel 1 with no replies is a
+    panel whose reviewers all failed."""
+    _replies(tmp_path, ["a"])
+    passed, out = _gate(tmp_path, capsys)
+    assert passed is False
+    assert out["panel1"] == {"failed": ["a"], "verdict": "no replies"}
+
+
 def test_a_missing_reviewer_needs_the_rest_unanimous(tmp_path, capsys):
     """A seat with no reply is a failed reviewer, not an absent one: the
     survivors' 0.90 average would approve a full panel, but AB retries a
@@ -233,7 +270,7 @@ def test_a_missing_reviewer_needs_the_rest_unanimous(tmp_path, capsys):
     passed, out = _gate(tmp_path, capsys)
     assert passed is False
     assert out["panel1"] == {"votes": 2, "failed": ["c"], "confidence": 0.9, "verdict": "Retry"}
-    assert out["panel2"]["verdict"] == "Approve"
+    assert out["panel2"]["verdict"] == "skipped"
 
 
 def test_a_reply_without_a_verdict_is_a_failed_reviewer(tmp_path, capsys):
@@ -246,8 +283,8 @@ def test_a_reply_without_a_verdict_is_a_failed_reviewer(tmp_path, capsys):
 
 
 def test_gate_fails_closed_when_a_panel_has_no_replies(tmp_path, capsys):
-    """No replies for a panel is not an approval."""
-    _replies(tmp_path, ["a"], **{"panel1-a": ("Approve", 0.99)})
+    """A panel that ran but gave no usable reply is not an approval."""
+    _replies(tmp_path, ["a"], **{"panel1-a": ("Approve", 0.99), "panel2-a": "rate limited"})
     passed, out = _gate(tmp_path, capsys)
     assert passed is False and out["panel2"]["verdict"] == "no replies"
 

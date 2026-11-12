@@ -2554,6 +2554,9 @@ def ensure_config_defaults(config):
     # dev, and is required for an unattended dev -> qa -> main flow — otherwise a
     # panel that denies a promotion PR stalls the chain with nothing to repair it.
     config.setdefault("pr_auto_remediate_skip_promotion", True)
+    # Panel 2 (state-logic) waits for panel 1's Approve (pr_review._state_panel_after);
+    # off runs both panels on every pass.
+    config.setdefault("pr_review_state_panel_waits", True)
     # How many times fix_one_pr may regenerate a fix, each retry told exactly why
     # the previous one failed (parse reason / panel critique / verification
     # error). Capped at 5 in pr_review.fix_one_pr.
@@ -2611,6 +2614,9 @@ async def settings_page(request: Request):
     config.setdefault("feature_automerge_allow_release_branch", False)
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
     config.setdefault("pr_auto_remediate_skip_promotion", True)
+    # Panel 2 (state-logic) waits for panel 1's Approve (pr_review._state_panel_after);
+    # off runs both panels on every pass.
+    config.setdefault("pr_review_state_panel_waits", True)
     config.setdefault("pr_fix_max_attempts", 3)
     # Batch API off, prompt caching on.
     config.setdefault("batch_enabled", False)
@@ -3247,6 +3253,8 @@ async def save_settings(request: Request):
     config_data["pr_review_llm_enabled"] = data.get("pr_review_llm_enabled") == "on"
     # Advisory state-logic/control-flow panel sub-option (independent of the above).
     config_data["pr_review_state_logic_enabled"] = data.get("pr_review_state_logic_enabled") == "on"
+    # Panel 2 waits for panel 1's Approve (pr_review._state_panel_after); default on.
+    config_data["pr_review_state_panel_waits"] = data.get("pr_review_state_panel_waits") == "on"
     # Test-regression sub-option (default OFF): actually clones + runs the repo's
     # test suite for a PR's head vs. base branch and flags NEW failures — real
     # code execution against PR-authored content, opt-in per install (see

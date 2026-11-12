@@ -3769,7 +3769,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         _names = ", ".join(failed_reviewers) if failed_reviewers else "reviewer(s)"
         logger.warning("review_fix: all %d reviewer(s) failed to produce a parseable response (%s).",
                        len(reviewers), _names)
-        return {"status": "queue_for_retry", "reason": "all_reviewers_failed: %s" % _names}
+        return {"status": "queue_for_retry", "reason": "all_reviewers_failed: %s" % _names,
+                "seats": [r["name"] for r in reviewers]}
 
     # Average confidence, the panel's verdict, and all critiques joined into one string.
     avg_conf, final_verdict = panel_verdict(votes, len(failed_reviewers))
@@ -3807,6 +3808,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
             "partial_votes": votes,
             "critique": critiques,
             "reviews": reviews,
+            "seats": [r["name"] for r in reviewers],
         }
     if failed_reviewers:
         logger.warning(
@@ -3815,8 +3817,12 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         )
 
     # Return the panel result.
+    # failed_reviewers: seats that gave no usable vote. The PR comment names
+    # them, so every review lists its whole panel (the local review skill reads
+    # its seats from there) and an operator can see which reviewer failed. The
+    # two queue_for_retry returns above carry the whole panel as `seats` instead.
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques,
-            "reviews": reviews, "panel_size": len(reviewers),
+            "reviews": reviews, "failed_reviewers": failed_reviewers, "panel_size": len(reviewers),
             "panel_models": [(r["candidate"] or {}).get("model") or "" for r in reviewers]}
 
 #: Failure kind -> operator-facing label. The pipeline knows precisely why it

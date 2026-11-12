@@ -347,3 +347,42 @@ def test_single_reviewer_notice_rendered_only_for_panel_of_one():
             "(claude-opus-5)._") in one
     assert "Single-reviewer" not in "\n".join(render(_review(panel_size=2)))
     assert "Single-reviewer" not in "\n".join(render(_review()))
+
+
+def test_a_partial_panel_names_its_failed_reviewers_in_the_comment():
+    """review_fix drops a failed seat from `reviews`; the comment must still
+    name it, or a reader of the comment (the local review skill reads its seats
+    from there) sees a smaller panel than AB seated."""
+    def turn(prompt, system_prompt, cand, *a, **k):
+        if cand["model"] == "gpt-5.6-sol":
+            return "not json"
+        return '{"confidence": 0.95, "verdict": "Approve", "critique": "ok"}'
+    ns = _engine(_production() + [_cand("copilot", "gpt-5.6-sol", tier="frontier")],
+                 _run_reviewer_turn=turn, _parse_reviewer_json=json.loads, _norm_confidence=float,
+                 is_llm_cooldown_error=lambda e: False)
+    res = ns["review_fix"](None, "issue", {"a.py": "x"}, builder_n=0, diff_override="diff")
+    assert res["verdict"] == "Approve"
+    assert res["failed_reviewers"] == ["Reviewer (copilot/gpt-5.6-sol)"]
+
+    body = "\n".join(_load_pr_review()["_render_panel"](res))
+    seats = re.findall(r"\*\*Reviewer \(([^)\s]+)\)\*\*", body)  # local_review._REVIEWER_RE
+    assert set(seats) == {"copilot/claude-opus-5", "copilot/gpt-5.6-sol"}
+
+
+def test_a_panel_that_must_retry_still_names_every_seat_in_the_comment():
+    """A partial panel that is not unanimous returns queue_for_retry; its
+    comment must still list the whole panel, or the local review falls back to
+    an older comment's seats."""
+    def turn(prompt, system_prompt, cand, *a, **k):
+        if cand["model"] == "gpt-5.6-sol":
+            return "not json"
+        return '{"confidence": 0.95, "verdict": "Reject", "critique": "bug"}'
+    ns = _engine(_production() + [_cand("copilot", "gpt-5.6-sol", tier="frontier")],
+                 _run_reviewer_turn=turn, _parse_reviewer_json=json.loads, _norm_confidence=float,
+                 is_llm_cooldown_error=lambda e: False)
+    res = ns["review_fix"](None, "issue", {"a.py": "x"}, builder_n=0, diff_override="diff")
+    assert res["status"] == "queue_for_retry"
+
+    body = "\n".join(_load_pr_review()["_render_panel"](res))
+    seats = re.findall(r"\*\*Reviewer \(([^)\s]+)\)\*\*", body)  # local_review._REVIEWER_RE
+    assert set(seats) == {"copilot/claude-opus-5", "copilot/gpt-5.6-sol"}

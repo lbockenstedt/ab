@@ -837,6 +837,24 @@ def state_logic_issue_body(pr):
         "something to report.")
 
 
+def _state_panel_after(review, pr, files, config, repo=None, head_sha=None):
+    """Panel 2 runs only once panel 1 Approves, to save its tokens: a PR panel 1
+    did not approve cannot merge anyway, and its fix moves the head, which
+    re-runs both panels. The skipped panel carries a status, so the merge gate
+    treats it as not approved and remediation acts on panel 1's verdict. With
+    panel 1 switched off (pr_review_llm_enabled) or giving no review, panel 2
+    runs on its own as before; with panel 2 switched off it stays off (None),
+    never "skipped". pr_review_state_panel_waits (default on) switched off runs
+    both panels on every pass, as before."""
+    approved = (isinstance(review, dict) and not review.get("status")
+                and str(review.get("verdict") or "").lower() == "approve")
+    if (config.get("pr_review_state_panel_waits", True)
+            and config.get("pr_review_llm_enabled", False) and config.get("pr_review_state_logic_enabled", False)
+            and isinstance(review, dict) and not approved):
+        return {"status": "skipped", "reason": "runs once panel 1 Approves"}
+    return _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
+
+
 def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     """Second, narrower skeptical-panel pass focused specifically on the bug
     SHAPE that hit lm#135 twice in one review cycle: a status/enum value that
@@ -998,10 +1016,16 @@ def _render_review_body(review, header, blurb):
     # No review: nothing to show; a status means the panel was offline.
     if not review:
         return []
+    if review.get("status") == "skipped":
+        return [header, "", "_Not run: this panel runs once panel 1 Approves._", ""]
     if review.get("status"):
-        return [header, "",
-                "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
-                ""]
+        out = [header, "",
+               "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")), ""]
+        # A panel that ran but must retry still names its seats, in the
+        # **Reviewer (provider/model)** form the local review skill reads.
+        if review.get("seats"):
+            out += ["_Seated: %s._" % ", ".join("**%s**" % n for n in review["seats"]), ""]
+        return out
 
     # Overall verdict, confidence, and which reviewers objected.
     verdict = str(review.get("verdict") or "—")
@@ -1026,6 +1050,13 @@ def _render_review_body(review, header, blurb):
         _models = review.get("panel_models") or []
         out += ["_Single-reviewer panel: only 1 of 2 required frontier models was available (%s)._"
                 % (_models[0] if _models and _models[0] else "unknown model"), ""]
+
+    # Seats that gave no usable vote. Each name is already the full
+    # "Reviewer (provider/model)" label (fix_engine._reviewer_name), so it
+    # renders as **Reviewer (provider/model)** and the comment lists the whole panel.
+    if review.get("failed_reviewers"):
+        out += ["_No reply from %s; counted as failed reviewers (the surviving panel must be "
+                "unanimous)._" % ", ".join("**%s**" % n for n in review["failed_reviewers"]), ""]
 
     # ── concerns, up front ────────────────────────────────────────────────
     if dissenting:
@@ -1638,10 +1669,16 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         # reason (persisted + shown on the PR) so a failed-panel docs auto-merge
         # is visibly distinguishable from a normal one, instead of both saying
         # "reviewed but not accuracy-gated".
-        _panel_ran = not rec.get("panel_status") and not rec.get("panel2_status")
-        _panel_note = ("reviewed but not accuracy-gated" if _panel_ran
-                       else "panel could not run for this diff — Tier-1/boundary/allowlist "
-                            "gates still applied")
+        # A skipped panel 2 is waiting on panel 1, not a panel that failed to
+        # run, but it did not review this diff either: say which panel did.
+        if rec.get("panel_status") or rec.get("panel2_status") not in (None, "", "skipped"):
+            _panel_note = ("panel could not run for this diff — Tier-1/boundary/allowlist "
+                           "gates still applied")
+        elif rec.get("panel2_status") == "skipped":
+            _panel_note = ("reviewed by the skeptical panel only (the state-logic panel runs once "
+                           "it Approves) and not accuracy-gated")
+        else:
+            _panel_note = "reviewed but not accuracy-gated"
         return True, ("cleared: documentation-only diff — %s "
                       "(panel verdict/confidence not required for docs), no boundary touched"
                       % _panel_note)
@@ -2039,8 +2076,8 @@ def _review_one(gh, repo, pr, config, force=False):
         _step("running the skeptical reviewer panel (LLM)")
         review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh,
                                    undefined_verified=_undef_verified)
-        _step("running the state-logic reviewer panel (LLM)")
-        state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
+        _step("running the state-logic reviewer panel (LLM) if panel 1 approved")
+        state_review = _state_panel_after(review, pr, files, config, repo=repo, head_sha=head_sha)
         # Build the comment text.
         _step("rendering and posting the review comment")
         body = _render(findings, head_sha, summary, review=review, state_review=state_review,

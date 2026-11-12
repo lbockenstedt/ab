@@ -89,22 +89,25 @@ def _gh_json(*args):
 
 
 def _reviewer_seats(repo_slug):
-    """AB's seats for each panel on its latest review, e.g.
+    """AB's seats for each panel on its latest review of that panel, e.g.
     {"panel1": ["copilot/claude-opus-5.5", ...], "panel2": [...]}.
 
     AB picks each panel's seats separately (each runs its own review_fix), so
-    they are read from each panel's section of the comment. A review whose
-    state-logic section names no seat (that panel was skipped) uses panel 1's
-    seats for panel 2. A seat is the full provider/model label, so two seats running the same
-    model through different providers stay two seats, as in AB. The latest
-    review is the most recently UPDATED comment carrying AB's marker (AB edits
-    its review comment in place) in the target repo or AB's own repo, which
-    always carries reviews; the target's own last review may be older.
+    each panel's seats come from its own section of AB's review comments: the
+    most recently UPDATED comment (AB edits its review in place) that names
+    seats for that panel, in the target repo or AB's own repo, which always
+    carries reviews. Panel 2 is skipped until panel 1 Approves, so its newest
+    seats are often on an older comment than panel 1's. Only when no comment
+    names panel 2 seats does panel 2 use panel 1's: AB seats both panels with
+    the same review_fix call and arguments (pr_review._skeptical_review and
+    _state_logic_review), so they get the same seats. A seat is the full provider/model label, so two seats running
+    the same model through different providers stay two seats, as in AB.
 
     Raises RuntimeError when GitHub cannot be read or no AB review names a
-    model, so a caller never mistakes "could not find out" for "no reviewers"."""
+    panel 1 model, so a caller never mistakes "could not find out" for "no
+    reviewers"."""
     import pr_review
-    newest = None
+    newest = {}  # panel -> (updated_at, seats)
     for slug in dict.fromkeys((repo_slug, _slug(_HERE))):
         comments = _gh_json("api", "repos/%s/issues/comments?sort=updated&direction=desc"
                             "&per_page=100" % slug)
@@ -114,15 +117,14 @@ def _reviewer_seats(repo_slug):
             if pr_review.PR_REVIEW_MARKER not in (c.get("body") or ""):
                 continue
             skeptical, _, state = (c.get("body") or "").partition(pr_review._STATE_PANEL_HEADER)
-            seats = {"panel1": _seats_in(skeptical), "panel2": _seats_in(state)}
-            if seats["panel1"]:
-                seats["panel2"] = seats["panel2"] or seats["panel1"]
-                if newest is None or c.get("updated_at", "") > newest[0]:
-                    newest = (c.get("updated_at", ""), seats)
-                break
-    if newest is None:
+            for panel, text in (("panel1", skeptical), ("panel2", state)):
+                seats = _seats_in(text)
+                when = c.get("updated_at", "")
+                if seats and (panel not in newest or when > newest[panel][0]):
+                    newest[panel] = (when, seats)
+    if "panel1" not in newest:
         raise RuntimeError("no AB review comment naming its reviewer models was found")
-    return newest[1]
+    return {"panel1": newest["panel1"][1], "panel2": newest.get("panel2", newest["panel1"])[1]}
 
 
 def _seats_in(text):
@@ -183,12 +185,21 @@ def gate(folder):
 
     ``folder`` is the --out folder: each panel's expected seats come from its
     reviewers.json, the replies from vote_file(). A seat with no reply file,
-    or a reply with no verdict, is a failed reviewer, as in AB."""
+    or a reply with no verdict, is a failed reviewer, as in AB. Panel 2 is
+    "skipped" until panel 1 Approves, as in AB, then "pending" until any of
+    its reply files exist: run its reviewers then and gate again."""
     import fix_engine
     with open(os.path.join(folder, "reviewers.json")) as fh:
         seats = json.load(fh)
     result = {}
     for panel in ("panel1", "panel2"):
+        if panel == "panel2" and result["panel1"]["verdict"] != "Approve":
+            # As in AB (pr_review._state_panel_after): panel 2 waits for panel 1.
+            result[panel] = {"verdict": "skipped", "reason": "runs once panel 1 Approves"}
+            continue
+        if panel == "panel2" and not any(os.path.exists(vote_file(folder, panel, s)) for s in seats[panel]):
+            result[panel] = {"verdict": "pending", "reason": "panel 1 Approves: run panel 2's reviewers"}
+            continue
         votes, failed = [], []
         for seat in seats[panel]:
             path = vote_file(folder, panel, seat)

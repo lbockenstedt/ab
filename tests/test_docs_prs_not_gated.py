@@ -304,6 +304,15 @@ def test_docs_bypass_reason_is_honest_when_panel_could_not_run(decide):
     assert "reviewed but not accuracy-gated" not in reason
 
 
+def test_docs_bypass_reason_names_the_one_panel_that_ran_when_panel_2_waits(decide):
+    """A panel 2 waiting on panel 1's Approve did not review the diff either;
+    the merge reason must not say the diff was fully reviewed."""
+    should, reason = decide(_rec(panel2_status="skipped", **REJECTED), ["README.md"], _cfg(),
+                            _meta(), changed_files=DOCS)
+    assert should is True
+    assert "skeptical panel only" in reason and "could not run" not in reason
+
+
 def test_docs_bypass_reason_still_says_reviewed_when_panel_ran(decide):
     should, reason = decide(_rec(**REJECTED), ["README.md"], _cfg(), _meta(),
                             changed_files=DOCS)

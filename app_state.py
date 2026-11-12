@@ -320,6 +320,14 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
         with _task_state_lock:
             # The previous record (if any) supplies fields that must survive a re-scan.
             prev = state["pr_reviews"].get(key) or {}
+            # Per-panel "panel unavailable" retries at this head; any pass where
+            # neither panel queued resets both.
+            retry_counts = [0, 0]
+            if panel_status == "queue_for_retry" or panel2_status == "queue_for_retry":
+                if prev.get("head") == head_sha:
+                    retry_counts = [int(c or 0) for c in (prev.get("queue_retry_counts") or [0, 0])]
+                retry_counts = [retry_counts[0] + (panel_status == "queue_for_retry"),
+                                retry_counts[1] + (panel2_status == "queue_for_retry")]
             # Rebuild the record from this scan plus the carried-over sticky fields.
             state["pr_reviews"][key] = {
                 "repo": repo,
@@ -369,14 +377,16 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 # panel keeps returning queue_for_retry AT THE SAME head; resets to
                 # 0 the moment a real verdict is reached or the head moves, so a
                 # fresh commit or a human Reprocess always gets its own full budget.
-                "queue_retry_count": (
-                    (int(prev.get("queue_retry_count") or 0) + 1)
-                    if (panel_status == "queue_for_retry" or panel2_status == "queue_for_retry")
-                    and prev.get("head") == head_sha
-                    and (prev.get("panel_status") == "queue_for_retry"
-                         or prev.get("panel2_status") == "queue_for_retry")
-                    else (1 if (panel_status == "queue_for_retry" or panel2_status == "queue_for_retry") else 0)
-                ),
+                # Counted per panel (queue_retry_counts), and the cap reads the larger
+                # count among the panels queued now (a panel that has since given a
+                # verdict no longer spends the retry):
+                # panel 2 may first run (and queue) only after panel 1's retry
+                # Approves, and that is its first retry, not panel 1's second. The
+                # counts survive the panels taking turns to queue at one head, so
+                # alternating outages still reach the cap.
+                "queue_retry_counts": retry_counts,
+                "queue_retry_count": max([n for n, queued in zip(retry_counts, (
+                    panel_status == "queue_for_retry", panel2_status == "queue_for_retry")) if queued] or [0]),
                 # Preserve a human's Approve across re-scans; reset if the head moved.
                 "approved": bool(prev.get("approved")) and prev.get("head") == head_sha,
                 # Merged is terminal — keep it so the PR stays listed with its badge.
