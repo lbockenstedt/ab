@@ -2706,7 +2706,8 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 _scan_lock = threading.Lock()
 
 # Head branches the lm-fleet promote.yml workflow opens promotion PRs from.
-_PROMOTION_PR_HEAD_RE = re.compile(r"^promote/(dev-to-qa|qa-to-main)")
+# Anchored at both ends so e.g. "promote/dev-to-qamalicious" does not match.
+_PROMOTION_PR_HEAD_RE = re.compile(r"^promote/(dev-to-qa|qa-to-main)(-[A-Za-z0-9._-]+)?$")
 
 
 def scan_open_prs(gh, config):
@@ -2789,13 +2790,21 @@ def _is_promotion_pr(pr):
 
 
 def _head_already_reviewed(repo_name, pr):
-    """True when the PR's current head SHA already has a finished review.
+    """True when the PR's current head AND current description already have a
+    finished review, the same currency rule _review_one applies.
 
-    A review that was queued for retry (panel unavailable) does not count, the
-    same rule _review_one's own head-SHA cache applies."""
+    Not reviewed: no record, a record for another head, a review queued for
+    retry (panel unavailable), no review comment, or a comment whose head or
+    description digest no longer matches (the panel judges the description
+    against the diff, so an edited description needs a new review)."""
     record = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, pr.number)) or {}
     head_sha = pr.head.sha
-    return record.get("head") == head_sha and not is_queued_for_retry_stale(record, head_sha)
+    if record.get("head") != head_sha or is_queued_for_retry_stale(record, head_sha):
+        return False
+    existing = _find_marker_comment(pr)
+    body = existing.body if existing else ""
+    return (("<!-- head: %s -->" % head_sha) in (body or "")
+            and _desc_is_current(body, _desc_digest(pr)))
 
 
 def scan_promotion_prs(gh, config):

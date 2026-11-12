@@ -18,14 +18,36 @@ class _Ref:
         self.sha = sha
 
 
+class _Comment:
+    """A PR comment: just its body."""
+
+    def __init__(self, body):
+        """Store the body."""
+        self.body = body
+
+
 class _PR:
     """The few PyGithub PullRequest attributes the fast lane reads."""
 
-    def __init__(self, number, head_ref, sha="sha-new", draft=False):
-        """Build a fake open PR."""
+    def __init__(self, number, head_ref, sha="sha-new", draft=False, body="intent"):
+        """Build a fake open PR with no comments yet."""
         self.number = number
         self.head = _Ref(head_ref, sha)
         self.draft = draft
+        self.title = "promote"
+        self.body = body
+        self.comments = []
+
+    def get_issue_comments(self):
+        """Return the PR's comments."""
+        return list(self.comments)
+
+
+def _reviewed(pr):
+    """Give ``pr`` AB's review comment for its current head and description."""
+    pr.comments.append(_Comment("%s\n<!-- head: %s -->\n<!-- desc: %s -->" % (
+        pr_review.PR_REVIEW_MARKER, pr.head.sha, pr_review._desc_digest(pr))))
+    return pr
 
 
 class _Repo:
@@ -83,14 +105,15 @@ def test_already_reviewed_head_is_skipped(lane):
     """A promotion PR whose current head was already reviewed costs nothing."""
     pr_review.state["pr_reviews"]["owner/app#7"] = {"head": "sha-new"}
     pr_review.state["pr_reviews"]["owner/app#8"] = {"head": "sha-old"}
-    gh = _GH(_Repo([_PR(7, "promote/dev-to-qa"), _PR(8, "promote/dev-to-qa")]))
+    gh = _GH(_Repo([_reviewed(_PR(7, "promote/dev-to-qa")), _PR(8, "promote/dev-to-qa")]))
     assert pr_review.scan_promotion_prs(gh, CONFIG) == 1
     assert lane == [8]
 
 
 def test_non_promotion_pr_is_ignored(lane):
     """Feature, fix and back-merge PRs are left to the hourly scan."""
-    gh = _GH(_Repo([_PR(1, "feature/x"), _PR(2, "backmerge/main-to-qa"), _PR(3, "dev")]))
+    gh = _GH(_Repo([_PR(1, "feature/x"), _PR(2, "backmerge/main-to-qa"), _PR(3, "dev"),
+                    _PR(4, "promote/dev-to-qamalicious")]))
     assert pr_review.scan_promotion_prs(gh, CONFIG) == 0
     assert lane == []
 
@@ -108,3 +131,17 @@ def test_skips_while_the_hourly_scan_holds_the_lock(lane):
     with pr_review._scan_lock:
         assert pr_review.scan_promotion_prs(gh, CONFIG) == 0
     assert lane == []
+
+
+def test_edited_description_or_queued_retry_is_reviewed_again(lane):
+    """Same head is not enough: an edited description or a review queued for
+    retry needs a new review, exactly as _review_one decides."""
+    edited = _reviewed(_PR(7, "promote/dev-to-qa"))
+    edited.body = "corrected intent"
+    queued = _reviewed(_PR(8, "promote/dev-to-qa"))
+    pr_review.state["pr_reviews"]["owner/app#7"] = {"head": "sha-new"}
+    pr_review.state["pr_reviews"]["owner/app#8"] = {"head": "sha-new",
+                                                    "panel_status": "queue_for_retry"}
+    gh = _GH(_Repo([edited, queued]))
+    assert pr_review.scan_promotion_prs(gh, CONFIG) == 2
+    assert lane == [7, 8]
