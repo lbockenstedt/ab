@@ -1673,7 +1673,9 @@ def _slice_signature(log_slice):
 _OPERATIONAL_FAULT = re.compile(
     r"time[sd]?[ -]?out|timing out|connection (?:refused|reset)|unreachable|no route to host"
     r"|name resolution|could not resolve|\b40[13]\b|forbidden|unauthori[sz]ed|oauth"
-    r"|certificate|let'?s encrypt|slow command|disk is nearly full|memory is nearly full",
+    r"|certificate|let'?s encrypt|renew(?:al)? failed|curl: \(28\)"
+    r"|ssh connection|ssh: connect|\bssh\b.{0,60}\bfailed|authentication failed"
+    r"|slow command|disk is nearly full|memory is nearly full",
     re.I)
 OPS_ALERT_LABEL = "ops-alert"
 
@@ -1681,6 +1683,33 @@ OPS_ALERT_LABEL = "ops-alert"
 def is_operational_fault(title):
     """True when an escalation's title names an environment fault (see _OPERATIONAL_FAULT)."""
     return bool(_OPERATIONAL_FAULT.search(title or ""))
+
+
+def escalation_is_operational(summary, log_slice, analysis, verdict):
+    """True when the title, the first raw ERROR/CRITICAL log line, or (for
+    health-check findings only) the analysis names an environment fault. The
+    title alone misses most: its numbers are masked ("HTTP error #") and it is
+    cut at 90 chars. Sentinel analysis is LLM prose that mentions timeouts
+    loosely, so it is not used; health-check analysis is fixed text."""
+    first_error = next((ln for ln in (log_slice or "").splitlines()
+                        if re.search(r"\b(?:ERROR|CRITICAL)\b", ln)), "")
+    texts = [summary, first_error]
+    if verdict == "health-check":
+        texts.append(analysis)
+    return any(is_operational_fault(t) for t in texts)
+
+
+def _mark_ops_alert(issue):
+    """Put an existing issue in the ops-alert lane: add the label, drop
+    automated-fix so the fixer stops retrying it. Best effort."""
+    try:
+        names = [lbl.name for lbl in (issue.labels or [])]
+        if OPS_ALERT_LABEL not in names:
+            issue.add_to_labels(OPS_ALERT_LABEL)
+        if "automated-fix" in names:
+            issue.remove_from_labels("automated-fix")
+    except Exception as e:  # noqa: BLE001 - labelling must not break filing
+        logger.warning(f"Could not mark #{getattr(issue, 'number', '?')} {OPS_ALERT_LABEL}: {e}")
 
 
 def recent_deploy_changes(repo_obj, config=None, now=None):
@@ -1743,7 +1772,7 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
             f"### Analysis\n{analysis or '(none)'}\n\n"
             f"### Offending log lines\n```\n{(log_slice or '')[:6000]}\n```\n"
         )
-        operational = is_operational_fault(summary)
+        operational = escalation_is_operational(summary, log_slice, analysis, verdict)
         if operational:
             body += ("\n### Operational fault\nThis looks like an environment problem (a device or "
                      "service not answering, a rejected credential, a certificate), not a code bug, "
@@ -1767,6 +1796,9 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
         issue = create_automated_issue(gh, monitored_repos, repo_obj, error_data, labels=labels)
         if issue is None:
             return True, f"deduped/no-op in {repo_name}"
+        # A match on an older issue keeps its old labels; move it to ops-alert too.
+        if operational and getattr(issue, "_bf_was_duplicate", False):
+            _mark_ops_alert(issue)
         return True, f"{repo_name}#{getattr(issue, 'number', '?')}"
     # Any failure is reported back to the caller.
     except Exception as e:  # noqa: BLE001
