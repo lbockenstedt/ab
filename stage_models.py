@@ -56,26 +56,30 @@ def _allowed(model: Any, pats: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(m, p) for p in pats)
 
 
-def exclusions(config: Dict[str, Any], stage: str, existing: Iterable[Any] = ()) -> tuple:
+def exclusions(config: Dict[str, Any], stage: str, existing: Iterable[Any] = (),
+               fallback: Any = None) -> tuple:
     """``existing`` plus every model key outside the stage's patterns.
 
-    Unchanged when nothing configured matches the patterns (a hard filter that
-    empties the pool would turn the escalation into a dead end), or when the
-    candidates cannot be listed."""
+    When no stage model is left (none configured, or all already tried) the
+    result is ``fallback`` if given, else ``existing``: emptying the pool would
+    turn the escalation into a dead end. The fix step passes the ordinary write
+    floor as ``fallback``; without it, retries fell to any configured model and
+    a weak model that returns empty answers wrote the last attempt."""
     existing = tuple(existing or ())
+    fallback = existing if fallback is None else tuple(fallback)
     try:
         import llm_client
         cands = llm_client._enumerate_candidates(config)
     except Exception as e:  # noqa: BLE001 - never block fixing on a policy lookup
         logger.debug("stage_models: could not enumerate candidates: %s", e)
-        return existing
+        return fallback
     pats = patterns(config, stage)
     skip = set(existing)
     ok = [c for c in cands if _allowed(c.get("model"), pats) and c["key"] not in skip]
     if not ok:
-        logger.warning("stage_models: no configured model matches %s for %s; using the normal pool",
+        logger.warning("stage_models: no untried model matches %s for %s; using the normal pool",
                        list(pats), stage)
-        return existing
+        return fallback
     out = set(existing)
     out.update(c["key"] for c in cands if not _allowed(c.get("model"), pats))
     return tuple(sorted(out, key=str))
