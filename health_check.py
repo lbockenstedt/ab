@@ -428,10 +428,12 @@ def dashboard(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg.update({k: v for k, v in (config or {}).items() if k in DEFAULTS and v is not None})
     res = last_result()
     interval = float(cfg["health_check_interval_s"])
+    import auto_scale
     return {**res, "status": status_of(res), "enabled": bool(cfg["health_check_enabled"]),
             "interval_s": interval,
             "next_run_ts": (res["ts"] + interval) if res.get("ts") and cfg["health_check_enabled"] else None,
-            "history": list(_history), "thresholds": {k: v for k, v in cfg.items() if k.startswith("hc_")}}
+            "history": list(_history), "thresholds": {k: v for k, v in cfg.items() if k.startswith("hc_")},
+            "autoscale": auto_scale.dashboard(config)}
 
 
 # The previous run's hub counters, kept on disk so an AB restart does not
@@ -478,6 +480,9 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
         import azure_health
         # Full config: cfg only holds health_check keys and would drop CHAT_AZURE_ENABLED.
         azure_findings = azure_health.findings({**(config or {}), **cfg})
+        if cfg["hc_azure_enabled"]:
+            import auto_scale
+            azure_findings += auto_scale.run({**(config or {}), **cfg})
         if not (isinstance(report, dict) and "host" in report):
             why = ("not connected/approved" if report is None and client is None else
                    report.get("message") if isinstance(report, dict) and report.get("message")
