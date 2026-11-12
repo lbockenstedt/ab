@@ -51,8 +51,8 @@ DEFAULTS = {
 }
 
 # Routes that are slow by design (they run a long job inside the request), so
-# a slow response is not a problem to file (lm#1747).
-_SLOW_ROUTE_EXEMPT = frozenset({"POST /admin/ops/self-update"})
+# a slow response is not a problem to file (lm#1747, lm#1866).
+_SLOW_ROUTE_EXEMPT = frozenset({"POST /admin/ops/self-update", "POST /admin/ops/netbox-autorack"})
 
 # Command prefix -> MODULE_TYPE_REPO key (log_scan) of the repo that owns it.
 _PREFIX_MODULE = {
