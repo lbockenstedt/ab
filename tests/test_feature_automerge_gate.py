@@ -245,6 +245,12 @@ def main():
     ok &= _check("merged elsewhere -> idempotent no-op, not a hold",
                  should is False and reason == "already merged (idempotent no-op)")
 
+    for _cfg, _meta in ((_clean_config(release_locked_branches=["dev"]), _clean_pr_meta(state="closed", merged=True)),
+                        (_clean_config(), _clean_pr_meta(base_ref="main", state="closed", merged=True))):
+        should, reason = decide(_clean_rec(), [], _cfg, _meta)
+        ok &= _check("merged elsewhere on locked/release branch -> already merged",
+                     should is False and reason == "already merged (idempotent no-op)")
+
     # ── PR-state gates ───────────────────────────────────────────────────────
     should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(draft=True))
     ok &= _check("draft PR -> blocked", should is False)
