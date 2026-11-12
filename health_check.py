@@ -10,8 +10,11 @@ in ``scan_health``.
 Each finding carries a stable ``fingerprint`` that is also its issue title, so a
 problem that persists folds into the same issue instead of opening duplicates.
 """
+import json
 import logging
+import os
 import re
+from datetime import datetime, timedelta
 import time
 from collections import Counter
 from typing import Any, Dict, List, Optional
@@ -24,13 +27,15 @@ DEFAULTS = {
     "hc_slow_route_min_hits": 3,       # slow responses before a route is reported
     "hc_slow_route_max_s": 10.0,       # ...or a single response this slow
     "hc_slow_command_min_hits": 3,
+    "hc_slow_command_pct": 20.0,       # ...and at least this share of its calls were slow
+    "hc_log_window_s": 3600,           # log rules (repeats, vault reads) look at this much recent log
     "hc_timeout_min": 5,               # request timeouts per (spoke, command)
     "hc_load_per_cpu": 1.5,
     "hc_mem_pct": 92.0,
     "hc_disk_pct": 88.0,
     "hc_loop_lag_s": 1.0,
     "hc_repeat_error_min": 25,         # identical (normalised) ERROR lines in the log tail
-    "hc_vault_gets_min": 200,          # Azure Key Vault GETs in the log tail
+    "hc_vault_gets_min": 200,          # Azure Key Vault GETs in the log window
     "hc_queue_rejected_min": 5,        # commands a spoke refused because its queue was full
     "hc_autorack_problems_min": 1,     # devices whose rack-from-name placement fails
     "hc_netbox_dupe_groups_min": 1,    # duplicate NetBox device groups (serial/MAC)
@@ -101,6 +106,7 @@ _HINT = {
 }
 
 _DIGITS = re.compile(r"\d+")
+_LINE_TS = re.compile(r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)")
 _TS = re.compile(r"^\S+\s+\S+\s+")
 
 
@@ -113,6 +119,67 @@ def _finding(kind: str, key: str, title: str, severity: str, module: str,
     return {"kind": kind, "key": key, "severity": severity, "module": module,
             "fingerprint": f"Health check: {title}", "title": f"Health check: {title}",
             "detail": detail, "evidence": evidence, "hint": _HINT.get(kind, "")}
+
+
+def recent_lines(lines: List[str], window_s: float) -> List[str]:
+    """Lines no older than ``window_s`` before the newest timestamped line.
+    The log mirror keeps days of history; an error that stopped hours ago is
+    not a current problem. Lines without a timestamp are kept."""
+    stamps = [m.group(1).replace("T", " ") for m in map(_LINE_TS.match, lines or []) if m]
+    if not stamps:
+        return list(lines or [])
+    cutoff = (datetime.strptime(max(stamps), "%Y-%m-%d %H:%M:%S")
+              - timedelta(seconds=window_s)).strftime("%Y-%m-%d %H:%M:%S")
+    keep = []
+    for ln in lines:
+        m = _LINE_TS.match(ln)
+        if not m or m.group(1).replace("T", " ") >= cutoff:
+            keep.append(ln)
+    return keep
+
+
+def counters(report: Dict[str, Any]) -> Dict[str, Any]:
+    """The hub's since-start counters from a report, saved between runs."""
+    perf = report.get("perf") or {}
+    rows = lambda key: {f"{r.get('spoke', '')}|{r['key']}": [r["count"], r["slow"],  # noqa: E731
+                                                            r["avg_s"] * r["count"]]
+                        for r in perf.get(key) or []}
+    return {"started": float(report.get("generated") or 0) - float(perf.get("uptime_s") or 0),
+            "routes": rows("routes"), "commands": rows("commands"),
+            "timeouts": report.get("timeouts_by_spoke") or {}}
+
+
+def since_last(report: Dict[str, Any], prev: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The report with its slow/timeout counters cut to what happened since the
+    previous run (``prev`` from ``counters``). The hub counts since it started,
+    so without this a problem that is fixed keeps being reported until the hub
+    restarts. With no previous run, or after a hub restart, the report is used as is."""
+    perf = report.get("perf") or {}
+    if not prev or not perf.get("uptime_s") or abs(counters(report)["started"] - prev.get("started", 0)) > 120:
+        return report
+
+    def cut(rows, before):
+        out = []
+        for r in rows or []:
+            c0, s0, t0 = before.get(f"{r.get('spoke', '')}|{r['key']}", [0, 0, 0.0])
+            n = r["count"] - c0
+            if n <= 0:
+                continue
+            slow = max(r["slow"] - s0, 0)
+            avg = max(round((r["avg_s"] * r["count"] - t0) / n, 2), 0)
+            # max_s is since hub start; only keep it when this run saw slow calls.
+            out.append(dict(r, count=n, slow=slow, avg_s=avg, max_s=r["max_s"] if slow else avg))
+        return out
+
+    timeouts = {}
+    for sid, cmds in (report.get("timeouts_by_spoke") or {}).items():
+        old = prev.get("timeouts", {}).get(sid, {})
+        new = {cmd: n - old.get(cmd, 0) for cmd, n in cmds.items() if n - old.get(cmd, 0) > 0}
+        if new:
+            timeouts[sid] = new
+    return dict(report, timeouts_by_spoke=timeouts,
+                perf=dict(perf, routes=cut(perf.get("routes"), prev.get("routes", {})),
+                          commands=cut(perf.get("commands"), prev.get("commands", {}))))
 
 
 def _norm(line: str) -> str:
@@ -155,7 +222,8 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
                  f"avg {r['avg_s']}s, max {r['max_s']}s"],
                 f"`{r['key']}` is slow for users."))
     for r in perf.get("commands") or []:
-        if r["slow"] >= c["hc_slow_command_min_hits"]:
+        if (r["slow"] >= c["hc_slow_command_min_hits"]
+                and 100.0 * r["slow"] / max(r["count"], 1) >= c["hc_slow_command_pct"]):
             out.append(_finding(
                 "slow_command", f"{r['spoke']}:{r['key']}",
                 f"slow command {r['key']} on {r['spoke']}", "medium", _module_for_command(r["key"]),
@@ -171,7 +239,7 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
                 out.append(_finding("timeouts", f"{spoke}:{cmd}",
                                     f"{cmd} keeps timing out on {spoke}", "high",
                                     _module_for_command(cmd),
-                                    [f"{n} request timeouts since the hub started"],
+                                    [f"{n} request timeouts since the last check"],
                                     f"`{cmd}` to `{spoke}` times out repeatedly."))
 
     # Spoke command queues: refusals because the queue was full, or pinned at the cap.
@@ -263,7 +331,7 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
     sample: Dict[str, str] = {}
     vault = 0
     slow_q: List[str] = []
-    for ln in log_lines or []:
+    for ln in recent_lines(log_lines, c["hc_log_window_s"]):
         if "vault.azure.net/secrets" in ln:
             vault += 1
         if re.search(r"slow query|long[- ]running quer|statement timeout|duration: \d{4,} ms", ln, re.I):
@@ -275,11 +343,11 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
     for k, n in errs.most_common(5):
         if n >= c["hc_repeat_error_min"]:
             out.append(_finding("repeat_error", k, f"repeated error: {k[:70]}", "medium", "hub",
-                                [f"{n} occurrences in the recent log", sample[k]],
+                                [f"{n} occurrences in the last {int(c['hc_log_window_s']) // 60} min", sample[k]],
                                 "The same error keeps recurring."))
     if vault >= c["hc_vault_gets_min"]:
         out.append(_finding("vault", "vault", "excessive Key Vault reads", "medium", "hub",
-                            [f"{vault} vault secret GETs in the recent log"],
+                            [f"{vault} vault secret GETs in the last {int(c['hc_log_window_s']) // 60} min"],
                             "Secrets are fetched far more often than needed."))
     if slow_q:
         out.append(_finding("slow_query", "q", "long-running database queries", "medium", "hub",
@@ -360,6 +428,29 @@ def dashboard(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "history": list(_history), "thresholds": {k: v for k, v in cfg.items() if k.startswith("hc_")}}
 
 
+# The previous run's hub counters, kept on disk so an AB restart does not
+# fall back to reporting everything since the hub started.
+BASELINE_FILE = "/etc/ab/health_baseline.json"
+
+
+def _load_baseline() -> Optional[Dict[str, Any]]:
+    try:
+        with open(BASELINE_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _save_baseline(data: Dict[str, Any]) -> None:
+    try:
+        tmp = BASELINE_FILE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, BASELINE_FILE)
+    except OSError as e:
+        logger.warning("health check: could not save baseline: %s", e)
+
+
 def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
     """One health review: fetch, evaluate, file. Honours the enable flag and
     interval unless ``force``. Never raises."""
@@ -394,6 +485,9 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
             _last.update(error="hub health report unavailable: %s" % why, findings=azure_findings, filed=filed,
                          running=False, duration_s=round(time.time() - now, 1))
             return last_result()
+        prev = _load_baseline()
+        _save_baseline(counters(report))
+        report = since_last(report, prev)
         lines = [e.get("log", "") for e in get_hub_logs(max_per_module=3000)]
         findings = evaluate(report, lines, cfg) + azure_findings
         filed = []

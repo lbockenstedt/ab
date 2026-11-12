@@ -215,3 +215,42 @@ def test_no_stale_versions_no_finding():
     """No stale spokes means no stale_version finding."""
     rep = {"host": {}, "fleet": {"stale_versions": []}}
     assert "stale_version" not in {f["kind"] for f in hc.evaluate(rep, [])}
+
+
+def _cmd_report(count, slow, avg, mx, uptime=3600, timeouts=0):
+    return _report(generated=10000.0 + uptime,
+                   perf={"slow_route_s": 3, "slow_command_s": 5, "uptime_s": uptime, "routes": [],
+                         "commands": [{"key": "NW_GET_MAC_TABLE", "spoke": "nw-1", "count": count,
+                                       "slow": slow, "avg_s": avg, "max_s": mx}]},
+                   timeouts_by_spoke={"s1": {"NW_GET_MAC_TABLE": timeouts}}, spoke_names={"s1": "nw-1"})
+
+
+def test_problem_that_stopped_since_last_check_clears():
+    # The hub counts since it started; a fixed problem kept being reported.
+    old = _cmd_report(100, 50, 10.0, 180.0, uptime=3600, timeouts=20)
+    now = _cmd_report(160, 50, 6.625, 180.0, uptime=5400, timeouts=20)  # 60 more calls, all 1 s
+    assert hc.evaluate(hc.since_last(now, hc.counters(old)), []) == []
+    # New slow calls and timeouts since the last check are still reported.
+    worse = _cmd_report(160, 80, 10.0, 180.0, uptime=5400, timeouts=26)
+    kinds = {f["kind"] for f in hc.evaluate(hc.since_last(worse, hc.counters(old)), [])}
+    assert kinds == {"slow_command", "timeouts"}
+
+
+def test_hub_restart_or_first_run_uses_the_whole_report():
+    old = _cmd_report(100, 50, 10.0, 180.0, uptime=3600)
+    restarted = _cmd_report(40, 20, 10.0, 60.0, uptime=600)
+    restarted["generated"] = 20000.0
+    assert hc.since_last(restarted, hc.counters(old)) is restarted
+    assert hc.since_last(restarted, None) is restarted
+
+
+def test_command_rarely_slow_is_not_reported():
+    rep = _cmd_report(384, 12, 4.59, 5.37)
+    assert [f for f in hc.evaluate(rep, []) if f["kind"] == "slow_command"] == []
+
+
+def test_log_rules_ignore_errors_older_than_the_window():
+    old = ["2026-11-11 17:56:%02d - Opnsense - ERROR - curl timed out id=%d" % (i % 60, i) for i in range(40)]
+    new = ["2026-11-12 13:20:00 - Hub - INFO - fine"]
+    vault = ["2026-11-11 18:00:00 - httpx - INFO - GET https://x.vault.azure.net/secrets/a"] * 300
+    assert hc.evaluate(_report(), new + old + vault) == []
