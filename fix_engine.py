@@ -3524,6 +3524,79 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
         return (out, None)
 
 
+SKIP_CONFIDENCE_THRESHOLD = 0.80  # skip missing reviewer only above this confidence
+
+
+def panel_verdict(votes, missing=0):
+    """A panel's (average confidence, verdict) from its reviewers' votes.
+
+    ``missing`` counts seats that gave no usable vote. With any missing, the
+    panel goes on only if every surviving vote is Approve at an average
+    confidence >= SKIP_CONFIDENCE_THRESHOLD; otherwise the verdict is "Retry".
+    Then: Approve when the average confidence is >= 0.90, whatever the vote
+    split (a high-confidence Reject is contradictory), or when a strict
+    majority approves; otherwise Reject. Shared with
+    scripts/local_review.py --gate."""
+    avg_conf = sum(v.get("confidence", 0.0) for v in votes) / len(votes)
+    approvals = [v for v in votes if v.get("verdict") == "Approve"]
+    if missing and not (avg_conf >= SKIP_CONFIDENCE_THRESHOLD and len(approvals) == len(votes)):
+        return avg_conf, "Retry"
+    if avg_conf >= 0.90 or len(approvals) >= (len(votes) / 2 + 0.5):
+        return avg_conf, "Approve"
+    return avg_conf, "Reject"
+
+
+def diff_details(diff_text):
+    """The change as review_fix shows it to reviewers: a headed diff block."""
+    return f"\n--- DIFF (working tree vs HEAD) ---\n{diff_text}\n"
+
+
+def reviewer_prompt(issue_body, fix_details):
+    """The prompt every review-panel reviewer gets: the issue or PR brief, the
+    change, the skeptical checklist, the fleet code rules and the verdict rules.
+
+    Shared with scripts/local_review.py, so a local pre-push review asks exactly
+    what AB asks; change the prompt here and both change."""
+    # The fleet code rules, for checklist item 5 ("" if unavailable).
+    try:
+        import fleet_checks as _fc
+        _rules_block = (_fc.rules_text() + "\n\n") if _fc.rules_text() else ""
+    except Exception:  # noqa: BLE001
+        _rules_block = ""
+    # Reviewer prompt: the issue, the change, the checklist, and confidence/verdict rules.
+    return (
+        f"Issue Description: {issue_body}\n\n"
+        f"Proposed Fixes:\n{fix_details}\n\n"
+        "You are a Skeptical Senior Engineer. Your job is to review this proposed fix. "
+        "Check for: \n"
+        "1. Does it actually fix the described issue?\n"
+        "2. Does it introduce new bugs or regressions?\n"
+        "3. Is the code quality acceptable?\n"
+        "4. Are there any obvious edge cases missed?\n"
+        "5. Does it follow the FLEET CODE RULES below? In particular: credentials "
+        "through the Credential Vault (backend AND WebUI picker), JSON-only storage, "
+        "tenant scope / no UUIDs in the UI, nothing hard-coded, generic not "
+        "vendor-specific, docstrings, few dependencies.\n"
+        "6. Is the logic in the right place (spoke does the work, hub relays), and "
+        "are hub<->spoke wire changes backward-compatible and reversible?\n"
+        "A rule breach is a defect: lower confidence below 0.90 unless the issue "
+        "text explicitly asks for it.\n\n"
+        + _rules_block +
+        "NOTE: Small, targeted changes that correct obvious typos or naming mismatches are considered high-signal; "
+        "if they correctly address the issue without regressions, they SHOULD be approved.\n\n"
+        "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}\n"
+        "\"confidence\" MUST be a fraction between 0.0 and 1.0 — e.g. 0.95 for 95% confidence. Do NOT return a 0-100 percentage.\n"
+        "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 0.90 confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 0.90). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back.\n"
+        "The same rule applies in the other direction: do NOT return 'Approve' with a confidence below 0.90. "
+        "'confidence' means how sure you are that this change is correct and safe to merge — it is NOT a rating of "
+        "how much you like the change, how thorough your own review felt, or how interesting the remaining nitpicks are. "
+        "If your only remaining points are ones you would describe as minor, non-blocking, cosmetic, stylistic, "
+        "defensive/harmless, or 'worth a follow-up', they do NOT justify a sub-0.90 score: say them in the critique and "
+        "score your actual belief that the change is safe. Reserve a sub-0.90 score for a doubt that would genuinely make "
+        "you stop the merge — and if you have one, return 'Reject' and name it explicitly."
+    )
+
+
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
                builder_n=None, builder_key=None, diff_override=None, repo=None, head_sha=None):
     """Run a cross-provider reviewer panel on a proposed fix.
@@ -3551,8 +3624,6 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
       - Otherwise: return {"status": "pending_review", "reason": ...} so the caller
         can queue the issue for manual approval or retry once providers come back.
     """
-    SKIP_CONFIDENCE_THRESHOLD = 0.80  # skip missing reviewer only above this confidence
-
     # Load settings.
     logger.info("Running Reviewer Panel pass...")
     config = load_config()
@@ -3620,50 +3691,13 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         diff_text = _truncate_diff(diff_text, 60000)
     # Use the diff if there is one; otherwise list the proposed file contents (capped).
     if diff_text.strip():
-        fix_details = f"\n--- DIFF (working tree vs HEAD) ---\n{diff_text}\n"
+        fix_details = diff_details(diff_text)
     else:
         for path, code in proposed_fixes.items():
             body = str(code) if len(str(code)) <= 8000 else _trunc(str(code), 8000)
             fix_details += f"\n--- FILE: {path} ---\n{body}\n"
 
-    # The fleet code rules, for checklist item 5 ("" if unavailable).
-    try:
-        import fleet_checks as _fc
-        _rules_block = (_fc.rules_text() + "\n\n") if _fc.rules_text() else ""
-    except Exception:  # noqa: BLE001
-        _rules_block = ""
-    # Reviewer prompt: the issue, the change, the checklist, and confidence/verdict rules.
-    prompt = (
-        f"Issue Description: {issue_body}\n\n"
-        f"Proposed Fixes:\n{fix_details}\n\n"
-        "You are a Skeptical Senior Engineer. Your job is to review this proposed fix. "
-        "Check for: \n"
-        "1. Does it actually fix the described issue?\n"
-        "2. Does it introduce new bugs or regressions?\n"
-        "3. Is the code quality acceptable?\n"
-        "4. Are there any obvious edge cases missed?\n"
-        "5. Does it follow the FLEET CODE RULES below? In particular: credentials "
-        "through the Credential Vault (backend AND WebUI picker), JSON-only storage, "
-        "tenant scope / no UUIDs in the UI, nothing hard-coded, generic not "
-        "vendor-specific, docstrings, few dependencies.\n"
-        "6. Is the logic in the right place (spoke does the work, hub relays), and "
-        "are hub<->spoke wire changes backward-compatible and reversible?\n"
-        "A rule breach is a defect: lower confidence below 0.90 unless the issue "
-        "text explicitly asks for it.\n\n"
-        + _rules_block +
-        "NOTE: Small, targeted changes that correct obvious typos or naming mismatches are considered high-signal; "
-        "if they correctly address the issue without regressions, they SHOULD be approved.\n\n"
-        "Return ONLY a JSON object: {\"confidence\": float, \"verdict\": \"Approve\"|\"Reject\", \"critique\": \"detailed explanation\"}\n"
-        "\"confidence\" MUST be a fraction between 0.0 and 1.0 — e.g. 0.95 for 95% confidence. Do NOT return a 0-100 percentage.\n"
-        "CRITICAL RULES: Your confidence score IS the decision. If you believe the fix is correct with >= 0.90 confidence, you MUST return 'Approve'. A 'Reject' verdict is only valid when you genuinely doubt the fix (confidence < 0.90). Do NOT give a high confidence score alongside a 'Reject' — that's contradictory and will cause the fix to be unnecessarily kicked back.\n"
-        "The same rule applies in the other direction: do NOT return 'Approve' with a confidence below 0.90. "
-        "'confidence' means how sure you are that this change is correct and safe to merge — it is NOT a rating of "
-        "how much you like the change, how thorough your own review felt, or how interesting the remaining nitpicks are. "
-        "If your only remaining points are ones you would describe as minor, non-blocking, cosmetic, stylistic, "
-        "defensive/harmless, or 'worth a follow-up', they do NOT justify a sub-0.90 score: say them in the critique and "
-        "score your actual belief that the change is safe. Reserve a sub-0.90 score for a doubt that would genuinely make "
-        "you stop the merge — and if you have one, return 'Reject' and name it explicitly."
-    )
+    prompt = reviewer_prompt(issue_body, fix_details)
     # NOTE: the tool-primed addendum used to be appended here, to one shared
     # `prompt` handed to every reviewer regardless of provider. Moved into
     # _run_reviewer_turn, which resolves each reviewer's actual provider and
@@ -3737,9 +3771,8 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
                        len(reviewers), _names)
         return {"status": "queue_for_retry", "reason": "all_reviewers_failed: %s" % _names}
 
-    # Average confidence, the approving votes, and all critiques joined into one string.
-    avg_conf = sum(v.get("confidence", 0.0) for v in votes) / len(votes)
-    approvals = [v for v in votes if v.get("verdict") == "Approve"]
+    # Average confidence, the panel's verdict, and all critiques joined into one string.
+    avg_conf, final_verdict = panel_verdict(votes, len(failed_reviewers))
     critiques = " | ".join(
         f"[{v.get('reviewer', '?')}] {v.get('critique', '')}" for v in votes
     )
@@ -3761,35 +3794,26 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     ]
 
     # If some reviewers were skipped, decide whether to proceed or queue.
+    if final_verdict == "Retry":
+        reason = (
+            f"Reviewers {failed_reviewers} unavailable and surviving panel confidence "
+            f"{avg_conf:.2f} < {SKIP_CONFIDENCE_THRESHOLD} or not unanimous."
+        )
+        logger.warning(f"Queuing for manual approval: {reason}")
+        return {
+            "status": "queue_for_retry",
+            "reason": reason,
+            "partial_confidence": avg_conf,
+            "partial_votes": votes,
+            "critique": critiques,
+            "reviews": reviews,
+        }
     if failed_reviewers:
-        if avg_conf >= SKIP_CONFIDENCE_THRESHOLD and len(approvals) == len(votes):
-            logger.warning(
-                f"Skipped unavailable reviewers {failed_reviewers} — "
-                f"surviving panel approved with confidence {avg_conf:.2f} (>= {SKIP_CONFIDENCE_THRESHOLD}). Proceeding."
-            )
-        else:
-            reason = (
-                f"Reviewers {failed_reviewers} unavailable and surviving panel confidence "
-                f"{avg_conf:.2f} < {SKIP_CONFIDENCE_THRESHOLD} or not unanimous."
-            )
-            logger.warning(f"Queuing for manual approval: {reason}")
-            return {
-                "status": "queue_for_retry",
-                "reason": reason,
-                "partial_confidence": avg_conf,
-                "partial_votes": votes,
-                "critique": critiques,
-                "reviews": reviews,
-            }
+        logger.warning(
+            f"Skipped unavailable reviewers {failed_reviewers} — "
+            f"surviving panel approved with confidence {avg_conf:.2f} (>= {SKIP_CONFIDENCE_THRESHOLD}). Proceeding."
+        )
 
-    # If avg confidence >= 90%, approve regardless of vote split — high-confidence
-    # Rejections are contradictory and cause unnecessary kickbacks.
-    if avg_conf >= 0.90:
-        final_verdict = "Approve"
-    elif len(approvals) >= (len(votes) / 2 + 0.5):
-        final_verdict = "Approve"
-    else:
-        final_verdict = "Reject"
     # Return the panel result.
     return {"confidence": avg_conf, "verdict": final_verdict, "critique": critiques,
             "reviews": reviews, "panel_size": len(reviewers),

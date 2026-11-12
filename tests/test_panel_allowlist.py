@@ -17,14 +17,15 @@ import re
 import pytest
 
 _PANEL_NAMES = {
-    "_select_review_panel", "review_fix", "_panel_allowlist", "_model_allowed",
+    "_select_review_panel", "review_fix", "diff_details", "reviewer_prompt",
+    "panel_verdict", "_panel_allowlist", "_model_allowed",
     "_reviewer_name", "_reviewer_vote", "_extract_reviewer_verdict",
     "_has_verdict_key", "_canon_verdict_keys", "_balanced_brace_span",
     "_is_local_provider", "_cloud_frontier_fallback",
 }
 _PANEL_ASSIGNS = {
     "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN", "DEFAULT_PANEL_ALLOWLIST",
-    "_REVIEWER_RETRY_NOTE", "_LOCAL_PROVIDERS",
+    "_REVIEWER_RETRY_NOTE", "_LOCAL_PROVIDERS", "SKIP_CONFIDENCE_THRESHOLD",
 }
 
 

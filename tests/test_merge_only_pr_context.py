@@ -116,8 +116,8 @@ def test_an_api_failure_degrades_to_no_block():
 
 def test_the_block_is_actually_fed_to_the_broad_panel():
     """Extracted-and-tested but never called is the failure mode this pins."""
-    body = _extract("_skeptical_review")
-    assert "_merge_only_context(pr)" in body
+    assert "_merge_only_context(pr)" in _extract("skeptical_issue_body")
+    assert "skeptical_issue_body(pr)" in _extract("_skeptical_review")
 
 
 def test_the_state_logic_panel_is_left_alone():
