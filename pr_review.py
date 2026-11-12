@@ -69,6 +69,7 @@ import logging
 import hashlib
 import os
 import re
+import threading
 from datetime import timedelta
 
 # AppBuilder helpers: repos, shared state, guardrails, PR actions and the deterministic checks.
@@ -2701,6 +2702,14 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         _release_issue(lock_id)
 
 
+# Held while a scan reviews PRs, so the hourly scan_open_prs and the promotion
+# fast lane (scan_promotion_prs) never review the same PR at the same time.
+_scan_lock = threading.Lock()
+
+# Head branches the lm-fleet promote.yml workflow opens promotion PRs from.
+_PROMOTION_PR_HEAD_RE = re.compile(r"^promote/(dev-to-qa|qa-to-main)")
+
+
 def scan_open_prs(gh, config):
     """Poll open PRs on monitored repos and post a parity pre-review on each.
 
@@ -2718,6 +2727,15 @@ def scan_open_prs(gh, config):
         return
     if not repos:
         return
+    # One scan at a time: the promotion fast lane takes the same lock.
+    with _scan_lock:
+        _scan_repos(gh, config, repos)
+
+
+def _scan_repos(gh, config, repos):
+    """Review every open PR in ``repos``, then run the housekeeping passes.
+
+    Called by scan_open_prs while it holds _scan_lock."""
     # Surface PR-review as a distinct 'pr'-kind task so the UI badges it apart
     # from bug scans/fixes (see templates/index.html Active Tasks).
     update_task_state("PRReview", "PR pre-review — scanning %d repo(s)" % len(repos),
@@ -2763,6 +2781,72 @@ def scan_open_prs(gh, config):
     # Always close the task.
     finally:
         update_task_state("PRReview", action="end")
+
+
+def _is_promotion_pr(pr):
+    """True when ``pr`` is a dev->qa or qa->main promotion PR (by head branch)."""
+    head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
+    return bool(_PROMOTION_PR_HEAD_RE.match(head_ref))
+
+
+def _head_already_reviewed(repo_name, pr):
+    """True when the PR's current head SHA already has a finished review.
+
+    A review that was queued for retry (panel unavailable) does not count, the
+    same rule _review_one's own head-SHA cache applies."""
+    record = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, pr.number)) or {}
+    head_sha = pr.head.sha
+    return record.get("head") == head_sha and not is_queued_for_retry_stale(record, head_sha)
+
+
+def scan_promotion_prs(gh, config):
+    """Fast lane: review open promotion PRs whose current head is not reviewed yet.
+
+    Runs every ``pr_review_fast_interval_s`` seconds (0 disables it) so a
+    promotion PR is reviewed, and auto-merged if it qualifies, within minutes
+    instead of waiting for the hourly scan_open_prs. Each PR goes through the
+    same _review_one as the hourly scan, so the review and the auto-merge
+    decision are identical. Skips while the hourly scan holds _scan_lock, and
+    honours the same gates: pr_review_enabled, paused/blackout and a GitHub
+    Actions outage. Returns the number of PRs reviewed. Never raises.
+    """
+    import gh_actions_health
+    # Same gates as the hourly scan, plus the interval switch.
+    if not config.get("pr_review_enabled", False):
+        return 0
+    if int(config.get("pr_review_fast_interval_s", 300) or 0) <= 0:
+        return 0
+    if state.get("paused") or state.get("blackout"):
+        return 0
+    if gh_actions_health.outage(config)[0]:
+        return 0
+    # The hourly scan is running and will cover these PRs itself.
+    if not _scan_lock.acquire(blocking=False):
+        return 0
+    reviewed = 0
+    try:
+        for repo_name in get_monitored_repos(config):
+            try:
+                repo = gh.get_repo(repo_name)
+                for pr in repo.get_pulls(state="open"):
+                    if (getattr(pr, "draft", False) or not _is_promotion_pr(pr)
+                            or _head_already_reviewed(repo.full_name, pr)):
+                        continue
+                    try:
+                        logger.info("pr_review: fast lane reviewing promotion PR %s #%s",
+                                    repo.full_name, pr.number)
+                        _review_one(gh, repo, pr, config)
+                        reviewed += 1
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("pr_review: fast lane PR #%s in %s failed: %s",
+                                       pr.number, repo_name, e)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("pr_review: fast lane repo %s failed: %s", repo_name, e)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("pr_review: fast lane could not resolve monitored repos: %s", e)
+    finally:
+        _scan_lock.release()
+    return reviewed
 
 
 # Records written before base_ref/head_ref existed have neither, so the PR list

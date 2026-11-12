@@ -1929,6 +1929,36 @@ def poller_worker():
         time.sleep(interval)
 
 
+def pr_review_fast_worker():
+    """Review new promotion-PR heads every ``pr_review_fast_interval_s`` seconds.
+
+    The hourly scan cycle reviews every open PR; this lane only picks up
+    promotion PRs whose current head has not been reviewed, so a promotion is
+    reviewed (and auto-merged if it qualifies) within minutes. 0 disables it;
+    the worker then re-reads the config every minute so it can be turned back on.
+    All gates live in pr_review.scan_promotion_prs."""
+    from pr_review import scan_promotion_prs
+    # Each loop: reload config, run one fast pass if enabled, then sleep.
+    while True:
+        try:
+            cfg = load_config()
+            interval = int(cfg.get("pr_review_fast_interval_s", 300) or 0)
+        except Exception as e:  # noqa: BLE001 — a bad config read must not kill the loop
+            logger.error("PR review fast lane: could not load config: %s", e)
+            time.sleep(60)
+            continue
+        if interval <= 0:
+            time.sleep(60)
+            continue
+        token = cfg.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+        if token:
+            try:
+                scan_promotion_prs(Github(token), cfg)
+            except Exception as e:  # noqa: BLE001 — never let a pass crash the worker
+                logger.error("PR review fast lane: pass failed: %s", e)
+        time.sleep(max(60, interval))
+
+
 def promote_scheduler_worker():
     """Open promotion PRs on a fixed cadence (dev->qa and, if enabled, qa->main).
 
