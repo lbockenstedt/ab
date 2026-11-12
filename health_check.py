@@ -108,6 +108,7 @@ _HINT = {
 _DIGITS = re.compile(r"\d+")
 _LINE_TS = re.compile(r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)")
 _TS = re.compile(r"^\S+\s+\S+\s+")
+_EXC_LINE = re.compile(r"^[A-Za-z_][\w.]*(Error|Exception): ")
 
 
 def _module_for_command(command: str) -> str:
@@ -124,16 +125,20 @@ def _finding(kind: str, key: str, title: str, severity: str, module: str,
 def recent_lines(lines: List[str], window_s: float) -> List[str]:
     """Lines no older than ``window_s`` before the newest timestamped line.
     The log mirror keeps days of history; an error that stopped hours ago is
-    not a current problem. Lines without a timestamp are kept."""
+    not a current problem. A line without a timestamp (a traceback body) goes
+    with the timestamped line above it."""
     stamps = [m.group(1).replace("T", " ") for m in map(_LINE_TS.match, lines or []) if m]
     if not stamps:
         return list(lines or [])
     cutoff = (datetime.strptime(max(stamps), "%Y-%m-%d %H:%M:%S")
               - timedelta(seconds=window_s)).strftime("%Y-%m-%d %H:%M:%S")
     keep = []
+    recent = True
     for ln in lines:
         m = _LINE_TS.match(ln)
-        if not m or m.group(1).replace("T", " ") >= cutoff:
+        if m:
+            recent = m.group(1).replace("T", " ") >= cutoff
+        if recent:
             keep.append(ln)
     return keep
 
@@ -184,7 +189,7 @@ def since_last(report: Dict[str, Any], prev: Optional[Dict[str, Any]]) -> Dict[s
 
 def _norm(line: str) -> str:
     """A log line with its timestamp and numbers removed, for grouping repeats."""
-    return _DIGITS.sub("#", _TS.sub("", line))[:200]
+    return _DIGITS.sub("#", _TS.sub("", line) if _LINE_TS.match(line) else line)[:200]
 
 
 def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
@@ -336,7 +341,8 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
             vault += 1
         if re.search(r"slow query|long[- ]running quer|statement timeout|duration: \d{4,} ms", ln, re.I):
             slow_q.append(ln[:240])
-        if " ERROR " in ln or ln.startswith("ERROR") or "Traceback" in ln:
+        # A traceback is counted by its last line (the exception), not its header.
+        if " ERROR " in ln or ln.startswith("ERROR") or _EXC_LINE.match(ln):
             k = _norm(ln)
             errs[k] += 1
             sample.setdefault(k, ln[:300])

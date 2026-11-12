@@ -254,3 +254,17 @@ def test_log_rules_ignore_errors_older_than_the_window():
     new = ["2026-11-12 13:20:00 - Hub - INFO - fine"]
     vault = ["2026-11-11 18:00:00 - httpx - INFO - GET https://x.vault.azure.net/secrets/a"] * 300
     assert hc.evaluate(_report(), new + old + vault) == []
+
+
+def test_old_traceback_bodies_age_out_and_a_traceback_is_named_by_its_exception():
+    tb = lambda ts: [f"{ts} - websockets.server - ERROR - opening handshake failed",  # noqa: E731
+                     "Traceback (most recent call last):",
+                     '  File "server.py", line 547, in parse',
+                     "EOFError: connection closed while reading HTTP request line"]
+    old = [ln for i in range(40) for ln in tb("2026-11-11 18:35:%02d" % (i % 60))]
+    now = ["2026-11-12 13:20:00 - Hub - INFO - fine"]
+    assert hc.evaluate(_report(), old + now) == []
+    titles = {f["title"] for f in hc.evaluate(_report(), now + [ln for _ in range(40)
+                                                                  for ln in tb("2026-11-12 13:19:00")])}
+    assert not any("recent call last" in t for t in titles)
+    assert any("EOFError: connection closed" in t for t in titles)
