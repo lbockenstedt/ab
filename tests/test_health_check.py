@@ -80,6 +80,21 @@ def test_scan_health_rejects_error_reply_and_reports_why(monkeypatch):
     assert hc.status_of(res) == "unavailable"
 
 
+def test_scan_health_passes_azure_access_settings_to_azure_review(monkeypatch):
+    """CHAT_AZURE_ENABLED is not a health_check key; it must still reach azure_health."""
+    import sys
+    import types
+    import azure_health
+    seen = {}
+    monkeypatch.setattr(azure_health, "findings", lambda cfg: seen.update(cfg) or [])
+    fake = types.SimpleNamespace(_get_hub_agent_client=lambda: None,
+                                 file_escalated_issue=lambda *a, **k: (True, ""), get_hub_logs=lambda **k: [])
+    monkeypatch.setitem(sys.modules, "log_scan", fake)
+    hc._last.update(ts=0.0, running=False)
+    hc.scan_health({"CHAT_AZURE_ENABLED": True, "AZURE_LM_RESOURCE_GROUP": "LM"}, force=True)
+    assert seen.get("CHAT_AZURE_ENABLED") is True and seen.get("AZURE_LM_RESOURCE_GROUP") == "LM"
+
+
 def test_findings_carry_measurements_for_the_fixer():
     report = {"host": {"cpus": 2, "load": [0.5], "mem_used_pct": 40, "disk_used_pct": 30},
               "spoke_names": {"s1": "mipbe-netbox"},

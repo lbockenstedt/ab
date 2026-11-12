@@ -379,7 +379,8 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
         client = _get_hub_agent_client()
         report = client.request_sync("GET_HEALTH_REPORT", {}, timeout=30) if client else None
         import azure_health
-        azure_findings = azure_health.findings(cfg)
+        # Full config: cfg only holds health_check keys and would drop CHAT_AZURE_ENABLED.
+        azure_findings = azure_health.findings({**(config or {}), **cfg})
         if not (isinstance(report, dict) and "host" in report):
             why = ("not connected/approved" if report is None and client is None else
                    report.get("message") if isinstance(report, dict) and report.get("message")
