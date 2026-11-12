@@ -1795,6 +1795,12 @@
                                         └ Test-regression check (runs the test suite on head vs. base, flags NEW failures only — real code execution)
                                     </label>
                                 </div>
+                                <div class="flex items-center gap-3 mt-2 ml-6">
+                                    <label for="pr_review_fast_interval_s" class="text-xs font-medium text-slate-700" title="Promotion-PR fast lane (needs Pre-review on). Every this many seconds, AppBuilder reviews open promotion PRs (promote/dev-to-qa*, promote/qa-to-main*) whose current head has not been reviewed yet, then makes the same auto-merge decision as the hourly scan — so promotions do not wait up to an hour. Already-reviewed heads are skipped. 0 disables it. Default 300.">
+                                        └ Promotion-PR fast lane interval (seconds, 0 = off)
+                                    </label>
+                                    <input type="number" name="pr_review_fast_interval_s" id="pr_review_fast_interval_s" min="0" value="{{ settings.get('pr_review_fast_interval_s', 300) }}" class="w-28 p-1 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                </div>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">QA Service URL <span class="text-primary-text font-bold">(primary)</span></label>
