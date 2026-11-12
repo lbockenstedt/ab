@@ -40,3 +40,14 @@ def test_settings_rows_and_save_clear_default():
     import routes
     rows = routes._model_stage_rows({}, ["claude-opus-5"])
     assert [r["stage"] for r in rows] == ["diag_identify", "diag_fix"] and rows[1]["value"]
+
+
+def test_used_up_stage_falls_back_to_the_given_floor(monkeypatch):
+    # Both opus models already tried: the fix step must keep the write floor,
+    # not open the pool to a model such as gemini flash.
+    monkeypatch.setattr(llm_client, "_enumerate_candidates",
+                        lambda cfg: _cands("claude-opus-5.1", "claude-sonnet-5.5", "gemini-3.8-flash"))
+    tried = (("p", "", "claude-opus-5.1"),)
+    floor = tried + (("p", "", "gemini-3.8-flash"),)
+    assert sm.exclusions({}, "diag_fix", tried, fallback=floor) == floor
+    assert sm.exclusions({}, "diag_fix", tried) == tried
