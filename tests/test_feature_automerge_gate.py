@@ -240,6 +240,10 @@ def main():
     ok &= _check("already merged -> blocked (idempotent no-op)", should is False)
     should, reason = decide(_clean_rec(auto_merged=True), [], _clean_config(), _clean_pr_meta())
     ok &= _check("already auto_merged -> blocked (idempotent no-op)", should is False)
+    # Merged by someone else before AB got to it: silent no-op, not "PR is not open".
+    should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(state="closed", merged=True))
+    ok &= _check("merged elsewhere -> idempotent no-op, not a hold",
+                 should is False and reason == "already merged (idempotent no-op)")
 
     # ── PR-state gates ───────────────────────────────────────────────────────
     should, reason = decide(_clean_rec(), [], _clean_config(), _clean_pr_meta(draft=True))
