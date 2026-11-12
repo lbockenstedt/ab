@@ -2958,9 +2958,14 @@ async def settings_page(request: Request):
         "health_check_fields": [
             {"key": k, "value": config.get(k, v), "step": "any" if isinstance(v, float) else "1"}
             for k, v in {**__import__("health_check").DEFAULTS,
-                         **__import__("gh_actions_health").DEFAULTS}.items()
+                         **__import__("gh_actions_health").DEFAULTS,
+                         **__import__("auto_scale").DEFAULTS}.items()
             if k not in ("health_check_enabled", "health_check_interval_s",
-                         "gh_outage_backoff_enabled")],
+                         "gh_outage_backoff_enabled", "autoscale_enabled")],
+        "autoscale_enabled": bool(config.get("autoscale_enabled", True)),
+        "autoscale_catalog": __import__("auto_scale").CATALOG,
+        "autoscale_vms": __import__("auto_scale").known_vms(config),
+        "autoscale_allowed": config.get("autoscale_allowed") or {},
         "gh_outage_backoff_enabled": bool(config.get("gh_outage_backoff_enabled", True)),
         "fleet_checks_enabled": bool(config.get("fleet_checks_enabled", True)),
         "health_check_interval_min": round(float(config.get("health_check_interval_s", 1800)) / 60, 1),
@@ -3561,9 +3566,19 @@ async def save_settings(request: Request):
     config_data["gh_outage_backoff_enabled"] = data.get("gh_outage_backoff_enabled") == "on"
     # Fleet code rules gate (fleet_checks.py) for fixes, PR reviews and features.
     config_data["fleet_checks_enabled"] = data.get("fleet_checks_enabled") == "on"
+    # Platform Auto Scale (auto_scale.py): on/off and, per VM, the sizes it may
+    # use, sent as "VM|size" checkbox values.
+    import auto_scale as _as
+    config_data["autoscale_enabled"] = data.get("autoscale_enabled") == "on"
+    _allowed = {}
+    for _v in (form_data.getlist("autoscale_allowed") if hasattr(form_data, "getlist") else []):
+        _vm, _, _size = str(_v).partition("|")
+        if _vm and _size:
+            _allowed.setdefault(_vm, []).append(_size)
+    config_data["autoscale_allowed"] = _allowed
     _have = load_config()
-    for _k, _dv in {**_hc.DEFAULTS, **_gha.DEFAULTS}.items():
-        if _k in ("health_check_enabled", "gh_outage_backoff_enabled"):
+    for _k, _dv in {**_hc.DEFAULTS, **_gha.DEFAULTS, **_as.DEFAULTS}.items():
+        if _k in ("health_check_enabled", "gh_outage_backoff_enabled", "autoscale_enabled"):
             continue
         _src, _mul = (("health_check_interval_min", 60) if _k == "health_check_interval_s" else (_k, 1))
         try:

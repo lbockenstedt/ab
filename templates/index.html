@@ -992,6 +992,10 @@
                 <div class="hpe-card rounded-2xl p-5"><h3 class="text-sm font-bold text-navy mb-2">Issues filed last run</h3><div id="hc-filed" class="text-xs"></div></div>
                 <div class="hpe-card rounded-2xl p-5"><h3 class="text-sm font-bold text-navy mb-2">History (newest first)</h3><div id="hc-history" class="text-xs"></div></div>
             </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="hpe-card rounded-2xl p-5"><h3 class="text-sm font-bold text-navy mb-2">Platform Auto Scale <span id="hc-as-sub" class="font-normal text-xs text-slate-500"></span></h3><div id="hc-autoscale" class="text-xs"></div></div>
+                <div class="hpe-card rounded-2xl p-5"><h3 class="text-sm font-bold text-navy mb-2">Resizes (newest first)</h3><div id="hc-resizes" class="text-xs"></div></div>
+            </div>
             <p class="text-xs text-slate-500">Schedule and thresholds are under Settings → Monitoring. History is kept in memory and resets when AppBuilder restarts.</p>
         </div>
         <script>
@@ -1057,6 +1061,10 @@
                 fill('hc-routes', rows(r.routes || [], x => [x.key, x.slow + '/' + x.count + ' slow · avg ' + x.avg_s + 's · max ' + x.max_s + 's']), 'None recorded.');
                 fill('hc-commands', rows(r.commands || [], x => [x.key + ' @ ' + x.spoke, x.slow + '/' + x.count + ' slow · avg ' + x.avg_s + 's · max ' + x.max_s + 's']), 'None recorded.');
                 fill('hc-filed', rows(d.filed || [], x => [x.title, x.ok ? 'filed/folded' : 'failed: ' + x.detail]), 'Nothing filed.');
+                const scale = d.autoscale || {}, short = s => (s || '').replace('Standard_', '');
+                $('hc-as-sub').textContent = scale.enabled ? '(on)' : '(off: shows what it would do)';
+                fill('hc-autoscale', rows(scale.vms || [], x => [x.name + ' ' + short(x.size) + ' — ' + x.action + (x.to ? ' → ' + short(x.to) : ''), x.why]), 'No run yet (needs Azure fleet access).');
+                fill('hc-resizes', rows(scale.history || [], x => [new Date(x.ts * 1000).toLocaleString() + ' ' + x.vm + ' ' + short(x.from) + ' → ' + short(x.to), x.ok ? 'done' : 'failed: ' + x.detail]), 'No resizes yet.');
                 fill('hc-history', rows((d.history || []).slice().reverse().slice(0, 24), x => [new Date(x.ts * 1000).toLocaleTimeString() + ' — ' + x.findings + ' finding(s), ' + x.high + ' high', 'load ' + x.load + ' · mem ' + x.mem + '% · disk ' + x.disk + '% · lag ' + x.lag + 's']), 'No runs yet.');
             }
             async function load() {
@@ -2238,6 +2246,35 @@
                                         <input type="number" step="{{ f.step }}" min="0" name="{{ f.key }}" value="{{ f.value }}" class="w-full p-1 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
                                     </label>
                                     {% endfor %}
+                                </div>
+                                <div class="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
+                                    <div class="flex items-center gap-3">
+                                        <input type="checkbox" name="autoscale_enabled" id="autoscale_enabled" {{ 'checked' if autoscale_enabled else '' }} class="w-4 h-4 text-primary-text focus:ring-brand">
+                                        <label for="autoscale_enabled" class="text-xs font-medium text-slate-700" title="Each health check reads the LM VMs' last 2 hours from Azure. A VM that is short of memory or CPU is resized to the cheapest larger size ticked for it (one VM per run, 24h apart). If no larger size is ticked, AppBuilder files a finding instead so the workload gets fixed. Smaller sizes are only recommended. Off = show what it would do. Needs Azure fleet access (Chat Agent settings).">Platform Auto Scale <span class="text-slate-500">(grow a VM only to a size ticked below)</span></label>
+                                    </div>
+                                    {% if autoscale_vms %}
+                                    <div class="overflow-x-auto">
+                                        <table class="text-xs text-slate-700">
+                                            <thead><tr><th class="text-left pr-3 py-1">VM (current size)</th>
+                                                {% for c in autoscale_catalog %}<th class="px-2 py-1 font-normal text-slate-500 whitespace-nowrap" title="{{ c.vcpu }} vCPU · {{ c.ram_gb }} GB · baseline {{ c.baseline_pct }}% · ${{ '%.2f' % c.usd_month }}/month">{{ c.size.replace('Standard_', '') }}<br>{{ c.vcpu }}c/{{ c.ram_gb }}G · ${{ c.usd_month|round|int }}</th>{% endfor %}
+                                            </tr></thead>
+                                            <tbody>
+                                            {% for vm in autoscale_vms %}
+                                            {% set picked = autoscale_allowed.get(vm.name, []) %}
+                                            <tr class="border-t border-slate-200">
+                                                <td class="pr-3 py-1 whitespace-nowrap">{{ vm.name }} <span class="text-slate-500">({{ vm.size.replace('Standard_', '') or '?' }})</span>{% if vm.name|upper == 'LM-AB' %}<br><span class="text-slate-500">never resized automatically</span>{% endif %}</td>
+                                                {% for c in autoscale_catalog %}
+                                                <td class="text-center">{% if c.size == vm.size %}<span title="Current size" class="text-emerald-700">●</span>{% else %}<input type="checkbox" name="autoscale_allowed" value="{{ vm.name }}|{{ c.size }}" {{ 'checked' if c.size in picked else '' }} class="rounded border-slate-300 focus:ring-brand">{% endif %}</td>
+                                                {% endfor %}
+                                            </tr>
+                                            {% endfor %}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <span class="text-xs text-slate-500">● = current size. Tick the sizes each VM may move to; nothing ticked = it stays at its current size.</span>
+                                    {% else %}
+                                    <span class="text-xs text-slate-500 block">The VM list appears after the first health check with Azure fleet access on.</span>
+                                    {% endif %}
                                 </div>
                                 <label class="text-xs font-medium text-slate-600 block mt-2">Hub-log auto-filing — per module <span class="text-slate-500 font-normal">(none checked = OFF; enable one at a time)</span></label>
                                 {% if log_module_options %}
