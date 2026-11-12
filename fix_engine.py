@@ -5085,15 +5085,18 @@ def _qa_service_verify(repo_name, config, timeout=120):
 
 
 def verify_fix(repo_path, repo_name, config):
-    """Run the tests for a fixed repo: the fleet smoke test when the repo has a
-    CI workflow, else the QA service, then configured or detected local tests.
+    """Run the tests for a fixed repo: the QA service or per-repo command when
+    the operator configured one, else the fleet smoke test when the repo has a
+    CI workflow, else detected local tests.
     Returns (passed, error_text).
     """
     logger.info(f"Verifying fix in {repo_path}...")
 
     # Priority 1: the fleet smoke test -- the checks and tests CI runs, read
-    # from the repo's own ci.yml (see SMOKE_HELPERS_DIRNAME).
-    if _smoke_available(repo_path):
+    # from the repo's own ci.yml (see SMOKE_HELPERS_DIRNAME). A QA service or
+    # per-repo command set in Settings is an explicit choice and wins.
+    operator_set = config.get("QA_API_URL") or config.get("repo_tests", {}).get(repo_name)
+    if _smoke_available(repo_path) and not operator_set:
         logger.info(f"Running the fleet smoke test for {repo_name}")
         result = run_sandboxed_command(_smoke_command(), repo_path)
         if _sandbox_infra_failure(result):
