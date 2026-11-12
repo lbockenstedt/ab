@@ -4478,11 +4478,12 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
         # call, so the floor cannot be sidestepped by whichever caller built the
         # requirements.
         import stage_models
+        _fix_excl = _fix_model_exclusions(config, requirements.exclude_models or ())
         if stage_models.is_diagnostic(issue_body):
-            # Health-check findings: the stage's own model list replaces the ordinary write floor.
-            _fix_excl = stage_models.exclusions(config, "diag_fix", requirements.exclude_models or ())
-        else:
-            _fix_excl = _fix_model_exclusions(config, requirements.exclude_models or ())
+            # Health-check findings: the stage's own model list replaces the ordinary
+            # write floor until those models are used up, then the floor applies.
+            _fix_excl = stage_models.exclusions(config, "diag_fix", requirements.exclude_models or (),
+                                                fallback=_fix_excl)
         if _fix_excl != tuple(requirements.exclude_models or ()):
             requirements = dataclasses.replace(requirements, exclude_models=_fix_excl)
         # Ask for the fix.
