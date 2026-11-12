@@ -375,6 +375,37 @@ def run_az(argv, config, timeout=120):
             "stdout": _cap(p.stdout), "stderr": _cap((p.stderr or "").strip(), 2000)}
 
 
+# AppBuilder runs on LM-AB: resizing it restarts AB in the middle of the run.
+NEVER_RESIZE = frozenset({"LM-AB"})
+
+
+def resize_vm(vm, size, config, timeout=900):
+    """Resize one LM VM (Platform Auto Scale's only change). It is a separate
+    path from run_az so auto-scale does not need CHAT_AZURE_ALLOW_MUTATION,
+    which would open every az command. LM-AB is always refused. Never raises."""
+    if not azure_enabled(config):
+        return {"error": "Azure access is disabled (set CHAT_AZURE_ENABLED to enable)."}
+    vm, size = (vm or "").strip(), (size or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", vm) or not re.fullmatch(r"Standard_[A-Za-z0-9_]{1,40}", size):
+        return {"error": f"invalid vm or size: {vm!r} {size!r}"}
+    if vm.upper() in NEVER_RESIZE:
+        return {"error": f"refused: {vm} is never resized automatically"}
+    ok, msg = _ensure_login(config)
+    if not ok:
+        return {"error": msg}
+    az = (config or {}).get("AZURE_AZ_BIN") or "az"
+    argv = ["vm", "resize", "-g", _resource_group(config), "-n", vm, "--size", size,
+            "--query", "hardwareProfile.vmSize", "-o", "tsv"]
+    try:
+        p = subprocess.run([az, *argv], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"error": f"resize timed out after {timeout}s", "argv": argv}
+    except FileNotFoundError:
+        return {"error": f"az binary not found ({az})"}
+    return {"argv": argv, "exit_code": p.returncode, "stdout": _cap(p.stdout, 2000),
+            "stderr": _cap((p.stderr or "").strip(), 2000)}
+
+
 def run_server_shell(vm, cmd, config, timeout=180):
     """Run a vetted shell command ON one LM VM via `az vm run-command invoke`.
     Returns a result dict (never raises)."""
