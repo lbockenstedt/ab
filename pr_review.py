@@ -69,6 +69,7 @@ import logging
 import hashlib
 import os
 import re
+import threading
 from datetime import timedelta
 
 # AppBuilder helpers: repos, shared state, guardrails, PR actions and the deterministic checks.
@@ -1399,6 +1400,11 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
     state_flags = state_flags or {}
     pr_meta = pr_meta or {}
 
+    # Already merged, by AB or by someone else: terminal state, nothing held.
+    if rec.get("merged") or rec.get("auto_merged") or pr_meta.get("merged"):
+        # Keep the literal (must equal _IDEMPOTENT_MERGED_REASON): the test execs this standalone.
+        return False, "already merged (idempotent no-op)"
+
     # Both kill switches must be on, and the repo must be opted in.
     if not config.get("feature_drive_enabled", False):
         return False, "feature_drive_enabled is off"
@@ -1446,11 +1452,6 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
                         "(opt-in, defaults to none) — main (or any unlisted branch) is "
                         "never eligible, regardless of author or confidence" % _base_ref)
 
-    # Already merged: nothing to do.
-    if rec.get("merged") or rec.get("auto_merged"):
-        # Keep the literal (must equal _IDEMPOTENT_MERGED_REASON): test_feature_automerge_gate
-        # execs this function standalone, so it cannot reference module constants.
-        return False, "already merged (idempotent no-op)"
     # The PR must be ready, open and mergeable, and AppBuilder running normally.
     if pr_meta.get("draft"):
         return False, "PR is a draft"
@@ -1748,6 +1749,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
             "is_feature_drive": bool(marker_match),
             "draft": bool(getattr(pr, "draft", False)),
             "state": (pr.state or "open"),
+            "merged": bool(getattr(pr, "merged", False)),
             "mergeable": mergeable,
             # Proves `rec` was actually written for THIS commit (see the
             # head-freshness check in _automerge_decision) — PR #261 review finding.
@@ -2699,6 +2701,15 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         _release_issue(lock_id)
 
 
+# Held while a scan reviews PRs, so the hourly scan_open_prs and the promotion
+# fast lane (scan_promotion_prs) never review the same PR at the same time.
+_scan_lock = threading.Lock()
+
+# Head branches the lm-fleet promote.yml workflow opens promotion PRs from.
+# Anchored at both ends so e.g. "promote/dev-to-qamalicious" does not match.
+_PROMOTION_PR_HEAD_RE = re.compile(r"^promote/(dev-to-qa|qa-to-main)(-[A-Za-z0-9._-]+)?$")
+
+
 def scan_open_prs(gh, config):
     """Poll open PRs on monitored repos and post a parity pre-review on each.
 
@@ -2716,6 +2727,15 @@ def scan_open_prs(gh, config):
         return
     if not repos:
         return
+    # One scan at a time: the promotion fast lane takes the same lock.
+    with _scan_lock:
+        _scan_repos(gh, config, repos)
+
+
+def _scan_repos(gh, config, repos):
+    """Review every open PR in ``repos``, then run the housekeeping passes.
+
+    Called by scan_open_prs while it holds _scan_lock."""
     # Surface PR-review as a distinct 'pr'-kind task so the UI badges it apart
     # from bug scans/fixes (see templates/index.html Active Tasks).
     update_task_state("PRReview", "PR pre-review — scanning %d repo(s)" % len(repos),
@@ -2761,6 +2781,80 @@ def scan_open_prs(gh, config):
     # Always close the task.
     finally:
         update_task_state("PRReview", action="end")
+
+
+def _is_promotion_pr(pr):
+    """True when ``pr`` is a dev->qa or qa->main promotion PR (by head branch)."""
+    head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
+    return bool(_PROMOTION_PR_HEAD_RE.match(head_ref))
+
+
+def _head_already_reviewed(repo_name, pr):
+    """True when the PR's current head AND current description already have a
+    finished review, the same currency rule _review_one applies.
+
+    Not reviewed: no record, a record for another head, a review queued for
+    retry (panel unavailable), no review comment, or a comment whose head or
+    description digest no longer matches (the panel judges the description
+    against the diff, so an edited description needs a new review)."""
+    record = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, pr.number)) or {}
+    head_sha = pr.head.sha
+    if record.get("head") != head_sha or is_queued_for_retry_stale(record, head_sha):
+        return False
+    existing = _find_marker_comment(pr)
+    body = existing.body if existing else ""
+    return (("<!-- head: %s -->" % head_sha) in (body or "")
+            and _desc_is_current(body, _desc_digest(pr)))
+
+
+def scan_promotion_prs(gh, config):
+    """Fast lane: review open promotion PRs whose current head is not reviewed yet.
+
+    Runs every ``pr_review_fast_interval_s`` seconds (0 disables it) so a
+    promotion PR is reviewed, and auto-merged if it qualifies, within minutes
+    instead of waiting for the hourly scan_open_prs. Each PR goes through the
+    same _review_one as the hourly scan, so the review and the auto-merge
+    decision are identical. Skips while the hourly scan holds _scan_lock, and
+    honours the same gates: pr_review_enabled, paused/blackout and a GitHub
+    Actions outage. Returns the number of PRs reviewed. Never raises.
+    """
+    import gh_actions_health
+    # Same gates as the hourly scan, plus the interval switch.
+    if not config.get("pr_review_enabled", False):
+        return 0
+    if int(config.get("pr_review_fast_interval_s", 300) or 0) <= 0:
+        return 0
+    if state.get("paused") or state.get("blackout"):
+        return 0
+    if gh_actions_health.outage(config)[0]:
+        return 0
+    # The hourly scan is running and will cover these PRs itself.
+    if not _scan_lock.acquire(blocking=False):
+        return 0
+    reviewed = 0
+    try:
+        for repo_name in get_monitored_repos(config):
+            try:
+                repo = gh.get_repo(repo_name)
+                for pr in repo.get_pulls(state="open"):
+                    if (getattr(pr, "draft", False) or not _is_promotion_pr(pr)
+                            or _head_already_reviewed(repo.full_name, pr)):
+                        continue
+                    try:
+                        logger.info("pr_review: fast lane reviewing promotion PR %s #%s",
+                                    repo.full_name, pr.number)
+                        _review_one(gh, repo, pr, config)
+                        reviewed += 1
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("pr_review: fast lane PR #%s in %s failed: %s",
+                                       pr.number, repo_name, e)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("pr_review: fast lane repo %s failed: %s", repo_name, e)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("pr_review: fast lane could not resolve monitored repos: %s", e)
+    finally:
+        _scan_lock.release()
+    return reviewed
 
 
 # Records written before base_ref/head_ref existed have neither, so the PR list
