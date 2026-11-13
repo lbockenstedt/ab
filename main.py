@@ -539,7 +539,8 @@ templates.env.globals.update(
     issue_chip=_mission_control.issue_chip, pr_chip=_mission_control.pr_chip,
     pr_filter_counts=_mission_control.pr_filter_counts,
     panel_chips=_mission_control.panel_chips, age_of=_mission_control.age_of,
-    iso_utc=_mission_control.iso_utc)
+    iso_utc=_mission_control.iso_utc, next_poll_label=_mission_control.next_poll_label,
+    fmt_minutes=_mission_control.fmt_minutes)
 import app_state as _app_state  # noqa: E402
 templates.env.globals["feed_resolved_statuses"] = list(_app_state.FEED_BUCKETS["resolved"])
 # Stamp which commit this process booted on, before any worker starts, so the watchdog
