@@ -434,6 +434,8 @@ def test_promotion_lanes_show_the_open_promotion_and_the_last_one():
     assert rows["lm"]["note"] == "#7 qa → main: auto-merge held"
     assert rows["nw"]["note"] == "last promoted to qa 3h ago"
     assert rows["cs"]["note"] == "no promotion PRs seen"
+    names = [r["repo"] for r in mission_control.promotion_lanes(["a/lm"], prs, NOW)]
+    assert names == ["a/lm", "o/lm", "nw"]
 
 
 @pytest.mark.parametrize("head, base, route", [

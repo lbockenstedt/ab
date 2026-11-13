@@ -570,6 +570,11 @@ def promotion_lanes(repos, pr_reviews, now=None):
             note = "no promotion PRs seen"
         rows.append({"repo": full.rsplit("/", 1)[-1], "full": full,
                      "qa": lanes[("dev", "qa")], "main": lanes[("qa", "main")], "note": note})
+    # Same repo name under two owners: show owner/repo so the rows differ.
+    names = [r["repo"] for r in rows]
+    for r in rows:
+        if names.count(r["repo"]) > 1:
+            r["repo"] = r["full"]
     return rows
 
 
