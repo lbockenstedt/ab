@@ -15,6 +15,7 @@ first, so the guard is satisfied honestly.
 """
 # os builds clone paths and reads the GitHub token from the environment.
 import os
+from datetime import datetime
 # time drives polling loops (mergeability, parked-run release).
 import time
 # tempfile gives a throwaway directory for the conflict-resolution clone.
@@ -147,6 +148,36 @@ def _expects_missing_check(msg):
     return "required status check" in low and "is expected" in low
 
 
+# The last check-run counts seen per (repo, head sha), from lookups AppBuilder
+# already makes; the dashboard reads them (mission_control) without calling GitHub.
+CI_SEEN = {}
+_CI_SEEN_MAX = 200
+
+
+def _remember_ci(repo_name, head_sha, runs, failing):
+    """Cache a commit's check-run counts: finished, passed and failed.
+
+    Only success/neutral/skipped count as passed; a cancelled, parked or
+    unrecognised run is finished but never a pass (as in head_ci_conclusion)."""
+    done = sum(1 for r in runs if r.get("status") == "completed")
+    passed = sum(1 for r in runs if r.get("status") == "completed"
+                 and r.get("conclusion") in ("success", "neutral", "skipped"))
+    # Parked runs wait for approval (_release_parked_checks); they are not a lost verdict.
+    parked = sum(1 for r in runs if r.get("status") == "completed" and r.get("conclusion") == "action_required")
+    total = len(runs)
+    # The CI state the dashboard shows; "since" is kept while it is unchanged,
+    # so Working on now's time in state counts from CI's last change.
+    phase = ("none" if not total else "failed" if failing else "running" if done < total
+             else "passed" if passed == total else "parked" if parked else "no verdict")
+    now = datetime.now().isoformat(timespec="seconds")
+    prev = CI_SEEN.get((repo_name, head_sha)) or {}
+    since = prev.get("since") if prev.get("phase") == phase and prev.get("since") else now
+    CI_SEEN[(repo_name, head_sha)] = {"done": done, "passed": passed, "parked": parked, "total": total,
+                                      "failed": len(failing), "phase": phase, "since": since, "at": now}
+    while len(CI_SEEN) > _CI_SEEN_MAX:
+        CI_SEEN.pop(next(iter(CI_SEEN)))
+
+
 def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
     """The CI verdict for *head_sha* as ``(state, details)``, where state is one
     of ``success``/``failure``/``pending``/``unknown``.
@@ -207,6 +238,7 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
         if stuck:
             gh_actions_health.note_infra_failure(len(stuck))
             return "infra", "%d workflow run(s) never started (GitHub Actions outage)" % len(stuck)
+        _remember_ci(repo_name, head_sha, [], [])
         return "unknown", ""
 
     # cancelled / stale / startup_failure / action_required never produced a
@@ -229,6 +261,7 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
         # Anything not clearly passing is unrecognised.
         elif conclusion not in ("success", "neutral", "skipped"):
             unrecognised = True
+    _remember_ci(repo_name, head_sha, runs, failing)
     # Any failure wins, then pending, then unknown; otherwise everything passed.
     if failing:
         return "failure", ", ".join(failing)

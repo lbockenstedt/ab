@@ -519,12 +519,10 @@ def test_release_route_is_registered_and_renders_the_release_view():
     assert m and m.group(1) == "release", "/release must render view='release'"
 
 
-def test_sidebar_links_to_release_management():
+def test_top_nav_links_to_release_management():
     text = _index_html()
-    assert 'href="/release"' in text
+    assert "('release', '/release', 'Release')" in text
     assert "Release Management" in text
-    # The nav item must light up on the matching view, like every other entry.
-    assert "'active' if view == 'release'" in text
 
 
 # --------------------------------------------------------------------------

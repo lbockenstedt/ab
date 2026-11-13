@@ -1,6 +1,8 @@
 """WebUI shell and log viewer in the Mission Control style: the run controls
 (Scan Now, updates, restart, blackout, stop) sit in the topbar instead of a
 footer action bar, and the Logs pages show one compact line per log entry."""
+import sys
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -128,3 +130,88 @@ def test_a_traceback_across_the_100_line_cut_keeps_its_entry(client, monkeypatch
     monkeypatch.setattr(routes, "get_log_path", lambda: str(log))
     html = client.get("/logs").text
     assert "crashed" in html and html.count('class="log-row') == 1
+
+
+# ---- Spec layout: four top tabs, Diagnostics sub-tabs, Mission Control and History ----
+
+def _tab(html):
+    """The highlighted top tab's label."""
+    nav = html[html.index("<header"):html.index("</header>")]
+    return nav.split('top-tab active')[1].split(">", 1)[1].split("<", 1)[0].strip()
+
+
+@pytest.mark.parametrize("path, tab", [("/", "Mission Control"), ("/history", "Mission Control"),
+                                       ("/release", "Release"), ("/settings", "Settings"),
+                                       ("/diagnostics", "Diagnostics"), ("/logs", "Diagnostics"),
+                                       ("/health", "Diagnostics"), ("/hub-logs", "Diagnostics"),
+                                       ("/chat", "Diagnostics")])
+def test_every_page_keeps_its_url_under_one_of_four_tabs(client, monkeypatch, path, tab):
+    monkeypatch.setattr(routes, "get_hub_logs", lambda *a: [])
+    monkeypatch.setattr(routes, "hub_log_line_count", lambda: 0)
+    # Other tests leave partial pr_reviews rows and a fix_engine stub behind.
+    from app_state import state
+    monkeypatch.setitem(state, "pr_reviews", {})
+    monkeypatch.setitem(state, "processed", {})
+    stub = sys.modules.get("fix_engine")
+    if stub is not None and not getattr(stub, "__file__", None):
+        monkeypatch.delitem(sys.modules, "fix_engine")
+    resp = client.get(path)
+    assert resp.status_code == 200 and _tab(resp.text) == tab
+    assert "<aside id=\"sidebar\"" not in resp.text and 'id="sidebar"' not in resp.text
+    assert resp.text.count('class="top-tab') == 4
+    # Logs, Hub Health, Hub Logs and Chat are Diagnostics sub-tabs.
+    assert ('href="/hub-logs" class="sub-nav-item' in resp.text) == (tab == "Diagnostics")
+
+
+@pytest.fixture
+def mc_state(monkeypatch):
+    """Sample stores: a split-verdict PR, a held PR and a fix running now."""
+    from datetime import datetime, timedelta
+    from app_state import state
+    now = datetime.now()
+    monkeypatch.setitem(state, "processed", {"o/lm:5": {"status": "processing", "timestamp": now.isoformat(), "title": "T"}})
+    monkeypatch.setitem(state, "pr_reviews", {
+        "o/lm#3": {"repo": "o/lm", "number": 3, "title": "Split", "url": "u3", "reviewed_at": now.isoformat(), "items": [],
+                   "panel_verdict": "Approve", "panel2_verdict": "Reject", "auto_merge_blocked_reason": "panel 2 did not Approve"},
+        "o/lm#4": {"repo": "o/lm", "number": 4, "title": "Held", "url": "u4", "reviewed_at": now.isoformat(), "items": [],
+                   "auto_merge_blocked_reason": "CI is failing on head h — needs human review"},
+    })
+    monkeypatch.setitem(state, "active_tasks", {"o/lm:5": {
+        "name": "Fix Attempt 1/3 for o/lm:5", "start_time": now - timedelta(minutes=3), "stage": "fix",
+        "stages": ["triage", "fix"], "step": "attempt 1/3: generating the fix", "models": ["qwen3.8-27b"]}})
+
+
+def test_dashboard_actions_fit_each_state_and_history_holds_all_activity(client, mc_state):
+    html = client.get("/").text
+    html = html[html.index('id="mc-attention"'):]
+    split = html[html.index('data-num="3"') - 400:html.index("lm #4")]
+    assert 'data-mc="approve-merge"' in split and ">Retry review<" in split and ">Deny<" in split
+    held = html[html.index('>lm #4<'):]
+    held = held[:held.index('</details>')]
+    assert ">Open PR<" in held and 'href="u4/checks"' in held and ">Re-run CI<" in held
+    assert "Sorted by urgency · oldest first within a group" in html
+    assert 'id="activity"' not in html and 'href="/history"' in html
+    assert 'id="activity"' in client.get("/history").text
+
+
+def test_working_on_now_renders_the_live_card_and_its_fragment_endpoint(client, mc_state):
+    html = client.get("/").text
+    assert "live · refreshed every 5s" in html and 'id="wk-host"' in html
+    frag = client.get("/api/mission-control/working").text
+    assert "<html" not in frag and 'data-tid="o/lm:5"' in frag
+    assert "attempt 1/3: generating the fix" in frag and "qwen3.8-27b" in frag
+    assert frag.count("wk-step wk-done") >= 1 and frag.count("wk-step wk-current") >= 1
+    # The held PR is in flight too, with its own stepper and Now line.
+    assert "lm #4" in frag and "held: CI is failing" in frag
+
+
+def test_a_stopped_app_shows_no_next_poll(client, monkeypatch):
+    import time
+    stub = sys.modules.get("fix_engine")
+    if stub is not None and not getattr(stub, "__file__", None):
+        monkeypatch.delitem(sys.modules, "fix_engine")
+    monkeypatch.setitem(routes.state, "next_poll_at", time.time() + 600)
+    monkeypatch.setitem(routes.state, "paused", False)
+    assert "Next poll" in client.get("/settings").text
+    monkeypatch.setitem(routes.state, "paused", True)
+    assert "Next poll" not in client.get("/settings").text

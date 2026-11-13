@@ -1020,6 +1020,13 @@ def auto_remediate_pr(
                    auto_remediate_reason="Remediation attempt limit reached")
         return False, "Remediation attempt limit reached"
 
+    # From here on AppBuilder is improving the PR: show it on the Working on now card.
+    try:
+        from app_state import set_task_step
+        set_task_step("PRReview", "improving: attempt %d/%d on the panel findings" % (attempts + 1, max_attempts),
+                      stage="fix")
+    except Exception:  # noqa: BLE001 - progress lines are cosmetic
+        pass
 
     # Twin-parity detection and auto-mirroring on pxmx
     if "pxmx" in repo_full_name.lower():

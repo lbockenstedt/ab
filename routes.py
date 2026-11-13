@@ -1070,25 +1070,58 @@ async def dashboard(request: Request):
     except Exception:
         claude_enabled = False
     # Mission Control (KPIs, Needs your attention, Recent outcomes); Settings can switch it off.
-    mission = None
-    if config.get("dashboard_mission_control", True):
-        mission = mission_control.build(state["processed"], state.get("pr_reviews"), state["active_tasks"])
+    # Working on now is always shown; with Mission Control off the dashboard also
+    # carries the All activity table (otherwise it lives on /history).
+    mission = _mission(config)
+    history = request.url.path == "/history"
 
     # Render the dashboard.
     return templates.TemplateResponse(request=request, name="index.html", context={
-        "view": "status",
+        "view": "history" if history else "status",
         "state": {**state, "processed": recent_processed},
         "sorted_pr_reviews": pr_items,
         "claude_enabled": claude_enabled,
-        "mission": mission,
+        "mission": mission if config.get("dashboard_mission_control", True) or history else None,
+        "working": mission,
     })
+
+
+def _mission(config=None):
+    """mission_control.build() over the live state and the caches the workers keep
+    (head CI counts, the next poll time, the remediation ceiling, monitored repos)."""
+    config = config if config is not None else load_config()
+    try:
+        from pr_actions import CI_SEEN
+        ci_seen = dict(CI_SEEN)
+    except Exception:
+        ci_seen = {}
+    try:
+        from github_ops import get_monitored_repos
+        repos = get_monitored_repos(config)
+    except Exception:
+        repos = []
+    return mission_control.build(
+        state["processed"], state.get("pr_reviews"), state["active_tasks"], ci_seen=ci_seen,
+        next_poll_at=None if state.get("paused") else state.get("next_poll_at"),
+        max_attempts=int(config.get("pr_auto_remediate_max_attempts", 3) or 3), repos=repos)
+
+
+# /history: the All activity table (every issue and PR, with filters and actions).
+router.add_api_route("/history", dashboard, methods=["GET"])
 
 
 @router.get("/api/mission-control")
 async def mission_control_summary():
     """The dashboard's Mission Control data: KPIs, what needs a person (with why),
-    what AppBuilder still owns, and recent outcomes."""
-    return mission_control.build(state["processed"], state.get("pr_reviews"), state["active_tasks"])
+    what AppBuilder is working on and what is in flight, and recent outcomes."""
+    return _mission()
+
+
+@router.get("/api/mission-control/working")
+async def mission_control_working(request: Request):
+    """The Working on now section as an HTML fragment; the dashboard swaps it in every 5s."""
+    return templates.TemplateResponse(request=request, name="_working.html",
+                                      context={"working": _mission()})
 
 
 def _duration_str(seconds):
