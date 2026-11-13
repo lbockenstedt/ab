@@ -152,7 +152,8 @@ def test_every_page_keeps_its_url_under_one_of_four_tabs(client, monkeypatch, pa
     from app_state import state
     monkeypatch.setitem(state, "pr_reviews", {})
     monkeypatch.setitem(state, "processed", {})
-    if not getattr(sys.modules.get("fix_engine"), "__file__", "x"):
+    stub = sys.modules.get("fix_engine")
+    if stub is not None and not getattr(stub, "__file__", None):
         monkeypatch.delitem(sys.modules, "fix_engine")
     resp = client.get(path)
     assert resp.status_code == 200 and _tab(resp.text) == tab
