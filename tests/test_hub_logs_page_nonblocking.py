@@ -64,6 +64,7 @@ def _load_ns(get_hub_logs_stub, total=0):
         "state": {},
         "datetime": _datetime,
         "Request": type("Request", (), {}),
+        "log_entry": lambda line, module="": {"module": module, "msg": line},
     }
     exec("\n\n".join(segs), ns)
     return ns
@@ -91,8 +92,9 @@ def main():
     big_logs = [{"module": f"m{i % 40}", "log": f"2026-08-29 12:00:{i % 60:02d} - line {i}"}
                for i in range(50000)]
 
-    def _slow_get_hub_logs(max_per_module=None):
+    def _slow_get_hub_logs(max_per_module=None, fold=False):
         assert max_per_module == 500  # only the newest page-worth per module is read
+        assert fold  # tracebacks stay with their entry
         time.sleep(0.2)  # stands in for the real read+sort of 575K lines
         return big_logs
 
@@ -125,10 +127,10 @@ def main():
     ok &= _check("hub_logs_total carries the UNTRUNCATED count for the 'showing N of TOTAL' label",
                 ctx["hub_logs_total"] == 50000)
     ok &= _check("the truncated rows are the FIRST 500 (get_hub_logs already returns newest-first)",
-                ctx["hub_logs"] == big_logs[:500])
+                [r["msg"] for r in ctx["hub_logs"]] == [r["log"] for r in big_logs[:500]])
 
     # ── a small mirror (under the limit) round-trips untouched ──────────────
-    small_ns = _load_ns(lambda _n=None: big_logs[:10], total=10)
+    small_ns = _load_ns(lambda *_a: big_logs[:10], total=10)
     small_resp = _run(small_ns["get_hub_logs_page"](request=None))
     ok &= _check("a mirror smaller than the limit is not padded/altered",
                 len(small_resp.context["hub_logs"]) == 10
@@ -136,7 +138,7 @@ def main():
 
     # ── an empty mirror still produces the existing "waiting for first
     # scan cycle" error message, unaffected by the truncation change ────────
-    empty_ns = _load_ns(lambda _n=None: [])
+    empty_ns = _load_ns(lambda *_a: [])
     empty_resp = _run(empty_ns["get_hub_logs_page"](request=None))
     ok &= _check("an empty mirror still reports fetch_error (not silently swallowed)",
                 bool(empty_resp.context["hub_fetch_error"]))
