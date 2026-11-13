@@ -801,10 +801,14 @@
                             {% set p1_conf = pr.get('panel_confidence') %}
                             {% set p2_conf = pr.get('panel2_confidence') %}
                             {% set am_score = pr.get('auto_merge_score') %}
-                            {% if pr.get('panel_status') and pr.get('panel2_status') %}
+                            {# A "skipped" panel 2 is waiting for panel 1 to Approve (pr_review._state_panel_after),
+                               not a panel that could not run: the headline shows panel 1's verdict. When panel 1
+                               itself could not run, neither panel gave a verdict: that is PANELS N/A. #}
+                            {% set p2_down = pr.get('panel2_status') if (pr.get('panel2_status') != 'skipped' or pr.get('panel_status')) else '' %}
+                            {% if pr.get('panel_status') and p2_down %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panels could not run for this pass: {{ pr.panel_status }}">PANELS N/A</span>
-                            {% elif pr.panel_status or pr.panel2_status %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panel could not run for this pass: {{ pr.panel_status or pr.panel2_status }}">PANEL N/A</span>
+                            {% elif pr.panel_status or p2_down %}
+                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panel could not run for this pass: {{ pr.panel_status or p2_down }}">PANEL N/A</span>
                             {% elif comp_verdict %}
                             <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {% if comp_verdict == 'Approve' %}text-green-700 bg-green-100{% elif comp_verdict == 'Split' %}text-amber-800 bg-amber-100 border border-amber-300{% else %}text-red-700 bg-red-100{% endif %}" title="Composite advisory panel verdict (average confidence: {{ (avg_conf * 100)|round|int if avg_conf is not none else 'N/A' }}%) — a human is still the sole approver.">ADVISORY {{ comp_verdict|upper }}{% if avg_conf is not none %} · {{ (avg_conf * 100)|round|int }}%{% endif %}</span>
                             {% endif %}
@@ -887,7 +891,9 @@
                                 <div class="text-xs text-slate-600 whitespace-pre-line pl-2 mt-0.5">{{ pr.panel_critique }}</div>
                             </div>
                             {% endif %}
-                            {% if pr.get('panel2_status') %}
+                            {% if pr.get('panel2_status') == 'skipped' %}
+                            <div class="text-xs text-slate-500 italic mb-1">🔀 State-logic review runs once the skeptical review Approves.</div>
+                            {% elif pr.get('panel2_status') %}
                             <div class="text-xs text-slate-500 italic mb-1">🔀 State-logic review unavailable this pass ({{ pr.panel2_status }}).</div>
                             {% elif pr.get('panel2_critique') %}
                             <div class="mb-1">
@@ -1785,8 +1791,14 @@
                                 </div>
                                 <div class="flex items-center gap-3 mt-2 ml-6">
                                     <input type="checkbox" name="pr_review_state_logic_enabled" id="pr_review_state_logic_enabled" {{ 'checked' if settings.pr_review_state_logic_enabled else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
-                                    <label for="pr_review_state_logic_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review on; independent of the LLM reviewer panel above). Runs a SECOND, narrow-scope panel pass that checks ONLY two defect shapes: a status/enum value conflating distinct states (e.g. a warning silently read as a failure), and new logic placed after an early-return/guard that skips it on the path it was meant to cover. Advisory only. Uses your configured LLM provider slots (an extra pass = extra cost per PR).">
+                                    <label for="pr_review_state_logic_enabled" class="text-xs font-medium text-slate-700" title="Off by default (needs Pre-review on; independent of the LLM reviewer panel above). Runs a SECOND, narrow-scope panel pass that checks ONLY two defect shapes: a status/enum value conflating distinct states (e.g. a warning silently read as a failure), and new logic placed after an early-return/guard that skips it on the path it was meant to cover. Advisory only. Uses your configured LLM provider slots (an extra pass = extra cost per PR). With the LLM reviewer panel above on, it runs only once that panel Approves (config pr_review_state_panel_waits).">
                                         └ State-logic / control-flow panel (narrow: status-conflation + unreachable-new-code only)
+                                    </label>
+                                </div>
+                                <div class="flex items-center gap-3 mt-2 ml-10">
+                                    <input type="checkbox" name="pr_review_state_panel_waits" id="pr_review_state_panel_waits" {{ 'checked' if settings.get('pr_review_state_panel_waits', True) else '' }} class="w-4 h-4 text-indigo-600 focus:ring-indigo-500">
+                                    <label for="pr_review_state_panel_waits" class="text-xs font-medium text-slate-700" title="On by default. With both panels on, the state-logic panel runs only once the LLM reviewer panel Approves: a PR that panel did not approve cannot merge, and its fix re-runs both panels, so this saves a full panel pass per rejected head. Off runs both panels on every pass.">
+                                        └ Run the state-logic panel only once the reviewer panel Approves (saves tokens)
                                     </label>
                                 </div>
                                 <div class="flex items-center gap-3 mt-2 ml-6">
@@ -2699,6 +2711,12 @@
                             {% if settings.get('feature_automerge_enabled') and not (settings.get('pr_review_llm_enabled') and settings.get('pr_review_state_logic_enabled')) %}
                             <p class="text-xs text-amber-600 font-medium mt-2">⚠️ Auto-merge is on, but one or both review panels (LLM tab → Pre-review) are off — auto-merge can never clear without them, so nothing will happen until you enable both.</p>
                             {% endif %}
+                        </div>
+
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label for="pr_remediate_stall_limit" class="text-sm font-semibold text-slate-700">Stop when fixes stop helping</label>
+                            <p class="text-xs text-slate-500">AppBuilder stops remediating a PR after this many reviewed heads in a row fail to beat its best review (more panels approving, or a higher lowest confidence), and leaves it for a human. The attempt ceiling still applies. 0 turns this off. Default 2.</p>
+                            <input type="number" name="pr_remediate_stall_limit" id="pr_remediate_stall_limit" min="0" step="1" value="{{ settings.get('pr_remediate_stall_limit', 2) }}" class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                         </div>
 
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
