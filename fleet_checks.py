@@ -45,6 +45,13 @@ _JS_SECRET_DECL = [
     re.compile(r"""type\s*[:=]\s*\\?["']password\\?["']""", re.I),
     re.compile(r"""\b(?:key|name|field)\s*[:=]\s*\\?["'](%s)\\?["']""" % _SECRET_NAME, re.I),
 ]
+# An <input> carrying data-account-password sets the password of a directory
+# account (LDAP, Entra, AD): it goes to that directory once and LM never
+# stores it, so there is nothing to put in the vault. The marker is explicit
+# on purpose: autocomplete="new-password" is also used on stored secrets
+# (only to stop browser autofill), so it cannot tell the two apart. Only that
+# input is removed from the line; any other input on the line is still checked.
+_JS_ACCOUNT_PASSWORD = re.compile(r"""<input\b[^>]*\bdata-account-password\b[^>]*(?:>|$)""", re.I)
 # Added text that shows the change already goes through the vault.
 _PY_VAULT_TOKENS = ("instance_vault", "cred_vault", "vault_credential", "SECRET_FIELDS",
                     "validate_ref", "strip_inline_secrets", "overlay_many", "automation_get",
@@ -150,6 +157,7 @@ def check_vault_secrets(files, repo_full_name="", vault_repos=("lm",)):
         elif name.endswith((".js", ".html")):
             js_vault = js_vault or any(t in text for t in _JS_VAULT_TOKENS)
             for ln in lines:
+                ln = _JS_ACCOUNT_PASSWORD.sub("", ln)
                 for rx in _JS_SECRET_DECL:
                     m = rx.search(ln)
                     if m:

@@ -108,14 +108,19 @@ def _atomic_write_json(path, data, *, indent=2, chmod=None):
     Raises on failure after removing the temp file: callers own their own
     fallback and logging, so the error must still reach them.
     """
-    # Temporary file written first, then renamed over the real one.
-    tmp = path + ".tmp"
-    # Any failure removes the temp file and re-raises (see below).
+    import tempfile
+
+    # Each writer owns its temp file: a shared path lets concurrent saves
+    # rename or remove each other's file, causing ENOENT even with a parent dir.
+    tmp = None
     try:
-        # Make sure the parent directory exists.
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        # Write the JSON to the temp file.
-        with open(tmp, "w") as f:
+        parent = os.path.dirname(path) or "."
+        os.makedirs(parent, exist_ok=True)
+        # Keep the unique temp on the same filesystem for atomic replacement.
+        with tempfile.NamedTemporaryFile(
+                mode="w", dir=parent, prefix=os.path.basename(path) + ".",
+                suffix=".tmp", delete=False) as f:
+            tmp = f.name
             json.dump(data, f, indent=indent)
         # Optionally restrict permissions (e.g. 0600 for files holding secrets).
         if chmod is not None:
@@ -125,12 +130,13 @@ def _atomic_write_json(path, data, *, indent=2, chmod=None):
                 pass
         # Atomically swap the finished file into place.
         os.replace(tmp, path)
-    # Clean up the temp file, then let the caller handle the error.
+    # Clean up only this writer's temp file, then let the caller handle the error.
     except Exception:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
+        if tmp is not None:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
         raise
 
 

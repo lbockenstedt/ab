@@ -11,6 +11,15 @@ Autonomous bot, and an optional hub **agent** (not a spoke). Repo: `ab`. See [ar
 
 A standalone autonomous bot that polls GitHub repos for issues labeled `automated-fix`, generates code fixes via local/cloud LLMs, verifies (internal tests or external QA), iterates up to 3×, pushes to a branch (PR) or directly to main (trusted repos), and notifies an external infra API. It is **not a spoke** — it is a standalone FastAPI app (dashboard :443, HTTPS) that **optionally connects to the LM hub as a WebSocket agent** (`module_type = "agent"`) via `hub_agent.py`, so the hub can broadcast `SET_LOG_LEVEL` to it and it can call the hub (signed `HUB_REQUEST`) for aggregated logs and to trigger spoke self-updates.
 
+## Persistent state writes
+
+The configuration/state writer creates missing parent directories and writes
+through a unique temporary file in the destination directory before atomically
+replacing the JSON file. Concurrent saves cannot rename or clean up each other's
+temporary files; the last successful replacement wins. This does not merge
+concurrent read-modify-write updates. Write failures retain caller-specific
+logging and fallback behavior.
+
 ## Log-analysis guardrails
 
 A targeted edit rejected because it would break Python syntax is an expected
