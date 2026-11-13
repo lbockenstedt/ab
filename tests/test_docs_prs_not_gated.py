@@ -304,6 +304,15 @@ def test_docs_bypass_reason_is_honest_when_panel_could_not_run(decide):
     assert "reviewed but not accuracy-gated" not in reason
 
 
+def test_docs_bypass_reason_names_the_one_panel_that_ran_when_panel_2_waits(decide):
+    """A panel 2 waiting on panel 1's Approve did not review the diff either;
+    the merge reason must not say the diff was fully reviewed."""
+    should, reason = decide(_rec(panel2_status="skipped", **REJECTED), ["README.md"], _cfg(),
+                            _meta(), changed_files=DOCS)
+    assert should is True
+    assert "skeptical panel only" in reason and "could not run" not in reason
+
+
 def test_docs_bypass_reason_still_says_reviewed_when_panel_ran(decide):
     should, reason = decide(_rec(**REJECTED), ["README.md"], _cfg(), _meta(),
                             changed_files=DOCS)
@@ -390,4 +399,12 @@ def test_existing_remediation_guards_still_win(remediate_calls, monkeypatch):
     ok, reason = pr_remediate.maybe_auto_remediate(None, _Repo(), _PR(["src/app.py"]), {})
     assert ok is False
     assert "guardrail" in reason
+    assert remediate_calls == []
+
+
+def test_a_stalled_pr_is_not_remediated(remediate_calls, monkeypatch):
+    monkeypatch.setattr(pr_remediate, "state", {"pr_reviews": {"owner/repo#5": {
+        "panel_verdict": "Deny", "panel_confidence": 0.60, "remediation_stalls": 2}}})
+    ok, reason = pr_remediate.maybe_auto_remediate(None, _Repo(), _PR(["src/app.py"]), {})
+    assert ok is False and "stalled" in reason
     assert remediate_calls == []

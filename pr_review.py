@@ -670,6 +670,59 @@ def _merge_only_context(pr):
         % len(commits))
 
 
+def skeptical_issue_body(pr):
+    """The review brief panel 1 (the skeptical panel) judges a PR against: title,
+    description, stated intent, merge-only note and the merge-safety checklist.
+
+    Shared with scripts/local_review.py, so a local pre-push review asks exactly
+    what AB asks; change the brief here and both change."""
+    # NOTE: the instruction block below contains literal Jinja examples (`{% for %}`,
+    # `{{ }}`) whose `%` signs would be mis-parsed as %-format conversions. So only the
+    # title/body header is %-formatted; the instructions are plain concatenation.
+    #
+    # Surface the stated intent as its OWN field rather than leaving the panel to
+    # hunt for it. Rule 4 below tells the reviewer to lower confidence when a PR
+    # has no clear intent statement, and AGENTS.md ("Pull Request Intent &
+    # Specification Rule") requires every fleet PR to carry one -- so whether the
+    # section is present is a merge-relevant fact, not a formatting detail. It is
+    # stated plainly here so the verdict turns on what the PR actually says.
+    try:
+        import pr_template
+        _intent = pr_template.stated_intent(pr.body or "")
+        _intent_block = (
+            "STATED INTENT (from the PR's '%s' section):\n%s\n\n"
+            % (pr_template.INTENT, _intent[:2000])
+            if _intent else
+            "STATED INTENT: none. The PR description does not carry an "
+            "'%s' section, which AGENTS.md requires of every fleet PR.\n\n"
+            % pr_template.INTENT)
+    except Exception as e:  # noqa: BLE001
+        logger.info("pr_review: intent extraction skipped (%s)", e)
+        _intent_block = ""
+    # Review input: title, description, intent, merge note and the merge-safety checklist.
+    return (
+        "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
+        % (pr.title or "", (pr.body or "").strip()[:4000])
+    ) + _intent_block + _merge_only_context(pr) + (
+        "NOTE: This is a HUMAN-authored pull request under pre-review — not a bot "
+        "fix. Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
+        "correctness/regressions, weight these merge-safety defects heavily (they "
+        "have broken prod before):\n"
+        "1) TEMPLATE RENDER CRASHES — Jinja dot-access of a dict method (`x.items`, "
+        "`x.keys`, `x.values`) inside `{{ }}` or `{% for %}`: dot-notation returns the "
+        "bound METHOD, not the key, so it 500s the whole page; the fix is bracket "
+        "access `x['items']`.\n"
+        "2) Template/JS SYNTAX errors: unbalanced Jinja blocks, duplicate `const`/`let` "
+        "in a <script>, leftover merge-conflict markers.\n"
+        "3) Undefined names, obvious logic errors, security issues.\n"
+        "4) INTENT vs DIFF FIDELITY — Extract the PR's stated INTENT from the description and compare it against the actual DIFF: Does the diff faithfully and completely implement the stated intent? Does the diff introduce unstated side effects, scope creep, or contradict the stated intent? If the PR description lacks a clear intent statement, or if the code deviates from the stated intent, flag it and lower confidence.\n"
+        "5) FLEET CODE RULES — the rules listed in this prompt (vault for every "
+        "credential incl. a WebUI vault picker, JSON-only storage, tenant scope, no "
+        "UUIDs in the UI, nothing hard-coded, generic, docstrings, few deps, twins "
+        "kept in step).\n"
+        "Reject (lower confidence) if any such defect is present.")
+
+
 def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
                       undefined_verified=None):
     """Run the cross-provider skeptical reviewer panel on the PR diff — the SAME
@@ -705,51 +758,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
     except Exception as e:  # noqa: BLE001
         logger.warning("pr_review: panel skipped (fix_engine import failed: %s)", e)
         return None
-    # NOTE: the instruction block below contains literal Jinja examples (`{% for %}`,
-    # `{{ }}`) whose `%` signs would be mis-parsed as %-format conversions. So only the
-    # title/body header is %-formatted; the instructions are plain concatenation.
-    #
-    # Surface the stated intent as its OWN field rather than leaving the panel to
-    # hunt for it. Rule 4 below tells the reviewer to lower confidence when a PR
-    # has no clear intent statement, and AGENTS.md ("Pull Request Intent &
-    # Specification Rule") requires every fleet PR to carry one -- so whether the
-    # section is present is a merge-relevant fact, not a formatting detail. It is
-    # stated plainly here so the verdict turns on what the PR actually says.
-    try:
-        import pr_template
-        _intent = pr_template.stated_intent(pr.body or "")
-        _intent_block = (
-            "STATED INTENT (from the PR's '%s' section):\n%s\n\n"
-            % (pr_template.INTENT, _intent[:2000])
-            if _intent else
-            "STATED INTENT: none. The PR description does not carry an "
-            "'%s' section, which AGENTS.md requires of every fleet PR.\n\n"
-            % pr_template.INTENT)
-    except Exception as e:  # noqa: BLE001
-        logger.info("pr_review: intent extraction skipped (%s)", e)
-        _intent_block = ""
-    # Review input: title, description, intent, merge note and the merge-safety checklist.
-    issue_body = (
-        "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
-        % (pr.title or "", (pr.body or "").strip()[:4000])
-    ) + _intent_block + _merge_only_context(pr) + (
-        "NOTE: This is a HUMAN-authored pull request under pre-review — not a bot "
-        "fix. Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
-        "correctness/regressions, weight these merge-safety defects heavily (they "
-        "have broken prod before):\n"
-        "1) TEMPLATE RENDER CRASHES — Jinja dot-access of a dict method (`x.items`, "
-        "`x.keys`, `x.values`) inside `{{ }}` or `{% for %}`: dot-notation returns the "
-        "bound METHOD, not the key, so it 500s the whole page; the fix is bracket "
-        "access `x['items']`.\n"
-        "2) Template/JS SYNTAX errors: unbalanced Jinja blocks, duplicate `const`/`let` "
-        "in a <script>, leftover merge-conflict markers.\n"
-        "3) Undefined names, obvious logic errors, security issues.\n"
-        "4) INTENT vs DIFF FIDELITY — Extract the PR's stated INTENT from the description and compare it against the actual DIFF: Does the diff faithfully and completely implement the stated intent? Does the diff introduce unstated side effects, scope creep, or contradict the stated intent? If the PR description lacks a clear intent statement, or if the code deviates from the stated intent, flag it and lower confidence.\n"
-        "5) FLEET CODE RULES — the rules listed in this prompt (vault for every "
-        "credential incl. a WebUI vault picker, JSON-only storage, tenant scope, no "
-        "UUIDs in the UI, nothing hard-coded, generic, docstrings, few deps, twins "
-        "kept in step).\n"
-        "Reject (lower confidence) if any such defect is present.")
+    issue_body = skeptical_issue_body(pr)
     # Add where getattr'd names are really defined in the repo.
     try:
         attr_names = extract_getattr_names(files)
@@ -791,6 +800,61 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
 _STATE_PANEL_HEADER = "### \U0001F500 State-logic / control-flow review (panel)"   # 🔀
 
 
+def state_logic_issue_body(pr):
+    """The review brief panel 2 (state-logic review) judges a PR against: the two
+    defect shapes, state coverage and reachability.
+
+    Shared with scripts/local_review.py, so a local pre-push review asks exactly
+    what AB asks; change the brief here and both change."""
+    # Review input: title, description and the two defect shapes to look for.
+    return (
+        "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
+        % (pr.title or "", (pr.body or "").strip()[:4000])
+    ) + (
+        "NOTE: This is a HUMAN-authored pull request under pre-review. Ignore style, "
+        "naming, and general correctness — a SEPARATE broad reviewer already covers "
+        "those. Your ONLY job is two specific defect shapes:\n\n"
+        "1) STATE/STATUS COVERAGE — for every boolean/enum/status value this diff "
+        "computes or changes the computation of: list every distinct state the "
+        "underlying data can actually be in (not just the two the author had in "
+        "mind), and check whether the new logic conflates states that should stay "
+        "distinct (e.g. 'a warning present' vs 'the operation failed' vs 'the "
+        "operation never ran' are three different things — treating any two of "
+        "them as the same value is a defect even if each individually looks "
+        "reasonable).\n\n"
+        "2) REACHABILITY — for every new line of logic (a render call, a state "
+        "update, a side effect): trace the function's control flow BACKWARD from "
+        "that line to its entry. Does an early-return, guard clause, or "
+        "short-circuit ABOVE it in the function actually let execution reach that "
+        "line on the specific input/condition the author intended it for? A line "
+        "that only runs when there's nothing left to act on (e.g. UI added after "
+        "an empty-result early-return, when the UI's whole purpose is describing "
+        "why the result is empty) is a defect even though the line itself is "
+        "syntactically and logically correct in isolation.\n\n"
+        "Report ONLY concrete instances of these two shapes, with the exact "
+        "variable/line and which states/paths are conflated or unreachable. If you "
+        "find neither, say so plainly — do not manufacture a finding to have "
+        "something to report.")
+
+
+def _state_panel_after(review, pr, files, config, repo=None, head_sha=None):
+    """Panel 2 runs only once panel 1 Approves, to save its tokens: a PR panel 1
+    did not approve cannot merge anyway, and its fix moves the head, which
+    re-runs both panels. The skipped panel carries a status, so the merge gate
+    treats it as not approved and remediation acts on panel 1's verdict. With
+    panel 1 switched off (pr_review_llm_enabled) or giving no review, panel 2
+    runs on its own as before; with panel 2 switched off it stays off (None),
+    never "skipped". pr_review_state_panel_waits (default on) switched off runs
+    both panels on every pass, as before."""
+    approved = (isinstance(review, dict) and not review.get("status")
+                and str(review.get("verdict") or "").lower() == "approve")
+    if (config.get("pr_review_state_panel_waits", True)
+            and config.get("pr_review_llm_enabled", False) and config.get("pr_review_state_logic_enabled", False)
+            and isinstance(review, dict) and not approved):
+        return {"status": "skipped", "reason": "runs once panel 1 Approves"}
+    return _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
+
+
 def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     """Second, narrower skeptical-panel pass focused specifically on the bug
     SHAPE that hit lm#135 twice in one review cycle: a status/enum value that
@@ -820,35 +884,7 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     except Exception as e:  # noqa: BLE001
         logger.warning("pr_review: state-logic panel skipped (fix_engine import failed: %s)", e)
         return None
-    # Review input: title, description and the two defect shapes to look for.
-    issue_body = (
-        "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
-        % (pr.title or "", (pr.body or "").strip()[:4000])
-    ) + (
-        "NOTE: This is a HUMAN-authored pull request under pre-review. Ignore style, "
-        "naming, and general correctness — a SEPARATE broad reviewer already covers "
-        "those. Your ONLY job is two specific defect shapes:\n\n"
-        "1) STATE/STATUS COVERAGE — for every boolean/enum/status value this diff "
-        "computes or changes the computation of: list every distinct state the "
-        "underlying data can actually be in (not just the two the author had in "
-        "mind), and check whether the new logic conflates states that should stay "
-        "distinct (e.g. 'a warning present' vs 'the operation failed' vs 'the "
-        "operation never ran' are three different things — treating any two of "
-        "them as the same value is a defect even if each individually looks "
-        "reasonable).\n\n"
-        "2) REACHABILITY — for every new line of logic (a render call, a state "
-        "update, a side effect): trace the function's control flow BACKWARD from "
-        "that line to its entry. Does an early-return, guard clause, or "
-        "short-circuit ABOVE it in the function actually let execution reach that "
-        "line on the specific input/condition the author intended it for? A line "
-        "that only runs when there's nothing left to act on (e.g. UI added after "
-        "an empty-result early-return, when the UI's whole purpose is describing "
-        "why the result is empty) is a defect even though the line itself is "
-        "syntactically and logically correct in isolation.\n\n"
-        "Report ONLY concrete instances of these two shapes, with the exact "
-        "variable/line and which states/paths are conflated or unreachable. If you "
-        "find neither, say so plainly — do not manufacture a finding to have "
-        "something to report.")
+    issue_body = state_logic_issue_body(pr)
     # Run the panel; any error skips the review.
     try:
         review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
@@ -980,10 +1016,16 @@ def _render_review_body(review, header, blurb):
     # No review: nothing to show; a status means the panel was offline.
     if not review:
         return []
+    if review.get("status") == "skipped":
+        return [header, "", "_Not run: this panel runs once panel 1 Approves._", ""]
     if review.get("status"):
-        return [header, "",
-                "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")),
-                ""]
+        out = [header, "",
+               "_Panel unavailable this pass (%s)._" % (review.get("reason") or review.get("status")), ""]
+        # A panel that ran but must retry still names its seats, in the
+        # **Reviewer (provider/model)** form the local review skill reads.
+        if review.get("seats"):
+            out += ["_Seated: %s._" % ", ".join("**%s**" % n for n in review["seats"]), ""]
+        return out
 
     # Overall verdict, confidence, and which reviewers objected.
     verdict = str(review.get("verdict") or "—")
@@ -1008,6 +1050,13 @@ def _render_review_body(review, header, blurb):
         _models = review.get("panel_models") or []
         out += ["_Single-reviewer panel: only 1 of 2 required frontier models was available (%s)._"
                 % (_models[0] if _models and _models[0] else "unknown model"), ""]
+
+    # Seats that gave no usable vote. Each name is already the full
+    # "Reviewer (provider/model)" label (fix_engine._reviewer_name), so it
+    # renders as **Reviewer (provider/model)** and the comment lists the whole panel.
+    if review.get("failed_reviewers"):
+        out += ["_No reply from %s; counted as failed reviewers (the surviving panel must be "
+                "unanimous)._" % ", ".join("**%s**" % n for n in review["failed_reviewers"]), ""]
 
     # ── concerns, up front ────────────────────────────────────────────────
     if dissenting:
@@ -1620,10 +1669,16 @@ def _automerge_decision(rec, changed_paths, config, pr_meta, state_flags=None, c
         # reason (persisted + shown on the PR) so a failed-panel docs auto-merge
         # is visibly distinguishable from a normal one, instead of both saying
         # "reviewed but not accuracy-gated".
-        _panel_ran = not rec.get("panel_status") and not rec.get("panel2_status")
-        _panel_note = ("reviewed but not accuracy-gated" if _panel_ran
-                       else "panel could not run for this diff — Tier-1/boundary/allowlist "
-                            "gates still applied")
+        # A skipped panel 2 is waiting on panel 1, not a panel that failed to
+        # run, but it did not review this diff either: say which panel did.
+        if rec.get("panel_status") or rec.get("panel2_status") not in (None, "", "skipped"):
+            _panel_note = ("panel could not run for this diff — Tier-1/boundary/allowlist "
+                           "gates still applied")
+        elif rec.get("panel2_status") == "skipped":
+            _panel_note = ("reviewed by the skeptical panel only (the state-logic panel runs once "
+                           "it Approves) and not accuracy-gated")
+        else:
+            _panel_note = "reviewed but not accuracy-gated"
         return True, ("cleared: documentation-only diff — %s "
                       "(panel verdict/confidence not required for docs), no boundary touched"
                       % _panel_note)
@@ -2021,8 +2076,8 @@ def _review_one(gh, repo, pr, config, force=False):
         _step("running the skeptical reviewer panel (LLM)")
         review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh,
                                    undefined_verified=_undef_verified)
-        _step("running the state-logic reviewer panel (LLM)")
-        state_review = _state_logic_review(pr, files, config, repo=repo, head_sha=head_sha)
+        _step("running the state-logic reviewer panel (LLM) if panel 1 approved")
+        state_review = _state_panel_after(review, pr, files, config, repo=repo, head_sha=head_sha)
         # Build the comment text.
         _step("rendering and posting the review comment")
         body = _render(findings, head_sha, summary, review=review, state_review=state_review,
