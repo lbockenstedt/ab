@@ -29,12 +29,20 @@ def test_slow_route_command_and_timeouts_become_findings_with_owning_module():
 
 
 def test_long_admin_jobs_are_not_reported_as_slow():
-    for route in ("POST /admin/ops/self-update", "POST /admin/ops/netbox-autorack"):
+    for route in ("POST /admin/ops/self-update", "POST /admin/ops/netbox-autorack",
+                  "POST /admin/ops/exec", "POST /admin/ops/dhcp-diagnostics"):
         rep = _report(perf={"slow_route_s": 3, "slow_command_s": 5, "commands": [],
                             "routes": [{"key": route, "count": 2,
                                         "slow": 2, "avg_s": 70.0, "max_s": 90.0}]})
         assert hc.evaluate(rep, []) == [], route
 
+
+
+def test_a_slow_user_page_next_to_the_admin_api_is_still_reported():
+    rep = _report(perf={"slow_route_s": 3, "slow_command_s": 5, "commands": [],
+                        "routes": [{"key": "GET /api/admin/ops-summary", "count": 4,
+                                    "slow": 4, "avg_s": 5.0, "max_s": 6.0}]})
+    assert [f["kind"] for f in hc.evaluate(rep, [])] == ["slow_route"]
 
 def test_host_pressure_and_log_patterns():
     rep = _report(host={"load": [9.0], "cpus": 4, "mem_used_pct": 95, "disk_used_pct": 50})
