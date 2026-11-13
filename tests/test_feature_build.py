@@ -301,6 +301,8 @@ class _FakeGhRepo:
         self.clone_url = "https://github.com/owner/repo.git"
         self.ensured_labels = []
         self.created_prs = []
+    def get_branch(self, name):
+        return name
     def create_pull(self, title, body, head, base):
         pr = _FakePR()
         self.created_prs.append({"title": title, "body": body, "head": head, "base": base})
@@ -318,7 +320,8 @@ def main():
 
     def _patch_clone(monkey_repo_git):
         import git as real_git
-        def _clone(url, path):
+        def _clone(url, path, branch=None):
+            monkey_repo_git.cloned_branch = branch
             # Materialize the "changed" files so the syntax gate has real paths to check.
             import os as _os
             for rel in monkey_repo_git._changed:
@@ -443,6 +446,8 @@ def main():
     ok &= _check("token was stripped back out after push (last set_url is the plain clone_url)",
                 fake_repo_git.remotes.origin.urls[-1] == repo.clone_url)
     ok &= _check("exactly one PR was created", len(repo.created_prs) == 1)
+    ok &= _check("the feature branch forks from the PR's base, not the clone's default (main)",
+                getattr(fake_repo_git, "cloned_branch", None) == repo.created_prs[0]["base"] != "main")
     ok &= _check("PR title is 'AI Feature #N: ...' (NOT 'AI Fix #N' — pr_review's own-PR skip must not match)",
                 repo.created_prs[0]["title"].startswith("AI Feature #7"))
     ok &= _check("PR body carries the feature-drive marker",
