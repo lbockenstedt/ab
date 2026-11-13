@@ -65,6 +65,7 @@ def _routes_ns(state):
         "datetime": datetime,
         "logger": _NoLog(),
         "JSONResponse": lambda status_code, content: {"status_code": status_code, "content": content},
+        "mission_control": __import__("mission_control"),
         "state": state,
     }
     return _extract("routes.py", ["get_task_details", "_duration_str", "_current_step"], ns)

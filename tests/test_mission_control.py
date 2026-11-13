@@ -2,7 +2,7 @@
 and what finished recently (mission_control.build), and the dashboard that
 renders it."""
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -153,7 +153,7 @@ def test_exhausted_panel_retries_wait_on_a_person_and_requester_questions_stay_i
     # feature_drive re-asks the classifier every cycle: not on the operator.
     assert "o/lm:3" not in needs
     assert sorted(i["id"] for i in mc["in_flight"]) == ["o/lm#1", "o/lm:3", "o/lm:4"]
-    assert mc["working"] == [{"id": "t1", "name": "RepoScan", "kind": "scan", "started": start.isoformat()}]
+    assert mc["working"] == [{"id": "t1", "name": "RepoScan", "kind": "scan", "started": start.astimezone(timezone.utc).isoformat()}]
 
 
 def test_approving_a_pr_swaps_in_a_delegated_merge_button():
