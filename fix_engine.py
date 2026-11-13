@@ -5865,7 +5865,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 continue
                             # Accept the fix.
                             success = True
-                            _progress(issue_id, "fix accepted — committing and pushing", stage="pr")
+                            _progress(issue_id, "fix accepted — committing and pushing")
                             state["success_count"] += 1
                             final_verdict = review_verdict
                             break
@@ -6151,6 +6151,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             if can_actually_direct_push:
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: {decision_reason}")
                 commit_type = "Direct Commit"
+                _progress(issue_id, "committed to %s — updating spokes" % base_branch, stage="commit")
                 detail_msg = f"The fix was verified and pushed directly to the {base_branch} branch. Avg Confidence: {final_confidence:.2%}"
                 # Fix is live on main — tell every spoke to pull and restart, then let
                 # the QA service verify against the updated code.
@@ -6233,11 +6234,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 # Report the PR.
                 if pr is None:
                     commit_type = f"Commit to {base_branch}"
+                    _progress(issue_id, "committed to %s" % base_branch, stage="commit")
                     detail_msg = (f"The fix was verified and pushed to the {base_branch} integration branch "
                                   f"(confidence below the direct-merge threshold, so it is promoted "
                                   f"{base_branch} -> qa -> main rather than via a PR).")
                 else:
                     commit_type = "Pull Request"
+                    _progress(issue_id, "opened PR #%s" % pr.number, stage="pr")
                     detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
 
 

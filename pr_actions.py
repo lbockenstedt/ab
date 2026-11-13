@@ -164,9 +164,16 @@ def _remember_ci(repo_name, head_sha, runs, failing):
                  and r.get("conclusion") in ("success", "neutral", "skipped"))
     # Parked runs wait for approval (_release_parked_checks); they are not a lost verdict.
     parked = sum(1 for r in runs if r.get("status") == "completed" and r.get("conclusion") == "action_required")
-    CI_SEEN[(repo_name, head_sha)] = {"done": done, "passed": passed, "parked": parked, "total": len(runs),
-                                      "failed": len(failing),
-                                      "at": datetime.now().isoformat(timespec="seconds")}
+    total = len(runs)
+    # The CI state the dashboard shows; "since" is kept while it is unchanged,
+    # so Working on now's time in state counts from CI's last change.
+    phase = ("none" if not total else "failed" if failing else "running" if done < total
+             else "passed" if passed == total else "parked" if parked else "no verdict")
+    now = datetime.now().isoformat(timespec="seconds")
+    prev = CI_SEEN.get((repo_name, head_sha)) or {}
+    since = prev.get("since") if prev.get("phase") == phase and prev.get("since") else now
+    CI_SEEN[(repo_name, head_sha)] = {"done": done, "passed": passed, "parked": parked, "total": total,
+                                      "failed": len(failing), "phase": phase, "since": since, "at": now}
     while len(CI_SEEN) > _CI_SEEN_MAX:
         CI_SEEN.pop(next(iter(CI_SEEN)))
 
@@ -231,6 +238,7 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
         if stuck:
             gh_actions_health.note_infra_failure(len(stuck))
             return "infra", "%d workflow run(s) never started (GitHub Actions outage)" % len(stuck)
+        _remember_ci(repo_name, head_sha, [], [])
         return "unknown", ""
 
     # cancelled / stale / startup_failure / action_required never produced a

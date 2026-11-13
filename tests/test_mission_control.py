@@ -308,8 +308,44 @@ def test_ci_checks_seen_are_cached_for_the_dashboard(monkeypatch):
     runs = [{"status": "completed", "conclusion": "success"}, {"status": "completed", "conclusion": "cancelled"},
             {"status": "completed", "conclusion": "failure"}, {"status": "in_progress"}]
     pr_actions._remember_ci("o/lm", "abc", runs + [{"status": "completed", "conclusion": "action_required"}], ["lint: failure"])
-    assert {k: v for k, v in pr_actions.CI_SEEN[("o/lm", "abc")].items() if k != "at"} == {
-        "done": 4, "passed": 1, "parked": 1, "total": 5, "failed": 1}
+    assert {k: v for k, v in pr_actions.CI_SEEN[("o/lm", "abc")].items() if k not in ("at", "since")} == {
+        "done": 4, "passed": 1, "parked": 1, "total": 5, "failed": 1, "phase": "failed"}
+
+
+def test_ci_since_is_kept_while_its_state_is_unchanged(monkeypatch):
+    import pr_actions
+    monkeypatch.setattr(pr_actions, "CI_SEEN", {})
+    running = [{"status": "completed", "conclusion": "success"}, {"status": "in_progress"}]
+    pr_actions._remember_ci("o/lm", "h", running, [])
+    pr_actions.CI_SEEN[("o/lm", "h")]["since"] = "2026-11-12T09:00:00"
+    pr_actions._remember_ci("o/lm", "h", running, [])
+    assert pr_actions.CI_SEEN[("o/lm", "h")]["since"] == "2026-11-12T09:00:00"
+    pr_actions._remember_ci("o/lm", "h", [{"status": "completed", "conclusion": "success"}] * 2, [])
+    assert pr_actions.CI_SEEN[("o/lm", "h")]["phase"] == "passed"
+    assert pr_actions.CI_SEEN[("o/lm", "h")]["since"] != "2026-11-12T09:00:00"
+
+
+def test_time_in_state_restarts_when_ci_changes_the_now_line():
+    # The hold reason has not changed for 2h, but CI started failing 30m ago.
+    prs = {"o/lm#1": _pr(1, head="h", state_since=_ago(2, iso=False),
+                         auto_merge_blocked_reason="CI is failing on head h — needs human review")}
+    ci = {"done": 6, "passed": 5, "total": 6, "failed": 1, "phase": "failed", "since": _ago(0.5)}
+    card = mission_control.flight_cards({}, prs, {}, {("o/lm", "h"): ci}, None, 3, NOW)[0]
+    assert (card["now"], card["for"]) == ("held: CI failing (1 of 6 checks failed)", "30m")
+    # A Now line that does not come from CI keeps the PR's own time in state.
+    prs["o/lm#1"].update(approved=True, auto_merge_blocked_reason="repo is not in feature_automerge_repos")
+    assert mission_control.flight_cards({}, prs, {}, {("o/lm", "h"): ci}, None, 3, NOW)[0]["for"] == "2h 0m"
+
+
+@pytest.mark.parametrize("ci, state", [
+    (None, "unknown"),
+    ({"done": 0, "passed": 0, "total": 0, "failed": 0}, "none"),
+    ({"done": 2, "passed": 2, "total": 2, "failed": 0}, "done"),
+])
+def test_tests_step_tells_unread_ci_from_no_checks_and_from_passed(ci, state):
+    prs = {"o/lm#1": _pr(1, head="h")}
+    card = mission_control.flight_cards({}, prs, {}, {("o/lm", "h"): ci} if ci else {}, None, 3, NOW)[0]
+    assert [s["state"] for s in card["steps"] if s["key"] == "tests"] == [state]
 
 
 @pytest.mark.parametrize("pr, ci, step, now_text", [
@@ -356,6 +392,18 @@ def test_each_issue_in_flight_maps_to_its_step_and_now_text(status, step, now_te
     cards = mission_control.flight_cards(processed, {}, {}, {}, NOW.timestamp() + 12 * 60, 3, NOW)
     current = [s["key"] for s in cards[0]["steps"] if s["state"] == "current"]
     assert (current, cards[0]["now"], cards[0]["for"]) == ([step] if step else [], now_text, "1h 0m")
+
+
+def test_a_fix_committed_without_a_pr_never_shows_a_pr_step(tasks):
+    import app_state
+    app_state.update_task_state("o/lm:4", "Reviewing o/lm:4", stage="review")
+    app_state.set_task_step("o/lm:4", "committed to main — updating spokes", stage="commit")
+    steps = {s["key"]: (s["label"], s["state"]) for s in mission_control.task_card("o/lm:4", tasks["o/lm:4"], now=NOW)["steps"]}
+    assert (steps["pr"], steps["merge"]) == (("PR", "skipped"), ("Commit", "current"))
+    card = mission_control.flight_cards({"o/lm:5": {"status": "pending_verification", "commit_type": "Direct Commit",
+                                                    "timestamp": _ago(1)}}, {}, {}, now=NOW)[0]
+    steps = {s["key"]: (s["label"], s["state"]) for s in card["steps"]}
+    assert (steps["pr"], steps["merge"]) == (("PR", "skipped"), ("Commit", "done"))
 
 
 def test_running_items_and_finished_prs_are_not_in_flight():
@@ -471,3 +519,53 @@ def test_next_poll_pill_text():
     assert mission_control.next_poll_label(1000 + 185, 1000) == "Next poll 3m"
     assert mission_control.next_poll_label(1000 + 20, 1000) == "Next poll now"
     assert mission_control.next_poll_label(None) == ""
+
+
+@pytest.mark.parametrize("subject, running, waiting", [
+    ("o/lm#2", 2, 0),   # the scan's PR is in flight: counted once, as running
+    ("o/lm#3", 1, 1),   # the scan's PR needs you: counted under Needs you only
+    ("", 1, 1),         # between PRs the scan is housekeeping, not an item
+])
+def test_in_progress_counts_running_in_flight_and_needs_you_apart(subject, running, waiting):
+    processed = {"o/lm:5": {"status": "processing", "timestamp": _ago(1)}}
+    prs = {"o/lm#2": _pr(2, auto_merge_blocked_reason="holding the merge while AppBuilder improves this PR"),
+           "o/lm#3": _pr(3)}
+    active = {"o/lm:5": {"name": "Fix Attempt 1/3"}, "PRReview": {"name": "PR pre-review", "subject": subject}}
+    k = mission_control.build(processed, prs, active, now=NOW)["kpis"]
+    assert k["needs_you"] == 1
+    assert (k["running"], k["in_flight"], k["in_progress"]) == (running, waiting, running + waiting)
+
+
+def _function(path, func):
+    """(ast node, source) of function `func` in `path` (pr_review and fix_engine cannot be imported here)."""
+    import ast
+    src = open(os.path.join(os.path.dirname(__file__), "..", path)).read()
+    fn = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef) and n.name == func)
+    return fn, src
+
+
+def test_fix_engine_records_pr_only_when_a_pr_is_opened():
+    import ast
+    fn, src = _function("fix_engine.py", "process_single_issue")
+    stages = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_progress":
+            kw = {k.arg: k.value for k in node.keywords}
+            if "stage" in kw and isinstance(kw["stage"], ast.Constant):
+                stages.setdefault(kw["stage"].value, []).append(node.lineno)
+    # The single PR stage sits right after commit_type = "Pull Request"; commits record "commit".
+    lines = src.splitlines()
+    assert len(stages["pr"]) == 1 and 'commit_type = "Pull Request"' in lines[stages["pr"][0] - 2]
+    assert len(stages["commit"]) == 2
+    assert all("commit_type" in lines[n - 2] for n in stages["commit"])
+
+
+def test_a_cached_pr_rescan_records_the_review_and_pr_stages():
+    import ast
+    fn, _ = _function("pr_review.py", "_review_one")
+    cached = next(n for n in ast.walk(fn) if isinstance(n, ast.If)
+                  and isinstance(n.test, ast.Name) and n.test.id == "already_current")
+    stages = [k.value.value for n in ast.walk(ast.Module(body=cached.body, type_ignores=[]))
+              if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_step"
+              for k in n.keywords if k.arg == "stage"]
+    assert stages == ["review", "pr"]

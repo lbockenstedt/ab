@@ -7,8 +7,8 @@
 {% macro stepper(steps, compact=False) -%}
 <div class="wk-steps{{ ' wk-steps-compact' if compact }}" role="list" aria-label="Progress">
     {% for s in steps %}
-    <div class="wk-step wk-{{ s.state }}" role="listitem" title="{{ s.label }}: {{ {'done': 'done', 'current': 'current step', 'todo': 'not reached'}[s.state] }}">
-        <div class="wk-step-line"><span class="wk-dot">{{ '✓' if s.state == 'done' else loop.index }}</span>{% if not loop.last %}<span class="wk-bar"></span>{% endif %}</div>
+    <div class="wk-step wk-{{ s.state }}" role="listitem" title="{{ s.label }}: {{ {'done': 'done', 'current': 'current step', 'todo': 'not reached', 'skipped': 'skipped — the fix was committed without a PR', 'unknown': 'unknown — AppBuilder has not read the CI checks of this commit (it reads them when it considers a merge or a fix)', 'none': 'no CI checks on this commit when last read'}[s.state] }}">
+        <div class="wk-step-line"><span class="wk-dot">{{ {'done': '✓', 'skipped': '–', 'unknown': '?', 'none': '–'}.get(s.state, loop.index) }}</span>{% if not loop.last %}<span class="wk-bar"></span>{% endif %}</div>
         <span class="wk-label">{{ 'Panels' if compact and s.key == 'review' else s.label }}</span>
     </div>
     {% endfor %}

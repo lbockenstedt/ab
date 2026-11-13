@@ -45,7 +45,8 @@ _ISSUE_WORKING = {
     "reopened": "Reopened, fixing again",
     "feature_built": "Feature built, PR open",
 }
-# A fix that landed: committed (awaiting verification) or later. Fixed · 7d,
+# A fix that is done: verified or resolved, the set the Resolved filter shows
+# (pending_verification is NOT in it: a commit nobody has checked yet). Fixed · 7d,
 # success % and Median fix time all count this same set.
 _FIX_LANDED = {"fixed", "verified", "awaiting_prod_verification", "resolved"}
 _ISSUE_DONE = {
@@ -245,14 +246,32 @@ _PHASE_STAGE = (("Triaging", "triage"), ("Fix Attempt", "fix"), ("Reviewing", "r
 _PROMOTION_ROUTES = {("dev", "qa"), ("qa", "main"), ("dev", "main")}
 
 
-def stepper(current, done=()):
-    """The six steps as [{"key", "label", "state"}]; state is done, current or todo.
+def stepper(current, done=(), unknown=None):
+    """The six steps as [{"key", "label", "state"}]; state is done, current, todo,
+    skipped, unknown or none.
 
     ``done`` holds the steps really completed (a fix that was reviewed before it
-    was tested shows Review panels done while Tests is current)."""
-    return [{"key": k, "label": label,
-             "state": "current" if k == current else "done" if k in done else "todo"}
-            for k, label in STEPS]
+    was tested shows Review panels done while Tests is current). The stage
+    "commit" is a fix published without a PR: the PR step is skipped and the
+    last step reads Commit. ``unknown`` marks a not-done Tests step whose CI
+    AppBuilder has not read ("unknown") or that has no checks ("none")."""
+    committed = current == "commit" or "commit" in done
+    out = []
+    for k, label in STEPS:
+        if committed and k == "pr":
+            state = "skipped"
+        elif committed and k == "merge":
+            label, state = "Commit", "current" if current == "commit" else "done"
+        elif k == current:
+            state = "current"
+        elif k in done:
+            state = "done"
+        elif k == "tests" and unknown:
+            state = unknown
+        else:
+            state = "todo"
+        out.append({"key": k, "label": label, "state": state})
+    return out
 
 
 def _duration(seconds):
@@ -357,6 +376,8 @@ def task_card(tid, task, processed=None, pr_reviews=None, now=None):
     done = [s for s in (task.get("stages") or []) if s != stage]
     if subject and stage != "pr":
         done.append("pr")  # a PR being reviewed or improved already exists
+    if stage == "commit" or "commit" in done:
+        done = [s for s in done if s != "pr"]
     if stage:
         # Steps before the first one recorded were passed before tracking began.
         first = min((_STEP_KEYS.index(s) for s in [stage] + done if s in _STEP_KEYS), default=0)
@@ -390,10 +411,18 @@ def _ci_chip(ci):
     return "CI … %d/%d" % (_ci_passed(ci), ci["total"]), "wait"
 
 
+def _ci_for(key, pr, ci_seen):
+    """The CI_SEEN entry for the PR's current head, or None when AppBuilder has not read its checks."""
+    return (ci_seen or {}).get((pr.get("repo") or key.rpartition("#")[0], pr.get("head")))
+
+
 def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
-    """(stage, done, now_text) of an open PR, from its cached review record."""
+    """(stage, done, now_text, ci) of an open PR, from its cached review record.
+
+    ``ci`` is the CI_SEEN entry when the Now line was read from CI (so time in
+    state counts from CI's last change too), else None."""
     where, label, why = _pr_state(pr)
-    ci = (ci_seen or {}).get((pr.get("repo") or key.rpartition("#")[0], pr.get("head")))
+    ci = _ci_for(key, pr, ci_seen)
     # Steps already behind the PR: it exists, so triage and PR are done.
     done = {"triage", "pr"}
     if int(pr.get("remediation_attempts") or 0):
@@ -408,36 +437,38 @@ def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
     pending_ci = ci and not ci["failed"] and _ci_passed(ci) < ci["total"]
     # Being fixed or waiting on CI.
     if label == "Improving" and "improves" in why:
-        return "fix", done, "improving: attempt %d/%d" % (min(attempts + 1, max_attempts), max_attempts)
+        return "fix", done, "improving: attempt %d/%d" % (min(attempts + 1, max_attempts), max_attempts), None
     if label in ("Improving", "Auto-merging") and pending_ci:
-        return "tests", done, _ci_wait(ci)
+        return "tests", done, _ci_wait(ci), ci
     if label == "Improving" and "waiting on GitHub Actions" in why:
-        return "tests", done, "waiting for CI (checks not started yet)"
+        return "tests", done, "waiting for CI (checks not started yet)", ci
+    # CI no longer pending: these lines changed when CI did.
     if label == "Auto-merging":
-        return "merge", done, "auto-merge approved — merges on the next poll" + (" (%s)" % poll if poll else "")
+        return "merge", done, "auto-merge approved — merges on the next poll" + (" (%s)" % poll if poll else ""), ci
     if label == "Improving":
-        return "merge", done, "held: " + _short(why, 120)
+        return "merge", done, "held: " + _short(why, 120), ci
     # Waiting on a review, or stopped and needing a person.
     if label == "Review queued":
-        return "review", done, "queued: next PR scan %s" % poll if poll else "queued for the next PR scan"
+        return "review", done, "queued: next PR scan %s" % poll if poll else "queued for the next PR scan", None
     if label == "Fixes stopped":
-        return "fix", done, "held: remediation limit %d/%d, needs human" % (attempts, max_attempts)
+        return "fix", done, "held: remediation limit %d/%d, needs human" % (attempts, max_attempts), None
     if label == "Panel unavailable":
-        return "review", done, "held: review panel unavailable, retries used up — needs human"
+        return "review", done, "held: review panel unavailable, retries used up — needs human", None
     # Held: say what it is held on.
     if label in ("Auto-merge held", "Merge refused"):
         if ci and ci["failed"]:
-            return "tests", done, "held: CI failing (%d of %d checks failed)" % (ci["failed"], ci["total"])
+            return "tests", done, "held: CI failing (%d of %d checks failed)" % (ci["failed"], ci["total"]), ci
         if pending_ci:
-            return "tests", done, "held: " + _ci_wait(ci)
-        return "merge", done, "held: " + _short(why, 120)
+            return "tests", done, "held: " + _ci_wait(ci), ci
+        # CI passed (or was never read): the hold is on something else.
+        return "merge", done, "held: " + _short(why, 120), ci
     # Otherwise it waits on a human (approval, review or promotion).
     if label == "Approved":
-        return "merge", done, "approved — waiting for a Merge click"
+        return "merge", done, "approved — waiting for a Merge click", None
     if is_promotion(pr):
-        return "review", done, "awaiting review before promotion to %s" % pr.get("base_ref")
+        return "review", done, "awaiting review before promotion to %s" % pr.get("base_ref"), None
     verdicts = " · ".join(c["label"] for c in panel_chips(pr))
-    return "review", done, "awaiting your review" + (" (%s)" % verdicts if verdicts else "")
+    return "review", done, "awaiting your review" + (" (%s)" % verdicts if verdicts else ""), None
 
 
 def flight_cards(processed, pr_reviews, active_tasks=None, ci_seen=None, next_poll_at=None,
@@ -456,12 +487,18 @@ def flight_cards(processed, pr_reviews, active_tasks=None, ci_seen=None, next_po
         if pr.get("auto_merged") or pr.get("merged") or pr.get("denied") or pr.get("closed") or key in running:
             continue
         pr_urls.add(pr.get("url"))
-        stage, done, text = _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now)
+        stage, done, text, from_ci = _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now)
         repo, number = _repo_and_number(key, "#")
         since = _when(pr.get("state_since") or pr.get("reviewed_at"))
+        # A Now line read from CI started when CI last changed, if that is later.
+        ci_since = _when((from_ci or {}).get("since"))
+        if ci_since and (not since or ci_since > since):
+            since = ci_since
+        ci = _ci_for(key, pr, ci_seen)
+        unknown = "unknown" if ci is None else "none" if not ci["total"] else None
         cards.append({"id": key, "live": False, "kind": _pr_kind(pr), "title": "%s #%s" % (repo, number),
                       "desc": pr.get("title") or "", "url": pr.get("url") or "", "base_ref": pr.get("base_ref") or "",
-                      "steps": stepper(stage, done), "now": text,
+                      "steps": stepper(stage, done, unknown), "now": text,
                       "for": _duration((now - since).total_seconds()) if since else "", "_t": since})
     for key, info in (processed or {}).items():
         status = info.get("status")
@@ -471,7 +508,8 @@ def flight_cards(processed, pr_reviews, active_tasks=None, ci_seen=None, next_po
         flight = {
             "pending_verification": (("pr", {"triage", "fix", "tests", "review"}, "fix PR open — awaiting merge, then verification")
                                      if info.get("commit_type") == "Pull Request"
-                                     else ("", set(_STEP_KEYS), "committed, awaiting verification")),
+                                     else ("", {"triage", "fix", "tests", "review", "commit"},
+                                           "committed, awaiting verification")),
             "processing": ("fix", {"triage"}, "fixing — continues on the next scan" + (" (%s)" % poll if poll else "")),
             "awaiting_review": ("review", {"triage", "fix"}, "queued: waiting for reviewers"),
             "reopened": ("triage", set(), "reopened — fixing again on the next scan" + (" (%s)" % poll if poll else "")),
@@ -696,14 +734,22 @@ def build(processed, pr_reviews, active_tasks=None, now=None, ci_seen=None, next
     working.sort(key=lambda t: str(t["started"] or ""))
     flight = flight_cards(processed, pr_reviews, active_tasks, ci_seen, next_poll_at, max_attempts, now)
 
+    # Running, in flight and needs you are disjoint: flight_cards already drops
+    # running items; a running task on an item that needs you is counted there,
+    # and the PR scan between PRs (no subject) is housekeeping, not an item.
+    needs = {i["id"] for i in attention}
+    running = [tid for tid, task in (active_tasks or {}).items()
+               if not (tid == "PRReview" and not task.get("subject"))
+               and tid not in needs and task.get("subject") not in needs]
+    waiting = [c for c in flight if c["id"] not in needs]
     done_7d = fixed_recent + failed_recent
     groups = {g: sum(1 for i in attention if i["group"] == g) for g in _GROUP_ORDER}
     return {
         "kpis": {
             "needs_you": len(attention),
-            "running": len(working),
-            "in_flight": len(in_flight),
-            "in_progress": len(working) + len(in_flight),
+            "running": len(running),
+            "in_flight": len(waiting),
+            "in_progress": len(running) + len(waiting),
             "fixed_7d": fixed_recent,
             "fixed_delta": fixed_recent - fixed_prev,
             "auto_merged_7d": auto_merged_recent,

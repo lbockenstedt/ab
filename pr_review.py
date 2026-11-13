@@ -2034,7 +2034,9 @@ def _review_one(gh, repo, pr, config, force=False):
     if already_current:
         # Recover the previously-generated summary from the comment — no LLM call
         # on a cached re-scan / post-restart.
-        _step("unchanged since last review — reusing cached result")
+        # Triage, review and the comment were done on an earlier scan of this head.
+        _step("unchanged since last review — reusing cached panel results", stage="review")
+        _step("unchanged since last review — reusing cached result", stage="pr")
         summary = _extract_summary(existing.body if existing else "")
         # Mark it as a cache hit.
         action = "cached"
