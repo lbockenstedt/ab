@@ -38,6 +38,32 @@ def test_vault_handled_backend_but_no_ui_picker_is_an_error():
     assert [f["title"] for f in out] == ["Secret field in the WebUI has no vault picker"]
 
 
+def test_directory_account_password_input_is_not_a_stored_secret():
+    """An initial password for a new LDAP/Entra account, marked
+    data-account-password, is sent to the directory once and never stored,
+    so it needs no vault picker. A stored-credential input still trips."""
+    acct = _file("WebUI/js/views/directory-entra.js",
+                 '<input id="pw" type="password" data-account-password autocomplete="new-password"')
+    assert fc.check_vault_secrets([acct], "o/lm") == []
+    stored = _file("WebUI/js/module-management.js",
+                   "  { key: 'api_key', label: 'API key', type: 'password' },")
+    out = fc.check_vault_secrets([acct, stored], "o/lm")
+    assert [f["title"] for f in out] == ["Secret field in the WebUI has no vault picker"]
+    assert "directory-entra" not in out[0]["detail"]
+
+
+def test_autofill_hint_alone_does_not_exempt_a_stored_secret():
+    """autocomplete="new-password" is used on stored secrets too (it only stops
+    autofill), and the marker exempts only its own input, not the whole line."""
+    hint = _file("WebUI/js/reports.js",
+                 '<input id="sub-psk" type="password" autocomplete="new-password" placeholder="stored">')
+    two = _file("WebUI/js/x.js",
+                '<input id="a" type="password" data-account-password><input id="k" type="password">')
+    for f in (hint, two):
+        assert [x["title"] for x in fc.check_vault_secrets([f], "o/lm")] == [
+            "Secret field in the WebUI has no vault picker"]
+
+
 def test_vault_aware_change_passes():
     files = [_file("core/src/instance_vault.py", '    "truenas": {"api_key": ("api_key",)},',
                    "SECRET_FIELDS['x'] = {}"),
