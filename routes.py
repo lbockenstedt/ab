@@ -2527,6 +2527,7 @@ def ensure_config_defaults(config):
     # because cost -- not capability -- is the binding constraint here.
     # 0 disables the extra turn entirely. See pr_remediate.premium_turn_available.
     config.setdefault("pr_remediate_premium_attempts", 1)
+    config.setdefault("pr_remediate_stall_limit", 2)
     # AppBuilder's remediation OBJECTIVE, in one number: keep repairing a PR
     # until BOTH panels Approve at or above this confidence. See
     # pr_remediate.should_remediate — the single choke point that reads it.
@@ -2608,6 +2609,7 @@ async def settings_page(request: Request):
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
     config.setdefault("pr_remediate_premium_attempts", 1)
+    config.setdefault("pr_remediate_stall_limit", 2)
     config.setdefault("pr_remediate_target_score", PR_REMEDIATE_DEFAULT_TARGET)
     config.setdefault("pr_remediate_address_all_concerns", True)
     config.setdefault("feature_automerge_docs_bypass_panel", True)
@@ -3191,6 +3193,8 @@ async def save_settings(request: Request):
         "promote_schedule_repo": lambda v: (v.strip() if v and v.strip() else "__all__"),
         # Promotion-PR fast lane cadence in seconds (pr_review.scan_promotion_prs); 0 = off.
         "pr_review_fast_interval_s": lambda v: max(0, int(v)) if str(v).strip().isdigit() else 300,
+        # Remediation soft stop (pr_remediate.remediation_stalled); 0 = off.
+        "pr_remediate_stall_limit": lambda v: max(0, int(v)) if str(v).strip().isdigit() else 2,
     }
 
 

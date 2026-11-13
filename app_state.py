@@ -294,6 +294,17 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     # A panel "counts" only if it produced a verdict and was not marked unavailable.
     p1_active = bool(panel_verdict and not panel_status)
     p2_active = bool(panel2_verdict and not panel2_status)
+    # Pass score for the remediation soft stop (pr_remediate.remediation_stalled):
+    # [panels that approved, lowest panel confidence], for a pass where no panel
+    # failed (a skipped panel 2 is waiting, not failed). None = not scorable,
+    # including a verdict with no confidence: unknown is not 0%.
+    pass_score = None
+    if (p1_active or p2_active) and not panel_status and panel2_status in (None, "", "skipped"):
+        _active = [(v, c) for ok, v, c in ((p1_active, panel_verdict, panel_confidence),
+                                           (p2_active, panel2_verdict, panel2_confidence)) if ok]
+        if all(c is not None for _, c in _active):
+            pass_score = [sum(1 for v, _ in _active if v.strip().lower() == "approve"),
+                          round(min(c for _, c in _active), 4)]
     # Both panels voted: Approve if both approve, Split if only one does, else Deny.
     if p1_active and p2_active:
         v1_app = panel_verdict.strip().lower() == "approve"
@@ -328,6 +339,17 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                     retry_counts = [int(c or 0) for c in (prev.get("queue_retry_counts") or [0, 0])]
                 retry_counts = [retry_counts[0] + (panel_status == "queue_for_retry"),
                                 retry_counts[1] + (panel2_status == "queue_for_retry")]
+            # Score each head once: the first head sets the best, and every later
+            # head that does not beat it is a stall; beating it resets the count.
+            best = prev.get("remediation_best")
+            stalls = int(prev.get("remediation_stalls") or 0)
+            scored_head = prev.get("remediation_scored_head")
+            if pass_score is not None and scored_head != head_sha:
+                if best is None or pass_score > list(best):
+                    best, stalls = pass_score, 0
+                else:
+                    stalls += 1
+                scored_head = head_sha
             # Rebuild the record from this scan plus the carried-over sticky fields.
             state["pr_reviews"][key] = {
                 "repo": repo,
@@ -447,6 +469,11 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 # model failing to SPEAK, so it pushes no commit and the head does
                 # not move between barren attempts. The allowance therefore binds
                 # within a head, while genuinely new code earns a fresh one.
+                # Soft stop (pr_remediate.remediation_stalled). Carried across heads
+                # like remediation_attempts, since each remediation moves the head.
+                "remediation_best": best,
+                "remediation_stalls": stalls,
+                "remediation_scored_head": scored_head,
                 "remediation_barren": (
                     int(prev.get("remediation_barren") or 0)
                     if prev.get("head") == head_sha else 0),

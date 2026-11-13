@@ -400,3 +400,11 @@ def test_existing_remediation_guards_still_win(remediate_calls, monkeypatch):
     assert ok is False
     assert "guardrail" in reason
     assert remediate_calls == []
+
+
+def test_a_stalled_pr_is_not_remediated(remediate_calls, monkeypatch):
+    monkeypatch.setattr(pr_remediate, "state", {"pr_reviews": {"owner/repo#5": {
+        "panel_verdict": "Deny", "panel_confidence": 0.60, "remediation_stalls": 2}}})
+    ok, reason = pr_remediate.maybe_auto_remediate(None, _Repo(), _PR(["src/app.py"]), {})
+    assert ok is False and "stalled" in reason
+    assert remediate_calls == []

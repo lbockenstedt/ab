@@ -127,3 +127,19 @@ def test_garbage_attempt_values_do_not_raise():
     result = remediation_pending(rec, config)
     assert result[0] == True
     assert isinstance(result[1], str) and len(result[1]) > 0
+
+
+def test_two_heads_without_a_gain_stop_remediation():
+    """Soft stop: fixes that stop raising the best review hand the PR to a human."""
+    rec = _rec(panel_verdict="Deny", remediation_stalls=2)
+    assert remediation_pending(rec, CONFIG) == (False, "remediation stalled: no gain over the best review")
+    assert remediation_pending(rec, dict(CONFIG, pr_remediate_stall_limit=0))[0] is True
+    assert remediation_pending(_rec(panel_verdict="Deny", remediation_stalls=1), CONFIG)[0] is True
+
+
+def test_the_stall_limit_has_a_settings_control():
+    """Fleet rule: UI for everything."""
+    routes = open("routes.py", encoding="utf-8").read()
+    assert routes.count('config.setdefault("pr_remediate_stall_limit", 2)') == 2
+    assert '"pr_remediate_stall_limit": lambda v:' in routes
+    assert 'name="pr_remediate_stall_limit"' in open("templates/index.html", encoding="utf-8").read()

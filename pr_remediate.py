@@ -680,6 +680,20 @@ def should_remediate(rec, config):
     return False, "panel score %.2f already meets the %.2f target" % (score, target), 0.0
 
 
+def remediation_stalled(rec, config):
+    """The soft stop: True once ``pr_remediate_stall_limit`` reviewed heads in a
+    row have not beaten the PR's best pass ([panels approved, lowest confidence],
+    kept by app_state.record_pr_review). A backtest of 766 AB-reviewed PRs found
+    nothing that first fully approved after pass 5, and PRs past that point
+    swung back and forth rather than converging, so two passes without a gain
+    hand the PR to a human. 0 turns the soft stop off."""
+    try:
+        limit = int(config.get("pr_remediate_stall_limit", 2))
+    except (TypeError, ValueError):
+        limit = 2
+    return limit > 0 and int(rec.get("remediation_stalls") or 0) >= limit
+
+
 def remediation_pending(rec, config):
     """The "improve before merging" gate.
 
@@ -710,6 +724,8 @@ def remediation_pending(rec, config):
         return False, "remediation is blocked by a guardrail"
     if rec.get("auto_remediate_status") == "exhausted_human_review":
         return False, "remediation attempts exhausted"
+    if remediation_stalled(rec, config):
+        return False, "remediation stalled: no gain over the best review"
 
     # Read the attempts so far and the maximum allowed.
     try:
@@ -1312,6 +1328,11 @@ def maybe_auto_remediate(
     # Out of attempts: a human has to take over.
     if rec.get("auto_remediate_status") == "exhausted_human_review":
         return _skip("PR remediation attempt limit reached")
+    # Fixes have stopped helping: a human takes over. Not latched, so a new
+    # head that beats the best review resumes remediation.
+    if remediation_stalled(rec, config):
+        return _skip("remediation stalled: %d reviewed heads in a row did not beat the best "
+                     "review (pr_remediate_stall_limit)" % int(rec.get("remediation_stalls") or 0))
 
     # Documentation PRs are reviewed but not accuracy-gated (same operator
     # policy as pr_review._automerge_decision's docs bypass). Remediation

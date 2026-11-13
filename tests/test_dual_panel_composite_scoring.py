@@ -297,3 +297,33 @@ def test_the_wait_knob_has_a_settings_control():
     assert 'name="pr_review_state_panel_waits"' in src
     assert ('config_data["pr_review_state_panel_waits"] = data.get("pr_review_state_panel_waits") == "on"'
             in open("routes.py", encoding="utf-8").read())
+
+
+def test_each_head_that_does_not_beat_the_best_review_is_a_stall(pr_env):
+    """[panels approved, lowest confidence] per head; a re-scan of the same
+    head or a failed panel is not a pass."""
+    record_pr_review, state = pr_env
+    deny = lambda c: {"verdict": "Deny", "confidence": c}
+    skip = {"status": "skipped"}
+    stalls = lambda: state["pr_reviews"]["o/r#9"]["remediation_stalls"]
+    record_pr_review("o/r", 9, "PR 9", "u", [], "a", review=deny(0.6), review2=skip)
+    assert state["pr_reviews"]["o/r#9"]["remediation_best"] == [0, 0.6] and stalls() == 0
+    record_pr_review("o/r", 9, "PR 9", "u", [], "b", review=deny(0.5), review2=skip)
+    record_pr_review("o/r", 9, "PR 9", "u", [], "b", review=deny(0.5), review2=skip)
+    assert stalls() == 1
+    record_pr_review("o/r", 9, "PR 9", "u", [], "c", review={"status": "queue_for_retry"}, review2=skip)
+    assert stalls() == 1
+    record_pr_review("o/r", 9, "PR 9", "u", [], "c", review=deny(0.6), review2=skip)
+    assert stalls() == 2
+    record_pr_review("o/r", 9, "PR 9", "u", [], "d", review={"verdict": "Approve", "confidence": 0.85},
+                     review2=deny(0.7))
+    assert state["pr_reviews"]["o/r#9"]["remediation_best"] == [1, 0.7] and stalls() == 0
+
+
+def test_a_verdict_without_a_confidence_is_not_a_stall(pr_env):
+    """Unknown confidence is not 0%: such a head is not scored."""
+    record_pr_review, state = pr_env
+    record_pr_review("o/r", 10, "PR 10", "u", [], "a", review={"verdict": "Deny"}, review2={"status": "skipped"})
+    record_pr_review("o/r", 10, "PR 10", "u", [], "b", review={"verdict": "Deny"}, review2={"status": "skipped"})
+    rec = state["pr_reviews"]["o/r#10"]
+    assert rec["remediation_best"] is None and rec["remediation_stalls"] == 0
