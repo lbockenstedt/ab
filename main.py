@@ -530,8 +530,8 @@ async def detect_https_probe(request: Request, call_next):
 # surface used by routes.py and the sibling modules resolves unchanged.
 from app_state import *  # noqa: E402,F401,F403
 
-# The All activity filter chips call feed_counts() so each chip's count is
-# computed from the same rows the feed lists.
+# The All activity filter chips call feed_counts(state.processed) so each chip
+# counts the same rows the feed renders.
 templates.env.globals["feed_counts"] = feed_counts  # noqa: F405
 import mission_control as _mission_control  # noqa: E402
 # One look for the dashboard: the All activity rows use Mission Control's chips.

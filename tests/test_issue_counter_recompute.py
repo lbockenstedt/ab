@@ -219,8 +219,8 @@ def main():
         "o/r:na": {"status": "non-actionable", "timestamp": old},
         "o/r:ff": {"status": "feature_classify_retry", "timestamp": old},
     })
-    counts = ns["feed_counts"](store, now=now)
     rows = ns["activity_feed_items"](store, now=now)
+    counts = ns["feed_counts"](rows)
     for bucket, statuses in ns["FEED_BUCKETS"].items():
         shown = sum(1 for i in rows.values() if i.get("status") in statuses)
         ok &= _check(f"feed_counts[{bucket!r}] == rows its filter shows ({shown})",

@@ -672,14 +672,12 @@ FEED_BUCKETS = {
 }
 
 
-def feed_counts(processed=None, now=None):
-    """All activity filter chip counts, computed at render time from the SAME
-    rows the feed lists, so a count can never point at an empty filter — no
-    matter how long an issue sits, or whether a counter write was missed.
+def feed_counts(rows):
+    """All activity filter chip counts over `rows`, the very issues the page
+    renders (the dashboard passes its activity_feed_items() result), so each
+    count is exactly what its filter shows: no second 7-day window or clock.
     "all" is the Active chip: every row except closed and resolved ones."""
-    if processed is None:
-        processed = state["processed"]
-    vals = list(activity_feed_items(processed, now=now).values())
+    vals = list((rows or {}).values())
     counts = {bucket: sum(1 for i in vals if i.get("status") in statuses)
               for bucket, statuses in FEED_BUCKETS.items()}
     counts["all"] = sum(1 for i in vals if i.get("status") not in ("closed", "resolved"))

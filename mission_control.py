@@ -157,25 +157,27 @@ def issue_chip(status):
 
 
 def pr_chip(pr):
-    """(label, tone) of the one status chip on an All activity PR row.
+    """(label, tone, why) of the one status chip on an All activity PR row.
 
     Same precedence as the row's data-pr-state: auto_merged is checked before
-    merged because an auto-merged PR is also merged=True. "Held" is a pending
-    PR whose auto-merge is held for a reason a person has to look at."""
-    hold = pr.get("auto_merge_blocked_reason") or ""
+    merged because an auto-merged PR is also merged=True. An open PR reads as
+    Mission Control files it (_pr_state): "Held" only when the hold waits on a
+    person, so a self-clearing hold (GitHub Actions, release lock, blackout)
+    stays "Pending" here just as it stays in flight up there."""
     if pr.get("auto_merged"):
-        return "Auto-merged", "teal"
+        return "Auto-merged", "teal", ""
     if pr.get("merged"):
-        return "Merged", "purple"
+        return "Merged", "purple", ""
     if pr.get("denied"):
-        return "Denied", "red"
+        return "Denied", "red", ""
     if pr.get("closed"):
-        return "Closed", "slate"
+        return "Closed", "slate", ""
+    kind, label, why = _pr_state(pr)
     if pr.get("approved"):
-        return "Approved", "green"
-    if hold and not any(m in hold for m in _NOT_APPLICABLE_HOLDS):
-        return "Held", "amber"
-    return "Pending", "indigo"
+        return "Approved", "green", why
+    if kind == "needs" and label == "Auto-merge held":
+        return "Held", "amber", why
+    return "Pending", "indigo", why
 
 
 def _pr_state(pr):

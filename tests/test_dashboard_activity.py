@@ -4,16 +4,19 @@ with one status chip and a ⋯ menu, bulk actions in a menu, and Working on now
 start times the browser can read in any timezone."""
 import re
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 
 import pytest
 from fastapi.testclient import TestClient
 
 import auth
 import main
+import mission_control
 import routes
 from app_state import state
 
 HOLD = "CI is failing on head abc — needs human review"
+_VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 
 @pytest.fixture
@@ -28,11 +31,15 @@ def page(monkeypatch):
         "o/lm:1": {"status": "failed", "timestamp": now.isoformat(), "title": "Sync drops tags", "error": "no edits"},
         "o/lm:2": {"status": "failed", "timestamp": now.isoformat(), "title": "Topology crash"},
         "o/lm:3": {"status": "pending_verification", "timestamp": now.isoformat(), "title": "Heartbeat"},
+        # Finished 30 days ago: out of the 7-day feed, so neither a row nor a count.
+        "o/lm:4": {"status": "fixed", "timestamp": (now - timedelta(days=30)).isoformat(), "title": "Old fix"},
     })
     monkeypatch.setitem(state, "pr_reviews", {
         "o/lm#5": {"repo": "o/lm", "number": 5, "title": "PR 5", "url": "u", "items": [],
                    "reviewed_at": now.strftime("%Y-%m-%d %H:%M:%S"), "panel_verdict": "Approve",
                    "panel_confidence": 0.91, "auto_merge_blocked_reason": HOLD},
+        "o/lm#6": {"repo": "o/lm", "number": 6, "title": "PR 6", "url": "u", "items": [], "denied": True,
+                   "reviewed_at": now.strftime("%Y-%m-%d %H:%M:%S"), "auto_merge_blocked_reason": "stale hold"},
     })
     start = now - timedelta(minutes=11)
     monkeypatch.setitem(state, "active_tasks", {"o/lm:9": {"name": "Fix o/lm:9", "start_time": start}})
@@ -103,3 +110,69 @@ def test_working_on_now_start_time_carries_its_utc_offset(page):
         parsed = datetime.fromisoformat(value)
         assert parsed.tzinfo is not None
         assert parsed == start.astimezone()
+
+
+def test_active_count_is_the_rows_the_active_filter_shows(page):
+    """The Active chip counts the rendered rows that are not closed/resolved;
+    an issue that aged out of the feed has neither a row nor a count."""
+    _, html, _ = page
+    rows = [r for r in _rows(html) if 'data-pr-state' not in r.split(">", 1)[0]]
+    shown = [r for r in rows if re.match(r'[^"]*" data-status="(?!closed"|resolved")', r)]
+    assert 'data-id="o/lm:4"' not in html
+    assert re.search(rf'data-filter="all"[^>]*>Active <span class="act-count">{len(shown)}</span>', html)
+    assert re.search(r'data-filter="fixed"[^>]*>Fixed <span class="act-count">0</span>', html)
+
+
+def test_why_line_only_on_open_prs(page):
+    _, html, _ = page
+    denied = next(r for r in _rows(html) if 'data-pr-state="denied"' in r)
+    assert "Why:" not in denied and "stale hold" not in denied
+
+
+def test_pr_chip_agrees_with_mission_control_on_self_clearing_holds():
+    """A hold AppBuilder clears by itself is in flight in Mission Control, so
+    the row chip must not call it Held; a hold on a person is Held in both."""
+    for hold in ("waiting on GitHub Actions — outage", "under a release lock", "in a blackout window"):
+        pr = {"auto_merge_blocked_reason": hold}
+        assert mission_control._pr_state(pr)[0] == "working"
+        assert mission_control.pr_chip(pr)[0] == "Pending"
+    pr = {"auto_merge_blocked_reason": HOLD}
+    assert mission_control._pr_state(pr)[:2] == ("needs", "Auto-merge held")
+    assert mission_control.pr_chip(pr)[:2] == ("Held", "amber")
+
+
+class _Ancestors(HTMLParser):
+    """Records, for each ⋯ menu inside #activity, the classes of its ancestors
+    from the #activity card down."""
+
+    def __init__(self):
+        super().__init__()
+        self.stack, self.menus = [], []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _VOID:
+            return
+        a = dict(attrs)
+        cls = a.get("class") or ""
+        ids = [i for _, i, _ in self.stack]
+        if tag == "details" and "act-menu" in cls and "activity" in ids:
+            # From the card down: the page's own scroll container (main) is fine,
+            # the menu scrolls with it.
+            self.menus.append([c for _, _, c in self.stack[ids.index("activity"):]])
+        self.stack.append((tag, a.get("id"), cls))
+
+    def handle_endtag(self, tag):
+        while self.stack:
+            if self.stack.pop()[0] == tag:
+                break
+
+
+def test_no_ancestor_clips_the_activity_menus(page):
+    """overflow-hidden on the card clipped the ⋯ menu of the last row, often
+    the only row under the default filter, so Deny/Fix/Reprocess were unreachable."""
+    _, html, _ = page
+    parser = _Ancestors()
+    parser.feed(html)
+    assert len(parser.menus) >= 3  # the bulk menu and the row menus
+    for ancestors in parser.menus:
+        assert not any(re.search(r"\boverflow-(hidden|auto|scroll|clip|[xy]-)", c) for c in ancestors), ancestors
