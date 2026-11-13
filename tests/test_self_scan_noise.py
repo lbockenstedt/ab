@@ -55,6 +55,27 @@ def _load_filter():
     return ns["filter_error_logs"]
 
 
+def test_webui_ratchet_feedback_is_not_an_appbuilder_fault():
+    """Drop candidate ratchet diagnostics without hiding runtime/check failures."""
+    fel = _load_filter()
+    noise = [
+        {"module": "ab-core",
+         "log": f"- [ERROR] WebUI ratchet: 1 new {label}: "
+                "`WebUI/js/settings.js` add inline event handlers; t"}
+        for label in ("escapeHtml() calls", "inline event handlers", "window globals")
+    ]
+    real = [
+        {"module": "ab-core",
+         "log": "[ERROR] WebUI ratchet: failed to read candidate files"},
+        {"module": "lm",
+         "log": "[ERROR] ReferenceError in WebUI/js/settings.js"},
+        {"module": "lm",
+         "log": "[ERROR] Failed to register inline event handlers"},
+    ]
+    kept = fel(noise + real)
+    assert [row["log"] for row in kept] == [row["log"] for row in real]
+
+
 def test_rejected_syntax_edit_is_not_a_product_error():
     """Suppress successful guardrail rejections, not actual syntax failures."""
     fel = _load_filter()
