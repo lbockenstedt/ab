@@ -106,6 +106,33 @@ def _merge_refusal(exc):
     return None
 
 
+def _github_message(exc):
+    """GitHub's error message from a GithubException."""
+    data = exc.data if isinstance(exc.data, dict) else {}
+    return str(data.get("message", exc.data) or "")
+
+
+# Merge refusals that clear by themselves within seconds (ab#500, ab#547,
+# opnsense#115): a required check that has not finished yet, or a merge of
+# the same PR already running.
+_TRANSIENT_MERGE_REFUSALS = ("is in progress", "is queued",
+                             "merge already in progress")
+
+
+def _merge_is_transient(exc):
+    """True when GitHub refused the merge only for now (see above).
+
+    A ruleset refusal lists every blocker on its own line, so EVERY listed
+    blocker must be transient: one still-running check next to a rule only a
+    human can clear is a refusal."""
+    if not isinstance(exc, GithubException):
+        return False
+    lines = [ln.strip().lower() for ln in _github_message(exc).splitlines()]
+    blockers = [ln for ln in lines if ln and ln != "repository rule violations found"]
+    return bool(blockers) and all(
+        any(t in ln for t in _TRANSIENT_MERGE_REFUSALS) for ln in blockers)
+
+
 def _expects_missing_check(msg):
     """True when a merge refusal is "a required status check never reported",
     as opposed to one that genuinely failed.
@@ -539,6 +566,23 @@ def merge_pr(gh, repo_name, number):
         res = pr.merge()  # default merge commit; raises if not mergeable
     # The merge failed.
     except GithubException as e:
+        # Another AppBuilder thread, or a retried request, may have merged it
+        # in the meantime: that is a success, not a refusal.
+        try:
+            pr.update()
+        except GithubException:
+            pass
+        if pr.merged:
+            update_pr_review(repo_name, number, merged=True, merge_blocked_reason=None)
+            logger.info(f"pr_actions: {repo_name} #{number} already merged by a concurrent attempt")
+            return 200, {"status": "success", "message": "already merged"}
+        # A check still running or a merge already in flight clears by itself:
+        # retry on the next poll instead of recording a refusal.
+        if _merge_is_transient(e):
+            msg = f"PR #{number}: {_github_message(e)} -- retrying the merge on the next poll."
+            logger.info("pr_actions: %s #%s — %s", repo_name, number, msg)
+            return 409, {"status": "error", "blocked": True, "retryable": True,
+                         "deferred": True, "message": msg}
         # Not a conflict: check whether it is a policy refusal; otherwise re-raise.
         if not _is_merge_conflict(e):
             refusal = _merge_refusal(e)
