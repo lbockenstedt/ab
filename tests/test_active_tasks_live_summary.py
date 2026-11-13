@@ -38,6 +38,7 @@ def _load_ns():
     ns = {
         "datetime": datetime,
         "JSONResponse": lambda status_code, content: {"status_code": status_code, "content": content},
+        "mission_control": __import__("mission_control"),
         "logger": _NoLog(),
     }
     exec("\n\n".join(segs), ns)

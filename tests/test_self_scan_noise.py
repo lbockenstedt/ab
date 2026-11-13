@@ -55,6 +55,26 @@ def _load_filter():
     return ns["filter_error_logs"]
 
 
+def test_rejected_syntax_edit_is_not_a_product_error():
+    """Suppress successful guardrail rejections, not actual syntax failures."""
+    fel = _load_filter()
+    rejected = {
+        "module": "ab-core",
+        "log": "2026-11-13 10:32:31 - AppBuilder - ERROR - REJECTING edit to "
+               "'src/nw_engine.py': the file parsed before the edit and does not "
+               "parse after it — the replacement text was almost certainly "
+               "truncated. Leaving the file untouched.",
+    }
+    real = [
+        {"module": "ab-core",
+         "log": "[ERROR] SyntaxError: unterminated string literal in fix_engine.py"},
+        {"module": "spoke",
+         "log": "[ERROR] REJECTING edit to device configuration: permission denied"},
+    ]
+    kept = fel([rejected] + real)
+    assert [row["log"] for row in kept] == [row["log"] for row in real]
+
+
 def main():
     fel = _load_filter()
 

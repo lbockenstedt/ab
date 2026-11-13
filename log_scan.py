@@ -348,6 +348,9 @@ _SELF_SCAN_NOISE = re.compile(
     r'|Error parsing or applying JSON fix'
     r'|AI generated invalid JSON format'
     r'|ABORTING fix'
+    # The targeted-edit syntax guard left the file untouched: a rejected
+    # candidate, not a deployed syntax error or a new AppBuilder defect.
+    r'|REJECTING edit to [^\n]+: the file parsed before the edit and does not parse after it'
     r'|No verified fix found after'
     r'|Error reading persistent config'
     r'|Could not save to persistent storage'
