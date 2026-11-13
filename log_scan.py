@@ -373,6 +373,10 @@ _SELF_SCAN_NOISE = re.compile(
     # A candidate fix failing the smoke test is the verifier rejecting it, not a
     # new fault (ab#503, #507 asked the fixer to fix its own rejected attempt).
     r'|Smoke test failed for [\w.-]+/[\w.-]+:'
+    # Fleet WebUI ratchet feedback describes a rejected candidate in LM, not
+    # an AppBuilder runtime fault. Keep the blocking check unchanged; only
+    # prevent its diagnostic from recursively seeding an issue against AB.
+    r'|WebUI ratchet: \d+ new (?:escapeHtml\(\) calls|inline event handlers|window globals):'
     # (5) provider rate-limiting that the LLM client already fully absorbs.
     # On the final 429 the client honours Retry-After (_parse_retry_after),
     # trips the global breaker (_llm_cb_trip, _RATELIMIT_COOLDOWN_SECONDS),
