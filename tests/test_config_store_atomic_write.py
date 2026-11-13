@@ -247,5 +247,42 @@ def main():
     return 1
 
 
+def test_overlapping_atomic_writes(tmp_path, monkeypatch):
+    """Interleaved saves must not consume another writer's temporary file."""
+    aw = _load_ns()["_atomic_write_json"]
+    target = tmp_path / "missing" / "nested" / "processed_issues.json"
+    replace = os.replace
+    sources = []
+
+    def interleaved_replace(src, dst):
+        """Finish another save while the first is about to replace its target."""
+        sources.append(src)
+        if len(sources) == 1:
+            aw(str(target), {"writer": "second"})
+            assert json.loads(target.read_text()) == {"writer": "second"}
+        replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", interleaved_replace)
+    aw(str(target), {"writer": "first"})
+    assert len(set(sources)) == 2
+    assert json.loads(target.read_text()) == {"writer": "first"}
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_failed_atomic_write_preserves_target(tmp_path):
+    """Serialization failure preserves old JSON and removes the unique temp."""
+    aw = _load_ns()["_atomic_write_json"]
+    target = tmp_path / "processed_issues.json"
+    aw(str(target), {"old": True})
+    try:
+        aw(str(target), {"bad": object()})
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("Serialization failure must reach the caller")
+    assert json.loads(target.read_text()) == {"old": True}
+    assert list(tmp_path.iterdir()) == [target]
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
