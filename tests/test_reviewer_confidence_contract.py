@@ -37,7 +37,7 @@ def prompt_text():
     """
     src = open("fix_engine.py", encoding="utf-8").read()
     fn = next(n for n in ast.parse(src).body
-              if isinstance(n, ast.FunctionDef) and n.name == "review_fix")
+              if isinstance(n, ast.FunctionDef) and n.name == "reviewer_prompt")
     doc = ast.get_docstring(fn, clean=False)
     parts = [n.value for n in ast.walk(fn)
              if isinstance(n, ast.Constant) and isinstance(n.value, str)]
