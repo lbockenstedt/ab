@@ -352,6 +352,7 @@ def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
     """(stage, done, now_text) of an open PR, from its cached review record."""
     where, label, why = _pr_state(pr)
     ci = (ci_seen or {}).get((pr.get("repo") or key.rpartition("#")[0], pr.get("head")))
+    # Steps already behind the PR: it exists, so triage and PR are done.
     done = {"triage", "pr"}
     if int(pr.get("remediation_attempts") or 0):
         done.add("fix")
@@ -359,9 +360,11 @@ def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
         done.add("tests")
     if pr.get("panel_verdict") or pr.get("panel2_verdict"):
         done.add("review")
+    # Facts the Now line quotes: next poll, attempts used, CI still running.
     poll = _until(next_poll_at, now.timestamp())
     attempts = int(pr.get("remediation_attempts") or 0)
     pending_ci = ci and ci["done"] < ci["total"]
+    # Being fixed or waiting on CI.
     if label == "Improving" and "improves" in why:
         return "fix", done, "improving: attempt %d/%d" % (min(attempts + 1, max_attempts), max_attempts)
     if label in ("Improving", "Auto-merging") and pending_ci:
@@ -372,18 +375,21 @@ def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
         return "merge", done, "auto-merge approved — merges on the next poll" + (" (%s)" % poll if poll else "")
     if label == "Improving":
         return "merge", done, "held: " + _short(why, 120)
+    # Waiting on a review, or stopped and needing a person.
     if label == "Review queued":
         return "review", done, "queued: next PR scan %s" % poll if poll else "queued for the next PR scan"
     if label == "Fixes stopped":
         return "fix", done, "held: remediation limit %d/%d, needs human" % (attempts, max_attempts)
     if label == "Panel unavailable":
         return "review", done, "held: review panel unavailable, retries used up — needs human"
+    # Held: say what it is held on.
     if label in ("Auto-merge held", "Merge refused"):
         if ci and ci["failed"]:
             return "tests", done, "held: CI failing (%d of %d checks failed)" % (ci["failed"], ci["total"])
         if pending_ci:
             return "tests", done, "held: waiting for CI (%d/%d checks done)" % (ci["done"], ci["total"])
         return "merge", done, "held: " + _short(why, 120)
+    # Otherwise it waits on a human (approval, review or promotion).
     if label == "Approved":
         return "merge", done, "approved — waiting for a Merge click"
     if is_promotion(pr):
