@@ -482,7 +482,9 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
             skills_root = os.path.join(tmp_dir, "skills")
             clone_url = repo_obj.clone_url.replace("https://", f"https://{token}@")
             logger.info(f"feature_build: cloning {repo_name} for {issue_id}...")
-            repo_git = git.Repo.clone_from(clone_url, checkout_path)
+            # Clone the integration branch: the default branch is main, and a
+            # feature forked from main carries main's VERSION into its dev PR.
+            repo_git = git.Repo.clone_from(clone_url, checkout_path, branch=base_branch)
             # Strip the token back out immediately — never let it sit in
             # .git/config for the duration of an agentic build with shell
             # access to this same directory. Re-applied only transiently via
