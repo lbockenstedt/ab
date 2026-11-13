@@ -10,6 +10,7 @@ from github import Github
 from app_state import activity_feed_items, mark_pr_approved, update_pr_review
 from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
+import mission_control
 from fastapi import APIRouter
 
 # Router that main.app includes.
@@ -1061,19 +1062,32 @@ async def dashboard(request: Request):
     # Whether a local Claude CLI provider slot is configured — the per-issue
     # "Claude" fix button is hidden when it isn't, since triggerFix(..., 'claude')
     # would otherwise fail with "no claude_cli provider is configured".
+    config = load_config()
     try:
         from llm_client import _find_claude_cli_slot
-        claude_enabled = _find_claude_cli_slot(load_config()) is not None
+        claude_enabled = _find_claude_cli_slot(config) is not None
     except Exception:
         claude_enabled = False
+    # Mission Control (KPIs, Needs your attention, Recent outcomes); Settings can switch it off.
+    mission = None
+    if config.get("dashboard_mission_control", True):
+        mission = mission_control.build(state["processed"], state.get("pr_reviews"), state["active_tasks"])
 
     # Render the dashboard.
     return templates.TemplateResponse(request=request, name="index.html", context={
         "view": "status",
         "state": {**state, "processed": recent_processed},
         "sorted_pr_reviews": pr_items,
-        "claude_enabled": claude_enabled
+        "claude_enabled": claude_enabled,
+        "mission": mission,
     })
+
+
+@router.get("/api/mission-control")
+async def mission_control_summary():
+    """The dashboard's Mission Control data: KPIs, what needs a person (with why),
+    what AppBuilder still owns, and recent outcomes."""
+    return mission_control.build(state["processed"], state.get("pr_reviews"), state["active_tasks"])
 
 
 def _duration_str(seconds):
@@ -2586,6 +2600,7 @@ async def settings_page(request: Request):
     # claude_binary lives in config (not DEFAULT_ENV), so expose it on `settings`
     # for the Settings form field to round-trip its saved value.
     settings["claude_binary"] = config.get("claude_binary", "")
+    settings["dashboard_mission_control"] = config.get("dashboard_mission_control", True)
     # Ollama preload settings.
     settings["ollama_preload_timeout_s"] = config.get("ollama_preload_timeout_s", 3600)
     settings["gate_scans_on_model_preload"] = config.get("gate_scans_on_model_preload", True)
@@ -3229,6 +3244,7 @@ async def save_settings(request: Request):
     # Unchecked checkboxes are simply absent from the form, so an explicit
     # comparison is what distinguishes "off" from "not submitted".
     config_data["delete_merged_branches"] = data.get("delete_merged_branches") == "on"
+    config_data["dashboard_mission_control"] = data.get("dashboard_mission_control") == "on"
     # Agentic LLM router (/v1/messages) toggles. agentic_default (OFF): route
     # every proxy request through AppBuilder's agent loop, not just model=
     # ab-agent. autofix_enabled (OFF, a second gate behind the required key):
@@ -4365,8 +4381,10 @@ async def delete_issue(request: Request):
     }
 
 
-# Statuses of a parked feature request.
-_REEVALUATE_FEATURE_STATUSES = {"feature_flagged", "feature_failed", "feature_classify_retry"}
+# Statuses of a parked feature request (feature_needs_info: the requester was
+# asked questions; Re-evaluate once they answer).
+_REEVALUATE_FEATURE_STATUSES = {"feature_flagged", "feature_failed", "feature_classify_retry",
+                                "feature_needs_info"}
 
 
 @router.post("/reevaluate_feature")
