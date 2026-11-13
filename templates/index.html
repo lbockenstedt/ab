@@ -197,28 +197,16 @@
            `flex`/`w-full` utilities some buttons already use. */
         button { white-space: nowrap; }
         .btn-primary, .btn-sec, .filter-btn { align-items: center; justify-content: center; gap: 0.375rem; }
-        /* Uniform filter buttons. Width is set from the LONGEST label
-           ("Pending Verification", 20 chars) plus the icon, gap and padding, so
-           nothing wraps and every button matches -- which also makes the issue
-           row and the PR row line up column-for-column instead of each being
-           packed to its own content width. Scoped to .filter-btn: the same
-           min-width on .btn-primary/.btn-sec would stretch every Save button in
-           the app. */
-        /* Each row is ONE line, always. flex:1 1 0 + min-width:0 makes the
-           buttons divide the row equally and SHRINK to fit, instead of keeping a
-           min-width floor that forces a wrap once the total exceeds the
-           container — a floor plus flex-wrap is what made them spill onto extra
-           lines. min-width:0 is the load-bearing half: without it a flex item
-           refuses to shrink below its content, so the wrap comes back.
-           Ellipsis rather than clipping for the one label ("Pending
-           Verification") that can outgrow a narrow column. */
-        .filter-btn {
-            flex: 1 1 0;
-            min-width: 0;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
+        /* All activity filter chips size to their label + count and the two chip
+           rows wrap on a narrow window, like the Mission Control chips. */
+        .filter-btn { flex: none; white-space: nowrap; }
+        /* <details> menus and expanders in All activity: no disclosure triangle on
+           the ⋯ button (Chrome and Safari draw it differently). */
+        .act-menu > summary, .act-details > summary { list-style: none; }
+        .act-menu > summary::-webkit-details-marker,
+        .act-details > summary::-webkit-details-marker { display: none; }
+        .act-details > summary::before { content: '▸ '; }
+        .act-details[open] > summary::before { content: '▾ '; }
         /* Soft danger variant (LM red-100 token) — matches btn-primary/btn-sec so
            Dismiss / Clear actions are a consistent size + shape, colour aside. */
         .btn-danger {
@@ -488,42 +476,13 @@
                 <i class="fas fa-comments w-4 text-center"></i>Chat
             </a>
         </nav>
-        <!-- page break between the nav and the System Health data -->
+        <!-- page break between the nav and the Skills line. The old System Health
+             counters lived here; they duplicated the KPI tiles and now ride on the
+             All activity filter chips as counts. -->
         <div class="border-t-2 border-slate-200 mx-3 my-1 flex-none"></div>
-        <!-- System Health (moved here from the main grid to use the sidebar white space) -->
         <div class="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0">
-            <div class="flex items-center justify-between">
-                <h4 class="text-xs font-bold text-slate-500">System Health</h4>
-                <i class="fas fa-heartbeat text-primary-text text-xs"></i>
-            </div>
-            {% set _fc = feed_counts() %}
-            <div class="space-y-1.5 text-xs">
-                <div onclick="goFilter('resolved')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Resolved"><span class="text-slate-500">Resolved</span><span class="font-bold text-green-600">{{ _fc['resolved'] }}</span></div>
-                <div onclick="goFilter('failed')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Failed"><span class="text-slate-500">Failed</span><span class="font-bold text-red-600">{{ _fc['failed'] }}</span></div>
-                <div onclick="goFilter('closed')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Closed"><span class="text-slate-500">Closed</span><span class="font-bold text-slate-600">{{ _fc['closed'] }}</span></div>
-                <div onclick="goFilter('pending_verification')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Pending Verification"><span class="text-slate-500">Pending Verif.</span><span class="font-bold text-amber-600">{{ _fc['pending_verification'] }}</span></div>
-                <div onclick="goFilter('non-actionable')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Non-Actionable"><span class="text-slate-500">Non-Actionable</span><span class="font-bold text-orange-600">{{ _fc['non-actionable'] }}</span></div>
-                <div onclick="goFilter('feature_flagged')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Feature requests flagged for a human (crosses a boundary)"><span class="text-slate-500">Feature Flagged</span><span class="font-bold text-purple-600">{{ _fc['feature_flagged'] }}</span></div>
-                <div onclick="goFilter('feature_needs_info')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Feature requests awaiting more detail from the requester"><span class="text-slate-500">Feature Needs Info</span><span class="font-bold text-sky-600">{{ _fc['feature_needs_info'] }}</span></div>
-                <div onclick="goFilter('feature_built')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: Feature requests auto-built, PR open"><span class="text-slate-500">Feature Built</span><span class="font-bold text-teal-600">{{ _fc['feature_built'] }}</span></div>
-                {% set _pr_ns = namespace(pending=0, approved=0, merged=0, denied=0, auto_merged=0) %}
-                {% set _pr_totals = state.pr_merge_totals or {'merged': 0, 'auto_merged': 0} %}
-                {% for _pk, _pr in (state.pr_reviews or {}).items() %}{% if _pr.auto_merged %}{% set _pr_ns.auto_merged = _pr_ns.auto_merged + 1 %}{% elif _pr.merged %}{% set _pr_ns.merged = _pr_ns.merged + 1 %}{% elif _pr.denied %}{% set _pr_ns.denied = _pr_ns.denied + 1 %}{% elif _pr.closed %}{# closed-unmerged: shown as CLOSED, not tallied in a sub-bucket #}{% elif _pr.approved %}{% set _pr_ns.approved = _pr_ns.approved + 1 %}{% else %}{% set _pr_ns.pending = _pr_ns.pending + 1 %}{% endif %}{% endfor %}
-                {# PENDING = reviewed and still awaiting a human: NOT approved/merged/denied/closed/
-                   auto_merged. This must be the `else` of the same chain that fills the other
-                   buckets — it used to be the raw pr_reviews length, which counted every terminal
-                   PR as pending and made the counters sum to more than the PR list. Mirrors the
-                   data-pr-state on the rows so the count and the filter agree. auto_merged is
-                   checked FIRST (an auto-merged PR is ALSO merged=True) — same ordering rule as
-                   the row's data-pr-state and the badge chain below. #}
-                <div onclick="goFilter('pr_review')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Pending"><span class="text-slate-500">PRs Pending</span><span class="font-bold text-indigo-600">{{ _pr_ns.pending }}</span></div>
-                <div onclick="goFilter('pr_approved')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Approved"><span class="text-slate-500">PRs Approved</span><span class="font-bold text-green-600">{{ _pr_ns.approved }}</span></div>
-                <div onclick="goFilter('pr_merged')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Merged (lifetime total; the list below shows only the most recent reviews)"><span class="text-slate-500">PRs Merged</span><span class="font-bold text-purple-600">{{ _pr_totals.merged }}</span></div>
-                <div onclick="goFilter('pr_auto_merged')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Auto-Merged, no human clicked Approve/Merge (lifetime total; the list below shows only the most recent reviews)"><span class="text-slate-500">PRs Auto-Merged</span><span class="font-bold text-teal-600">{{ _pr_totals.auto_merged }}</span></div>
-                <div onclick="goFilter('pr_denied')" class="flex justify-between cursor-pointer rounded px-1 -mx-1 hover:bg-slate-100" title="Filter activity: PRs Denied"><span class="text-slate-500">PRs Denied</span><span class="font-bold text-red-600">{{ _pr_ns.denied }}</span></div>
-            </div>
             {% if state.skills %}
-            <div class="pt-2 border-t border-slate-100 text-xs" title="Claude skills loaded from lm/.claude/skills — injected into AppBuilder's fixes.">
+            <div class="text-xs" title="Claude skills loaded from lm/.claude/skills — injected into AppBuilder's fixes.">
                 <span class="text-slate-500">Skills</span>
                 <div class="font-semibold text-indigo-600 mt-0.5 break-words">{{ state.skills|join(', ') }}</div>
             </div>
@@ -641,7 +600,7 @@
             <div id="active-tasks-list" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                 {% if state.active_tasks %}
                     {% for tid, task in state.active_tasks.items() %}
-                        <div class="hpe-card p-4" data-tid="{{ tid }}" data-start="{{ task.start_time.isoformat() }}">
+                        <div class="hpe-card p-4" data-tid="{{ tid }}" data-start="{{ iso_utc(task.start_time) }}">
                             <div class="mb-1">
                                 <span class="text-xs font-bold px-2 py-0.5 rounded-full {{ 'bg-indigo-50 text-indigo-700' if task.kind == 'pr' else 'bg-brand/10 text-primary-text' }}"><i class="fas {{ 'fa-code-branch' if task.kind == 'pr' else 'fa-search' }}"></i> {{ 'PR review' if task.kind == 'pr' else 'Scan / fix' }}</span>
                             </div>
@@ -670,104 +629,114 @@
             {% endif %}
         </div>
 
-        <!-- Processed Table -->
-        <div id="activity" class="mt-8 hpe-card rounded-2xl overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-200 bg-white flex flex-col gap-3">
-                <!-- Row 1: title + bulk actions -->
-                <div class="flex justify-between items-center flex-wrap gap-2">
-                    <h3 class="text-lg font-bold text-navy whitespace-nowrap">All activity</h3>
-                    <div class="flex gap-2 items-center flex-wrap">
-                        <button onclick="retryAll(null)" class="btn-primary px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap">
-                            <i class="fas fa-redo-alt mr-1"></i> Retry All
-                        </button>
-                        <button onclick="clearHistory()" class="btn-danger px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap">
-                            <i class="fas fa-trash-alt mr-1"></i> Clear History
-                        </button>
-                        <button onclick="deleteAllIssues()" class="px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 transition-all border border-red-700" title="Dismiss every issue on GitHub (ab-dismissed) and clear the whole history">
-                            <i class="fas fa-trash-alt mr-1"></i> Dismiss All
-                        </button>
+        <!-- All activity: one line per issue or PR in the Mission Control style (one
+             status chip, age, a primary action and a ⋯ menu for the rest); the long
+             detail sits in a collapsed "Details" expander under each row. Buttons
+             carry data-mc="<action>" for the one delegated listener (MC_ACTIONS). -->
+        {% macro act_button(action, label, title, primary=False, id='', repo='', num='', href='') -%}
+        {%- set _cls = 'bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold whitespace-nowrap' if primary else 'block w-full text-left px-3 py-1.5 text-xs whitespace-nowrap hover:bg-slate-100 ' ~ ('text-red-600' if action in ('dismiss', 'deny') else 'text-slate-700') -%}
+        {%- if href -%}
+        <a href="{{ href }}" target="_blank" class="{{ _cls }}" title="{{ title }}">{{ label }}</a>
+        {%- else -%}
+        <button type="button" data-mc="{{ action }}"{% if id %} data-id="{{ id }}"{% endif %}{% if repo %} data-repo="{{ repo }}" data-num="{{ num }}"{% endif %} class="{{ _cls }}" title="{{ title }}">{{ label }}</button>
+        {%- endif -%}
+        {%- endmacro %}
+        {% macro act_menu(title='More actions') -%}
+        <details class="act-menu relative">
+            <summary class="btn-sec px-2 py-1 rounded text-xs font-bold cursor-pointer select-none" title="{{ title }}">⋯</summary>
+            <div class="absolute right-0 z-20 mt-1 min-w-[11rem] bg-white border border-slate-200 rounded shadow-lg py-1">{{ caller() }}</div>
+        </details>
+        {%- endmacro %}
+        {% macro filter_chip(key, label, count, title) -%}
+        <button type="button" data-mc="activity" data-filter="{{ key }}" class="filter-btn px-3 py-1 rounded-full text-xs font-bold border transition-all bg-white text-slate-600 border-slate-300 hover:border-brand{{ ' opacity-50' if not count }}" title="{{ title }}">{{ label }} <span class="act-count">{{ count }}</span></button>
+        {%- endmacro %}
+        <div id="activity" class="mt-8 hpe-card overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
+                <h3 class="text-lg font-bold text-navy mr-auto">All activity</h3>
+                <button type="button" data-mc="retry-all" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold whitespace-nowrap" title="Retry every failed issue"><i class="fas fa-redo-alt mr-1"></i>Retry All</button>
+                <details id="act-bulk-menu" class="act-menu relative">
+                    <summary class="btn-sec px-2 py-1 rounded text-xs font-bold cursor-pointer select-none" title="More bulk actions">⋯</summary>
+                    <div class="absolute right-0 z-20 mt-1 min-w-[13rem] bg-white border border-slate-200 rounded shadow-lg py-1">
+                        <button type="button" data-mc="clear-history" class="block w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-slate-100 whitespace-nowrap" title="Clear the local activity history (asks first)"><i class="fas fa-trash-alt mr-1"></i>Clear History</button>
+                        <button type="button" data-mc="dismiss-all" class="block w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-slate-100 whitespace-nowrap" title="Dismiss every issue on GitHub (ab-dismissed) and clear the whole history (asks you to type DISMISS)"><i class="fas fa-trash-alt mr-1"></i>Dismiss All</button>
+                    </div>
+                </details>
+            </div>
+            <!-- Filters: the same keys filterActivity() has always used, with counts
+                 (these replaced the old sidebar System Health counters). -->
+            {% set _fc = feed_counts() %}
+            {# PENDING = reviewed and still awaiting a human: NOT approved/merged/denied/closed/
+               auto_merged. This must be the `else` of the same chain that fills the other
+               buckets, mirroring the data-pr-state on the rows so the count and the filter
+               agree. auto_merged is checked FIRST (an auto-merged PR is ALSO merged=True). #}
+            {% set _pr_ns = namespace(pending=0, approved=0, merged=0, denied=0, auto_merged=0, closed=0) %}
+            {% set _pr_totals = state.pr_merge_totals or {'merged': 0, 'auto_merged': 0} %}
+            {% for _pk, _pr in (state.pr_reviews or {}).items() %}{% if _pr.auto_merged %}{% set _pr_ns.auto_merged = _pr_ns.auto_merged + 1 %}{% elif _pr.merged %}{% set _pr_ns.merged = _pr_ns.merged + 1 %}{% elif _pr.denied %}{% set _pr_ns.denied = _pr_ns.denied + 1 %}{% elif _pr.closed %}{% set _pr_ns.closed = _pr_ns.closed + 1 %}{% elif _pr.approved %}{% set _pr_ns.approved = _pr_ns.approved + 1 %}{% else %}{% set _pr_ns.pending = _pr_ns.pending + 1 %}{% endif %}{% endfor %}
+            <div class="px-5 py-3 border-b border-slate-200 flex flex-col gap-2">
+                <div class="flex items-start gap-2">
+                    <span class="text-xs font-bold text-slate-500 w-24 flex-none pt-1">Issues</span>
+                    <div class="flex flex-wrap items-center gap-2">
+                    {{ filter_chip('all', 'Active', _fc['all'], 'Active issues (closed and resolved hidden)') }}
+                    {{ filter_chip('pending_verification', 'Pending verification', _fc['pending_verification'], 'Auto-committed, awaiting your verification') }}
+                    {{ filter_chip('fixed', 'Fixed', _fc['fixed'], 'AI fix pushed or PR opened') }}
+                    {{ filter_chip('resolved', 'Resolved', _fc['resolved'], 'Fixed, verified, awaiting the production check, or resolved') }}
+                    {{ filter_chip('failed', 'Failed', _fc['failed'], 'The fix failed') }}
+                    {{ filter_chip('non-actionable', 'Not actionable', _fc['non-actionable'], 'Triage judged it not actionable') }}
+                    {{ filter_chip('closed', 'Closed', _fc['closed'], 'Closed on GitHub') }}
+                    {{ filter_chip('feature_flagged', 'Feature flagged', _fc['feature_flagged'], 'Feature requests crossing a boundary — need a human decision') }}
+                    {{ filter_chip('feature_needs_info', 'Feature needs info', _fc['feature_needs_info'], 'Feature requests awaiting more detail from the requester') }}
+                    {{ filter_chip('feature_built', 'Feature built', _fc['feature_built'], 'Feature requests auto-built — PR open') }}
                     </div>
                 </div>
-                <!-- Row 2: filters (pinned right) -->
-                <div class="flex items-center flex-nowrap gap-2">
-                    <button data-filter="all" onclick="filterActivity('all')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-brand/10 hover:bg-brand/20 text-primary-text border-brand" title="Active issues (closed hidden)">Active</button>
-                    <button data-filter="pending_verification" onclick="filterActivity('pending_verification')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Auto-committed, awaiting your verification">Pending Verification</button>
-                    <button data-filter="fixed" onclick="filterActivity('fixed')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Fixed</button>
-                    <button data-filter="resolved" onclick="filterActivity('resolved')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Resolved</button>
-                    <button data-filter="failed" onclick="filterActivity('failed')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Failed</button>
-                    <button data-filter="non-actionable" onclick="filterActivity('non-actionable')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Non-Actionable</button>
-                    <button data-filter="closed" onclick="filterActivity('closed')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200">Closed</button>
-                    <button data-filter="feature_flagged" onclick="filterActivity('feature_flagged')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests crossing a boundary — need a human decision">Feature Flagged</button>
-                    <button data-filter="feature_needs_info" onclick="filterActivity('feature_needs_info')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests awaiting more detail from the requester">Feature Needs Info</button>
-                    <button data-filter="feature_built" onclick="filterActivity('feature_built')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature requests auto-built — PR open">Feature Built</button>
+                <div class="flex items-start gap-2">
+                    <span class="text-xs font-bold text-slate-500 w-24 flex-none pt-1">Pull requests</span>
+                    <div class="flex flex-wrap items-center gap-2">
+                    {{ filter_chip('pr_review', 'Pending', _pr_ns.pending, 'PRs AppBuilder has pre-reviewed that still wait on a person (held ones included)') }}
+                    {{ filter_chip('pr_approved', 'Approved', _pr_ns.approved, 'Reviewed PRs a human has Approved') }}
+                    {{ filter_chip('pr_merged', 'Merged', _pr_totals.merged, 'PRs merged (lifetime total; the list shows only the most recent reviews)') }}
+                    {{ filter_chip('pr_auto_merged', 'Auto-merged', _pr_totals.auto_merged, 'PRs auto-merged with no human click (lifetime total; the list shows only the most recent reviews)') }}
+                    {{ filter_chip('pr_denied', 'Denied', _pr_ns.denied, 'Reviewed PRs a human has Denied') }}
+                    {{ filter_chip('pr_closed', 'Closed', _pr_ns.closed, 'Reviewed PRs closed without merging (e.g. superseded)') }}
                     </div>
-                    <!-- PR filters on their own row: they are a different object
-                         (pull requests, not issues) and wrapping them into the issue
-                         row made the two sets read as one list. -->
-                    <div class="flex items-center flex-nowrap gap-2 mt-1">
-                    <button data-filter="pr_review" onclick="filterActivity('pr_review')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="PRs AppBuilder has pre-reviewed (parity/drift). Comment-only — a human is the sole approver."><i class="fas fa-code-branch mr-1"></i>PR Pending</button>
-                    <button data-filter="pr_approved" onclick="filterActivity('pr_approved')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Approved"><i class="fas fa-code-branch mr-1"></i>PR Approved</button>
-                    <button data-filter="pr_merged" onclick="filterActivity('pr_merged')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human Merged"><i class="fas fa-code-branch mr-1"></i>PR Merged</button>
-                    <button data-filter="pr_auto_merged" onclick="filterActivity('pr_auto_merged')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Feature-drive PRs auto-merged unattended — no human clicked Approve/Merge"><i class="fas fa-robot mr-1"></i>PR Auto-Merged</button>
-                    <button data-filter="pr_denied" onclick="filterActivity('pr_denied')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs a human has Denied"><i class="fas fa-code-branch mr-1"></i>PR Denied</button>
-                    <button data-filter="pr_closed" onclick="filterActivity('pr_closed')" class="filter-btn px-2 py-0.5 rounded-full text-xs font-bold border transition-all bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200" title="Reviewed PRs closed without merging (e.g. superseded). Reachable only here — they are not a System Health sub-bucket."><i class="fas fa-code-branch mr-1"></i>PR Closed</button>
-                    <i class="fas fa-history text-slate-500 ml-2"></i>
                 </div>
             </div>
-            <table class="w-full text-left text-sm table-fixed">
-                <thead class="bg-slate-50 text-slate-500 text-xs">
-                    <tr class="border-b border-slate-200">
-                        <th class="px-4 py-3 font-medium w-[30%]">Issue ID</th>
-                        <th class="px-4 py-3 font-medium w-[16%]">Status</th>
-                        <th class="px-4 py-3 font-medium w-[54%]">Actions</th>
-                    </tr>
-                </thead>
-                <tbody class="divide-y divide-slate-200">
-                    {% for issue_id, info in state.processed.items() %}
-                    <tr class="hover:bg-slate-50 transition-colors" data-status="{{ info.status }}">
-                        <td class="px-4 py-3 align-middle max-w-0">
-                            <div class="font-mono text-primary-text truncate" title="{{ issue_id }}">{% if info.issue_url %}<a href="{{ info.issue_url }}" target="_blank" class="hover:underline">{{ issue_id }}</a>{% else %}{{ issue_id }}{% endif %}</div>
-                            {% if info.title %}<div class="text-xs text-slate-600 truncate" title="{{ info.title }}">{{ info.title }}</div>{% endif %}
-                        </td>
-                        <td class="px-4 py-3 align-middle">
-                            <span class="px-2 py-1 rounded text-xs font-bold whitespace-nowrap {% if info.status == 'closed' %}text-slate-600 bg-slate-200{% elif info.status == 'failed' %}text-red-700 bg-red-100{% elif info.status == 'non-actionable' %}text-orange-700 bg-orange-100{% elif info.status == 'ops-alert' %}text-slate-700 bg-slate-200{% elif info.status == 'pending_verification' %}text-amber-700 bg-amber-100{% elif info.status == 'processing' %}text-blue-700 bg-blue-100{% elif info.status == 'feature_flagged' %}text-purple-700 bg-purple-100{% elif info.status == 'feature_classify_retry' %}text-amber-700 bg-amber-100{% elif info.status == 'feature_needs_info' %}text-sky-700 bg-sky-100{% elif info.status == 'feature_built' %}text-teal-700 bg-teal-100{% else %}text-green-700 bg-green-100{% endif %}">{{ info.status.upper() }}</span>
-                        </td>
-                        <td class="px-4 py-3 align-middle">
-                            <div class="flex flex-wrap gap-1.5 justify-start items-center">
-                                {% if info.status in ('feature_flagged', 'feature_needs_info', 'feature_classify_retry') %}
-                                <!-- No Retry/Claude/Reopen here — those trigger a code fix attempt,
-                                     but a boundary-flag or a clarify request has no code to fix; the
-                                     next automatic classify pass (on a reply or a re-run) is what
-                                     re-evaluates it, not a manual retry. Re-evaluate re-queues it for
-                                     that classify pass now (e.g. after a classifier error). -->
-                                {% if info.status in ('feature_flagged', 'feature_classify_retry') %}
-                                <button onclick="reevaluateFeature('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 transition-colors" title="Re-queue for classification on the next feature-drive cycle (same boundary checks, build gates and PR review as before — nothing is built immediately)">Re-evaluate</button>
-                                {% endif %}
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
-                                {% elif info.status == 'feature_built' %}
-                                {% if info.pr_url %}
-                                <a href="{{ info.pr_url }}" target="_blank" class="text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap bg-teal-100 hover:bg-teal-200 text-teal-700 border border-teal-200 transition-colors">View PR</a>
-                                {% endif %}
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
-                                {% else %}
-                                {% if info.pipeline == 'fix_engine' and info.status not in ('processing', 'awaiting_review') %}
-                                <button onclick="reevaluateFeature('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 transition-colors" title="Feature request that was handed to the fix pipeline: re-queue it for the feature drive (classify, build agent, pre-PR guardrails)">Re-evaluate</button>
-                                {% endif %}
-                                <button onclick="triggerFix('{{ issue_id }}', 'retry')" class="btn-sec text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap">Retry</button>
-                                <button onclick="reopenIssue('{{ issue_id }}')" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-200 transition-colors" title="Reopen on GitHub + re-queue — for when AppBuilder marked it fixed but the fix didn't actually land">Reopen</button>
-                                {% if claude_enabled %}
-                                <button onclick="triggerFix('{{ issue_id }}', 'claude')" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-200 transition-colors" title="Attempt fix using local Claude CLI">Claude</button>
-                                {% endif %}
-                                <button onclick="deleteIssue('{{ issue_id }}', this)" class="btn-danger text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
-                                <button onclick="resolveIssue('{{ issue_id }}')" class="btn-primary text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap" title="Mark as resolved: close on GitHub and move to Closed">Resolved</button>
-                                {% endif %}
-                            </div>
-                        </td>
-                    </tr>
-                    <tr class="bg-slate-50/50">
-                        <td colspan="3" class="px-6 py-2 border-b border-slate-100">
+            <div class="divide-y divide-slate-200">
+                {% for issue_id, info in state.processed.items() %}
+                {% set _st = info.status %}
+                {% set _chip = issue_chip(_st) %}
+                {% set _p = issue_id.rpartition(':') %}
+                {# The actions this status offers (same conditions as before the redesign);
+                   the first one named in _primary is the button, the rest go in the ⋯ menu. #}
+                {% set _acts = [] %}
+                {% if _st in ('feature_flagged', 'feature_needs_info', 'feature_classify_retry') %}
+                    {# No Retry/Claude/Reopen: a boundary flag or a clarify request has no code to fix. #}
+                    {% if _st in ('feature_flagged', 'feature_classify_retry') %}{% set _ = _acts.append(('reevaluate', 'Re-evaluate', 'Re-queue for classification on the next feature-drive cycle (same boundary checks, build gates and PR review as before — nothing is built immediately)')) %}{% endif %}
+                {% elif _st == 'feature_built' %}
+                    {% if info.pr_url %}{% set _ = _acts.append(('view', 'View PR', 'Open the auto-built PR on GitHub')) %}{% endif %}
+                {% else %}
+                    {% if info.pipeline == 'fix_engine' and _st not in ('processing', 'awaiting_review') %}{% set _ = _acts.append(('reevaluate', 'Re-evaluate', 'Feature request that was handed to the fix pipeline: re-queue it for the feature drive (classify, build agent, pre-PR guardrails)')) %}{% endif %}
+                    {% set _ = _acts.append(('retry', 'Retry', 'Try the fix again')) %}
+                    {% set _ = _acts.append(('reopen', 'Reopen', 'Reopen on GitHub + re-queue — for when AppBuilder marked it fixed but the fix did not actually land')) %}
+                    {% if claude_enabled %}{% set _ = _acts.append(('claude', 'Claude', 'Attempt the fix using the local Claude CLI')) %}{% endif %}
+                {% endif %}
+                {% set _ = _acts.append(('resolve', 'Resolved', 'Mark as resolved: close on GitHub and move to Closed')) %}
+                {% set _ = _acts.append(('dismiss', 'Dismiss', "Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)")) %}
+                {% set _primary = {'pending_verification': 'resolve', 'feature_flagged': 'reevaluate', 'feature_classify_retry': 'reevaluate', 'feature_built': 'view', 'fixed': 'reopen', 'verified': 'reopen', 'closed': 'reopen', 'resolved': 'reopen', 'awaiting_prod_verification': 'reopen', 'feature_needs_info': '', 'processing': '', 'awaiting_review': ''}.get(_st, 'retry') %}
+                <div class="act-row px-5 py-3 hover:bg-slate-50" data-status="{{ _st }}">
+                    <div class="flex items-center gap-3 min-w-0">
+                        {% set _short = (_p[0].rsplit('/', 1)[-1] ~ ' #' ~ _p[2]) if _p[1] else issue_id %}
+                        {% if info.issue_url %}<a href="{{ info.issue_url }}" target="_blank" class="font-bold text-navy hover:underline whitespace-nowrap" title="{{ issue_id }}">{{ _short }}</a>{% else %}<span class="font-bold text-navy whitespace-nowrap" title="{{ issue_id }}">{{ _short }}</span>{% endif %}
+                        <span class="flex-1 min-w-0 text-sm text-slate-700 truncate" title="{{ info.title or '' }}">{{ info.title or '' }}</span>
+                        <span class="act-status text-xs px-1.5 py-0.5 rounded whitespace-nowrap bg-{{ _chip[1] }}-50 text-{{ _chip[1] }}-700" title="{{ _st }}">{{ _chip[0] }}</span>
+                        <span class="text-xs text-slate-500 whitespace-nowrap w-8 text-right" title="{{ info.timestamp or '' }}">{{ age_of(info.timestamp) }}</span>
+                        <div class="act-actions flex-none flex items-center gap-1.5 justify-end w-40">
+                            {% for a in _acts if a[0] == _primary %}{{ act_button(a[0], a[1], a[2], True, id=issue_id, href=info.pr_url if a[0] == 'view' else '') }}{% endfor %}
+                            {% call act_menu() %}{% for a in _acts if a[0] != _primary %}{{ act_button(a[0], a[1], a[2], id=issue_id, href=info.pr_url if a[0] == 'view' else '') }}{% endfor %}{% endcall %}
+                        </div>
+                    </div>
+                    <details class="act-details mt-1">
+                        <summary class="text-xs text-slate-500 cursor-pointer select-none">Details</summary>
+                        <div class="mt-2 pl-3 border-l-2 border-slate-200">
                             <div class="flex flex-col gap-2">
                                 <div class="text-slate-600 text-xs">
                                     {% if info.status == 'fixed' %}AI fix pushed / PR opened
@@ -863,103 +832,68 @@
                                 </div>
                                 {% endif %}
                             </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                    {% for _k, pr in sorted_pr_reviews %}
-                    <tr class="hover:bg-slate-50 transition-colors" data-status="pr_review" data-pr-state="{% if pr.auto_merged %}auto_merged{% elif pr.merged %}merged{% elif pr.denied %}denied{% elif pr.closed %}closed{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
-                        <td class="px-3 py-2 font-mono align-middle truncate">
-                            <a href="{{ pr.url }}" target="_blank" class="text-indigo-600 hover:underline"><i class="fas fa-code-branch mr-1"></i>{{ pr.repo }} #{{ pr.number }}</a>
-                            {# Where this PR is HEADED. In a dev -> qa -> main chain the target
-                               branch is the most important fact about a PR, and this row used to
-                               show only repo #N -- a routine dev PR looked identical to one aimed
-                               at main. Records written before base_ref existed have no value, so
-                               the badge is omitted entirely rather than rendered blank. #}
-                            {% if pr.base_ref %}
-                            <span class="ml-1 px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {{ 'text-amber-800 bg-amber-100 border border-amber-300' if pr.base_ref in ('main', 'master') else 'text-slate-600 bg-slate-100' }}" title="This PR merges into {{ pr.base_ref }}{% if pr.head_ref %} from {{ pr.head_ref }}{% endif %}.{% if pr.base_ref in ('main', 'master') %} This is a protected branch.{% endif %}"><i class="fas fa-arrow-right-long mr-1"></i>{{ pr.base_ref }}</span>
-                            {% endif %}
-                        </td>
-                        <td class="px-3 py-2 text-right align-middle">
-                            <div class="flex flex-wrap gap-1 justify-end items-center">
-                            {% if pr.findings and pr.findings > 0 %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-indigo-700 bg-indigo-100">REVIEWED · {{ pr.findings }} FINDING{{ 'S' if pr.findings != 1 else '' }}</span>
+                        </div>
+                    </details>
+                </div>
+                {% endfor %}
+                {% for _k, pr in sorted_pr_reviews %}
+                {% set _chip = pr_chip(pr) %}
+                {% set p1_conf = pr.get('panel_confidence') %}
+                {% set p2_conf = pr.get('panel2_confidence') %}
+                {% set _hold = pr.get('auto_merge_blocked_reason') if not (pr.get('merged') or pr.get('auto_merged')) else '' %}
+                {% set _done = pr.auto_merged or pr.merged %}
+                <div class="act-row px-5 py-3 hover:bg-slate-50" data-status="pr_review" data-pr-state="{% if pr.auto_merged %}auto_merged{% elif pr.merged %}merged{% elif pr.denied %}denied{% elif pr.closed %}closed{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
+                    <div class="flex items-center gap-3 min-w-0">
+                        <a href="{{ pr.url }}" target="_blank" class="font-bold text-navy hover:underline whitespace-nowrap"><i class="fas fa-code-branch mr-1 text-slate-500"></i>{{ pr.repo.rsplit('/', 1)[-1] }} #{{ pr.number }}</a>
+                        {# Where this PR is HEADED: in a dev -> qa -> main chain the target branch
+                           is the most important fact about a PR. Older records have no base_ref. #}
+                        {% if pr.base_ref %}<span class="text-xs px-1.5 py-0.5 rounded whitespace-nowrap {{ 'bg-amber-100 text-amber-800 border border-amber-300' if pr.base_ref in ('main', 'master') else 'bg-slate-100 text-slate-600' }}" title="This PR merges into {{ pr.base_ref }}{% if pr.head_ref %} from {{ pr.head_ref }}{% endif %}.{% if pr.base_ref in ('main', 'master') %} This is a protected branch.{% endif %}"><i class="fas fa-arrow-right-long mr-1"></i>{{ pr.base_ref }}</span>{% endif %}
+                        <span class="flex-1 min-w-0 text-sm text-slate-700 truncate" title="{{ pr.title or '' }}">{{ pr.title or '' }}</span>
+                        <span class="act-status text-xs px-1.5 py-0.5 rounded whitespace-nowrap bg-{{ _chip[1] }}-50 text-{{ _chip[1] }}-700" title="{% if pr.auto_merged %}Auto-merged by feature auto-drive, no human clicked Approve/Merge. {{ pr.auto_merge_reason or '' }}{% else %}{{ _chip[0] }}{% endif %}">{{ _chip[0] }}{% if pr.auto_merged and pr.get('auto_merge_score') is not none %} · {{ (pr.auto_merge_score * 100)|round|int }}%{% endif %}</span>
+                        <span class="text-xs text-slate-500 whitespace-nowrap w-8 text-right" title="Reviewed {{ pr.reviewed_at or '' }}">{{ age_of(pr.reviewed_at) }}</span>
+                        <div class="act-actions flex-none flex items-center gap-1.5 justify-end w-40">
+                            {% if _done %}
+                            {# Nothing left for a person to click on a merged PR. #}
+                            {{ act_button('view', 'View PR', 'Open the PR on GitHub', True, href=pr.url) }}
+                            {% elif pr.denied or pr.closed %}
+                            {{ act_button('view', 'View PR', 'Open the PR on GitHub', True, href=pr.url) }}
+                            {% call act_menu() %}{{ act_button('reprocess', 'Reprocess', "Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle.", repo=pr.repo, num=pr.number) }}{% endcall %}
                             {% else %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-green-700 bg-green-100">REVIEWED · CLEAN</span>
+                            {# Approved: Merge is unlocked. Not approved: only Approve (or Deny). #}
+                            {% if pr.approved %}{{ act_button('merge', 'Merge', 'Merge this approved PR', True, repo=pr.repo, num=pr.number) }}
+                            {% else %}{{ act_button('approve', 'Approve', 'Approve this PR on GitHub; Merge unlocks after', True, repo=pr.repo, num=pr.number) }}{% endif %}
+                            {% call act_menu() %}
+                            {# Fix is human-triggered only: generate a fix for the findings, gate it
+                               through the skeptical panel, push it onto THIS PR's branch. #}
+                            {% if pr.findings and pr.findings > 0 %}{{ act_button('fix', 'Fix', "Generate an AI fix for this PR's findings, gate it through the skeptical reviewer panel, and push it as a new commit onto this PR's branch. You will still Approve/Merge separately.", repo=pr.repo, num=pr.number) }}{% endif %}
+                            {{ act_button('reprocess', 'Reprocess', "Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle.", repo=pr.repo, num=pr.number) }}
+                            {{ act_button('view', 'View PR', 'Open the PR on GitHub', href=pr.url) }}
+                            {{ act_button('deny', 'Deny', 'Deny this PR (closes it on GitHub)', repo=pr.repo, num=pr.number) }}
+                            {% endcall %}
                             {% endif %}
-                            {# Advisory review panels verdict — surfaced here so it isn't github.com-only.
-                               Advisory ONLY: a human is still the sole approver. #}
+                        </div>
+                    </div>
+                    {# panel-chips: the advisory review panels, as in Mission Control. A panel 2
+                       "skipped" is waiting for panel 1 to Approve (pr_review._state_panel_after),
+                       not an outage; with panel 1 down too, neither panel gave a verdict. #}
+                    {% set p2_down = pr.get('panel2_status') if (pr.get('panel2_status') != 'skipped' or pr.get('panel_status')) else '' %}
+                    {% set _pc = panel_chips(pr) %}
+                    {% if _pc or pr.get('panel_status') or pr.get('panel2_status') %}
+                    <div class="act-panels flex flex-wrap gap-1.5 mt-1.5">
+                        {% for c in _pc %}<span class="text-xs px-2 py-0.5 rounded-full border {{ 'bg-green-50 text-green-700 border-green-200' if c.ok else 'bg-red-50 text-red-700 border-red-200' }}">{{ c.label }}</span>{% endfor %}
+                        {% if pr.get('panel_status') %}<span class="text-xs px-2 py-0.5 rounded-full border bg-slate-50 text-slate-500 border-slate-200" title="Panel 1 could not run for this pass: {{ pr.panel_status }}">Panel 1 · N/A</span>{% endif %}
+                        {% if p2_down %}<span class="text-xs px-2 py-0.5 rounded-full border bg-slate-50 text-slate-500 border-slate-200" title="Panel 2 could not run for this pass: {{ p2_down }}">Panel 2 · N/A</span>
+                        {% elif pr.get('panel2_status') == 'skipped' %}<span class="text-xs px-2 py-0.5 rounded-full border bg-slate-50 text-slate-500 border-slate-200" title="The state-logic review runs once the skeptical review Approves">Panel 2 · waits for Panel 1</span>{% endif %}
+                    </div>
+                    {% endif %}
+                    {# /panel-chips #}
+                    {% if _hold %}<div class="text-sm mt-1"><span class="font-semibold text-amber-700">Why:</span> <span class="text-slate-700">{{ _hold }}</span></div>{% endif %}
+                    <details class="act-details mt-1">
+                        <summary class="text-xs text-slate-500 cursor-pointer select-none">Details</summary>
+                        <div class="mt-2 pl-3 border-l-2 border-slate-200">
                             {% set comp_verdict = pr.get('composite_verdict') or pr.get('panel_verdict') %}
                             {% set avg_conf = pr.get('panel_avg_confidence') if pr.get('panel_avg_confidence') is not none else pr.get('panel_confidence') %}
-                            {% set p1_conf = pr.get('panel_confidence') %}
-                            {% set p2_conf = pr.get('panel2_confidence') %}
-                            {% set am_score = pr.get('auto_merge_score') %}
-                            {# A "skipped" panel 2 is waiting for panel 1 to Approve (pr_review._state_panel_after),
-                               not a panel that could not run: the headline shows panel 1's verdict. When panel 1
-                               itself could not run, neither panel gave a verdict: that is PANELS N/A. #}
-                            {% set p2_down = pr.get('panel2_status') if (pr.get('panel2_status') != 'skipped' or pr.get('panel_status')) else '' %}
-                            {% if pr.get('panel_status') and p2_down %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panels could not run for this pass: {{ pr.panel_status }}">PANELS N/A</span>
-                            {% elif pr.panel_status or p2_down %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-slate-500 bg-slate-100" title="The review panel could not run for this pass: {{ pr.panel_status or p2_down }}">PANEL N/A</span>
-                            {% elif comp_verdict %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {% if comp_verdict == 'Approve' %}text-green-700 bg-green-100{% elif comp_verdict == 'Split' %}text-amber-800 bg-amber-100 border border-amber-300{% else %}text-red-700 bg-red-100{% endif %}" title="Composite advisory panel verdict (average confidence: {{ (avg_conf * 100)|round|int if avg_conf is not none else 'N/A' }}%) — a human is still the sole approver.">ADVISORY {{ comp_verdict|upper }}{% if avg_conf is not none %} · {{ (avg_conf * 100)|round|int }}%{% endif %}</span>
-                            {% endif %}
-                            {% if pr.get('panel_verdict') and not pr.get('panel_status') %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {% if pr.panel_verdict == 'Approve' %}text-green-700 bg-green-50 border border-green-200{% else %}text-red-700 bg-red-50 border border-red-200{% endif %}" title="Panel 1 (Skeptical review): {{ pr.panel_verdict }}{% if p1_conf is not none %} ({{ (p1_conf * 100)|round|int }}%){% endif %}">🧠 {{ pr.panel_verdict|upper }}{% if p1_conf is not none %} · {{ (p1_conf * 100)|round|int }}%{% endif %}</span>
-                            {% endif %}
-                            {% if pr.get('panel2_verdict') and not pr.get('panel2_status') %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap {% if pr.panel2_verdict == 'Approve' %}text-green-700 bg-green-50 border border-green-200{% else %}text-red-700 bg-red-50 border border-red-200{% endif %}" title="Panel 2 (State-logic review): {{ pr.panel2_verdict }}{% if p2_conf is not none %} ({{ (p2_conf * 100)|round|int }}%){% endif %}">🔀 {{ pr.panel2_verdict|upper }}{% if p2_conf is not none %} · {{ (p2_conf * 100)|round|int }}%{% endif %}</span>
-                            {% endif %}
-                            {% if pr.get('auto_merged') %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-teal-700 bg-teal-100" title="Auto-merged by feature auto-drive — both review panels cleared the configured confidence threshold, no human clicked Approve/Merge. {{ pr.auto_merge_reason or '' }}"><i class="fas fa-robot mr-1"></i>AUTO-MERGED{% if am_score is not none %} · {{ (am_score * 100)|round|int }}%{% endif %}</span>
-                            {% elif pr.get('auto_merge_blocked_reason') and not pr.get('merged') %}
-                            <span class="px-1.5 py-0.5 rounded text-xs font-bold whitespace-nowrap text-amber-700 bg-amber-100" title="Auto-merge held: {{ pr.auto_merge_blocked_reason }}"><i class="fas fa-lock mr-1"></i>AUTO-MERGE HELD</span>
-                            {% endif %}
-                            </div>
-                        </td>
-                        <td class="px-3 py-2 align-middle">
-                            <div class="flex flex-nowrap gap-1 justify-end items-center">
-                                <a href="{{ pr.url }}" target="_blank" class="btn-sec text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap">View PR</a>
-                                {% if pr.auto_merged %}
-                                {# No Approve/Merge/Deny here — there is nothing left for a human to
-                                   click. The AUTO-MERGED badge above already communicates the score;
-                                   this just states the outcome plainly. #}
-                                <span class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-teal-100 text-teal-700 border border-teal-300"><i class="fas fa-robot mr-1"></i>AUTO-MERGED</span>
-                                {% elif pr.merged %}
-                                <span class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-purple-100 text-purple-700 border border-purple-300"><i class="fas fa-code-merge mr-1"></i>MERGED</span>
-                                {% elif pr.denied %}
-                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
-                                <span class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-red-100 text-red-700 border border-red-300"><i class="fas fa-ban mr-1"></i>DENIED</span>
-                                {% elif pr.closed %}
-                                <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
-                                <span class="text-xs px-1.5 py-0.5 rounded font-bold whitespace-nowrap bg-slate-200 text-slate-600 border border-slate-300" title="Closed on GitHub without a merge (its changes may have merged under another PR)."><i class="fas fa-circle-xmark mr-1"></i>CLOSED</span>
-                                {% else %}
-                                    <button onclick="reprocessPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300" title="Re-run the full pre-review now (parity/secrets/lint findings + panel(s)), bypassing the head-SHA cache — don't wait for the next poll cycle."><i class="fas fa-rotate mr-1"></i>Reprocess</button>
-                                    {% if pr.findings and pr.findings > 0 %}
-                                    {# Human-triggered only — AppBuilder never applies a PR fix on its
-                                       own. Generates a fix for the findings above, gates it through
-                                       the same skeptical panel the bug/issue pipeline uses, and on
-                                       approval pushes a new commit onto THIS PR's own branch. #}
-                                    <button onclick="fixPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-amber-500 text-white hover:bg-amber-600 border border-amber-600" title="Generate an AI fix for this PR's findings, gate it through the skeptical reviewer panel, and push it as a new commit onto this PR's branch. You will still Approve/Merge separately."><i class="fas fa-wrench mr-1"></i>Fix</button>
-                                    {% endif %}
-                                    {% if pr.approved %}
-                                    {# Approved → the human sign-off is done and Merge is unlocked. No
-                                       separate APPROVED badge here — Merge being visible at all IS the
-                                       approved signal (mirrors the dynamic approvePr() swap below), and
-                                       this is the busiest row state, so dropping the redundant badge
-                                       actually saves the space it needs. #}
-                                    <button onclick="mergePr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>
-                                    {% else %}
-                                    {# Not approved yet → Merge is gated; only Approve (or Deny) is offered. #}
-                                    <button onclick="approvePr('{{ pr.repo }}', {{ pr.number }}, this)" class="btn-primary text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap"><i class="fas fa-check mr-1"></i>Approve</button>
-                                    {% endif %}
-                                    <button onclick="denyPr('{{ pr.repo }}', {{ pr.number }}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-red-600 text-white hover:bg-red-700 border border-red-700"><i class="fas fa-ban mr-1"></i>Deny</button>
-                                {% endif %}
-                            </div>
-                        </td>
-                    </tr>
-                    <tr class="bg-slate-50/50" style="display:none">
-                        <td colspan="3" class="px-6 py-2 border-b border-slate-100">
+                            {% if comp_verdict and not pr.get('panel_status') %}<div class="text-xs text-slate-500 mb-1" title="Advisory only: a human is still the sole approver.">Composite advisory verdict: <span class="font-semibold">{{ comp_verdict }}</span>{% if avg_conf is not none %} · {{ (avg_conf * 100)|round|int }}% average confidence{% endif %}</div>{% endif %}
                             {% if pr.summary %}
                             <div class="text-slate-600 text-xs whitespace-pre-line mb-1 not-italic"><span class="font-semibold">📝 What changed:</span>
 {{ pr.summary }}</div>
@@ -1003,16 +937,14 @@
                                 <span class="mx-2 text-slate-500">|</span>
                                 <span>reviewed {{ pr.reviewed_at }}</span>
                             </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                    {% if not state.processed %}
-                    <tr>
-                        <td colspan="3" class="px-6 py-8 text-center text-slate-500 italic">No issues processed yet.</td>
-                    </tr>
-                    {% endif %}
-                </tbody>
-            </table>
+                        </div>
+                    </details>
+                </div>
+                {% endfor %}
+                {% if not state.processed and not sorted_pr_reviews %}
+                <div class="px-5 py-8 text-center text-slate-500 text-sm">No activity yet.</div>
+                {% endif %}
+            </div>
         </div>
         {% endif %}
 
@@ -4442,7 +4374,7 @@
                     // one (Reprocess + this + Deny), so the badge would just cost space
                     // for no new information.
                     if (btn) btn.outerHTML =
-                        `<button type="button" data-mc="merge" data-repo="${repo}" data-num="${number}" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
+                        `<button type="button" data-mc="merge" data-repo="${repo}" data-num="${number}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold whitespace-nowrap" title="Merge this approved PR">Merge</button>`;
                     showToast('Approved ' + repo + ' #' + number, 'success');
                 } else {
                     showToast('Approve failed: ' + (d.message || resp.status), 'error');
@@ -4501,10 +4433,10 @@
         }
 
         function _setPrBadge(btn, label, cls, icon) {
-            // Replace the action buttons in this PR row with a terminal badge, keep View PR.
-            const cell = btn.closest('div');
+            // Replace the action buttons (and the ⋯ menu) in this PR row with a terminal badge.
+            const cell = btn.closest('.act-actions') || btn.closest('div');
             if (!cell) return;
-            cell.querySelectorAll('button').forEach(b => b.remove());
+            cell.querySelectorAll('button, details.act-menu').forEach(b => b.remove());
             const span = document.createElement('span');
             span.className = 'text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap border ' + cls;
             span.innerHTML = '<i class="fas ' + icon + ' mr-1"></i>' + label;
@@ -4561,26 +4493,14 @@
 
         // The Dashboard always opens on 'pr_review' — the PR Pending filter, the
         // queue that actually needs a human (AppBuilder never approves or denies).
-        // It used to restore whatever was last clicked from sessionStorage, so a
-        // session that once clicked e.g. "PR Merged" reopened there on every
-        // later visit and login, which reads as the dashboard being stuck rather
-        // than remembering.
-        //
-        // sessionStorage still carries ONE case: goFilter() clicking a System
-        // Health count navigates to '/' and needs the target filter to survive
-        // that navigation. That is now a ONE-SHOT key, consumed and cleared on
-        // read, so it applies to exactly the load it was set for and never
-        // becomes a sticky default.
+        // A click applies to this view only; nothing is persisted, so a session
+        // that once clicked e.g. "Merged" doesn't reopen there on every visit.
         let _activityFilter = 'pr_review';   // PR Pending
         try {
-            const once = sessionStorage.getItem('bf_activity_filter_once');
-            if (once) {
-                _activityFilter = once;
-                sessionStorage.removeItem('bf_activity_filter_once');
-            }
-            // Drop the old sticky key so an existing session stops resurrecting
-            // its last filter after this ships.
+            // Drop the old sticky and one-shot keys so an existing session stops
+            // resurrecting its last filter.
             sessionStorage.removeItem('bf_activity_filter');
+            sessionStorage.removeItem('bf_activity_filter_once');
         } catch (e) {}
 
         // Mission Control "Needs your attention" chips: show one group, or all.
@@ -4599,10 +4519,18 @@
             dismiss: function (b) { deleteIssue(b.dataset.id, b); },
             retry: function (b) { triggerFix(b.dataset.id, 'retry'); },
             claude: function (b) { triggerFix(b.dataset.id, 'claude'); },
+            'retry-all': function () { retryAll(null); },
+            'clear-history': function () { clearHistory(); },
+            'dismiss-all': function () { deleteAllIssues(); },
         };
         document.addEventListener('click', function (ev) {
             const b = ev.target.closest('[data-mc]');
             if (b && MC_ACTIONS[b.dataset.mc]) MC_ACTIONS[b.dataset.mc](b);
+            // Close any open ⋯ menu once an item in it is picked or the click
+            // lands outside it; one menu open at a time.
+            document.querySelectorAll('details.act-menu[open]').forEach(function (m) {
+                if (b || !m.contains(ev.target)) m.removeAttribute('open');
+            });
         });
 
         function mcFilter(group) {
@@ -4618,22 +4546,18 @@
 
         function filterActivity(status) {
             _activityFilter = status;
-            // Deliberately NOT persisted: a click applies to this view only. See
-            // the one-shot key above for the goFilter navigation handoff.
+            // Deliberately NOT persisted: a click applies to this view only.
 
-            const buttons = document.querySelectorAll('.filter-btn');
-            buttons.forEach(btn => {
-                // LM tokens: selected filter = HPE-green primary chip; others = neutral slate chip.
+            // Selected chip = navy, others = white, as the Mission Control chips.
+            document.querySelectorAll('#activity .filter-btn').forEach(btn => {
                 const active = btn.dataset.filter === status;
-                ['bg-brand/10', 'hover:bg-brand/20', 'text-primary-text', 'border-brand']
-                    .forEach(c => btn.classList.toggle(c, active));
-                ['bg-slate-100', 'hover:bg-slate-200', 'text-slate-600', 'border-slate-200']
+                ['bg-navy', 'text-white', 'border-navy'].forEach(c => btn.classList.toggle(c, active));
+                ['bg-white', 'text-slate-600', 'border-slate-300', 'hover:border-brand']
                     .forEach(c => btn.classList.toggle(c, !active));
             });
 
-            // Only the Activity Feed table has data-status rows. Each main row is
-            // followed by its expandable detail row (no data-status) — toggle both
-            // together so a filtered-out issue hides its detail too.
+            // Each All activity row (.act-row) carries its Details expander inside
+            // it, so hiding the row hides its detail too.
             // PR-review filters: each narrows to ONE lifecycle state via the row's
             // data-pr-state. 'reviewed' is the pending state (reviewed, not yet
             // approved/merged/denied/closed) — pr_review used to map to null and show
@@ -4643,7 +4567,7 @@
             const PR_FILTERS = { pr_review: 'reviewed', pr_approved: 'approved', pr_merged: 'merged', pr_auto_merged: 'auto_merged', pr_denied: 'denied', pr_closed: 'closed' };
             const isPrFilter = Object.prototype.hasOwnProperty.call(PR_FILTERS, status);
             const RESOLVED_STATUSES = {{ feed_resolved_statuses | tojson }};
-            document.querySelectorAll('tbody tr[data-status]').forEach(row => {
+            document.querySelectorAll('#activity .act-row').forEach(row => {
                 const s = (row.dataset.status || '').toLowerCase();
                 let show;
                 if (s === 'pr_review') {                                                   // a reviewed-PR row
@@ -4653,36 +4577,18 @@
                 else if (isPrFilter)             show = false;                             // hide issue rows under any PR filter
                 else if (status === 'all')       show = s !== 'closed' && s !== 'resolved';  // active: closed + resolved hidden
                 else if (status === 'closed')    show = s === 'closed';
-                else if (status === 'resolved')  show = RESOLVED_STATUSES.includes(s);  // matches the sidebar's Resolved count (app_state.FEED_BUCKETS)
+                else if (status === 'resolved')  show = RESOLVED_STATUSES.includes(s);  // matches the Resolved chip's count (app_state.FEED_BUCKETS)
                 else if (status === 'feature_flagged') show = s === 'feature_flagged' || s === 'feature_classify_retry';  // retries are parked too, just not for good
                 else                             show = s === status;
                 row.style.display = show ? '' : 'none';
-                const detail = row.nextElementSibling;
-                if (detail) detail.style.display = show ? '' : 'none';
             });
         }
 
-        // Clicking a System Health count (left sidebar) jumps to the Dashboard's
-        // Activity Feed with that filter applied. On the status view we filter in
-        // place + scroll to the feed; elsewhere we persist the choice and navigate
-        // to '/', where the on-load applier picks it up from sessionStorage.
-        function goFilter(status) {
-            try { sessionStorage.setItem('bf_activity_filter_once', status); } catch (e) {}
-            const onStatus = window.BF_REFRESH && window.BF_REFRESH.view === 'status';
-            if (onStatus && document.querySelector('tbody tr[data-status]')) {
-                filterActivity(status);
-                const tbl = document.querySelector('main table');
-                if (tbl) tbl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            } else {
-                window.location.href = '/';
-            }
-        }
-
-        // Apply the default/persisted filter once the Activity Feed is present.
+        // Apply the default filter once the Activity Feed is present.
         // (Runs on every status-view load so closed rows start hidden.)
         (function () {
             const apply = () => {
-                if (document.querySelector('tbody tr[data-status]')) filterActivity(_activityFilter);
+                if (document.getElementById('activity')) filterActivity(_activityFilter);
             };
             if (document.readyState === 'loading') {
                 document.addEventListener('DOMContentLoaded', apply);
@@ -6809,7 +6715,7 @@
                     // now instead of waiting on a reload. The GitHub close (retried
                     // up to 5x) keeps running server-side; poll it and toast the
                     // real outcome once it lands, without blocking this click.
-                    const row = btn && btn.closest ? btn.closest('tr') : null;
+                    const row = btn && btn.closest ? (btn.closest('.act-row') || btn.closest('tr')) : null;
                     if (row) row.remove();
                     showToast(data.message || 'Dismissing…', 'info');
                     pollDismissStatus(issueId);
@@ -6908,9 +6814,14 @@
             // Dismiss All = Clear History + dismiss (ab-dismissed label +
             // close) every issue on GitHub. The backend wipes local history
             // immediately and closes on GitHub in a background thread (can't
-            // time out). No confirm popup — the success toast confirms it
-            // happened (per the user's toast-over-popup UX preference). The feed
-            // only shows <7d issues but this clears the ENTIRE history.
+            // time out). The feed only shows <7d issues but this clears the ENTIRE
+            // history and closes every issue on GitHub, so unlike routine actions
+            // (toast, no popup) it asks the user to type DISMISS first.
+            const typed = prompt('Dismiss ALL issues? This closes every issue on GitHub (ab-dismissed) and clears the whole history. Type DISMISS to confirm.');
+            if ((typed || '').trim() !== 'DISMISS') {
+                if (typed !== null) showToast('Not dismissed: type DISMISS to confirm.', 'info');
+                return;
+            }
             try {
                 const resp = await fetch('/delete_all_issues', {
                     method: 'POST',

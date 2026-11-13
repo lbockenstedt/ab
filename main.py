@@ -530,9 +530,15 @@ async def detect_https_probe(request: Request, call_next):
 # surface used by routes.py and the sibling modules resolves unchanged.
 from app_state import *  # noqa: E402,F401,F403
 
-# The System Health sidebar renders on every view; it calls feed_counts() so its
-# counts are computed from the same rows the Activity Feed lists.
+# The All activity filter chips call feed_counts() so each chip's count is
+# computed from the same rows the feed lists.
 templates.env.globals["feed_counts"] = feed_counts  # noqa: F405
+import mission_control as _mission_control  # noqa: E402
+# One look for the dashboard: the All activity rows use Mission Control's chips.
+templates.env.globals.update(
+    issue_chip=_mission_control.issue_chip, pr_chip=_mission_control.pr_chip,
+    panel_chips=_mission_control.panel_chips, age_of=_mission_control.age_of,
+    iso_utc=_mission_control.iso_utc)
 import app_state as _app_state  # noqa: E402
 templates.env.globals["feed_resolved_statuses"] = list(_app_state.FEED_BUCKETS["resolved"])
 # Stamp which commit this process booted on, before any worker starts, so the watchdog

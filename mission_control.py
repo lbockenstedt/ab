@@ -5,7 +5,7 @@ Built from the same stores the Status table lists (processed issues and PR
 reviews), so every item here is also a row there. The dashboard renders it and
 GET /api/mission-control returns it as JSON.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pr_review_retry import MAX_AUTO_QUEUE_RETRIES
 
@@ -109,7 +109,7 @@ def _issue_why(info):
     return info.get("reason") or info.get("error") or ""
 
 
-def _panels(pr):
+def panel_chips(pr):
     """Panel verdict chips: [{"label", "ok"}]; a panel that did not run is left out."""
     chips = []
     for name, prefix in (("Panel 1", "panel"), ("Panel 2", "panel2")):
@@ -122,6 +122,60 @@ def _panels(pr):
     if pr.get("findings"):
         chips.append({"label": "%d finding%s" % (pr["findings"], "" if pr["findings"] == 1 else "s"), "ok": False})
     return chips
+
+
+def iso_utc(value):
+    """A task start time as ISO 8601 in UTC with its offset.
+
+    start_time is a naive server-local datetime. Sent without an offset, the
+    browser reads it as ITS local time, so a server on UTC and a browser on US
+    Central showed hours of extra "total" on the Working on now cards."""
+    if not isinstance(value, datetime):
+        return value
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def age_of(value, now=None):
+    """Short age ("45m", "3h", "2d") of an ISO or "YYYY-MM-DD HH:MM:SS" timestamp."""
+    return _age(_when(value), now or datetime.now())
+
+
+# Tone of each attention group; the issue status chips in All activity use the same colours.
+GROUP_TONE = {"pr": "amber", "failed": "red", "verify": "sky", "feature": "purple", "other": "slate"}
+
+
+def issue_chip(status):
+    """(label, tone) of the one status chip on an All activity issue row."""
+    if status in _ISSUE_NEEDS:
+        group, label = _ISSUE_NEEDS[status]
+        return label, GROUP_TONE[group]
+    if status in _ISSUE_WORKING:
+        return _ISSUE_WORKING[status], "blue"
+    if status in _ISSUE_DONE:
+        return _ISSUE_DONE[status].capitalize(), "slate" if status == "closed" else "green"
+    return str(status or "unknown"), "slate"
+
+
+def pr_chip(pr):
+    """(label, tone) of the one status chip on an All activity PR row.
+
+    Same precedence as the row's data-pr-state: auto_merged is checked before
+    merged because an auto-merged PR is also merged=True. "Held" is a pending
+    PR whose auto-merge is held for a reason a person has to look at."""
+    hold = pr.get("auto_merge_blocked_reason") or ""
+    if pr.get("auto_merged"):
+        return "Auto-merged", "teal"
+    if pr.get("merged"):
+        return "Merged", "purple"
+    if pr.get("denied"):
+        return "Denied", "red"
+    if pr.get("closed"):
+        return "Closed", "slate"
+    if pr.get("approved"):
+        return "Approved", "green"
+    if hold and not any(m in hold for m in _NOT_APPLICABLE_HOLDS):
+        return "Held", "amber"
+    return "Pending", "indigo"
 
 
 def _pr_state(pr):
@@ -210,10 +264,10 @@ def build(processed, pr_reviews, active_tasks=None, now=None):
                 text, tone = "denied", "bad"
             else:
                 text, tone = "closed without merging", "muted"
-            outcomes.append({**base, "kind": "pr", "text": text, "tone": tone, "panels": _panels(pr)})
+            outcomes.append({**base, "kind": "pr", "text": text, "tone": tone, "panels": panel_chips(pr)})
             continue
         where, label, why = _pr_state(pr)
-        item = {**base, "kind": "pr", "label": label, "why": _short(why), "panels": _panels(pr),
+        item = {**base, "kind": "pr", "label": label, "why": _short(why), "panels": panel_chips(pr),
                 "approved": bool(pr.get("approved")), "findings": pr.get("findings") or 0}
         if where == "needs":
             attention.append({**item, "group": "pr"})
@@ -232,7 +286,7 @@ def build(processed, pr_reviews, active_tasks=None, now=None):
     for tid, task in (active_tasks or {}).items():
         started = task.get("start_time")
         working.append({"id": tid, "name": task.get("name") or "", "kind": task.get("kind") or "",
-                        "started": started.isoformat() if isinstance(started, datetime) else started})
+                        "started": iso_utc(started)})
     working.sort(key=lambda t: str(t["started"] or ""))
 
     groups = {g: sum(1 for i in attention if i["group"] == g) for g in _GROUP_ORDER}

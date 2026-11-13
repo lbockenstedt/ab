@@ -1150,7 +1150,7 @@ async def get_task_details(task_id: str = None):
         tasks[tid] = {
             "name": task.get("name", "Unknown Task"),
             "kind": task.get("kind", "scan"),
-            "start_time": start_time.isoformat(),
+            "start_time": mission_control.iso_utc(start_time),
             "duration": _duration_str((now - start_time).total_seconds()),
             "elapsed_seconds": int((now - start_time).total_seconds()),
             "phase_duration": _duration_str((now - phase_start).total_seconds()),
