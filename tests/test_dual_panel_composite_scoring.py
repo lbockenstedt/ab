@@ -180,23 +180,26 @@ def test_state_panel_runs_only_once_panel_1_approves(monkeypatch, review, runs):
 
 def test_a_skipped_panel_2_shows_panel_1s_verdict_not_an_outage(pr_env):
     """A panel 2 waiting on panel 1 is not a panel that could not run: the
-    PR's headline keeps panel 1's REJECT instead of 'PANEL N/A'. Renders the
-    real template lines for a real record."""
+    PR row keeps panel 1's Reject chip instead of 'N/A'. Renders the real
+    template lines for a real record."""
+    import mission_control
     record_pr_review, state = pr_env
     record_pr_review("o/r", 5, "PR 5", "http://pr/5", [], "h5",
                      review={"verdict": "Reject", "confidence": 0.6, "critique": "bug"},
                      review2={"status": "skipped", "reason": "runs once panel 1 Approves"})
     pr = state["pr_reviews"]["o/r#5"]
+    env = jinja2.Environment()
+    env.globals["panel_chips"] = mission_control.panel_chips
     src = open("templates/index.html", encoding="utf-8").read()
-    start = src.index("{% set comp_verdict")
-    headline = src[start:src.index("{% endif %}", src.index("</span>", src.index("ADVISORY {{", start))) + len("{% endif %}")]
+    start = src.index("{# panel-chips")
+    chips = src[start:src.index("{# /panel-chips #}", start)]
     start = src.index("{% if pr.get('panel2_status') == 'skipped' %}")
     panel2 = src[start:src.index("{% elif pr.get('panel2_critique') %}", start)] + "{% endif %}"
-    env = jinja2.Environment()
 
-    out = env.from_string(headline + panel2).render(pr=pr)
+    out = env.from_string(chips + panel2).render(pr=pr)
 
-    assert "ADVISORY REJECT" in out and "N/A" not in out
+    assert "Panel 1 · Reject 0.60" in out and "N/A" not in out
+    assert "Panel 2 · waits for Panel 1" in out
     assert "runs once the skeptical review Approves" in out and "unavailable" not in out
 
 
@@ -282,13 +285,15 @@ def test_the_retry_cap_reads_the_panel_that_is_queued_now(pr_env):
 
 
 def test_panel_1_down_and_panel_2_waiting_is_panels_na():
-    """Neither panel gave a verdict: the headline says both are missing."""
+    """Neither panel gave a verdict: the row says both are missing."""
+    import mission_control
     src = open("templates/index.html", encoding="utf-8").read()
-    start = src.index("{% set p2_down")
-    badge = src[start:src.index("{% elif comp_verdict %}", start)] + "{% endif %}"
-    out = jinja2.Environment().from_string(badge).render(
+    start = src.index("{# panel-chips")
+    env = jinja2.Environment()
+    env.globals["panel_chips"] = mission_control.panel_chips
+    out = env.from_string(src[start:src.index("{# /panel-chips #}", start)]).render(
         pr={"panel_status": "queue_for_retry", "panel2_status": "skipped"})
-    assert "PANELS N/A" in out
+    assert "Panel 1 · N/A" in out and "Panel 2 · N/A" in out
 
 
 def test_the_wait_knob_has_a_settings_control():

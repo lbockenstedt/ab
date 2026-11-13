@@ -30,6 +30,7 @@ caught here too.
 """
 import ast
 import asyncio
+import re
 import threading
 from datetime import datetime, timedelta
 
@@ -218,8 +219,8 @@ def main():
         "o/r:na": {"status": "non-actionable", "timestamp": old},
         "o/r:ff": {"status": "feature_classify_retry", "timestamp": old},
     })
-    counts = ns["feed_counts"](store, now=now)
     rows = ns["activity_feed_items"](store, now=now)
+    counts = ns["feed_counts"](rows)
     for bucket, statuses in ns["FEED_BUCKETS"].items():
         shown = sum(1 for i in rows.values() if i.get("status") in statuses)
         ok &= _check(f"feed_counts[{bucket!r}] == rows its filter shows ({shown})",
@@ -227,13 +228,13 @@ def main():
     ok &= _check("feed_counts: aged closed/resolved drop out of the counts too",
                  counts["closed"] == 2 and counts["resolved"] == 2)
 
-    # ── the template must render every sidebar count from feed_counts(), and
-    # every bucket must have a goFilter click wired to it.
+    # ── every All activity filter chip's count comes from feed_counts(), on the
+    # chip whose click filters to that bucket.
     html = open("templates/index.html").read()
     for bucket in ns["FEED_BUCKETS"]:
-        ok &= _check(f"sidebar: {bucket!r} count is feed_counts()-driven and clickable",
-                     "{{ _fc['%s'] }}" % bucket in html and "goFilter('%s')" % bucket in html)
-    ok &= _check("sidebar: no stale state.*_count badges remain",
+        ok &= _check(f"chips: {bucket!r} count is feed_counts()-driven and on its filter chip",
+                     re.search(r"filter_chip\('%s', '[^']+', _fc\['%s'\]" % (bucket, bucket), html) is not None)
+    ok &= _check("chips: no stale state.*_count badges remain",
                  not any("{{ state.%s_count }}" % k in html for k in (
                      "success", "failure", "closed", "pending_verification", "non_actionable",
                      "feature_flagged", "feature_needs_info", "feature_built")))
