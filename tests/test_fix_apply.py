@@ -301,6 +301,26 @@ def main():
     return 1
 
 
+def test_an_edit_stub_for_a_file_written_by_fixes_is_not_an_error():
+    """ab#539: the model listed a new test file as an edit with search/replace
+    None while writing it whole under "fixes". Only a stub that "fixes" does
+    not cover is logged as malformed."""
+    ns = _load_funcs()
+    apply, errors = ns["parse_and_apply"], ns["_captured_errors"]
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "app.py"), "w").write("x = 1\n")
+    stub = {"file": "tests/test_new.py", "search": None, "replace": None}
+
+    ok, applied, _ = apply(json.dumps({"confidence": 0.9, "edits": [
+        stub, {"file": "app.py", "search": "x = 1", "replace": "x = 2"}],
+        "fixes": {"tests/test_new.py": "def test_x():\n    assert True\n"}}), d)
+    assert ok and set(applied) == {"app.py", "tests/test_new.py"}
+    assert not [e for e in errors if "malformed edit" in e]
+
+    apply(json.dumps({"confidence": 0.9, "edits": [stub]}), d)
+    assert [e for e in errors if "malformed edit" in e]
+
+
 def test_fix_apply():
     """pytest entry point. CI runs `pytest -q .`, which collects nothing from a
     script whose only entry point is main() under __main__ -- so every case in
