@@ -155,9 +155,14 @@ _CI_SEEN_MAX = 200
 
 
 def _remember_ci(repo_name, head_sha, runs, failing):
-    """Cache how many of a commit's check runs have finished, and how many failed."""
+    """Cache a commit's check-run counts: finished, passed and failed.
+
+    Only success/neutral/skipped count as passed; a cancelled, parked or
+    unrecognised run is finished but never a pass (as in head_ci_conclusion)."""
     done = sum(1 for r in runs if r.get("status") == "completed")
-    CI_SEEN[(repo_name, head_sha)] = {"done": done, "total": len(runs), "failed": len(failing),
+    passed = sum(1 for r in runs if r.get("status") == "completed"
+                 and r.get("conclusion") in ("success", "neutral", "skipped"))
+    CI_SEEN[(repo_name, head_sha)] = {"done": done, "passed": passed, "total": len(runs), "failed": len(failing),
                                       "at": datetime.now().isoformat(timespec="seconds")}
     while len(CI_SEEN) > _CI_SEEN_MAX:
         CI_SEEN.pop(next(iter(CI_SEEN)))

@@ -348,6 +348,29 @@ def task_card(tid, task, processed=None, pr_reviews=None, now=None):
     return card
 
 
+def _ci_passed(ci):
+    """Checks that passed; older cache entries without "passed" only knew done and failed."""
+    return ci["passed"] if "passed" in ci else ci["done"] - ci["failed"]
+
+
+def _ci_wait(ci):
+    """The Now text for CI that has not passed yet and has not failed."""
+    if ci["done"] < ci["total"]:
+        return "waiting for CI (%d/%d checks done)" % (ci["done"], ci["total"])
+    return "CI finished without a verdict (%d/%d passed) — Re-run CI" % (_ci_passed(ci), ci["total"])
+
+
+def _ci_chip(ci):
+    """(text, tone) of the attention CI chip; tone is ok, bad or wait."""
+    if not ci or not ci["total"]:
+        return "", ""
+    if ci["failed"]:
+        return "CI ✕ %d/%d" % (ci["failed"], ci["total"]), "bad"
+    if _ci_passed(ci) == ci["total"]:
+        return "CI ✓ %d/%d" % (ci["total"], ci["total"]), "ok"
+    return "CI … %d/%d" % (_ci_passed(ci), ci["total"]), "wait"
+
+
 def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
     """(stage, done, now_text) of an open PR, from its cached review record."""
     where, label, why = _pr_state(pr)
@@ -356,19 +379,19 @@ def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
     done = {"triage", "pr"}
     if int(pr.get("remediation_attempts") or 0):
         done.add("fix")
-    if ci and ci["total"] and ci["done"] == ci["total"] and not ci["failed"]:
+    if ci and ci["total"] and _ci_passed(ci) == ci["total"]:
         done.add("tests")
     if pr.get("panel_verdict") or pr.get("panel2_verdict"):
         done.add("review")
     # Facts the Now line quotes: next poll, attempts used, CI still running.
     poll = _until(next_poll_at, now.timestamp())
     attempts = int(pr.get("remediation_attempts") or 0)
-    pending_ci = ci and ci["done"] < ci["total"]
+    pending_ci = ci and not ci["failed"] and _ci_passed(ci) < ci["total"]
     # Being fixed or waiting on CI.
     if label == "Improving" and "improves" in why:
         return "fix", done, "improving: attempt %d/%d" % (min(attempts + 1, max_attempts), max_attempts)
     if label in ("Improving", "Auto-merging") and pending_ci:
-        return "tests", done, "waiting for CI (%d/%d checks done)" % (ci["done"], ci["total"])
+        return "tests", done, _ci_wait(ci)
     if label == "Improving" and "waiting on GitHub Actions" in why:
         return "tests", done, "waiting for CI (checks not started yet)"
     if label == "Auto-merging":
@@ -387,7 +410,7 @@ def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
         if ci and ci["failed"]:
             return "tests", done, "held: CI failing (%d of %d checks failed)" % (ci["failed"], ci["total"])
         if pending_ci:
-            return "tests", done, "held: waiting for CI (%d/%d checks done)" % (ci["done"], ci["total"])
+            return "tests", done, "held: " + _ci_wait(ci)
         return "merge", done, "held: " + _short(why, 120)
     # Otherwise it waits on a human (approval, review or promotion).
     if label == "Approved":
@@ -454,12 +477,13 @@ def flight_cards(processed, pr_reviews, active_tasks=None, ci_seen=None, next_po
 def stamp_state_since(rec, prev=None, now=None):
     """Set rec["state_since"] to when the PR entered its current dashboard state.
 
-    The state is _pr_state's label (or the outcome once closed); it is kept from
-    ``prev`` while the label is unchanged, so "for 2h 10m" is time in THIS state."""
+    The state is _pr_state's label and reason (or the outcome once closed); it is
+    kept from ``prev`` while unchanged, so "for 2h 10m" is time in THIS state."""
     if rec.get("auto_merged") or rec.get("merged") or rec.get("denied") or rec.get("closed"):
         label = pr_chip(rec)[1]
     else:
-        label = _pr_state(rec)[1]
+        # Label plus reason: "Improving" while fixing and while release-locked differ.
+        label = "%s: %s" % _pr_state(rec)[1:]
     prev = prev or {}
     if prev.get("state_label") == label and prev.get("state_since"):
         rec["state_since"] = prev["state_since"]
@@ -615,11 +639,10 @@ def build(processed, pr_reviews, active_tasks=None, now=None, ci_seen=None, next
         since = _when(pr.get("state_since") or pr.get("reviewed_at"))
         item = {**base, "kind": "pr", "label": label, "why": _short(why), "panels": panel_chips(pr),
                 "approved": bool(pr.get("approved")), "findings": pr.get("findings") or 0,
-                "ci": ("CI ✕ %d/%d" % (ci["failed"], ci["total"]) if ci["failed"]
-                       else "CI ✓ %d/%d" % (ci["done"], ci["total"])) if ci and ci["total"] else "",
-                "ci_ok": bool(ci and not ci["failed"]),
+                "ci": _ci_chip(ci)[0], "ci_tone": _ci_chip(ci)[1],
                 "held_for": _duration((now - since).total_seconds()) if since and label == "Auto-merge held" else ""}
-        if where == "needs" and _split_verdict(pr):
+        panel_hold = label == "Auto-merge held" and "panel" in why.lower()
+        if (label == "Awaiting review" or panel_hold) and _split_verdict(pr):
             item["label"], item["split"] = "Split verdict", True
         if where == "needs":
             attention.append({**item, "group": "pr"})

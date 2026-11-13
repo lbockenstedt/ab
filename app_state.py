@@ -137,9 +137,12 @@ def set_task_step(task_id, step=None, *, stage=None, subject=None, scope=None, m
                 task["step"] = str(step)[:200]
             if stage:
                 task["stage"] = stage
-                task.setdefault("stages", [])
-                if stage not in task["stages"]:
-                    task["stages"].append(stage)
+                stages = task.setdefault("stages", [])
+                # Re-entering a stage (a retry) drops the later ones: they did not pass.
+                if stage in stages:
+                    del stages[stages.index(stage) + 1:]
+                else:
+                    stages.append(stage)
             if scope is not None:
                 task["scope"] = str(scope)[:80]
             if model:

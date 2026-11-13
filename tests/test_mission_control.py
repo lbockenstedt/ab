@@ -247,6 +247,15 @@ def test_tests_after_review_keep_the_review_step_done(tasks):
     assert _states(card["steps"]) == ["d", "d", "c", "d", "t", "t"]
 
 
+def test_a_retry_attempt_forgets_the_steps_the_last_attempt_failed(tasks):
+    import app_state
+    for name, stage in (("Triaging", "triage"), ("Fix Attempt 1/3", "fix"), ("Reviewing", "review"),
+                        ("Verifying", "tests"), ("Fix Attempt 2/3", "fix")):
+        app_state.update_task_state("o/lm:5", name, stage=stage)
+    card = mission_control.task_card("o/lm:5", tasks["o/lm:5"], now=NOW)
+    assert _states(card["steps"]) == ["d", "c", "t", "t", "t", "t"]
+
+
 def test_a_task_with_no_recorded_stage_takes_it_from_its_phase_name():
     card = mission_control.task_card("o/lm:5", {"name": "Reviewing o/lm:5"}, now=NOW)
     assert _states(card["steps"]) == ["d", "d", "d", "c", "t", "t"]
@@ -295,8 +304,11 @@ def test_a_new_subject_starts_a_fresh_stage_and_model_history(tasks):
 def test_ci_checks_seen_are_cached_for_the_dashboard(monkeypatch):
     import pr_actions
     monkeypatch.setattr(pr_actions, "CI_SEEN", {})
-    pr_actions._remember_ci("o/lm", "abc", [{"status": "completed"}, {"status": "in_progress"}], [{"name": "lint"}])
-    assert {k: v for k, v in pr_actions.CI_SEEN[("o/lm", "abc")].items() if k != "at"} == {"done": 1, "total": 2, "failed": 1}
+    runs = [{"status": "completed", "conclusion": "success"}, {"status": "completed", "conclusion": "cancelled"},
+            {"status": "completed", "conclusion": "failure"}, {"status": "in_progress"}]
+    pr_actions._remember_ci("o/lm", "abc", runs, ["lint: failure"])
+    assert {k: v for k, v in pr_actions.CI_SEEN[("o/lm", "abc")].items() if k != "at"} == {
+        "done": 3, "passed": 1, "total": 4, "failed": 1}
 
 
 @pytest.mark.parametrize("pr, ci, step, now_text", [
@@ -306,6 +318,8 @@ def test_ci_checks_seen_are_cached_for_the_dashboard(monkeypatch):
           auto_merge_reason="both approve"), {"done": 2, "total": 6, "failed": 0}, "fix", "improving: attempt 1/3"),
     (dict(approved=True, auto_merge_reason="both panels approve", head="h"), {"done": 2, "total": 6, "failed": 0},
      "tests", "waiting for CI (2/6 checks done)"),
+    (dict(approved=True, auto_merge_reason="both panels approve", head="h"),
+     {"done": 6, "passed": 0, "total": 6, "failed": 0}, "tests", "CI finished without a verdict (0/6 passed) — Re-run CI"),
     (dict(panel_status="queue_for_retry", queue_retry_count=1), None, "review", "queued: next PR scan in 12m"),
     (dict(auto_merge_blocked_reason="holding the merge while AppBuilder improves", remediation_attempts=4,
           auto_remediate_status="exhausted_human_review"), None, "fix", "held: remediation limit 4/3, needs human"),
@@ -346,13 +360,18 @@ def test_running_items_and_finished_prs_are_not_in_flight():
 
 def test_time_in_state_resets_only_when_the_state_changes():
     held = _pr(1, auto_merge_blocked_reason="CI is failing on head h — needs human review")
-    prev = dict(held, state_label="Auto-merge held", state_since="2026-11-12T09:00:00")
+    prev = dict(held)
+    mission_control.stamp_state_since(prev, None, NOW.replace(hour=9))
     rec = dict(held)
     mission_control.stamp_state_since(rec, prev, NOW)
-    assert rec["state_since"] == "2026-11-12T09:00:00"
+    assert rec["state_since"] == "2026-11-12 09:00:00"
     rec = dict(held, approved=True, auto_merge_blocked_reason="", auto_merge_reason="ok")
     mission_control.stamp_state_since(rec, prev, NOW)
-    assert rec["state_since"] == "2026-11-12 12:00:00" and rec["state_label"] != "Auto-merge held"
+    assert rec["state_since"] == "2026-11-12 12:00:00" and not rec["state_label"].startswith("Auto-merge held")
+    # Same label, new reason: a new state.
+    rec = dict(held, auto_merge_blocked_reason="panel 2 did not Approve")
+    mission_control.stamp_state_since(rec, prev, NOW)
+    assert rec["state_since"] == "2026-11-12 12:00:00"
 
 
 def test_kpis_compare_weeks_and_take_the_median_fix_time():
@@ -380,13 +399,26 @@ def test_attention_labels_fit_the_state():
                       auto_merge_blocked_reason="panel 2 did not Approve"),
         "o/lm#4": _pr(4, hours=2, head="h", state_since=_ago(2.5),
                       auto_merge_blocked_reason="CI is failing on head h — needs human review"),
+        "o/lm#5": _pr(5, panel_verdict="Approve", panel2_verdict="Reject", head="h",
+                      auto_merge_blocked_reason="CI is failing on head h — needs human review"),
     }
     items = {i["id"]: i for i in mission_control.build(
         processed, prs, now=NOW, ci_seen={("o/lm", "h"): {"done": 6, "total": 6, "failed": 1}})["attention"]}
     assert (items["o/lm:1"]["label"], items["o/lm:1"]["reply"]) == ("Fix failed · attempt 2/3", "model said no")
     assert (items["o/lm:2"]["label"], items["o/lm:2"]["boundary"]) == ("Feature flagged · crosses boundary", "auth-rbac")
     assert items["o/lm#3"]["label"] == "Split verdict" and items["o/lm#3"]["split"]
-    assert (items["o/lm#4"]["ci"], items["o/lm#4"]["ci_ok"], items["o/lm#4"]["held_for"]) == ("CI ✕ 1/6", False, "2h 30m")
+    assert (items["o/lm#4"]["ci"], items["o/lm#4"]["ci_tone"], items["o/lm#4"]["held_for"]) == ("CI ✕ 1/6", "bad", "2h 30m")
+    # Split panels on a PR held for failing CI: the CI hold stays the label and actions.
+    assert items["o/lm#5"]["label"] == "Auto-merge held" and not items["o/lm#5"].get("split")
+
+
+@pytest.mark.parametrize("ci, chip", [
+    ({"done": 6, "passed": 6, "total": 6, "failed": 0}, ("CI ✓ 6/6", "ok")),
+    ({"done": 6, "passed": 4, "total": 6, "failed": 0}, ("CI … 4/6", "wait")),
+    ({"done": 2, "passed": 2, "total": 6, "failed": 0}, ("CI … 2/6", "wait")),
+])
+def test_ci_chip_is_green_only_when_every_check_passed(ci, chip):
+    assert mission_control._ci_chip(ci) == chip
 
 
 def test_promotion_lanes_show_the_open_promotion_and_the_last_one():
