@@ -1935,6 +1935,29 @@ _SANDBOX_UNAVAILABLE_MARKER = "No sandbox backend available"
 _SANDBOX_TIMEOUT_MARKER = "Sandbox timed out"
 
 
+def _test_failure_headline(output, max_ids=5):
+    """One-line summary of a failed test run, for the first line of the log entry.
+
+    The log scanner only reads the line that carries the ERROR prefix. A pytest
+    run puts its failures hundreds of lines below that line, after the progress
+    dots, so the scanner saw "failed:" with nothing after it. This summary lists
+    the failing test ids, the pytest totals and the component line."""
+    lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
+    failed = [ln.split(" - ")[0].split(" ", 1)[1] for ln in lines
+              if ln.startswith(("FAILED ", "ERROR "))]
+    totals = [ln.strip("= ") for ln in lines
+              if re.search(r"\d+ (failed|error|errors)\b", ln) and " in " in ln]
+    parts = []
+    if failed:
+        more = f" (+{len(failed) - max_ids} more)" if len(failed) > max_ids else ""
+        parts.append("failing: " + ", ".join(failed[:max_ids]) + more)
+    parts += totals
+    parts += [ln for ln in lines if ln.startswith("failing components:")]
+    if not parts and lines:
+        parts.append(lines[-1])
+    return "; ".join(parts) or "no output"
+
+
 def _sandbox_infra_failure(result):
     """True when the sandbox itself failed, rather than the repository's tests.
 
@@ -5140,7 +5163,7 @@ def verify_fix(repo_path, repo_name, config):
             # smoke.sh exits 2 for its own setup problems (no python, missing
             # helper), never for a failing check or test.
             return False, f"{VERIFICATION_INFRA_PREFIX} smoke test could not run: {output[-2000:]}"
-        logger.error(f"Smoke test failed for {repo_name}:\n{output}")
+        logger.error(f"Smoke test failed for {repo_name}: {_test_failure_headline(output)}\n{output}")
         return False, output
 
     # Priority 2: QA service API (when QA_API_URL is configured).
@@ -5190,7 +5213,7 @@ def verify_fix(repo_path, repo_name, config):
                 return True, None
             else:
                 error_msg = result.stdout + result.stderr
-                logger.error(f"External QA tests failed:\n{error_msg}")
+                logger.error(f"External QA tests failed: {_test_failure_headline(error_msg)}\n{error_msg}")
                 return False, error_msg
         else:
             # Default command: guess from the files in the repo.
@@ -5216,7 +5239,7 @@ def verify_fix(repo_path, repo_name, config):
                 return True, None
             else:
                 error_msg = result.stdout + result.stderr
-                logger.error(f"Tests failed:\n{error_msg}")
+                logger.error(f"Tests failed: {_test_failure_headline(error_msg)}\n{error_msg}")
                 return False, error_msg
     # Per-repo command from settings: run it in the sandbox and report the result.
     result = run_sandboxed_command(test_cmd, repo_path)
@@ -5228,7 +5251,7 @@ def verify_fix(repo_path, repo_name, config):
         return True, None
     else:
         error_msg = result.stdout + result.stderr
-        logger.error(f"Per-repo tests for {repo_name} failed:\n{error_msg}")
+        logger.error(f"Per-repo tests for {repo_name} failed: {_test_failure_headline(error_msg)}\n{error_msg}")
         return False, error_msg
 
 

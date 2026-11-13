@@ -33,6 +33,7 @@ TARGETS = {
     "_smoke_command",
     "_exclude_spoke_core_from_pytest",
     "verify_fix",
+    "_test_failure_headline",
 }
 
 # Pulled from the source rather than restated here: a test that hard-codes the
@@ -527,6 +528,36 @@ def test_a_configured_per_repo_command_wins_over_the_smoke_test(tmp_path):
                           "lbockenstedt/kvm", {"repo_tests": {"lbockenstedt/kvm": "pytest -q tests"}})
     assert out == (True, None)
     assert [c for c, _ in seen] == ["pytest -q tests"]
+
+
+def test_a_failed_per_repo_run_names_its_failures_on_the_logged_line(tmp_path, monkeypatch):
+    """The log scanner reads only the ERROR line, so the failures must be on it (ab#540)."""
+    repo = _smoke_repo(tmp_path)
+    logged = []
+    monkeypatch.setattr(MOD["logger"], "error", lambda m, *a, **k: logged.append(m))
+    output = ("." * 72 + " [ 50%]\n" + "F" * 3 + " [100%]\n"
+              "=========== short test summary info ===========\n"
+              "FAILED tests/test_a.py::test_one - AssertionError: boom\n"
+              "FAILED tests/test_a.py::test_two - KeyError: 'x'\n"
+              "======= 2 failed, 210 passed in 9.10s =======\n"
+              "failing components: core\n")
+    _, (ok, _msg) = _run_with("verify_fix", [FakeCompleted(output, "", 1)], str(repo),
+                              "lbockenstedt/kvm", {"repo_tests": {"lbockenstedt/kvm": "pytest -q tests"}})
+    first_line = logged[-1].splitlines()[0]
+    assert not ok
+    assert "tests/test_a.py::test_one" in first_line and "tests/test_a.py::test_two" in first_line
+    assert "2 failed, 210 passed" in first_line and "failing components: core" in first_line
+
+
+def test_a_failed_smoke_run_names_its_failures_on_the_logged_line(tmp_path, monkeypatch):
+    repo = _smoke_repo(tmp_path)
+    logged = []
+    monkeypatch.setattr(MOD["logger"], "error", lambda m, *a, **k: logged.append(m))
+    output = ("." * 72 + "\nFAILED tests/test_b.py::test_three - ValueError\n"
+              "1 failed, 9 passed in 0.50s\nSMOKE FAILED at: tests\n")
+    _, (ok, _msg) = _run_with("verify_fix", [FakeCompleted(output, "", 1)],
+                              str(repo), "lbockenstedt/kvm", {})
+    assert not ok and "tests/test_b.py::test_three" in logged[-1].splitlines()[0]
 
 
 def test_smoke_failure_is_fed_back_as_a_test_failure(tmp_path):
