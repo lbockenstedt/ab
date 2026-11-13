@@ -533,57 +533,149 @@
 
     <main class="flex-1 min-h-0 overflow-y-auto p-6">
         {% if view == 'status' %}
-        <div class="grid grid-cols-1 gap-6">
-            <!-- Active Tasks Card (System Health moved to the left sidebar) -->
-            <div class="hpe-card p-5">
-                <div class="flex items-center justify-between mb-6">
-                    <h3 class="text-lg font-bold text-navy">Active Tasks</h3>
-                    <i class="fas fa-tasks text-primary-text"></i>
+        {% set mc = mission or {'kpis': {}, 'groups': {}, 'attention': [], 'in_flight': [], 'outcomes': []} %}
+        <!-- Mission Control: what needs you, what AppBuilder is doing, what just finished.
+             Built by mission_control.build() from the same stores as the Status table
+             below (GET /api/mission-control returns the same data). -->
+        {% if mission %}{# Settings → dashboard_mission_control #}
+        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+            {% set _k = mc.kpis %}
+            <a href="#mc-attention" class="hpe-card p-4 block hover:border-brand" title="Items waiting on a person"><div class="text-xs text-slate-500">Needs you</div><div class="text-2xl font-bold {{ 'text-red-600' if _k.needs_you else 'text-navy' }}">{{ _k.needs_you or 0 }}</div></a>
+            <a href="#mc-working" class="hpe-card p-4 block hover:border-brand" title="Tasks AppBuilder is running right now"><div class="text-xs text-slate-500">Running now</div><div class="text-2xl font-bold text-primary-text">{{ _k.running or 0 }}</div></a>
+            <a href="#mc-working" class="hpe-card p-4 block hover:border-brand" title="Issues and PRs AppBuilder still owns (fixing, improving, waiting for a review or the requester)"><div class="text-xs text-slate-500">In flight</div><div class="text-2xl font-bold text-navy">{{ _k.in_flight or 0 }}</div></a>
+            <a href="#activity" data-mc="activity" data-filter="resolved" class="hpe-card p-4 block hover:border-brand" title="Issues fixed, verified or resolved in the last 7 days"><div class="text-xs text-slate-500">Fixed · 7d</div><div class="text-2xl font-bold text-primary-text">{{ _k.fixed_7d or 0 }}</div></a>
+            <a href="#activity" data-mc="activity" data-filter="pr_auto_merged" class="hpe-card p-4 block hover:border-brand" title="PRs merged with no human click in the last 7 days"><div class="text-xs text-slate-500">Auto-merged · 7d</div><div class="text-2xl font-bold text-navy">{{ _k.auto_merged_7d or 0 }}</div></a>
+            <a href="#activity" data-mc="activity" data-filter="failed" class="hpe-card p-4 block hover:border-brand" title="Issues whose fix failed in the last 7 days"><div class="text-xs text-slate-500">Failed · 7d</div><div class="text-2xl font-bold text-navy">{{ _k.failed_7d or 0 }}</div></a>
+        </div>
+
+        <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mt-6">
+            <!-- Needs your attention -->
+            <div id="mc-attention" class="hpe-card xl:col-span-2 overflow-hidden">
+                <div class="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
+                    <h3 class="text-lg font-bold text-navy mr-auto">Needs your attention</h3>
+                    {% set _g = mc.groups %}
+                    {% for gid, glabel in [('all', 'All'), ('pr', 'PRs held'), ('failed', 'Failed'), ('verify', 'Verify'), ('feature', 'Features'), ('other', 'Other')] %}
+                    {% set _n = mc.kpis.needs_you if gid == 'all' else _g.get(gid, 0) %}
+                    {% if gid == 'all' or _n %}
+                    <button type="button" data-mc-group="{{ gid }}" data-mc="filter" class="mc-chip px-3 py-1 rounded-full text-xs font-bold border {{ 'bg-navy text-white border-navy' if gid == 'all' else 'bg-white text-slate-600 border-slate-300 hover:border-brand' }}" title="Show {{ glabel|lower }} items">{{ glabel }} {{ _n or 0 }}</button>
+                    {% endif %}
+                    {% endfor %}
                 </div>
-                <div class="flex flex-col h-full justify-between">
-                    <div id="active-tasks-list" class="space-y-2 overflow-y-auto max-h-64">
-                        {% if state.active_tasks %}
-                            {% for tid, task in state.active_tasks.items() %}
-                                <div class="p-3 rounded-xl border {% if task.kind == 'pr' %}bg-indigo-50 border-indigo-300{% else %}bg-slate-100 border-slate-200{% endif %}" data-tid="{{ tid }}" data-start="{{ task.start_time.isoformat() }}">
-                                    <div class="mb-1">
-                                        {% if task.kind == 'pr' %}
-                                            <span class="text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-300"><i class="fas fa-code-branch"></i> PR REVIEW</span>
-                                        {% else %}
-                                            <span class="text-xs font-bold px-2 py-0.5 rounded-full bg-brand/10 text-primary-text border border-brand/30"><i class="fas fa-search"></i> SCAN / FIX</span>
-                                        {% endif %}
-                                    </div>
-                                    <p class="task-name text-slate-700 font-mono text-xs break-all font-bold">{{ task.name }}</p>
-                                    <!-- The task id (issue / repo / worker) shown regardless of
-                                         what the name happens to say. Task names are written by
-                                         many call sites and some describe only the mechanism
-                                         ("CPU build <model>"), leaving an operator unable to tell
-                                         WHICH issue is in flight. Rendering the id here fixes that
-                                         for every task, not just the ones whose name remembers. -->
-                                    <p class="task-tid text-slate-500 font-mono text-xs break-all mt-0.5">{% if tid and tid not in task.name %}{{ tid }}{% endif %}</p>
-                                    <!-- Filled/kept live by startActiveTasksLiveRefresh() below so an
-                                         operator can see elapsed time and the current step without
-                                         waiting for the 30s full-page reload. -->
-                                    <p class="task-elapsed text-slate-500 font-mono text-xs mt-0.5"></p>
-                                    <p class="task-current-step text-slate-500 text-xs italic mt-1 truncate"></p>
-                                </div>
-                            {% endfor %}
-                        {% else %}
-                            <div class="p-4 bg-slate-100 rounded-xl border border-slate-200 text-center">
-                                <p class="text-slate-500 font-mono text-sm italic">Standing by for issues...</p>
+                <div class="divide-y divide-slate-200">
+                    {% for it in mc.attention %}
+                    {% set _tone = {'pr': 'amber', 'failed': 'red', 'verify': 'sky', 'feature': 'purple', 'other': 'slate'}[it.group] %}
+                    <div class="mc-item px-5 py-4 flex gap-4" data-group="{{ it.group }}">
+                        <div class="w-9 h-9 flex-none rounded-lg flex items-center justify-center bg-{{ _tone }}-100 text-{{ _tone }}-700">
+                            <i class="fas {{ {'pr': 'fa-code-branch', 'failed': 'fa-xmark', 'verify': 'fa-question', 'feature': 'fa-flag', 'other': 'fa-circle-info'}[it.group] }}"></i>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center flex-wrap gap-2">
+                                <a href="{{ it.url }}" target="_blank" class="font-bold text-navy hover:underline">{{ it.repo }} #{{ it.number }}</a>
+                                {% if it.base_ref %}<span class="text-xs px-1.5 py-0.5 rounded {{ 'bg-amber-100 text-amber-800 border border-amber-300' if it.base_ref in ('main', 'master') else 'bg-slate-100 text-slate-600' }}"><i class="fas fa-arrow-right-long mr-1"></i>{{ it.base_ref }}</span>{% endif %}
+                                <span class="text-xs px-1.5 py-0.5 rounded bg-{{ _tone }}-50 text-{{ _tone }}-700">{{ it.label }}</span>
+                                <span class="ml-auto text-xs text-slate-500 whitespace-nowrap">{{ it.age }}</span>
                             </div>
-                        {% endif %}
+                            {% if it.title %}<div class="text-sm text-slate-700 truncate" title="{{ it.title }}">{{ it.title }}</div>{% endif %}
+                            {% if it.why %}<div class="text-sm mt-0.5"><span class="font-semibold text-{{ _tone }}-700">Why:</span> <span class="text-slate-700">{{ it.why }}</span></div>{% endif %}
+                            {% if it.panels %}<div class="flex flex-wrap gap-1.5 mt-1.5">{% for c in it.panels %}<span class="text-xs px-2 py-0.5 rounded-full border {{ 'bg-green-50 text-green-700 border-green-200' if c.ok else 'bg-red-50 text-red-700 border-red-200' }}">{{ c.label }}</span>{% endfor %}</div>{% endif %}
+                        </div>
+                        <div class="flex-none flex flex-col items-stretch gap-1.5 w-32">
+                            {% if it.kind == 'pr' %}
+                                {% if it.approved %}
+                                <button type="button" data-mc="merge" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="Merge this approved PR">Merge</button>
+                                {% else %}
+                                <button type="button" data-mc="approve" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>
+                                {% endif %}
+                                {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
+                                <button type="button" data-mc="reprocess" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="Re-run the full review now instead of waiting for the next poll">Re-review</button>
+                                <button type="button" data-mc="deny" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="text-xs text-red-600 hover:underline" title="Deny this PR">Deny</button>
+                            {% elif it.group == 'verify' %}
+                                <button type="button" data-mc="resolve" data-id="{{ it.id }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="The problem is gone: close it as resolved">Resolve</button>
+                                <button type="button" data-mc="reopen" data-id="{{ it.id }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="The fix did not work: reopen on GitHub and try again">Reopen</button>
+                            {% elif it.group == 'feature' %}
+                                <button type="button" data-mc="reevaluate" data-id="{{ it.id }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="Queue it for classification again on the next feature-drive cycle">Re-evaluate</button>
+                                <button type="button" data-mc="dismiss" data-id="{{ it.id }}" class="text-xs text-slate-500 hover:underline" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                            {% else %}
+                                <button type="button" data-mc="retry" data-id="{{ it.id }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="Try the fix again">Retry</button>
+                                {% if claude_enabled %}<button type="button" data-mc="claude" data-id="{{ it.id }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="Try the fix with the local Claude CLI">Retry with Claude</button>{% endif %}
+                                <button type="button" data-mc="resolve" data-id="{{ it.id }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="Already handled: close it as resolved">Resolve</button>
+                                <button type="button" data-mc="dismiss" data-id="{{ it.id }}" class="text-xs text-slate-500 hover:underline" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                            {% endif %}
+                        </div>
                     </div>
+                    {% else %}
+                    <div class="px-5 py-8 text-center text-slate-500 text-sm"><i class="fas fa-circle-check text-primary-text mr-1"></i>Nothing needs you right now.</div>
+                    {% endfor %}
                 </div>
             </div>
 
+            <!-- Recent outcomes -->
+            <div class="hpe-card overflow-hidden">
+                <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                    <h3 class="text-lg font-bold text-navy">Recent outcomes</h3>
+                    <a href="#activity" class="text-xs font-bold text-primary-text hover:underline">All activity <i class="fas fa-arrow-down"></i></a>
+                </div>
+                <ul class="px-5 py-4 space-y-3 text-sm">
+                    {% for o in mc.outcomes %}
+                    <li class="flex gap-3">
+                        <span class="mt-1.5 w-2 h-2 rounded-full flex-none {{ {'ok': 'bg-brand', 'bad': 'bg-red-500', 'muted': 'bg-slate-400'}[o.tone] }}"></span>
+                        <div class="min-w-0">
+                            <div><a href="{{ o.url }}" target="_blank" class="font-bold text-navy hover:underline">{{ o.repo }} #{{ o.number }}</a> {{ o.text }}{% if o.base_ref and 'merged' in o.text %} into {{ o.base_ref }}{% endif %}</div>
+                            <div class="text-xs text-slate-500 truncate" title="{{ o.title }}">{% for c in o.panels or [] %}{{ c.label }}{{ ' · ' }}{% endfor %}{{ o.age }} ago</div>
+                        </div>
+                    </li>
+                    {% else %}
+                    <li class="text-slate-500">Nothing finished in the last 7 days.</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Working on now: live task cards (startActiveTasksLiveRefresh keeps them current) -->
+        <div id="mc-working" class="mt-6">
+            <div class="flex items-baseline gap-3 mb-3">
+                <h3 class="text-lg font-bold text-navy">Working on now</h3>
+                <span class="text-xs text-slate-500">live</span>
+            </div>
+            <div id="active-tasks-list" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {% if state.active_tasks %}
+                    {% for tid, task in state.active_tasks.items() %}
+                        <div class="hpe-card p-4" data-tid="{{ tid }}" data-start="{{ task.start_time.isoformat() }}">
+                            <div class="mb-1">
+                                <span class="text-xs font-bold px-2 py-0.5 rounded-full {{ 'bg-indigo-50 text-indigo-700' if task.kind == 'pr' else 'bg-brand/10 text-primary-text' }}"><i class="fas {{ 'fa-code-branch' if task.kind == 'pr' else 'fa-search' }}"></i> {{ 'PR review' if task.kind == 'pr' else 'Scan / fix' }}</span>
+                            </div>
+                            <p class="task-name text-navy text-sm break-all font-bold">{{ task.name }}</p>
+                            <!-- The task id (issue / repo / worker), shown when the name does not already carry it. -->
+                            <p class="task-tid text-slate-500 font-mono text-xs break-all mt-0.5">{% if tid and tid not in task.name %}{{ tid }}{% endif %}</p>
+                            <p class="task-elapsed text-slate-500 font-mono text-xs mt-0.5"></p>
+                            <p class="task-current-step text-slate-600 text-xs italic mt-1 truncate"></p>
+                        </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="hpe-card p-4 text-center">
+                        <p class="text-slate-500 text-sm italic">Standing by for issues...</p>
+                    </div>
+                {% endif %}
+            </div>
+            {% if mc.in_flight %}
+            <div class="hpe-card mt-3 px-5 py-3">
+                <div class="text-xs font-bold text-slate-500 mb-2">In flight ({{ mc.in_flight|length }})</div>
+                <div class="flex flex-wrap gap-2">
+                    {% for f in mc.in_flight %}
+                    <a href="{{ f.url }}" target="_blank" class="text-xs px-2 py-1 rounded border border-slate-200 bg-slate-50 hover:border-brand" title="{{ f.title }}{% if f.why %} — {{ f.why }}{% endif %}"><b class="text-navy">{{ f.repo }} #{{ f.number }}</b> · {{ f.label }}{% if f.age %} · {{ f.age }}{% endif %}</a>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
         </div>
 
         <!-- Processed Table -->
-        <div class="mt-8 hpe-card rounded-2xl overflow-hidden">
+        <div id="activity" class="mt-8 hpe-card rounded-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 bg-white flex flex-col gap-3">
                 <!-- Row 1: title + bulk actions -->
                 <div class="flex justify-between items-center flex-wrap gap-2">
-                    <h3 class="text-lg font-bold text-navy whitespace-nowrap">Status</h3>
+                    <h3 class="text-lg font-bold text-navy whitespace-nowrap">All activity</h3>
                     <div class="flex gap-2 items-center flex-wrap">
                         <button onclick="retryAll(null)" class="btn-primary px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap">
                             <i class="fas fa-redo-alt mr-1"></i> Retry All
@@ -1223,6 +1315,12 @@
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Update API URL (NetBox)</label>
                                 <input type="text" name="UPDATE_API_URL" value="{{ settings.UPDATE_API_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
+                            <div class="space-y-2 col-span-1 md:col-span-3">
+                                <label class="flex items-center gap-2 text-sm font-medium text-slate-700" title="On by default. The Dashboard opens with Mission Control: KPI tiles, Needs your attention (with why each item waits and its actions) and Recent outcomes. Off shows only Working on now and the All activity table.">
+                                    <input type="checkbox" name="dashboard_mission_control" {{ 'checked' if settings.dashboard_mission_control else '' }} class="rounded border-slate-300 focus:ring-brand">
+                                    Show Mission Control on the Dashboard
+                                </label>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <div class="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-3">
@@ -3780,30 +3878,28 @@
             function buildRow(tid, task) {
                 const isPr = task.kind === 'pr';
                 const row = document.createElement('div');
-                row.className = 'p-3 rounded-xl border ' +
-                    (isPr ? 'bg-indigo-50 border-indigo-300' : 'bg-slate-100 border-slate-200');
+                row.className = 'hpe-card p-4';
                 row.dataset.tid = tid;
 
                 const badgeWrap = document.createElement('div');
                 badgeWrap.className = 'mb-1';
                 const badge = document.createElement('span');
-                badge.className = isPr
-                    ? 'text-xs font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-300'
-                    : 'text-xs font-bold px-2 py-0.5 rounded-full bg-brand/10 text-primary-text border border-brand/30';
+                badge.className = 'text-xs font-bold px-2 py-0.5 rounded-full ' +
+                    (isPr ? 'bg-indigo-50 text-indigo-700' : 'bg-brand/10 text-primary-text');
                 const icon = document.createElement('i');
                 icon.className = isPr ? 'fas fa-code-branch' : 'fas fa-search';
                 badge.appendChild(icon);
-                badge.appendChild(document.createTextNode(isPr ? ' PR REVIEW' : ' SCAN / FIX'));
+                badge.appendChild(document.createTextNode(isPr ? ' PR review' : ' Scan / fix'));
                 badgeWrap.appendChild(badge);
 
                 const nameP = document.createElement('p');
-                nameP.className = 'task-name text-slate-700 font-mono text-xs break-all font-bold';
+                nameP.className = 'task-name text-navy text-sm break-all font-bold';
                 const tidP = document.createElement('p');
                 tidP.className = 'task-tid text-slate-500 font-mono text-xs break-all mt-0.5';
                 const elapsedP = document.createElement('p');
                 elapsedP.className = 'task-elapsed text-slate-500 font-mono text-xs mt-0.5';
                 const stepP = document.createElement('p');
-                stepP.className = 'task-current-step text-slate-500 text-xs italic mt-1 truncate';
+                stepP.className = 'task-current-step text-slate-600 text-xs italic mt-1 truncate';
 
                 row.appendChild(badgeWrap);
                 row.appendChild(nameP);
@@ -3831,9 +3927,9 @@
             function renderEmpty(list) {
                 list.innerHTML = '';
                 const empty = document.createElement('div');
-                empty.className = 'p-4 bg-slate-100 rounded-xl border border-slate-200 text-center';
+                empty.className = 'hpe-card p-4 text-center';
                 const p = document.createElement('p');
-                p.className = 'text-slate-500 font-mono text-sm italic';
+                p.className = 'text-slate-500 text-sm italic';
                 p.textContent = 'Standing by for issues...';
                 empty.appendChild(p);
                 list.appendChild(empty);
@@ -4346,7 +4442,7 @@
                     // one (Reprocess + this + Deny), so the badge would just cost space
                     // for no new information.
                     if (btn) btn.outerHTML =
-                        `<button onclick="mergePr('${repo}', ${number}, this)" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
+                        `<button type="button" data-mc="merge" data-repo="${repo}" data-num="${number}" class="text-xs px-1.5 py-0.5 rounded-full font-bold whitespace-nowrap bg-purple-600 text-white hover:bg-purple-700 border border-purple-700"><i class="fas fa-code-merge mr-1"></i>Merge</button>`;
                     showToast('Approved ' + repo + ' #' + number, 'success');
                 } else {
                     showToast('Approve failed: ' + (d.message || resp.status), 'error');
@@ -4486,6 +4582,39 @@
             // its last filter after this ships.
             sessionStorage.removeItem('bf_activity_filter');
         } catch (e) {}
+
+        // Mission Control "Needs your attention" chips: show one group, or all.
+        // Mission Control buttons carry data-mc="<action>" (no inline handlers, fleet rule 7.1).
+        const MC_ACTIONS = {
+            activity: function (b) { filterActivity(b.dataset.filter); },
+            filter: function (b) { mcFilter(b.dataset.mcGroup); },
+            merge: function (b) { mergePr(b.dataset.repo, Number(b.dataset.num), b); },
+            approve: function (b) { approvePr(b.dataset.repo, Number(b.dataset.num), b); },
+            fix: function (b) { fixPr(b.dataset.repo, Number(b.dataset.num), b); },
+            reprocess: function (b) { reprocessPr(b.dataset.repo, Number(b.dataset.num), b); },
+            deny: function (b) { denyPr(b.dataset.repo, Number(b.dataset.num), b); },
+            resolve: function (b) { resolveIssue(b.dataset.id); },
+            reopen: function (b) { reopenIssue(b.dataset.id); },
+            reevaluate: function (b) { reevaluateFeature(b.dataset.id); },
+            dismiss: function (b) { deleteIssue(b.dataset.id, b); },
+            retry: function (b) { triggerFix(b.dataset.id, 'retry'); },
+            claude: function (b) { triggerFix(b.dataset.id, 'claude'); },
+        };
+        document.addEventListener('click', function (ev) {
+            const b = ev.target.closest('[data-mc]');
+            if (b && MC_ACTIONS[b.dataset.mc]) MC_ACTIONS[b.dataset.mc](b);
+        });
+
+        function mcFilter(group) {
+            document.querySelectorAll('#mc-attention .mc-item').forEach(function (el) {
+                el.style.display = (group === 'all' || el.dataset.group === group) ? '' : 'none';
+            });
+            document.querySelectorAll('#mc-attention .mc-chip').forEach(function (b) {
+                const on = b.dataset.mcGroup === group;
+                b.classList.toggle('bg-navy', on); b.classList.toggle('text-white', on); b.classList.toggle('border-navy', on);
+                b.classList.toggle('bg-white', !on); b.classList.toggle('text-slate-600', !on); b.classList.toggle('border-slate-300', !on);
+            });
+        }
 
         function filterActivity(status) {
             _activityFilter = status;

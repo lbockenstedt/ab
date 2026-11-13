@@ -565,7 +565,10 @@ def update_pr_review(repo, number, **fields):
                 # is lifetime and must still be tallied in the ledger.
                 _record_merge_milestone(key, fields)
                 return False
-            # Apply the new fields and save the review list.
+            # Apply the new fields and save the review list. The first merge, deny or
+            # close also stamps outcome_at (reviewed_at is when it was last reviewed).
+            if not rec.get("outcome_at") and any(fields.get(k) for k in ("merged", "auto_merged", "denied", "closed")):
+                fields = {**fields, "outcome_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
             rec.update(fields)
             save_pr_reviews(state["pr_reviews"])
             # After the record is safely persisted: the ledger is a derived
