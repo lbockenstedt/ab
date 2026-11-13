@@ -5415,7 +5415,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             path = os.path.join(tmp_dir, "repo")
             url = repo_obj.clone_url.replace("https://", f"https://{token}@")
             logger.info(f"Cloning {repo_name} for manual fix...")
-            repo_git = git.Repo.clone_from(url, path)
+            # Clone the integration branch: the default branch is main, and a fix
+            # made on main carries main's VERSION and history into dev.
+            base_branch, base_why = integration_branch(config, repo_obj)
+            repo_git = git.Repo.clone_from(url, path, branch=base_branch)
             # Strip the token back out of .git/config right after cloning. The AI
             # fix, review, and test/verify steps below run untrusted repository code
             # inside run_sandboxed_command()'s Docker container, which mounts this
@@ -5466,7 +5469,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # dev, never main: this is both the direct-push target for a trusted
             # repo and the base of any PR opened below. Work reaches main only
             # by promotion (dev -> qa -> main), which the repo owner drives.
-            base_branch, base_why = integration_branch(config, repo_obj)
             logger.info(f"fix_engine: integrating into {base_branch} -- {base_why}")
 
             # File-a-Bug enrichment: if this issue was filed from the WebUI "File
