@@ -50,9 +50,11 @@ DEFAULTS = {
     "hc_max_issues_per_run": 5,
 }
 
-# Routes that are slow by design (they run a long job inside the request), so
-# a slow response is not a problem to file (lm#1747, lm#1866).
-_SLOW_ROUTE_EXEMPT = frozenset({"POST /admin/ops/self-update", "POST /admin/ops/netbox-autorack"})
+# Routes that are slow by design, so a slow response is not a problem to file.
+# /admin/ops/* is the loopback-only operator API: each call runs a job or waits
+# on a spoke command inside the request (self-update, autorack, exec,
+# dhcp-diagnostics), and no user page uses it (lm#1747, lm#1866, lm#1889, lm#1891).
+_SLOW_ROUTE_EXEMPT_PREFIX = "/admin/ops/"
 
 # Command prefix -> MODULE_TYPE_REPO key (log_scan) of the repo that owns it.
 _PREFIX_MODULE = {
@@ -218,7 +220,7 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
                             [f"event-loop lag {report['loop_lag_s']}s"], "The hub loop is saturated."))
 
     for r in perf.get("routes") or []:
-        if r["key"] in _SLOW_ROUTE_EXEMPT:
+        if r["key"].split(" ", 1)[-1].startswith(_SLOW_ROUTE_EXEMPT_PREFIX):
             continue
         if r["slow"] >= c["hc_slow_route_min_hits"] or r["max_s"] >= c["hc_slow_route_max_s"]:
             out.append(_finding(
