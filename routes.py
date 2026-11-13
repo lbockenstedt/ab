@@ -2527,6 +2527,7 @@ def ensure_config_defaults(config):
     # because cost -- not capability -- is the binding constraint here.
     # 0 disables the extra turn entirely. See pr_remediate.premium_turn_available.
     config.setdefault("pr_remediate_premium_attempts", 1)
+    config.setdefault("pr_remediate_stall_limit", 2)
     # AppBuilder's remediation OBJECTIVE, in one number: keep repairing a PR
     # until BOTH panels Approve at or above this confidence. See
     # pr_remediate.should_remediate — the single choke point that reads it.
@@ -2554,6 +2555,9 @@ def ensure_config_defaults(config):
     # dev, and is required for an unattended dev -> qa -> main flow — otherwise a
     # panel that denies a promotion PR stalls the chain with nothing to repair it.
     config.setdefault("pr_auto_remediate_skip_promotion", True)
+    # Panel 2 (state-logic) waits for panel 1's Approve (pr_review._state_panel_after);
+    # off runs both panels on every pass.
+    config.setdefault("pr_review_state_panel_waits", True)
     # How many times fix_one_pr may regenerate a fix, each retry told exactly why
     # the previous one failed (parse reason / panel critique / verification
     # error). Capped at 5 in pr_review.fix_one_pr.
@@ -2605,12 +2609,16 @@ async def settings_page(request: Request):
     config.setdefault("pr_auto_remediate_enabled", True)
     config.setdefault("pr_auto_remediate_max_attempts", 3)
     config.setdefault("pr_remediate_premium_attempts", 1)
+    config.setdefault("pr_remediate_stall_limit", 2)
     config.setdefault("pr_remediate_target_score", PR_REMEDIATE_DEFAULT_TARGET)
     config.setdefault("pr_remediate_address_all_concerns", True)
     config.setdefault("feature_automerge_docs_bypass_panel", True)
     config.setdefault("feature_automerge_allow_release_branch", False)
     config.setdefault("pr_auto_remediate_skip_docs_only", True)
     config.setdefault("pr_auto_remediate_skip_promotion", True)
+    # Panel 2 (state-logic) waits for panel 1's Approve (pr_review._state_panel_after);
+    # off runs both panels on every pass.
+    config.setdefault("pr_review_state_panel_waits", True)
     config.setdefault("pr_fix_max_attempts", 3)
     # Batch API off, prompt caching on.
     config.setdefault("batch_enabled", False)
@@ -3185,6 +3193,8 @@ async def save_settings(request: Request):
         "promote_schedule_repo": lambda v: (v.strip() if v and v.strip() else "__all__"),
         # Promotion-PR fast lane cadence in seconds (pr_review.scan_promotion_prs); 0 = off.
         "pr_review_fast_interval_s": lambda v: max(0, int(v)) if str(v).strip().isdigit() else 300,
+        # Remediation soft stop (pr_remediate.remediation_stalled); 0 = off.
+        "pr_remediate_stall_limit": lambda v: max(0, int(v)) if str(v).strip().isdigit() else 2,
     }
 
 
@@ -3247,6 +3257,8 @@ async def save_settings(request: Request):
     config_data["pr_review_llm_enabled"] = data.get("pr_review_llm_enabled") == "on"
     # Advisory state-logic/control-flow panel sub-option (independent of the above).
     config_data["pr_review_state_logic_enabled"] = data.get("pr_review_state_logic_enabled") == "on"
+    # Panel 2 waits for panel 1's Approve (pr_review._state_panel_after); default on.
+    config_data["pr_review_state_panel_waits"] = data.get("pr_review_state_panel_waits") == "on"
     # Test-regression sub-option (default OFF): actually clones + runs the repo's
     # test suite for a PR's head vs. base branch and flags NEW failures — real
     # code execution against PR-authored content, opt-in per install (see
