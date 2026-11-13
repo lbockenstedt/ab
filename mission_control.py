@@ -288,9 +288,23 @@ def next_poll_label(next_poll_at, now_ts=None):
     return "Next poll now" if left < 60 else "Next poll %s" % _duration(left)
 
 
+def promotion_route(pr):
+    """(source, target) branches of a promotion or backmerge PR, else None.
+
+    Promotions are raised from ``promote/<src>-to-<tgt>`` (backmerges from
+    ``backmerge/<src>-to-<tgt>``), the prefixes pr_remediate._PROMOTION_HEAD_RE
+    guards; a PR straight from dev or qa into the next branch also counts."""
+    from pr_remediate import _PROMOTION_HEAD_RE
+    head, base = str(pr.get("head_ref") or ""), str(pr.get("base_ref") or "")
+    if _PROMOTION_HEAD_RE.match(head):
+        src, _, tgt = head.split("/", 1)[1].partition("-to-")
+        return (src.lower() or "?", base or tgt.lower())
+    return (head, base) if (head, base) in _PROMOTION_ROUTES else None
+
+
 def is_promotion(pr):
-    """True for a PR that promotes one environment branch to the next (dev -> qa -> main)."""
-    return (pr.get("head_ref"), pr.get("base_ref")) in _PROMOTION_ROUTES
+    """True for a promotion or backmerge PR (see promotion_route)."""
+    return promotion_route(pr) is not None
 
 
 def _pr_kind(pr):
@@ -529,7 +543,7 @@ def promotion_lanes(repos, pr_reviews, now=None):
     Ahead/behind commit counts are not cached, so they are not shown."""
     now = now or datetime.now()
     rows = []
-    repos = list(repos or [])
+    repos = sorted(repos or [])
     # A repo with promotion PRs on record gets a row even when it is not monitored.
     repos += sorted({k.rpartition("#")[0] for k, pr in (pr_reviews or {}).items() if is_promotion(pr)} - set(repos))
     for full in repos:
@@ -538,7 +552,7 @@ def promotion_lanes(repos, pr_reviews, now=None):
         for key, pr in (pr_reviews or {}).items():
             if key.rpartition("#")[0] != full or not is_promotion(pr):
                 continue
-            route = (pr.get("head_ref"), pr.get("base_ref"))
+            route = promotion_route(pr)
             if pr.get("merged") or pr.get("auto_merged"):
                 then = _when(pr.get("outcome_at") or pr.get("reviewed_at"))
                 if then and (last is None or then > last[0]):
@@ -636,10 +650,11 @@ def build(processed, pr_reviews, active_tasks=None, now=None, ci_seen=None, next
             continue
         where, label, why = _pr_state(pr)
         ci = (ci_seen or {}).get((key.rpartition("#")[0], pr.get("head")))
+        chip = _ci_chip(ci)
         since = _when(pr.get("state_since") or pr.get("reviewed_at"))
         item = {**base, "kind": "pr", "label": label, "why": _short(why), "panels": panel_chips(pr),
                 "approved": bool(pr.get("approved")), "findings": pr.get("findings") or 0,
-                "ci": _ci_chip(ci)[0], "ci_tone": _ci_chip(ci)[1],
+                "ci": chip[0], "ci_tone": chip[1],
                 "held_for": _duration((now - since).total_seconds()) if since and label == "Auto-merge held" else ""}
         panel_hold = label == "Auto-merge held" and "panel" in why.lower()
         if (label == "Awaiting review" or panel_hold) and _split_verdict(pr):

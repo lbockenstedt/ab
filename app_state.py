@@ -130,7 +130,7 @@ def set_task_step(task_id, step=None, *, stage=None, subject=None, scope=None, m
             task = state["active_tasks"].get(task_id)
             if task is None:
                 return
-            if subject is not None and subject != task.get("subject"):
+            if subject is not None and str(subject)[:120] != task.get("subject"):
                 task.update(subject=str(subject)[:120], stage="", stages=[], models=[])
             if step is not None:
                 # Keep the step short (200 chars) so the UI card stays one line.
@@ -147,7 +147,7 @@ def set_task_step(task_id, step=None, *, stage=None, subject=None, scope=None, m
                 task["scope"] = str(scope)[:80]
             if model:
                 models = task.setdefault("models", [])
-                if str(model) not in models:
+                if str(model)[:60] not in models:
                     models.append(str(model)[:60])
                     del models[:-4]
     # Status lines are cosmetic, so a failure is only logged at debug level.

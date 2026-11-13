@@ -327,7 +327,7 @@ def test_ci_checks_seen_are_cached_for_the_dashboard(monkeypatch):
      {"done": 6, "total": 6, "failed": 1}, "tests", "held: CI failing (1 of 6 checks failed)"),
     (dict(approved=True, auto_merge_blocked_reason="repo is not in feature_automerge_repos"), None, "merge",
      "approved — waiting for a Merge click"),
-    (dict(head_ref="dev", base_ref="qa"), None, "review", "awaiting review before promotion to qa"),
+    (dict(head_ref="promote/dev-to-qa", base_ref="qa"), None, "review", "awaiting review before promotion to qa"),
 ])
 def test_each_open_pr_state_maps_to_its_step_and_now_text(pr, ci, step, now_text):
     prs = {"o/lm#1": _pr(1, hours=2, **pr)}
@@ -423,17 +423,26 @@ def test_ci_chip_is_green_only_when_every_check_passed(ci, chip):
 
 def test_promotion_lanes_show_the_open_promotion_and_the_last_one():
     prs = {
-        "o/lm#7": _pr(7, head_ref="qa", base_ref="main", auto_merge_blocked_reason="CI is failing on head h — needs human review"),
+        "o/lm#7": _pr(7, head_ref="promote/qa-to-main", base_ref="main", auto_merge_blocked_reason="CI is failing on head h — needs human review"),
         "o/lm#6": _pr(6, hours=5, head_ref="dev", base_ref="qa", merged=True),
         "o/nw#2": _pr(2, hours=3, head_ref="dev", base_ref="qa", auto_merged=True, merged=True),
         "o/nw#3": _pr(3, head_ref="feature/x", base_ref="dev"),
     }
     rows = {r["repo"]: r for r in mission_control.promotion_lanes(["o/nw", "o/cs"], prs, NOW)}
-    assert list(rows) == ["nw", "cs", "lm"]
+    assert list(rows) == ["cs", "nw", "lm"]  # monitored repos sorted, then others
     assert rows["lm"]["main"]["number"] == "7" and rows["lm"]["main"]["held"] and rows["lm"]["qa"] is None
     assert rows["lm"]["note"] == "#7 qa → main: auto-merge held"
     assert rows["nw"]["note"] == "last promoted to qa 3h ago"
     assert rows["cs"]["note"] == "no promotion PRs seen"
+
+
+@pytest.mark.parametrize("head, base, route", [
+    ("promote/dev-to-qa", "qa", ("dev", "qa")), ("promote/qa-to-main", "main", ("qa", "main")),
+    ("backmerge/main-to-qa", "qa", ("main", "qa")), ("dev", "qa", ("dev", "qa")),
+    ("bug/fix-1", "dev", None), ("ai-feature/x", "dev", None),
+])
+def test_promotion_prs_are_found_by_their_promote_branch(head, base, route):
+    assert mission_control.promotion_route({"head_ref": head, "base_ref": base}) == route
 
 
 def test_next_poll_pill_text():
