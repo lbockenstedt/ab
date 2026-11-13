@@ -183,13 +183,75 @@
         }
         /* Neutral / secondary action button (LM btnSecCls token:
            bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200). */
+        /* Secondary buttons (spec): white with a grey outline, normal weight. */
         .btn-sec {
-            background-color: #f1f5f9; /* slate-100 */
+            background-color: #FFFFFF;
             color: #334155; /* slate-700 */
-            border: 1px solid #e2e8f0; /* slate-200 */
+            border: 1px solid #CCCCCC;
+            font-weight: 400 !important;
             transition: all 0.2s ease;
         }
-        .btn-sec:hover { background-color: #e2e8f0; } /* slate-200 */
+        .btn-sec:hover { background-color: #F5F5F5; border-color: #999999; }
+        /* Primary action: the HPE green, white text. */
+        .btn-go { background-color: #068667; color: #FFFFFF; font-weight: 600; border: 1px solid #068667; }
+        .btn-go:hover { background-color: #006750; }
+        .btn-purple { background-color: #7630EA; color: #FFFFFF; font-weight: 600; border: 1px solid #7630EA; }
+        .btn-purple:hover { background-color: #5B22B8; }
+        /* Page width: the spec's centred column. */
+        .ab-wrap { max-width: 1280px; margin-left: auto; margin-right: auto; width: 100%; }
+        /* Topbar: square green AB badge, tabs (active = light-green pill), status pills. */
+        .ab-badge { width: 28px; height: 28px; border-radius: 6px; background: #01A982; color: #fff;
+            display: grid; place-items: center; font-size: 0.8rem; font-weight: 700; }
+        .top-tab { padding: 6px 12px; border-radius: 6px; color: #cbd5e1; white-space: nowrap; }
+        .top-tab:hover { background: rgba(1,169,130,.18); color: #fff; }
+        .top-tab.active { background: #E3FDF4; color: #006750; font-weight: 600; }
+        .hdr-pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 9999px;
+            border: 1px solid; white-space: nowrap; font-weight: 500; }
+        .hdr-pill-ok { background: #E3FDF4; color: #006750; border-color: #99DBCD; }
+        .hdr-pill-bad { background: #FFECEC; color: #CC1F1A; border-color: #F5B5B3; }
+        .hdr-pill-busy { background: #E3FDF4; color: #006750; border-color: #99DBCD; }
+        .hdr-pill-idle { background: #F1F5F9; color: #475569; border-color: #CBD5E1; }
+        .hdr-pill-warn { background: #FFF3DD; color: #9B4F00; border-color: #F5C77E; }
+        .hdr-btn { display: inline-flex; align-items: center; padding: 3px 12px; border-radius: 9999px; font-weight: 600; white-space: nowrap;
+            border: 1px solid rgba(255,255,255,.45); color: #fff; }
+        .hdr-btn:hover { border-color: #fff; background: rgba(255,255,255,.08); }
+        /* Needs your attention chips: label, count on a second line; active = dark. */
+        .mc-chip { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.15;
+            padding: 4px 12px; border-radius: 9999px; border: 1px solid #CBD5E1; background: #fff; color: #475569; font-size: 0.75rem; }
+        .mc-chip b { font-size: 0.8rem; }
+        .mc-chip:hover { border-color: #01A982; }
+        .mc-chip.on { background: #263040; border-color: #263040; color: #fff; }
+        /* Working on now: kind chips, the live badge and the six-step stepper. */
+        .wk-kind { font-size: 0.72rem; padding: 2px 8px; border-radius: 9999px; background: #F1F5F9; color: #475569; white-space: nowrap; }
+        .wk-kind-bug-fix { background: #E0F8FF; color: #00567A; }
+        .wk-kind-pr-review { background: #E3FDF4; color: #006750; }
+        .wk-kind-feature { background: #F3EBFF; color: #5B22B8; }
+        .wk-kind-promotion { background: #FFF3DD; color: #9B4F00; }
+        .wk-live { display: inline-flex; align-items: center; gap: 4px; font-size: 0.7rem; font-weight: 600; color: #006750; }
+        .wk-live-dot { width: 7px; height: 7px; border-radius: 9999px; background: #01A982; animation: wkpulse 1.6s infinite; }
+        @keyframes wkpulse { 50% { opacity: .35; } }
+        .wk-steps { display: flex; margin-top: 16px; }
+        .wk-step { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .wk-step:last-child { flex: none; }
+        .wk-step-line { display: flex; align-items: center; }
+        .wk-dot { width: 24px; height: 24px; border-radius: 9999px; display: grid; place-items: center; flex: none;
+            font-size: 11px; font-weight: 700; background: #E2E8F0; color: #64748B; }
+        .wk-bar { flex: 1; height: 4px; margin: 0 4px; border-radius: 4px; background: #E2E8F0; }
+        .wk-done .wk-dot { background: #01A982; color: #fff; }
+        .wk-done .wk-bar { background: #01A982; }
+        .wk-current .wk-dot { background: #6366F1; color: #fff; box-shadow: 0 0 0 4px rgba(99,102,241,.2); }
+        .wk-label { font-size: 10px; color: #64748B; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .wk-current .wk-label { color: #006750; font-weight: 700; }
+        .wk-skipped .wk-dot, .wk-none .wk-dot { background: #fff; color: #94A3B8; border: 1px dashed #CBD5E1; }
+        .wk-unknown .wk-dot { background: #FEF3C7; color: #92400E; }
+        .wk-steps-compact { margin-top: 0; }
+        .wk-steps-compact .wk-dot { width: 18px; height: 18px; font-size: 9px; }
+        .wk-steps-compact .wk-bar { height: 3px; margin: 0 2px; }
+        .wk-steps-compact .wk-label { font-size: 9px; }
+        /* Chat: a floating button at the bottom right. */
+        .chat-fab { position: fixed; right: 20px; bottom: 20px; z-index: 40; width: 48px; height: 48px; border-radius: 9999px;
+            background: #068667; color: #fff; display: grid; place-items: center; box-shadow: 0 6px 16px rgba(0,0,0,.2); }
+        .chat-fab:hover { background: #006750; }
         /* Buttons never wrap to a second line, and their label + optional icon
            are vertically centred. Applied to every <button> so toolbars stay a
            single tidy row regardless of the per-button size/colour utilities.
@@ -308,63 +370,71 @@
             </div>
         </div>
     </div>
-    <!-- Topbar — spans full page width (LM-HUB shell) -->
-    <header class="hpe-topbar h-16 flex-none flex items-center justify-between px-6">
-        <!-- Left: AppBuilder icon | AppBuilder | <current module> — mirrors LM's
-             (Logo | Lab Manager | <Module>) header pattern. The module label
-             tracks the active sidebar view so it always reads "where am I". -->
-        <div class="flex items-center gap-3 min-w-0">
-            <div class="bg-primary p-1.5 rounded-lg flex items-center shrink-0" title="AppBuilder">
-                <i class="fas fa-robot text-white text-sm"></i>
-            </div>
-            <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
-            <h1 class="text-white text-xl font-bold tracking-tight shrink-0">AppBuilder</h1>
-            <span class="text-white/40 font-light text-xl leading-none shrink-0">|</span>
-            <span class="text-white/80 text-base font-semibold tracking-tight truncate">{% if view == 'status' %}Dashboard{% elif view == 'logs' %}Logs{% elif view == 'hub-logs' %}Hub Logs{% elif view == 'health' %}Hub Health{% elif view == 'settings' %}Settings{% elif view == 'diagnostics' %}Diagnostics{% elif view == 'release' %}Release Management{% elif view == 'chat' %}Chat{% else %}AppBuilder{% endif %}</span>
-        </div>
-        <!-- Hub agent connection status — mirrors LM's header status pattern
-             (w-2 h-2 rounded-full, green/amber/red/slate by agent state) with a
-             hover tooltip that drops DOWN from the header. Clickable → Diagnostics
-             (Hub & Heartbeat Triage card). Polled by refreshHubStatusDot(). -->
-        <!-- Right cluster: run status + provider pills (moved here from the System
-             Health sidebar) + hub agent dot. Wrapped so justify-between keeps the
-             logo hard-left and this whole group hard-right. -->
-        <div class="flex items-center gap-5">
-            <!-- Status (moved from System Health) -->
-            <div class="hidden sm:flex items-center gap-1.5" title="AppBuilder run status">
-                <span class="text-xs text-white/50">Status</span>
-                <span id="hdr-status" class="text-xs font-semibold {% if 'Error' in state.status %}text-red-300{% else %}text-emerald-300{% endif %}">{{ state.status }}</span>
-            </div>
-            <a href="/logout" class="hidden sm:flex items-center gap-1.5 text-xs text-white/50 hover:text-white/90 transition-colors" title="Sign out">
-                <i class="fas fa-right-from-bracket"></i> Sign out
+    <!-- Topbar (spec "Mission Control"): AB badge + AppBuilder, four tabs, then
+         the status pills (hub, busy, next poll), the version and Update (fleet
+         rule 7.6: always visible) and the Actions menu holding every other control. -->
+    {% set _tab = 'mission' if view in ('status', 'history') else 'release' if view == 'release' else 'settings' if view == 'settings' else 'diagnostics' %}
+    <header class="hpe-topbar flex-none">
+      <div class="ab-wrap min-h-[3.5rem] flex flex-wrap items-center gap-x-4 gap-y-1 px-4 md:px-6 py-2">
+        <a href="/" class="flex items-center gap-2 shrink-0 text-white font-bold" title="AppBuilder">
+            <span class="ab-badge">AB</span><span class="hidden xl:inline">AppBuilder</span>
+        </a>
+        <nav class="order-last w-full md:order-none md:w-auto flex gap-1 text-sm md:ml-2 overflow-x-auto" aria-label="Main">
+            {% for key, href, label in [('mission', '/', 'Mission Control'), ('release', '/release', 'Release'), ('diagnostics', '/diagnostics', 'Diagnostics'), ('settings', '/settings', 'Settings')] %}
+            <a href="{{ href }}" class="top-tab{{ ' active' if _tab == key }}"{% if _tab == key %} aria-current="page"{% endif %}>{{ label }}</a>
+            {% endfor %}
+        </nav>
+            {% set _hs = (state.hub_agent_status or 'not_registered') %}
+            {# Mirror refreshHubStatusDot()'s JS logic exactly (index.html ~3338):
+               approved is split on the LIVE socket, not just registration —
+               green only when actually connected, amber when approved but the
+               socket is down. Without this, every full-page reload (the
+               Dashboard/Logs views auto-reload every statusSeconds) re-painted
+               the dot from registration status ALONE, flashing green for ~10s
+               until the JS poll corrected it to amber — a green/amber flicker
+               that was really just this render lagging the truth, not the
+               connection actually flapping that fast. #}
+            {% set _hs_color = 'bg-green-500' if (_hs == 'approved' and state.hub_agent_connected)
+                else 'bg-amber-500' if _hs == 'approved'
+                else {'pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') %}
+        <div class="ml-auto flex items-center gap-2 text-xs">
+            {% set _hub_ok = _hs == 'approved' and state.hub_agent_connected %}
+            <a href="/diagnostics" id="hub-status-group" class="hdr-pill {{ 'hdr-pill-ok' if _hub_ok else 'hdr-pill-bad' }} group relative" title="Hub agent connection status">
+                <span id="hub-status-dot" class="w-2 h-2 rounded-full {{ _hs_color }}"></span><span id="hub-status-text" class="hidden xl:inline">{{ 'Hub connected' if _hub_ok else 'Hub disconnected' }}</span><span class="xl:hidden">Hub</span>
+                <span id="hub-status-tooltip" class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-xs p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[200px] text-left normal-case tracking-normal">
+                    <span class="block opacity-60 mb-1">Hub Agent</span>
+                    <span id="hub-status-tip-status" class="block font-bold">{{ state.hub_agent_status }}</span>
+                    <span id="hub-status-tip-msg" class="block opacity-80 mt-0.5">{{ state.hub_agent_message }}</span>
+                    <span class="block opacity-50 mt-1">last seen: <span id="hub-status-tip-seen">{{ state.hub_agent_last_seen }}</span></span>
+                </span>
             </a>
-            <!-- Which AI is answering right now: slot + provider + model. The bare
-                 model name is ambiguous once several slots serve the same family and
-                 the router can substitute a model that was never configured, so all
-                 three are shown ("P1 · ollama · qwen2.5-coder:14b"). Filled by
-                 refreshActiveLlm() from /api/status. -->
-            <div class="hidden md:flex items-center gap-1.5" id="hdr-ai-wrap"
-                 title="The provider slot and model serving LLM calls right now (dimmed = last used, currently idle)">
-                <span class="text-xs text-white/50">AI</span>
-                <span id="hdr-active-llm" class="text-xs font-semibold text-white/40">—</span>
-                <!-- Generation throughput while BUSY: averaged over completed
-                     generations only, so idle time between calls never dilutes it.
-                     Hidden until there is a measurement — a 0 would read as a
-                     stalled box rather than "nothing has run yet". -->
-                <span id="hdr-tps" class="hidden text-xs font-semibold text-white/50 tabular-nums"
-                      title="Average generation speed over recent runs (busy time only)"></span>
-            </div>
-            <!-- Providers: one compact chip — an aggregate health dot plus an
-                 online/total count — instead of a pill per endpoint. A row of
-                 4-letter codes (often the same provider repeated) made the
-                 header noisy; the per-endpoint detail now lives in a hover
-                 dropdown, mirroring the hub status dot. Click through to the
-                 Diagnostics providers table for the full view. Server-rendered
-                 from state (no JS). -->
-            <div id="hdr-providers-group" class="hidden sm:flex items-center gap-1.5 group relative cursor-pointer"
-                 onclick="location.href='/diagnostics'"
-                 title="LLM endpoints actively serving calls — click for the full providers table">
-                <span class="text-xs text-white/50">Providers</span>
+            {% set _busy = (state.active_tasks or {})|length %}
+            <a href="/#mc-working" id="hdr-busy" class="hdr-pill {{ 'hdr-pill-busy' if _busy else 'hdr-pill-idle' }} hidden lg:flex" title="Run status: {{ state.status }}">
+                <span class="w-2 h-2 rounded-full {{ 'bg-brand animate-pulse' if _busy else 'bg-slate-400' }}"></span><span id="hdr-status">{{ ('Busy · %d task%s' % (_busy, '' if _busy == 1 else 's')) if _busy else 'Idle' }}</span>
+            </a>
+            {% set _np = "" if state.paused else next_poll_label(state.next_poll_at) %}
+            {% if _np %}<span class="hdr-pill hdr-pill-idle hidden xl:flex" title="When the scheduler next checks for issues">{{ _np }}</span>{% endif %}
+            <span id="hdr-blackout-chip" class="{{ '' if state.blackout else 'hidden ' }}hdr-pill hdr-pill-warn" title="Triage only — no fix commits pushed">Blackout ON</span>
+            <span id="hdr-paused-chip" class="{{ '' if state.paused else 'hidden ' }}hdr-pill hdr-pill-warn" title="AppBuilder is stopped — Actions → Resume">Stopped</span>
+            <!-- Fleet rule 7.6: the version and the Update button are always visible. -->
+            <span id="hdr-version" class="text-white/90 font-semibold whitespace-nowrap ml-1" title="AppBuilder version">v{{ state.version }}</span>
+            <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')" class="inline">
+                <button type="submit" title="Check for AppBuilder updates" class="hdr-btn"><i class="fas fa-cloud-download-alt mr-1"></i>Update</button>
+            </form>
+            <details id="hdr-actions" class="act-menu relative">
+                <summary class="hdr-btn cursor-pointer select-none" title="Scan now, AI and providers, restart, blackout, stop, sign out">Actions ▾</summary>
+                <div class="absolute right-0 z-50 mt-2 min-w-[16rem] bg-white border border-slate-200 rounded-md shadow-lg py-1 text-slate-700">
+                    <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')"><button type="submit" class="block w-full text-left px-3 py-1.5 text-xs font-semibold text-primary-text hover:bg-slate-100 whitespace-nowrap" title="Check for issues now"><i class="fas fa-search w-4 mr-1"></i>Scan Now</button></form>
+                    <div class="border-t border-slate-200 my-1"></div>
+                    <!-- Which AI is answering right now: slot + provider + model (refreshActiveLlm() fills it). -->
+                    <div class="flex items-center gap-1.5 px-3 py-1.5 text-xs" id="hdr-ai-wrap" title="The provider slot and model serving LLM calls right now (dimmed = last used, currently idle)">
+                        <span class="w-12 text-slate-500">AI</span>
+                        <span id="hdr-active-llm" class="font-semibold text-slate-500 truncate">—</span>
+                        <span id="hdr-tps" class="hidden font-semibold text-slate-500 tabular-nums" title="Average generation speed over recent runs (busy time only)"></span>
+                    </div>
+                    <a href="/diagnostics" id="hdr-providers-group" class="flex items-center gap-1.5 group relative px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
+                       title="LLM endpoints actively serving calls — click for the full providers table">
+                <span class="w-12 text-slate-500">Providers</span>
                 {% if state.llm_endpoints_online %}
                 {# Show EVERY configured endpoint, not only those that have already
                    served a call. Filtering on `used` meant a newly added LLM (0 runs,
@@ -378,10 +448,10 @@
                 {% if all_eps %}
                 <span class="inline-flex items-center gap-1.5">
                     <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if online_eps|length == all_eps|length else ('bg-amber-400' if online_eps|length else 'bg-red-400') }}"></span>
-                    <span class="text-xs font-semibold text-white/80 tabular-nums">{{ online_eps|length }}/{{ all_eps|length }}</span>
+                    <span class="text-xs font-semibold text-slate-700 tabular-nums">{{ online_eps|length }}/{{ all_eps|length }}</span>
                 </span>
                 <!-- Hover detail: one line per configured endpoint. -->
-                <div class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-xs p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[220px] text-left normal-case tracking-normal">
+                <div class="absolute right-full top-0 mr-2 hidden group-hover:block bg-slate-800 text-white text-xs p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[220px] text-left normal-case tracking-normal">
                     <div class="opacity-50 mb-1">Configured LLM endpoints</div>
                     {% for ep in sorted_eps %}
                     <div class="flex items-center gap-2 py-0.5">
@@ -392,7 +462,7 @@
                     {% endfor %}
                 </div>
                 {% else %}
-                <span class="text-xs text-white/40" title="No LLM endpoints configured yet">—</span>
+                <span class="text-xs text-slate-500" title="No LLM endpoints configured yet">—</span>
                 {% endif %}
                 {% else %}
                 {# Startup-only fallback: fires just until connectivity_worker first
@@ -410,249 +480,232 @@
                 {% if slot_ns.total %}
                 <span class="inline-flex items-center gap-1.5">
                     <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if slot_ns.online == slot_ns.total else ('bg-amber-400' if slot_ns.online else 'bg-red-400') }}"></span>
-                    <span class="text-xs font-semibold text-white/80 tabular-nums">{{ slot_ns.online }}/{{ slot_ns.total }}</span>
+                    <span class="text-xs font-semibold text-slate-700 tabular-nums">{{ slot_ns.online }}/{{ slot_ns.total }}</span>
                 </span>
                 {% else %}
-                <span class="text-xs text-white/40">—</span>
+                <span class="text-xs text-slate-500">—</span>
                 {% endif %}
                 {% endif %}
-            </div>
-            {% set _hs = (state.hub_agent_status or 'not_registered') %}
-            {# Mirror refreshHubStatusDot()'s JS logic exactly (index.html ~3338):
-               approved is split on the LIVE socket, not just registration —
-               green only when actually connected, amber when approved but the
-               socket is down. Without this, every full-page reload (the
-               Dashboard/Logs views auto-reload every statusSeconds) re-painted
-               the dot from registration status ALONE, flashing green for ~10s
-               until the JS poll corrected it to amber — a green/amber flicker
-               that was really just this render lagging the truth, not the
-               connection actually flapping that fast. #}
-            {% set _hs_color = 'bg-green-500' if (_hs == 'approved' and state.hub_agent_connected)
-                else 'bg-amber-500' if _hs == 'approved'
-                else {'pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') %}
-            <!-- Run controls (were the footer action bar): Scan Now stays one click; the
-                 rest sit in the Actions menu. A chip shows while Blackout or Stop is on
-                 so the state is visible without opening the menu. -->
-            <span id="hdr-blackout-chip" class="{{ '' if state.blackout else 'hidden ' }}px-2 py-0.5 rounded-full text-xs font-bold bg-violet-500/20 text-violet-200" title="Triage only — no fix commits pushed">Blackout ON</span>
-            <span id="hdr-paused-chip" class="{{ '' if state.paused else 'hidden ' }}px-2 py-0.5 rounded-full text-xs font-bold bg-orange-500/20 text-orange-200" title="AppBuilder is stopped — Actions → Resume">Stopped</span>
-            <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')" class="inline">
-                <button type="submit" title="Check for issues now" class="px-3 py-1 rounded-full text-xs font-bold border border-white/30 text-white/90 hover:border-white hover:text-white"><i class="fas fa-search mr-1"></i>Scan Now</button>
-            </form>
-            <!-- Fleet rule 7.6: the version and the Update button are always visible. -->
-            <span id="hdr-version" class="text-xs opacity-70" title="AppBuilder version">v{{ state.version }}</span>
-            <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')" class="inline">
-                <button type="submit" title="Check for AppBuilder updates" class="px-3 py-1 rounded-full text-xs font-bold border border-white/30 text-white/90 hover:border-white hover:text-white"><i class="fas fa-cloud-download-alt mr-1"></i>Update</button>
-            </form>
-            <details id="hdr-actions" class="act-menu relative">
-                <summary class="px-3 py-1 rounded-full text-xs font-bold border border-white/30 text-white/90 hover:border-white cursor-pointer select-none" title="Restart, hub update, blackout, stop">Actions ▾</summary>
-                <div class="absolute right-0 z-50 mt-2 min-w-[13rem] bg-white border border-slate-200 rounded shadow-lg py-1">
+            </a>
+                    {% if state.skills %}
+                    <div class="px-3 py-1.5 text-xs" title="Claude skills loaded from lm/.claude/skills — injected into AppBuilder's fixes."><span class="text-slate-500">Skills</span> <span class="font-semibold text-slate-700 break-words">{{ state.skills|join(', ') }}</span></div>
+                    {% endif %}
+                    <div class="border-t border-slate-200 my-1"></div>
                     <form action="/restart" method="post" onsubmit="handleFormSubmit(event, '/restart')"><button type="submit" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Restart AppBuilder"><i class="fas fa-sync-alt w-4 mr-1"></i>Restart AppBuilder</button></form>
                     <form action="/trigger_hub_update" method="post" onsubmit="handleFormSubmit(event, '/trigger_hub_update')"><button type="submit" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Trigger a hub update"><i class="fas fa-network-wired w-4 mr-1"></i>Hub update</button></form>
                     <div class="border-t border-slate-200 my-1"></div>
                     <button type="button" onclick="toggleBlackout()" id="blackout-btn" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Triage only — no fix commits pushed"><i class="fas fa-ban w-4 mr-1"></i>{% if state.blackout %}Turn Blackout off{% else %}Blackout{% endif %}</button>
                     <button type="button" onclick="togglePause()" id="pause-btn" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Stop or resume scanning and fixing">{% if state.paused %}<i class="fas fa-play w-4 mr-1"></i>Resume{% else %}<i class="fas fa-pause w-4 mr-1"></i>Stop{% endif %}</button>
                     <button type="button" onclick="toggleRefreshPause()" id="refresh-pause-btn" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Pause / resume page auto-refresh"><i class="fas fa-pause w-4 mr-1"></i>Pause refresh</button>
+                    <div class="border-t border-slate-200 my-1"></div>
+                    <a href="/logout" class="block px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100" title="Sign out"><i class="fas fa-right-from-bracket w-4 mr-1"></i>Sign out</a>
                 </div>
             </details>
-            <div id="hub-status-group" class="flex items-center gap-2 group relative cursor-pointer" onclick="location.href='/diagnostics'" title="Hub agent connection status">
-                <div id="hub-status-dot" class="w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] {{ _hs_color }}"></div>
-                <span class="text-xs opacity-60">Hub</span>
-                <div id="hub-status-tooltip" class="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-800 text-white text-xs p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[200px] text-left normal-case tracking-normal">
-                    <div class="opacity-60 mb-1">Hub Agent</div>
-                    <div id="hub-status-tip-status" class="font-bold">{{ state.hub_agent_status }}</div>
-                    <div id="hub-status-tip-msg" class="opacity-80 mt-0.5">{{ state.hub_agent_message }}</div>
-                    <div class="opacity-50 mt-1">last seen: <span id="hub-status-tip-seen">{{ state.hub_agent_last_seen }}</span></div>
-                </div>
-            </div>
         </div>
+      </div>
     </header>
 
-    <!-- MIDDLE AREA: sidebar + viewport (header spans full width above) -->
+    {% if _tab == 'diagnostics' %}
+    <!-- Diagnostics sub-tabs (the Settings sub-nav style): Overview, Logs, Hub
+         Health and Hub Logs. Chat keeps its URL and highlights Diagnostics. -->
+    <div class="hpe-subnav flex-none">
+        <div class="ab-wrap px-6 flex gap-6 text-sm overflow-x-auto">
+            {% for key, href, label in [('diagnostics', '/diagnostics', 'Overview'), ('logs', '/logs', 'Logs'), ('health', '/health', 'Hub Health'), ('hub-logs', '/hub-logs', 'Hub Logs'), ('chat', '/chat', 'Chat')] %}
+            <a href="{{ href }}" class="sub-nav-item py-2.5 whitespace-nowrap{{ ' active' if view == key }}">{{ label }}</a>
+            {% endfor %}
+        </div>
+    </div>
+    {% elif _tab == 'settings' %}
+    <!-- Settings sub-tabs, the same strip as Diagnostics: a tab shows its section and hides the rest. -->
+    <div class="hpe-subnav flex-none">
+        <div class="ab-wrap px-6 flex gap-6 text-sm overflow-x-auto">
+            <button type="button" class="sub-nav-item active py-2.5 whitespace-nowrap select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
+            <button type="button" title="Model Registry — the capability and cost rules that rank every enabled endpoint. Edit each rule with labelled dropdowns instead of raw JSON." class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-model-registry" onclick="settingsTab('sec-model-registry')">Model Registry</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in (SSO)</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-monitoring" onclick="settingsTab('sec-monitoring')">Monitoring</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-feature-drive" onclick="settingsTab('sec-feature-drive')">Feature Auto-Drive</button>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Page content: full width, centred (the spec's max-width), no sidebar. -->
     <div class="flex flex-1 min-h-0 overflow-hidden">
-    <!-- Sidebar (LM-HUB shell: white left nav) -->
-    <aside class="hpe-sidebar w-56 flex-none flex flex-col">
-        <!-- Brand block moved to header (Logo | AppBuilder | <module>); top spacer
-             keeps the nav from crowding the top, matching LM's sidebar. -->
-        <div class="pt-4"></div>
-        <nav class="py-2 px-2 space-y-1 flex-none">
-            <a href="/" class="nav-item {{ 'active' if view == 'status' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
-                <i class="fas fa-chart-line w-4 text-center"></i>Dashboard
-            </a>
-            <a href="/logs" class="nav-item {{ 'active' if view == 'logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
-                <i class="fas fa-list-ul w-4 text-center"></i>Logs
-            </a>
-            <a href="/health" class="nav-item {{ 'active' if view == 'health' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
-                <i class="fas fa-heart-pulse w-4 text-center"></i>Hub Health
-            </a>
-            <a href="/hub-logs" class="nav-item {{ 'active' if view == 'hub-logs' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
-                <i class="fas fa-network-wired w-4 text-center"></i>Hub Logs
-            </a>
-            <a href="/settings" class="nav-item {{ 'active' if view == 'settings' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
-                <i class="fas fa-cog w-4 text-center"></i>Settings
-            </a>
-            <a href="/diagnostics" class="nav-item {{ 'active' if view == 'diagnostics' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
-                <i class="fas fa-stethoscope w-4 text-center"></i>Diagnostics
-            </a>
-            <a href="/release" class="nav-item {{ 'active' if view == 'release' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
-                <i class="fas fa-code-branch w-4 text-center"></i>Release Management
-            </a>
-            <a href="/chat" class="nav-item {{ 'active' if view == 'chat' else '' }} flex items-center gap-2 px-3 py-2 rounded text-xs font-medium">
-                <i class="fas fa-comments w-4 text-center"></i>Chat
-            </a>
-        </nav>
-        <!-- page break between the nav and the Skills line. The old System Health
-             counters lived here; they duplicated the KPI tiles and now ride on the
-             All activity filter chips as counts. -->
-        <div class="border-t-2 border-slate-200 mx-3 my-1 flex-none"></div>
-        <div class="flex-1 overflow-y-auto px-3 py-3 space-y-3 min-h-0">
-            {% if state.skills %}
-            <div class="text-xs" title="Claude skills loaded from lm/.claude/skills — injected into AppBuilder's fixes.">
-                <span class="text-slate-500">Skills</span>
-                <div class="font-semibold text-indigo-600 mt-0.5 break-words">{{ state.skills|join(', ') }}</div>
-            </div>
-            {% endif %}
-        </div>
-    </aside>
-
-    <main class="flex-1 min-h-0 overflow-y-auto p-6">
+    <main class="flex-1 min-h-0 overflow-y-auto p-6"><div class="ab-wrap">
         {% if view == 'status' %}
-        {% set mc = mission or {'kpis': {}, 'groups': {}, 'attention': [], 'in_flight': [], 'outcomes': []} %}
+        {% set mc = mission or {'kpis': {}, 'groups': {}, 'attention': [], 'in_flight': [], 'outcomes': [], 'lanes': []} %}
         <!-- Mission Control: what needs you, what AppBuilder is doing, what just finished.
-             Built by mission_control.build() from the same stores as the Status table
-             below (GET /api/mission-control returns the same data). -->
+             Built by mission_control.build() from the same stores as the History
+             table (GET /api/mission-control returns the same data). -->
         {% if mission %}{# Settings → dashboard_mission_control #}
-        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-            {% set _k = mc.kpis %}
-            <a href="#mc-attention" class="hpe-card p-4 block hover:border-brand" title="Items waiting on a person"><div class="text-xs text-slate-500">Needs you</div><div class="text-2xl font-bold {{ 'text-red-600' if _k.needs_you else 'text-navy' }}">{{ _k.needs_you or 0 }}</div></a>
-            <a href="#mc-working" class="hpe-card p-4 block hover:border-brand" title="Tasks AppBuilder is running right now"><div class="text-xs text-slate-500">Running now</div><div class="text-2xl font-bold text-primary-text">{{ _k.running or 0 }}</div></a>
-            <a href="#mc-working" class="hpe-card p-4 block hover:border-brand" title="Issues and PRs AppBuilder still owns (fixing, improving, waiting for a review or the requester)"><div class="text-xs text-slate-500">In flight</div><div class="text-2xl font-bold text-navy">{{ _k.in_flight or 0 }}</div></a>
-            <a href="#activity" data-mc="activity" data-filter="resolved" class="hpe-card p-4 block hover:border-brand" title="Issues fixed, verified or resolved in the last 7 days"><div class="text-xs text-slate-500">Fixed · 7d</div><div class="text-2xl font-bold text-primary-text">{{ _k.fixed_7d or 0 }}</div></a>
-            <a href="#activity" data-mc="activity" data-filter="pr_auto_merged" class="hpe-card p-4 block hover:border-brand" title="PRs merged with no human click in the last 7 days"><div class="text-xs text-slate-500">Auto-merged · 7d</div><div class="text-2xl font-bold text-navy">{{ _k.auto_merged_7d or 0 }}</div></a>
-            <a href="#activity" data-mc="activity" data-filter="failed" class="hpe-card p-4 block hover:border-brand" title="Issues whose fix failed in the last 7 days"><div class="text-xs text-slate-500">Failed · 7d</div><div class="text-2xl font-bold text-navy">{{ _k.failed_7d or 0 }}</div></a>
-        </div>
+        {% set _k = mc.kpis %}
+        <section class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+            <a href="#mc-attention" class="hpe-card p-3 block hover:border-brand" title="Items waiting on a person"><div class="text-xs text-slate-500">Needs you</div><div class="text-2xl font-bold {{ 'text-red-600' if _k.needs_you else 'text-navy' }}">{{ _k.needs_you or 0 }}</div></a>
+            <a href="#mc-working" class="hpe-card p-3 block hover:border-brand" title="Running now ({{ _k.running or 0 }}) plus waiting in flight (CI, a review, a merge or the next scan)"><div class="text-xs text-slate-500">In progress</div><div class="text-2xl font-bold text-primary-text">{{ _k.in_progress or 0 }}</div></a>
+            <a href="/history?filter=resolved" class="hpe-card p-3 block hover:border-brand" title="Fixes verified or resolved in the last 7 days (the Resolved filter), against the 7 days before; a commit still awaiting verification is not counted yet"><div class="text-xs text-slate-500">Fixed · 7d</div><div class="text-2xl font-bold text-primary-text">{{ _k.fixed_7d or 0 }}</div>{% if _k.fixed_delta is not none %}<div class="text-[11px] {{ 'text-primary-text' if _k.fixed_delta >= 0 else 'text-red-600' }}">{{ '▲' if _k.fixed_delta >= 0 else '▼' }} {{ _k.fixed_delta|abs }} vs last week</div>{% endif %}</a>
+            <a href="/history?filter=pr_auto_merged" class="hpe-card p-3 block hover:border-brand" title="PRs merged with no human click in the last 7 days"><div class="text-xs text-slate-500">Auto-merged · 7d</div><div class="text-2xl font-bold text-navy">{{ _k.auto_merged_7d or 0 }}</div></a>
+            <a href="/history?filter=failed" class="hpe-card p-3 block hover:border-brand" title="Issues whose fix failed in the last 7 days; success = verified or resolved fixes / (those + failed), so fixes still awaiting verification are left out"><div class="text-xs text-slate-500">Failed · 7d</div><div class="text-2xl font-bold text-navy">{{ _k.failed_7d or 0 }}</div><div class="text-[11px] text-slate-500">success {{ ('%d%%' % _k.success_pct) if _k.success_pct is not none else '—' }}</div></a>
+            <div class="hpe-card p-3" title="Median time from an issue being opened to its fix being committed, over the last 7 days (— until a fix records when its issue was opened)"><div class="text-xs text-slate-500">Median fix time</div><div class="text-2xl font-bold text-navy">{{ fmt_minutes(_k.median_fix_min) }}</div></div>
+        </section>
+        {% endif %}
 
+        <!-- Working on now: running tasks (live) then everything else in flight.
+             First on the page: the owner wants to see what is happening.
+             The fragment is re-fetched every 5s (startWorkingRefresh). -->
+        <section id="mc-working" class="mt-6">
+            <div class="flex items-baseline gap-3 mb-3">
+                <h3 class="text-lg font-bold text-navy">Working on now</h3>
+                <span class="text-xs text-slate-500">live · refreshed every 5s</span>
+            </div>
+            <div id="wk-host">{% include "_working.html" %}</div>
+        </section>
+
+        {% if mission %}
         <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mt-6">
-            <!-- Needs your attention -->
-            <div id="mc-attention" class="hpe-card xl:col-span-2 overflow-hidden">
+            <!-- Needs your attention: one card per item; its buttons fit its state. -->
+            <section id="mc-attention" class="hpe-card xl:col-span-2">
                 <div class="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
-                    <h3 class="text-lg font-bold text-navy mr-auto">Needs your attention</h3>
+                    <h3 class="text-lg font-bold text-navy">Needs your attention</h3>
+                    <span class="text-xs text-slate-500 mr-auto">Sorted by urgency · oldest first within a group</span>
                     {% set _g = mc.groups %}
+                    <div class="flex flex-wrap gap-1.5">
                     {% for gid, glabel in [('all', 'All'), ('pr', 'PRs held'), ('failed', 'Failed'), ('verify', 'Verify'), ('feature', 'Features'), ('other', 'Other')] %}
                     {% set _n = mc.kpis.needs_you if gid == 'all' else _g.get(gid, 0) %}
                     {% if gid == 'all' or _n %}
-                    <button type="button" data-mc-group="{{ gid }}" data-mc="filter" class="mc-chip px-3 py-1 rounded-full text-xs font-bold border {{ 'bg-navy text-white border-navy' if gid == 'all' else 'bg-white text-slate-600 border-slate-300 hover:border-brand' }}" title="Show {{ glabel|lower }} items">{{ glabel }} {{ _n or 0 }}</button>
+                    <button type="button" data-mc-group="{{ gid }}" data-mc="filter" class="mc-chip{{ ' on' if gid == 'all' }}" title="Show {{ glabel|lower }} items">{{ glabel }}<b>{{ _n or 0 }}</b></button>
                     {% endif %}
                     {% endfor %}
+                    </div>
                 </div>
                 <div class="divide-y divide-slate-200">
                     {% for it in mc.attention %}
                     {% set _tone = {'pr': 'amber', 'failed': 'red', 'verify': 'sky', 'feature': 'purple', 'other': 'slate'}[it.group] %}
-                    <div class="mc-item px-5 py-4 flex gap-4" data-group="{{ it.group }}">
-                        <div class="w-9 h-9 flex-none rounded-lg flex items-center justify-center bg-{{ _tone }}-100 text-{{ _tone }}-700">
-                            <i class="fas {{ {'pr': 'fa-code-branch', 'failed': 'fa-xmark', 'verify': 'fa-question', 'feature': 'fa-flag', 'other': 'fa-circle-info'}[it.group] }}"></i>
+                    {% set _repo = it.id.rsplit("#", 1)[0] %}
+                    <div class="mc-item px-5 py-4 flex flex-wrap sm:flex-nowrap gap-4" data-group="{{ it.group }}">
+                        <div class="w-9 h-9 flex-none rounded-md flex items-center justify-center bg-{{ _tone }}-100 text-{{ _tone }}-700">
+                            <i class="fas {{ 'fa-scale-balanced' if it.split else {'pr': 'fa-pause', 'failed': 'fa-xmark', 'verify': 'fa-question', 'feature': 'fa-flag', 'other': 'fa-circle-info'}[it.group] }}"></i>
                         </div>
                         <div class="flex-1 min-w-0">
                             <div class="flex items-center flex-wrap gap-2">
                                 <a href="{{ it.url }}" target="_blank" class="font-bold text-navy hover:underline">{{ it.repo }} #{{ it.number }}</a>
-                                {% if it.base_ref %}<span class="text-xs px-1.5 py-0.5 rounded {{ 'bg-amber-100 text-amber-800 border border-amber-300' if it.base_ref in ('main', 'master') else 'bg-slate-100 text-slate-600' }}"><i class="fas fa-arrow-right-long mr-1"></i>{{ it.base_ref }}</span>{% endif %}
+                                {% if it.base_ref %}<span class="text-xs px-1.5 py-0.5 rounded {{ 'bg-amber-100 text-amber-800 border border-amber-300' if it.base_ref in ('main', 'master') else 'bg-slate-100 text-slate-600' }}">→ {{ it.base_ref }}</span>{% endif %}
                                 <span class="text-xs px-1.5 py-0.5 rounded bg-{{ _tone }}-50 text-{{ _tone }}-700">{{ it.label }}</span>
-                                <span class="ml-auto text-xs text-slate-500 whitespace-nowrap">{{ it.age }}</span>
+                                <span class="ml-auto text-xs text-slate-500 whitespace-nowrap">{% if it.held_for %}held {{ it.held_for }}{% elif it.group == 'verify' %}auto-committed {{ it.age }} ago{% else %}{{ it.age }} ago{% endif %}</span>
                             </div>
-                            {% if it.title %}<div class="text-sm text-slate-700 truncate" title="{{ it.title }}">{{ it.title }}</div>{% endif %}
-                            {% if it.why %}<div class="text-sm mt-0.5"><span class="font-semibold text-{{ _tone }}-700">Why:</span> <span class="text-slate-700">{{ it.why }}</span></div>{% endif %}
-                            {% if it.panels %}<div class="flex flex-wrap gap-1.5 mt-1.5">{% for c in it.panels %}<span class="text-xs px-2 py-0.5 rounded-full border {{ 'bg-green-50 text-green-700 border-green-200' if c.ok else 'bg-red-50 text-red-700 border-red-200' }}">{{ c.label }}</span>{% endfor %}</div>{% endif %}
+                            {% if it.title %}<div class="text-sm text-slate-600 truncate" title="{{ it.title }}">{{ it.title }}</div>{% endif %}
+                            {% if it.boundary %}<div class="text-sm mt-1"><b class="text-purple-700">Boundary:</b> <span class="text-slate-700">{{ it.boundary }}</span></div>
+                            {% elif it.why %}<div class="text-sm mt-1"><b class="text-{{ _tone }}-700">{{ 'Why held:' if it.group == 'pr' else 'Why:' }}</b> <span class="text-slate-700">{{ it.why }}</span></div>{% endif %}
+                            {% if it.panels or it.ci %}<div class="flex flex-wrap gap-1.5 mt-2">{% for c in it.panels %}<span class="text-xs px-2 py-0.5 rounded-full border {{ 'bg-green-50 text-green-700 border-green-200' if c.ok else 'bg-red-50 text-red-700 border-red-200' }}">{{ c.label }}</span>{% endfor %}{% if it.ci %}<span class="text-xs px-2 py-0.5 rounded-full border {{ 'bg-green-50 text-green-700 border-green-200' if it.ci_tone == 'ok' else ('bg-amber-50 text-amber-700 border-amber-200' if it.ci_tone == 'wait' else 'bg-red-50 text-red-700 border-red-200') }}" title="Checks on the PR head, as last seen">{{ it.ci }}</span>{% endif %}</div>{% endif %}
+                            {% if it.reply %}<details class="act-details mt-1 text-xs text-slate-500"><summary class="cursor-pointer">Last model reply{% if it.reply_model %} ({{ it.reply_model }}){% endif %}</summary><pre class="mt-1 p-2 bg-slate-50 rounded border border-slate-200 whitespace-pre-wrap max-h-48 overflow-y-auto">{{ it.reply }}</pre></details>{% endif %}
                         </div>
-                        <div class="flex-none flex flex-col items-stretch gap-1.5 w-32">
-                            {% if it.kind == 'pr' %}
+                        <div class="flex-none flex flex-row flex-wrap sm:flex-col items-stretch gap-1.5 w-full sm:w-36">
+                            {% if it.kind == 'pr' and it.split %}
+                                <button type="button" data-mc="approve-merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Side with the approving panel: approve on GitHub, then merge">Approve &amp; merge</button>
+                                <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Run both review panels again">Retry review</button>
+                                {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
+                                <button type="button" data-mc="deny" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="text-xs text-red-600 hover:underline py-1" title="Deny this PR (closes it on GitHub)">Deny</button>
+                            {% elif it.kind == 'pr' and it.label in ('Auto-merge held', 'Merge refused') %}
+                                <a href="{{ it.url }}" target="_blank" class="btn-go px-3 py-1.5 rounded-md text-xs text-center" title="Open the PR on GitHub">Open PR</a>
+                                <a href="{{ it.url }}/checks" target="_blank" class="btn-sec px-3 py-1.5 rounded-md text-xs text-center" title="Open the PR's checks on GitHub to re-run the failed jobs">Re-run CI</a>
+                                <details class="mc-more relative text-xs text-center">
+                                    <summary class="cursor-pointer text-slate-500 hover:text-navy py-1 list-none" title="More actions for this PR">More ▾</summary>
+                                    <div class="absolute right-0 z-20 mt-1 w-40 bg-white border border-slate-200 rounded-md shadow-lg py-1">
+                                        {% if it.approved %}<button type="button" data-mc="merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Merge this approved PR">Merge</button>
+                                        {% else %}<button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>{% endif %}
+                                        {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
+                                        <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Re-run the full review now instead of waiting for the next poll">Re-review</button>
+                                        <button type="button" data-mc="deny" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50" title="Deny this PR (closes it on GitHub)">Deny</button>
+                                    </div>
+                                </details>
+                            {% elif it.kind == 'pr' %}
                                 {% if it.approved %}
-                                <button type="button" data-mc="merge" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="Merge this approved PR">Merge</button>
+                                <button type="button" data-mc="merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Merge this approved PR">Merge</button>
                                 {% else %}
-                                <button type="button" data-mc="approve" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>
+                                <button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>
                                 {% endif %}
-                                {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
-                                <button type="button" data-mc="reprocess" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="Re-run the full review now instead of waiting for the next poll">Re-review</button>
-                                <button type="button" data-mc="deny" data-repo="{{ it.id.rsplit("#", 1)[0] }}" data-num="{{ it.number }}" class="text-xs text-red-600 hover:underline" title="Deny this PR">Deny</button>
+                                {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
+                                <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Re-run the full review now instead of waiting for the next poll">Re-review</button>
+                                <button type="button" data-mc="deny" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="text-xs text-red-600 hover:underline py-1" title="Deny this PR (closes it on GitHub)">Deny</button>
                             {% elif it.group == 'verify' %}
-                                <button type="button" data-mc="resolve" data-id="{{ it.id }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="The problem is gone: close it as resolved">Resolve</button>
-                                <button type="button" data-mc="reopen" data-id="{{ it.id }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="The fix did not work: reopen on GitHub and try again">Reopen</button>
+                                <button type="button" data-mc="resolve" data-id="{{ it.id }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="The problem is gone: close it as resolved">Resolve</button>
+                                <button type="button" data-mc="reopen" data-id="{{ it.id }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="The fix did not work: reopen on GitHub and try again">Reopen</button>
                             {% elif it.group == 'feature' %}
-                                <button type="button" data-mc="reevaluate" data-id="{{ it.id }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="Queue it for classification again on the next feature-drive cycle">Re-evaluate</button>
-                                <button type="button" data-mc="dismiss" data-id="{{ it.id }}" class="text-xs text-slate-500 hover:underline" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button type="button" data-mc="reevaluate" data-id="{{ it.id }}" class="btn-purple px-3 py-1.5 rounded-md text-xs" title="Queue it for classification again on the next feature-drive cycle">Re-evaluate</button>
+                                <button type="button" data-mc="dismiss" data-id="{{ it.id }}" class="text-xs text-slate-500 hover:underline py-1" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                             {% else %}
-                                <button type="button" data-mc="retry" data-id="{{ it.id }}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold" title="Try the fix again">Retry</button>
-                                {% if claude_enabled %}<button type="button" data-mc="claude" data-id="{{ it.id }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="Try the fix with the local Claude CLI">Retry with Claude</button>{% endif %}
-                                <button type="button" data-mc="resolve" data-id="{{ it.id }}" class="btn-sec px-3 py-1 rounded text-xs font-bold" title="Already handled: close it as resolved">Resolve</button>
-                                <button type="button" data-mc="dismiss" data-id="{{ it.id }}" class="text-xs text-slate-500 hover:underline" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
+                                <button type="button" data-mc="retry" data-id="{{ it.id }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Try the fix again">Retry</button>
+                                {% if claude_enabled %}<button type="button" data-mc="claude" data-id="{{ it.id }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Try the fix with the local Claude CLI">Retry with Claude</button>{% endif %}
+                                <button type="button" data-mc="resolve" data-id="{{ it.id }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Already handled: close it as resolved">Resolve</button>
+                                <button type="button" data-mc="dismiss" data-id="{{ it.id }}" class="text-xs text-slate-500 hover:underline py-1" title="Dismiss: label ab-dismissed on GitHub and close (won't be re-filed)">Dismiss</button>
                             {% endif %}
                         </div>
                     </div>
-                    {% else %}
-                    <div class="px-5 py-8 text-center text-slate-500 text-sm"><i class="fas fa-circle-check text-primary-text mr-1"></i>Nothing needs you right now.</div>
                     {% endfor %}
                 </div>
-            </div>
+                <div id="mc-empty" class="{{ 'hidden ' if mc.attention }}px-5 py-10 text-center text-slate-500 text-sm">Nothing needs you here 🎉</div>
+            </section>
 
             <!-- Recent outcomes -->
-            <div class="hpe-card overflow-hidden">
+            <aside class="hpe-card">
                 <div class="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
                     <h3 class="text-lg font-bold text-navy">Recent outcomes</h3>
-                    <a href="#activity" class="text-xs font-bold text-primary-text hover:underline">All activity <i class="fas fa-arrow-down"></i></a>
+                    <a href="/history" class="text-xs font-bold text-primary-text hover:underline" title="Every issue and PR, with filters and actions">History →</a>
                 </div>
-                <ul class="px-5 py-4 space-y-3 text-sm">
+                <ol class="px-5 py-4 space-y-3 text-sm">
                     {% for o in mc.outcomes %}
                     <li class="flex gap-3">
                         <span class="mt-1.5 w-2 h-2 rounded-full flex-none {{ {'ok': 'bg-brand', 'bad': 'bg-red-500', 'muted': 'bg-slate-400'}[o.tone] }}"></span>
                         <div class="min-w-0">
-                            <div><a href="{{ o.url }}" target="_blank" class="font-bold text-navy hover:underline">{{ o.repo }} #{{ o.number }}</a> {{ o.text }}{% if o.base_ref and 'merged' in o.text %} into {{ o.base_ref }}{% endif %}</div>
-                            <div class="text-xs text-slate-500 truncate" title="{{ o.title }}">{% for c in o.panels or [] %}{{ c.label }}{{ ' · ' }}{% endfor %}{{ o.age }} ago</div>
+                            <div><a href="{{ o.url }}" target="_blank" class="font-bold text-navy hover:underline" title="{{ o.title }}">{{ o.repo }} #{{ o.number }}</a> {{ o.text }}{% if o.base_ref and 'merged' in o.text %} to {{ o.base_ref }}{% endif %}</div>
+                            <div class="text-xs text-slate-500 truncate" title="{{ o.title }}">{% if o.detail %}{{ o.detail }} · {% endif %}{{ o.age }} ago</div>
                         </div>
                     </li>
                     {% else %}
                     <li class="text-slate-500">Nothing finished in the last 7 days.</li>
                     {% endfor %}
-                </ul>
-            </div>
+                </ol>
+            </aside>
         </div>
         {% endif %}
 
-        <!-- Working on now: live task cards (startActiveTasksLiveRefresh keeps them current) -->
-        <div id="mc-working" class="mt-6">
-            <div class="flex items-baseline gap-3 mb-3">
-                <h3 class="text-lg font-bold text-navy">Working on now</h3>
-                <span class="text-xs text-slate-500">live</span>
-            </div>
-            <div id="active-tasks-list" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                {% if state.active_tasks %}
-                    {% for tid, task in state.active_tasks.items() %}
-                        <div class="hpe-card p-4" data-tid="{{ tid }}" data-start="{{ iso_utc(task.start_time) }}">
-                            <div class="mb-1">
-                                <span class="text-xs font-bold px-2 py-0.5 rounded-full {{ 'bg-indigo-50 text-indigo-700' if task.kind == 'pr' else 'bg-brand/10 text-primary-text' }}"><i class="fas {{ 'fa-code-branch' if task.kind == 'pr' else 'fa-search' }}"></i> {{ 'PR review' if task.kind == 'pr' else 'Scan / fix' }}</span>
-                            </div>
-                            <p class="task-name text-navy text-sm break-all font-bold">{{ task.name }}</p>
-                            <!-- The task id (issue / repo / worker), shown when the name does not already carry it. -->
-                            <p class="task-tid text-slate-500 font-mono text-xs break-all mt-0.5">{% if tid and tid not in task.name %}{{ tid }}{% endif %}</p>
-                            <p class="task-elapsed text-slate-500 font-mono text-xs mt-0.5"></p>
-                            <p class="task-current-step text-slate-600 text-xs italic mt-1 truncate"></p>
-                        </div>
+        {% if mission %}
+        <!-- Promotion lanes: dev → qa → main per monitored repo, from cached PR reviews. -->
+        <section class="hpe-card p-5 mt-6">
+            <h3 class="text-lg font-bold text-navy mb-3">Promotion lanes</h3>
+            <div class="space-y-2 text-sm">
+                {% for l in mc.lanes %}
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span class="w-24 font-semibold text-navy truncate" title="{{ l.full }}">{{ l.repo }}</span>
+                    <span class="px-2 py-1 rounded-md border bg-slate-50 text-slate-600 border-slate-200">dev</span><span class="text-slate-400">→</span>
+                    {% for br in ('qa', 'main') %}
+                    {% set lane = l[br] %}
+                    {% if lane %}<a href="{{ lane.url }}" target="_blank" class="px-2 py-1 rounded-md border {{ 'bg-amber-50 text-amber-700 border-amber-300' if lane.held else 'bg-green-50 text-primary-text border-green-200' }}" title="Promotion PR into {{ br }}">{{ br }} · #{{ lane.number }} {{ lane.label|lower }}</a>
+                    {% else %}<span class="px-2 py-1 rounded-md border bg-slate-50 text-slate-600 border-slate-200">{{ br }}</span>{% endif %}
+                    {% if not loop.last %}<span class="text-slate-400">→</span>{% endif %}
                     {% endfor %}
-                {% else %}
-                    <div class="hpe-card p-4 text-center">
-                        <p class="text-slate-500 text-sm italic">Standing by for issues...</p>
-                    </div>
-                {% endif %}
-            </div>
-            {% if mc.in_flight %}
-            <div class="hpe-card mt-3 px-5 py-3">
-                <div class="text-xs font-bold text-slate-500 mb-2">In flight ({{ mc.in_flight|length }})</div>
-                <div class="flex flex-wrap gap-2">
-                    {% for f in mc.in_flight %}
-                    <a href="{{ f.url }}" target="_blank" class="text-xs px-2 py-1 rounded border border-slate-200 bg-slate-50 hover:border-brand" title="{{ f.title }}{% if f.why %} — {{ f.why }}{% endif %}"><b class="text-navy">{{ f.repo }} #{{ f.number }}</b> · {{ f.label }}{% if f.age %} · {{ f.age }}{% endif %}</a>
-                    {% endfor %}
+                    <span class="ml-auto text-xs text-slate-500">{{ l.note }}</span>
                 </div>
+                {% else %}
+                <div class="text-slate-500">No monitored repos.</div>
+                {% endfor %}
             </div>
-            {% endif %}
-        </div>
+        </section>
+        {% endif %}
+        {% endif %}
 
+        {% if view == 'history' or (view == 'status' and not mission) %}
+        {% if view == 'history' %}
+        <div class="flex items-baseline gap-3 mb-4">
+            <a href="/" class="text-xs font-bold text-primary-text hover:underline">← Mission Control</a>
+            <h2 class="text-xl font-bold text-navy">History</h2>
+            <span class="text-xs text-slate-500">every issue and PR AppBuilder has handled</span>
+        </div>
+        {% endif %}
         <!-- All activity: one line per issue or PR in the Mission Control style (one
              status chip, age, a primary action and a ⋯ menu for the rest); the long
              detail sits in a collapsed "Details" expander under each row. Buttons
@@ -676,7 +729,7 @@
         {%- endmacro %}
         {# No overflow-hidden on this card or any wrapper of its rows: it clipped the
            ⋯ menus on the last row (often the only row under the default filter). #}
-        <div id="activity" class="mt-8 hpe-card">
+        <div id="activity" class="{{ 'mt-8 ' if view == 'status' }}hpe-card">
             <div class="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center gap-3">
                 <h3 class="text-lg font-bold text-navy mr-auto">All activity</h3>
                 <button type="button" data-mc="retry-all" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold whitespace-nowrap" title="Retry every failed issue"><i class="fas fa-redo-alt mr-1"></i>Retry All</button>
@@ -1033,8 +1086,8 @@
                 </div>
                 <div class="flex gap-2 flex-wrap">
                     <button onclick="runLogAnalysis('self')" id="log-analysis-btn" class="py-1 px-3 text-xs btn-primary rounded-full font-bold"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</button>
-                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold border border-slate-300">↻ Refresh</button>
-                    <button onclick="copyLogs()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold border border-slate-300"><i class="fas fa-copy mr-1"></i>Copy</button>
+                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs btn-sec rounded-full">↻ Refresh</button>
+                    <button onclick="copyLogs()" class="py-1 px-3 text-xs btn-sec rounded-full"><i class="fas fa-copy mr-1"></i>Copy</button>
                 </div>
             </div>
             <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
@@ -1187,8 +1240,8 @@
                 </div>
                 <div class="flex gap-2 flex-wrap">
                     <button onclick="runLogAnalysis('hub')" id="log-analysis-btn" class="py-1 px-3 text-xs btn-primary rounded-full font-bold"><i class="fas fa-wand-magic-sparkles mr-1"></i>Log Analysis</button>
-                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold border border-slate-300">↻ Refresh</button>
-                    <button onclick="showHubRaw()" class="py-1 px-3 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full font-bold border border-slate-300">Debug Raw</button>
+                    <button onclick="window.location.reload()" class="py-1 px-3 text-xs btn-sec rounded-full">↻ Refresh</button>
+                    <button onclick="showHubRaw()" class="py-1 px-3 text-xs btn-sec rounded-full">Debug Raw</button>
                 </div>
             </div>
             <div id="log-analysis-panel" class="hidden px-6 py-4 border-b border-slate-200 bg-indigo-50/40">
@@ -1227,24 +1280,6 @@
 
         {% if view == 'settings' %}
         <div>
-            <!-- Full-bleed sub-nav strip matching LM's #top-nav (h-12 px-6 gap-6,
-                 white bg, bottom border). -mx-6 -mt-6 cancels <main>'s p-6 so it
-                 spans edge-to-edge under the header like LM's top nav; clicking a
-                 tab hides every settings section and shows the one it points at. -->
-            <div class="hpe-subnav h-12 flex items-center px-6 gap-6 text-sm font-medium text-slate-600 -mx-6 -mt-6 mb-6 shrink-0 overflow-x-auto">
-                <button type="button" class="sub-nav-item active px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
-                <button type="button" title="Model Registry — the capability and cost rules that rank every enabled endpoint. Edit each rule with labelled dropdowns instead of raw JSON." class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-model-registry" onclick="settingsTab('sec-model-registry')">Model Registry</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">QA</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Automation</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in (SSO)</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-monitoring" onclick="settingsTab('sec-monitoring')">Monitoring</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-chat" onclick="settingsTab('sec-chat')">Chat</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
-                <button type="button" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal select-none" data-tab="sec-feature-drive" onclick="settingsTab('sec-feature-drive')">Feature Auto-Drive</button>
-            </div>
-
             <div class="hpe-card p-5">
                 <form id="settings-form" action="/save_settings" method="post" class="space-y-8">
                     <!-- 1. GitHub & Repository Core -->
@@ -1638,9 +1673,9 @@
                         <!-- Toolbar -->
                         <div class="flex flex-wrap items-center gap-2 mb-3">
                             <button type="button" title="Append a new empty rule with safe defaults (cheap / medium / streaming) to the bottom of the list" onclick="abRegAdd()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-plus mr-1"></i>Add rule</button>
-                            <button type="button" title="Upsert free-tier catch-all rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" onclick="registrySetLocalFree()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Set local providers free</button>
-                            <button type="button" title="Expand every rule card so all fields are visible" onclick="abRegExpandAll(true)" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Expand all</button>
-                            <button type="button" title="Collapse every rule card back to its one-line summary" onclick="abRegExpandAll(false)" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Collapse all</button>
+                            <button type="button" title="Upsert free-tier catch-all rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" onclick="registrySetLocalFree()" class="px-3 py-1.5 rounded-full text-xs btn-sec">Set local providers free</button>
+                            <button type="button" title="Expand every rule card so all fields are visible" onclick="abRegExpandAll(true)" class="px-3 py-1.5 rounded-full text-xs btn-sec">Expand all</button>
+                            <button type="button" title="Collapse every rule card back to its one-line summary" onclick="abRegExpandAll(false)" class="px-3 py-1.5 rounded-full text-xs btn-sec">Collapse all</button>
                             <input id="registry-filter" type="search" placeholder="Filter by provider, match or label&hellip;" title="Show only rules whose provider, match glob, label or id contains this text. Filtering never changes what is saved." oninput="abRegRender()" class="ml-auto w-64 p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-brand">
                         </div>
 
@@ -1670,7 +1705,7 @@
                         <div id="registry-json-box" hidden class="mt-2">
                             <p class="text-xs text-slate-500 mb-2">This is the value that posts. The cards above rewrite it on every change; edit it directly and press <b>Apply JSON to editor</b> to pull your changes back into the cards. A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span> and <span class="font-mono">match</span>. Invalid JSON is rejected on save and the previous value is kept.</p>
                             <textarea id="model_registry_json" name="model_registry_json" rows="14" spellcheck="false" title="The raw model-registry rule list, as JSON. Normally maintained by the cards above." class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">{{ registry_rules_json }}</textarea>
-                            <button type="button" title="Re-parse the JSON above and rebuild the rule cards from it. Use after editing the JSON by hand." onclick="abRegApplyJson()" class="mt-2 px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">Apply JSON to editor</button>
+                            <button type="button" title="Re-parse the JSON above and rebuild the rule cards from it. Use after editing the JSON by hand." onclick="abRegApplyJson()" class="mt-2 px-3 py-1.5 rounded-full text-xs btn-sec">Apply JSON to editor</button>
                         </div>
 
                         <!-- Effective merged registry (read-only) -->
@@ -2197,7 +2232,7 @@
                                 <label class="text-sm font-medium text-slate-600">Allowed groups (admin groups)</label>
                                 <div class="flex gap-2">
                                     <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand hidden"></select>
-                                    <button type="button" id="oidc-group-btn" onclick="loadOidcGroupPicker()" class="px-3 py-2 rounded-full text-sm font-medium bg-slate-100 hover:bg-slate-200 whitespace-nowrap">Pick from Entra</button>
+                                    <button type="button" id="oidc-group-btn" onclick="loadOidcGroupPicker()" class="px-3 py-2 rounded-full text-sm btn-sec whitespace-nowrap">Pick from Entra</button>
                                 </div>
                                 <p id="oidc-group-msg" class="text-xs text-amber-600 hidden"></p>
                                 <div id="oidc-group-chips" class="flex flex-wrap gap-2"></div>
@@ -2240,7 +2275,7 @@
                                 <label class="text-sm font-medium text-slate-600">Client secret <span class="text-slate-500 font-normal">(only if not using a certificate)</span></label>
                                 <div class="flex gap-2">
                                     <input type="password" id="oidc-client-secret" autocomplete="new-password" class="flex-1 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="Leave blank to keep the stored secret">
-                                    <button type="button" onclick="abOidcSecretClear()" class="px-3 py-2 rounded-full text-sm font-medium bg-slate-100 hover:bg-slate-200">Clear</button>
+                                    <button type="button" onclick="abOidcSecretClear()" class="px-3 py-2 rounded-full text-sm btn-sec">Clear</button>
                                 </div>
                                 <p class="text-xs text-slate-500">A certificate is preferred. Leaving this blank never wipes the stored secret.</p>
                             </div>
@@ -2813,7 +2848,7 @@
                                 {% if st.models %}
                                 <div class="flex flex-wrap gap-1">
                                     {% for m in st.models %}
-                                    <button type="button" class="px-2 py-0.5 text-xs rounded bg-slate-100 hover:bg-slate-200 border border-slate-200" title="Add {{ m }} to this list" onclick="var i=document.getElementById('{{ st.field }}');i.value=i.value.trim()?i.value.replace(/[,\s]+$/,'')+', {{ m }}':'{{ m }}';">+ {{ m }}</button>
+                                    <button type="button" class="px-2 py-0.5 text-xs rounded btn-sec" title="Add {{ m }} to this list" onclick="var i=document.getElementById('{{ st.field }}');i.value=i.value.trim()?i.value.replace(/[,\s]+$/,'')+', {{ m }}':'{{ m }}';">+ {{ m }}</button>
                                     {% endfor %}
                                 </div>
                                 {% endif %}
@@ -3279,7 +3314,8 @@
             </div>
         </div>
         {% endif %}
-    </main>
+    </div></main>
+    {% if view != 'chat' %}<a href="/chat" class="chat-fab" title="Chat with AppBuilder" aria-label="Chat"><i class="fas fa-comments"></i></a>{% endif %}
     </div><!-- /middle row -->
 
     <script>
@@ -3753,142 +3789,74 @@
             syncBtn(document.getElementById('refresh-pause-btn'));
         })();
 
-        // Keeps the "Active Tasks" card fresh without the 30s full-page reload:
-        // ticks each task's elapsed time locally every second, and separately
-        // polls /api/task-details (lightweight, no full stream) every 4s to
-        // re-render the whole list, so an operator sees what's happening in
-        // near-real-time instead of only when a PR/fix suddenly appears after
-        // the next full reload. The list itself is re-rendered (not just the
-        // step line) because tasks start and finish between polls, and because
-        // a single task id re-labels itself as it moves through its phases
-        // (e.g. "Reviewing org/repo PR #12 (3/7)").
-        function startActiveTasksLiveRefresh() {
-            let lastTaskIds = null;
+        // Working on now stays live without the full-page reload: each running
+        // card's elapsed timer ticks every second, and the whole section (running
+        // cards and in-flight rows, rendered server-side by _working.html) is
+        // re-fetched every 5s. A card whose log is open keeps it open and fresh.
+        function startWorkingRefresh() {
+            const host = document.getElementById('wk-host');
 
-            // The total is recomputed locally every second so the clock stays
-            // smooth between the 4s polls; the phase string comes from the API,
-            // which is the only side that knows when the current sub-step began.
-            function formatElapsed(startIso, phaseDuration) {
+            // "mm:ss" for the first hour, then "139m 17s".
+            function fmtElapsed(startIso) {
                 const start = new Date(startIso).getTime();
-                if (isNaN(start)) return phaseDuration ? phaseDuration + ' this step' : '';
-                const totalSeconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
-                const h = Math.floor(totalSeconds / 3600);
-                const m = Math.floor((totalSeconds % 3600) / 60);
-                const s = totalSeconds % 60;
-                const total = `${h}h ${m}m ${s}s total`;
-                return phaseDuration ? `${total} · ${phaseDuration} this step` : total;
+                if (isNaN(start)) return '';
+                const t = Math.max(0, Math.floor((Date.now() - start) / 1000));
+                const m = Math.floor(t / 60), s = t % 60;
+                return m < 60 ? String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') : m + 'm ' + s + 's';
             }
 
-            function buildRow(tid, task) {
-                const isPr = task.kind === 'pr';
-                const row = document.createElement('div');
-                row.className = 'hpe-card p-4';
-                row.dataset.tid = tid;
-
-                const badgeWrap = document.createElement('div');
-                badgeWrap.className = 'mb-1';
-                const badge = document.createElement('span');
-                badge.className = 'text-xs font-bold px-2 py-0.5 rounded-full ' +
-                    (isPr ? 'bg-indigo-50 text-indigo-700' : 'bg-brand/10 text-primary-text');
-                const icon = document.createElement('i');
-                icon.className = isPr ? 'fas fa-code-branch' : 'fas fa-search';
-                badge.appendChild(icon);
-                badge.appendChild(document.createTextNode(isPr ? ' PR review' : ' Scan / fix'));
-                badgeWrap.appendChild(badge);
-
-                const nameP = document.createElement('p');
-                nameP.className = 'task-name text-navy text-sm break-all font-bold';
-                const tidP = document.createElement('p');
-                tidP.className = 'task-tid text-slate-500 font-mono text-xs break-all mt-0.5';
-                const elapsedP = document.createElement('p');
-                elapsedP.className = 'task-elapsed text-slate-500 font-mono text-xs mt-0.5';
-                const stepP = document.createElement('p');
-                stepP.className = 'task-current-step text-slate-600 text-xs italic mt-1 truncate';
-
-                row.appendChild(badgeWrap);
-                row.appendChild(nameP);
-                row.appendChild(tidP);
-                row.appendChild(elapsedP);
-                row.appendChild(stepP);
-                return row;
+            // Set every running card's timer from its data-start.
+            function tick() {
+                host.querySelectorAll('.wk-elapsed[data-start]').forEach(function (el) {
+                    el.textContent = fmtElapsed(el.dataset.start);
+                });
             }
 
-            // textContent/dataset only, never innerHTML, so a task name or step
-            // carrying a PR title can't inject markup.
-            function fillRow(row, tid, task) {
-                if (task.start_time) row.dataset.start = task.start_time;
-                row.dataset.phaseDuration = task.phase_duration || '';
-                const nameEl = row.querySelector('.task-name');
-                if (nameEl) nameEl.textContent = task.name || tid;
-                const tidEl = row.querySelector('.task-tid');
-                if (tidEl) tidEl.textContent = (task.name || '').includes(tid) ? '' : tid;
-                const stepEl = row.querySelector('.task-current-step');
-                if (stepEl) stepEl.textContent = task.step || task.current_step || '';
-                const elapsedEl = row.querySelector('.task-elapsed');
-                if (elapsedEl) elapsedEl.textContent = formatElapsed(row.dataset.start, row.dataset.phaseDuration);
+            // Fill one card's log box with the task's streamed output (textContent only).
+            function loadLog(card) {
+                const pre = card.querySelector('.wk-log');
+                fetch('/api/task-details?task_id=' + encodeURIComponent(card.dataset.tid)).then(function (r) {
+                    return r.ok ? r.json() : { stream: '(the task has finished)' };
+                }).then(function (d) {
+                    pre.textContent = (d.stream || '').trim() || '(no output yet)';
+                    pre.scrollTop = pre.scrollHeight;
+                }).catch(function () { pre.textContent = '(could not load the log)'; });
             }
 
-            function renderEmpty(list) {
-                list.innerHTML = '';
-                const empty = document.createElement('div');
-                empty.className = 'hpe-card p-4 text-center';
-                const p = document.createElement('p');
-                p.className = 'text-slate-500 text-sm italic';
-                p.textContent = 'Standing by for issues...';
-                empty.appendChild(p);
-                list.appendChild(empty);
-            }
-
-            setInterval(function () {
-                try {
-                    document.querySelectorAll('#active-tasks-list [data-start]').forEach(function (el) {
-                        try {
-                            const elapsedEl = el.querySelector('.task-elapsed');
-                            if (elapsedEl) elapsedEl.textContent = formatElapsed(el.dataset.start, el.dataset.phaseDuration);
-                        } catch (innerErr) { /* one bad element shouldn't stop the rest */ }
+            // Swap in the fresh fragment, keeping open logs open.
+            function refresh() {
+                const open = Array.from(host.querySelectorAll('.wk-card')).filter(function (c) {
+                    return !c.querySelector('.wk-log').classList.contains('hidden');
+                }).map(function (c) { return c.dataset.tid; });
+                fetch('/api/mission-control/working').then(function (r) { return r.ok ? r.text() : null; }).then(function (html) {
+                    if (!html) return;
+                    host.innerHTML = html;  // server-rendered and autoescaped by Jinja
+                    host.querySelectorAll('.wk-card').forEach(function (c) {
+                        if (open.indexOf(c.dataset.tid) === -1) return;
+                        c.querySelector('.wk-log').classList.remove('hidden');
+                        c.querySelector('[data-wk-log]').textContent = 'Hide log';
+                        loadLog(c);
                     });
-                } catch (e) { /* no-op — list may not be present on this view */ }
-            }, 1000);
+                    tick();
+                }).catch(function () { /* transient network error: the next poll retries */ });
+            }
 
-            setInterval(function () {
-                fetch('/api/task-details').then(function (resp) {
-                    return resp.json();
-                }).then(function (data) {
-                    const list = document.getElementById('active-tasks-list');
-                    if (!list) return;
-                    const activeTasks = (data && data.active_tasks) || {};
-                    const tids = Object.keys(activeTasks);
-                    if (!tids.length) {
-                        if (lastTaskIds !== '') { renderEmpty(list); lastTaskIds = ''; }
-                        return;
-                    }
-                    // Rebuild only when the SET of tasks changed; otherwise update in
-                    // place so the 1s ticker and scroll position survive. The name is
-                    // refreshed either way: a long-running task re-labels itself per
-                    // phase (e.g. each PR under review) while keeping one task id.
-                    const key = tids.join('|');
-                    if (key !== lastTaskIds) {
-                        list.innerHTML = '';
-                        tids.forEach(function (tid) {
-                            try {
-                                const row = buildRow(tid, activeTasks[tid]);
-                                fillRow(row, tid, activeTasks[tid]);
-                                list.appendChild(row);
-                            } catch (innerErr) { /* skip this task, render the rest */ }
-                        });
-                        lastTaskIds = key;
-                        return;
-                    }
-                    tids.forEach(function (tid) {
-                        try {
-                            const row = list.querySelector('[data-tid="' + CSS.escape(tid) + '"]');
-                            if (row) fillRow(row, tid, activeTasks[tid]);
-                        } catch (innerErr) { /* skip this task, keep polling */ }
-                    });
-                }).catch(function (e) { /* transient network error — next tick will retry */ });
-            }, 4000);
+            // Show log / Hide log toggles the card's log box.
+            host.addEventListener('click', function (ev) {
+                const b = ev.target.closest('[data-wk-log]');
+                if (!b) return;
+                const card = b.closest('.wk-card');
+                const pre = card.querySelector('.wk-log');
+                const show = pre.classList.contains('hidden');
+                pre.classList.toggle('hidden', !show);
+                b.textContent = show ? 'Hide log' : 'Show log';
+                if (show) loadLog(card);
+            });
+            tick();
+            setInterval(tick, 1000);
+            setInterval(refresh, 5000);
         }
-        if (document.getElementById('active-tasks-list')) startActiveTasksLiveRefresh();
+        if (document.getElementById('wk-host')) startWorkingRefresh();
 
         let currentTaskId = null;
         let detailsPollingInterval = null;
@@ -4458,6 +4426,9 @@
         // A click applies to this view only; nothing is persisted, so a session
         // that once clicked e.g. "Merged" doesn't reopen there on every visit.
         let _activityFilter = 'pr_review';   // PR Pending
+        // A Mission Control KPI card links to /history?filter=<key>: open on that filter.
+        const _urlFilter = new URLSearchParams(location.search).get('filter');
+        if (_urlFilter && /^[a-z_-]+$/.test(_urlFilter)) _activityFilter = _urlFilter;
         try {
             // Drop the old sticky and one-shot keys so an existing session stops
             // resurrecting its last filter.
@@ -4472,6 +4443,7 @@
             filter: function (b) { mcFilter(b.dataset.mcGroup); },
             merge: function (b) { mergePr(b.dataset.repo, Number(b.dataset.num), b); },
             approve: function (b) { approvePr(b.dataset.repo, Number(b.dataset.num), b); },
+            'approve-merge': function (b) { approveAndMergePr(b.dataset.repo, Number(b.dataset.num), b); },
             fix: function (b) { fixPr(b.dataset.repo, Number(b.dataset.num), b); },
             reprocess: function (b) { reprocessPr(b.dataset.repo, Number(b.dataset.num), b); },
             deny: function (b) { denyPr(b.dataset.repo, Number(b.dataset.num), b); },
@@ -4495,15 +4467,41 @@
             });
         });
 
+        // Needs your attention chips: show one group (or all); the picked chip is dark.
         function mcFilter(group) {
+            let shown = 0;
             document.querySelectorAll('#mc-attention .mc-item').forEach(function (el) {
-                el.style.display = (group === 'all' || el.dataset.group === group) ? '' : 'none';
+                const ok = group === 'all' || el.dataset.group === group;
+                el.style.display = ok ? '' : 'none';
+                if (ok) shown++;
             });
             document.querySelectorAll('#mc-attention .mc-chip').forEach(function (b) {
-                const on = b.dataset.mcGroup === group;
-                b.classList.toggle('bg-navy', on); b.classList.toggle('text-white', on); b.classList.toggle('border-navy', on);
-                b.classList.toggle('bg-white', !on); b.classList.toggle('text-slate-600', !on); b.classList.toggle('border-slate-300', !on);
+                b.classList.toggle('on', b.dataset.mcGroup === group);
             });
+            const empty = document.getElementById('mc-empty');
+            if (empty) empty.classList.toggle('hidden', shown > 0);
+        }
+
+        // Split verdict "Approve & merge": approve on GitHub, then merge straight away.
+        async function approveAndMergePr(repo, number, btn) {
+            btn.disabled = true; btn.textContent = 'Approving…';
+            try {
+                const resp = await fetch('/api/pr-review/approve', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo: repo, number: number })
+                });
+                const d = await resp.json();
+                if (!resp.ok || d.status !== 'success') {
+                    showToast('Approve failed: ' + (d.message || resp.status), 'error');
+                    btn.disabled = false; btn.textContent = 'Approve & merge';
+                    return;
+                }
+            } catch (e) {
+                showToast('Approve failed: ' + e, 'error');
+                btn.disabled = false; btn.textContent = 'Approve & merge';
+                return;
+            }
+            mergePr(repo, number, btn);
         }
 
         function filterActivity(status) {
@@ -5008,7 +5006,13 @@
                 else if (s === 'pending') color = 'bg-yellow-500';
                 else if (s === 'error') color = 'bg-red-500';
                 else color = 'bg-slate-500';
-                dot.className = 'w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] ' + color;
+                dot.className = 'w-2 h-2 rounded-full ' + color;
+                // The pill reads "Hub connected" (green) only on a live socket, else red.
+                const ok = s === 'approved' && connected;
+                const pill = document.getElementById('hub-status-group');
+                if (pill) { pill.classList.toggle('hdr-pill-ok', ok); pill.classList.toggle('hdr-pill-bad', !ok); }
+                const txt = document.getElementById('hub-status-text');
+                if (txt) txt.textContent = ok ? 'Hub connected' : 'Hub disconnected';
                 const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v == null ? '' : v); };
                 // Show the live socket state alongside the registration status.
                 set('hub-status-tip-status', (d.status || '—') + (s === 'approved' ? (connected ? ' · connected' : ' · reconnecting') : ''));

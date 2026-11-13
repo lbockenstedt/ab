@@ -104,7 +104,8 @@ def test_working_on_now_start_time_carries_its_utc_offset(page):
     """A naive start_time read by a browser in another timezone than the server
     showed hours of extra elapsed time; the offset makes it one instant."""
     client, html, start = page
-    data_start = re.search(r'data-tid="o/lm:9" data-start="([^"]+)"', html).group(1)
+    card = html[html.index('data-tid="o/lm:9"'):]
+    data_start = re.search(r'data-start="([^"]+)"', card).group(1)
     api_start = client.get("/api/task-details").json()["active_tasks"]["o/lm:9"]["start_time"]
     for value in (data_start, api_start):
         parsed = datetime.fromisoformat(value)

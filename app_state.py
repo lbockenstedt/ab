@@ -40,9 +40,10 @@ _task_state_lock = threading.Lock()
 _chat_lock = threading.RLock()
 
 
-def update_task_state(task_id, task_name="Unknown Task", action="start", kind="scan"):
+def update_task_state(task_id, task_name="Unknown Task", action="start", kind="scan", stage=None):
     """Manages active tasks and their start times. action can be 'start' or 'end'.
-    kind tags the work type for the UI ('scan'/'fix' vs 'pr' for PR pre-review)."""
+    kind tags the work type for the UI ('scan'/'fix' vs 'pr' for PR pre-review).
+    stage, when given, is the pipeline step this phase is (see set_task_step)."""
     # state is the module-level dict defined further down; we mutate it in place.
     global state
     # Without an id there is nothing to track, so log quietly and do nothing.
@@ -80,7 +81,15 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
                     "stream": carried,
                     "kind": kind,
                     "step": carried_step,
+                    # Pipeline progress for the Working on now stepper (set_task_step).
+                    "stage": prev.get("stage") or "",
+                    "stages": list(prev.get("stages") or []),
+                    "models": list(prev.get("models") or []),
+                    "subject": prev.get("subject") or "",
+                    "scope": prev.get("scope") or "",
                 }
+            if stage:
+                set_task_step(task_id, stage=stage)
             logger.info(f"Task started: {task_id} - {task_name}")
         # Finishing a task: remove it from the active list if it is still there.
         elif action == "end":
@@ -97,15 +106,20 @@ def update_task_state(task_id, task_name="Unknown Task", action="start", kind="s
 _PR_REVIEWS_MAX = 100
 
 
-def set_task_step(task_id, step):
-    """Record a human-readable "what the system is doing right now" line on an
-    active task, for the UI's Active Tasks card.
+def set_task_step(task_id, step=None, *, stage=None, subject=None, scope=None, model=None):
+    """Record what an active task is doing right now, for the UI's Working on now card.
 
-    update_task_state's name covers the PHASE; this covers the step inside it.
-    Needed because the card otherwise derives its one-liner from the tail of the
-    task's streamed LLM reasoning, which leaves every non-LLM stage (static
-    parity/secrets checks, GitHub API calls, cloning, test runs) showing nothing
-    at all. No-op for an unknown/finished task; never raises.
+    update_task_state's name covers the PHASE; ``step`` is the human-readable
+    line inside it ("running the skeptical reviewer panel"). Without it the card
+    falls back to the tail of the streamed LLM reasoning, which leaves every
+    non-LLM stage (static checks, GitHub calls, test runs) blank.
+
+    The keyword fields feed the stepper: ``stage`` is the pipeline step reached
+    (mission_control.STEPS; every stage entered is remembered in ``stages``),
+    ``subject`` is the item being worked ("owner/repo#12"; a new subject starts
+    a fresh stage and model history), ``scope`` is where a multi-item scan is
+    ("repo 3/4") and ``model`` is a model that has worked on it. A field left
+    as None is unchanged. No-op for an unknown or finished task; never raises.
     """
     # No task id means no task to update.
     if not task_id:
@@ -114,9 +128,28 @@ def set_task_step(task_id, step):
     try:
         with _task_state_lock:
             task = state["active_tasks"].get(task_id)
-            if task is not None:
+            if task is None:
+                return
+            if subject is not None and str(subject)[:120] != task.get("subject"):
+                task.update(subject=str(subject)[:120], stage="", stages=[], models=[])
+            if step is not None:
                 # Keep the step short (200 chars) so the UI card stays one line.
                 task["step"] = str(step)[:200]
+            if stage:
+                task["stage"] = stage
+                stages = task.setdefault("stages", [])
+                # Re-entering a stage (a retry) drops the later ones: they did not pass.
+                if stage in stages:
+                    del stages[stages.index(stage) + 1:]
+                else:
+                    stages.append(stage)
+            if scope is not None:
+                task["scope"] = str(scope)[:80]
+            if model:
+                models = task.setdefault("models", [])
+                if str(model)[:60] not in models:
+                    models.append(str(model)[:60])
+                    del models[:-4]
     # Status lines are cosmetic, so a failure is only logged at debug level.
     except Exception as e:  # noqa: BLE001
         logger.debug(f"set_task_step failed for task_id={task_id!r}: {e}")
@@ -498,6 +531,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "denied": False,
                 "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
+            _stamp_pr_state(state["pr_reviews"][key], prev)
             # Bound: drop oldest (dicts preserve insertion order) beyond the cap.
             extra = len(state["pr_reviews"]) - _PR_REVIEWS_MAX
             if extra > 0:
@@ -507,6 +541,15 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     # Persisting a review is best-effort; log and carry on.
     except Exception as e:
         logger.error(f"record_pr_review failed for {repo}#{number}: {e}")
+
+
+def _stamp_pr_state(rec, prev):
+    """Keep rec["state_since"]: when the PR entered its current dashboard state."""
+    try:
+        import mission_control
+        mission_control.stamp_state_since(rec, prev)
+    except Exception as e:  # noqa: BLE001 - the timestamp is display-only
+        logger.debug(f"state_since stamp failed: {e}")
 
 
 def mark_pr_approved(repo, number, approved=True):
@@ -569,7 +612,9 @@ def update_pr_review(repo, number, **fields):
             # close also stamps outcome_at (reviewed_at is when it was last reviewed).
             if not rec.get("outcome_at") and any(fields.get(k) for k in ("merged", "auto_merged", "denied", "closed")):
                 fields = {**fields, "outcome_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            before = dict(rec)
             rec.update(fields)
+            _stamp_pr_state(rec, before)
             save_pr_reviews(state["pr_reviews"])
             # After the record is safely persisted: the ledger is a derived
             # tally, so losing it is recoverable, but losing the review is not.

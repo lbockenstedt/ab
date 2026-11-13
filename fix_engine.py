@@ -38,6 +38,25 @@ from main import (
 )
 
 
+def _progress(task_id, step=None, **fields):
+    """Report pipeline progress to the Working on now card (app_state.set_task_step)."""
+    try:
+        from app_state import set_task_step
+        set_task_step(task_id, step, **fields)
+    except Exception:  # noqa: BLE001 - progress lines are cosmetic
+        pass
+
+
+def _opened_at(issue):
+    """The issue's creation time as a naive local ISO string, or None."""
+    created = getattr(issue, "created_at", None)
+    if not isinstance(created, datetime):
+        return None
+    if created.tzinfo:
+        created = created.astimezone().replace(tzinfo=None)
+    return created.isoformat()
+
+
 class QueueLocalException(Exception):
     """Kept for backward compatibility with persisted 'awaiting_local' issue states."""
     pass
@@ -3621,8 +3640,12 @@ def reviewer_prompt(issue_body, fix_details):
 
 
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
-               builder_n=None, builder_key=None, diff_override=None, repo=None, head_sha=None):
+               builder_n=None, builder_key=None, diff_override=None, repo=None, head_sha=None,
+               progress=None):
     """Run a cross-provider reviewer panel on a proposed fix.
+
+    progress: optional (task_id, label) whose Working on now card shows the
+    panel's progress ("Panel 1: 2 of 3 reviewers done"); defaults to task_id.
 
     builder_key: the builder's already-resolved ModelKey (e.g. apply_ai_fix's
     used_model_out=) — the picker-based fix-generation call site's preferred
@@ -3750,10 +3773,24 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     votes = []
     failed_reviewers = []
 
+    progress_task, progress_label = progress or (task_id, "Review panel")
+    progress_done = []
+    for r in reviewers:
+        _progress(progress_task, model=(r.get("candidate") or {}).get("model"))
+    _progress(progress_task, "%s reviewing the diff — 0 of %d reviewers done" % (progress_label, len(reviewers)),
+              stage="review")
+
     def _review_one(r):
         """Run one reviewer from this panel and return (vote, failed_name)."""
         # Pass the shared prompt, checkout and panel details.
-        return _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=panel_keys, panel_candidates=panel_candidates)
+        result = _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=panel_keys, panel_candidates=panel_candidates)
+        # Count finished seats for the progress line (reviewers run in parallel).
+        # list.append is atomic, so the count stays right without a lock.
+        progress_done.append(r["name"])
+        _progress(progress_task, "%s reviewing the diff — %d of %d reviewers done (last: %s)" % (
+            progress_label, len(progress_done), len(reviewers),
+            (r.get("candidate") or {}).get("model") or r["name"]))
+        return result
 
     try:
         # Fan the panel out: reviewers are independent + read-only, so run them
@@ -5358,7 +5395,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             pass
 
         # Show the task as active and check whether the issue is actionable.
-        update_task_state(task_id=issue_id, task_name=f"Triaging {issue_id}", action="start")
+        update_task_state(task_id=issue_id, task_name=f"Triaging {issue_id}", action="start", stage="triage")
         actionable, request_msg = analyze_issue(issue)
 
         # Not actionable: ask the reporter for what is missing, record it, and stop.
@@ -5578,7 +5615,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             for attempt in range(1, max_attempts + 1):
                 try:
                     # Show progress for this attempt.
-                    update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start")
+                    update_task_state(task_id=issue_id, task_name=f"Fix Attempt {attempt}/{max_attempts} for {issue_id}", action="start", stage="fix")
+                    _progress(issue_id, "attempt %d/%d: generating the fix" % (attempt, max_attempts))
                     logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
                     logger.info(f"Attempt {attempt}/{max_attempts}: requirements = {reqs!r}.")
                     used_model_out = {}
@@ -5602,6 +5640,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         success_applied, fixes, confidence = parse_and_apply(fix_code, path)
                     # Remember which model built this fix.
                     built_key = used_model_out.get("key")
+                    if isinstance(built_key, tuple) and built_key:
+                        _progress(issue_id, model=built_key[-1])
 
                     # The fix could not be applied: explain why to the next attempt.
                     if not success_applied:
@@ -5708,7 +5748,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             review_verdict = "Approve"
                         else:
                             # Show the review step and run the panel.
-                            update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start")
+                            update_task_state(task_id=issue_id, task_name=f"Reviewing {issue_id}", action="start", stage="review")
                             review = review_fix(path, fix_body, fixes, task_id=issue_id, builder_key=built_key)
 
                             # --- Handle Queue for Retry ---
@@ -5766,7 +5806,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 if failure_msg:
                                     verified = False
                                 else:
-                                    update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start")
+                                    update_task_state(task_id=issue_id, task_name=f"Verifying {issue_id}", action="start", stage="tests")
+                                    _progress(issue_id, "running the test suite on the fix (attempt %d/%d)" % (attempt, max_attempts))
                                     verified, failure_msg = verify_fix(path, repo_name, config)
                             finally:
                                 # Tests write into their own tree; the commit
@@ -5824,6 +5865,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 continue
                             # Accept the fix.
                             success = True
+                            _progress(issue_id, "fix accepted — committing and pushing")
                             state["success_count"] += 1
                             final_verdict = review_verdict
                             break
@@ -6109,6 +6151,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             if can_actually_direct_push:
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: {decision_reason}")
                 commit_type = "Direct Commit"
+                _progress(issue_id, "committed to %s — updating spokes" % base_branch, stage="commit")
                 detail_msg = f"The fix was verified and pushed directly to the {base_branch} branch. Avg Confidence: {final_confidence:.2%}"
                 # Fix is live on main — tell every spoke to pull and restart, then let
                 # the QA service verify against the updated code.
@@ -6191,11 +6234,13 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 # Report the PR.
                 if pr is None:
                     commit_type = f"Commit to {base_branch}"
+                    _progress(issue_id, "committed to %s" % base_branch, stage="commit")
                     detail_msg = (f"The fix was verified and pushed to the {base_branch} integration branch "
                                   f"(confidence below the direct-merge threshold, so it is promoted "
                                   f"{base_branch} -> qa -> main rather than via a PR).")
                 else:
                     commit_type = "Pull Request"
+                    _progress(issue_id, "opened PR #%s" % pr.number, stage="pr")
                     detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
 
 
@@ -6237,7 +6282,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 "commit_type": commit_type,
                 "decision_reason": decision_reason,
                 "reopened": was_reopened,
-                "original_body": issue.body
+                "original_body": issue.body,
+                # When the issue was opened and the fix landed, for the dashboard's
+                # Median fix time (timestamp moves when a person clicks Resolved).
+                "opened_at": _opened_at(issue),
+                "fixed_at": datetime.now().isoformat(timespec="seconds"),
             }
 
             save_processed(processed)
