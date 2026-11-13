@@ -15,6 +15,7 @@ first, so the guard is satisfied honestly.
 """
 # os builds clone paths and reads the GitHub token from the environment.
 import os
+from datetime import datetime
 # time drives polling loops (mergeability, parked-run release).
 import time
 # tempfile gives a throwaway directory for the conflict-resolution clone.
@@ -147,6 +148,21 @@ def _expects_missing_check(msg):
     return "required status check" in low and "is expected" in low
 
 
+# The last check-run counts seen per (repo, head sha), from lookups AppBuilder
+# already makes; the dashboard reads them (mission_control) without calling GitHub.
+CI_SEEN = {}
+_CI_SEEN_MAX = 200
+
+
+def _remember_ci(repo_name, head_sha, runs, failing):
+    """Cache how many of a commit's check runs have finished, and how many failed."""
+    done = sum(1 for r in runs if r.get("status") == "completed")
+    CI_SEEN[(repo_name, head_sha)] = {"done": done, "total": len(runs), "failed": len(failing),
+                                      "at": datetime.now().isoformat(timespec="seconds")}
+    while len(CI_SEEN) > _CI_SEEN_MAX:
+        CI_SEEN.pop(next(iter(CI_SEEN)))
+
+
 def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
     """The CI verdict for *head_sha* as ``(state, details)``, where state is one
     of ``success``/``failure``/``pending``/``unknown``.
@@ -229,6 +245,7 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
         # Anything not clearly passing is unrecognised.
         elif conclusion not in ("success", "neutral", "skipped"):
             unrecognised = True
+    _remember_ci(repo_name, head_sha, runs, failing)
     # Any failure wins, then pending, then unknown; otherwise everything passed.
     if failing:
         return "failure", ", ".join(failing)

@@ -789,7 +789,7 @@ def _skeptical_review(pr, files, config, repo=None, head_sha=None, gh=None,
         # (when available) let each reviewer fetch_repo_file instead of rejecting
         # on a truncated/incomplete diff view.
         review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
-                            repo=repo, head_sha=head_sha)
+                            repo=repo, head_sha=head_sha, progress=("PRReview", "Panel 1"))
     except Exception as e:  # noqa: BLE001
         logger.warning("pr_review: panel skipped (review_fix error: %s)", e, exc_info=True)
         return None
@@ -888,7 +888,7 @@ def _state_logic_review(pr, files, config, repo=None, head_sha=None):
     # Run the panel; any error skips the review.
     try:
         review = review_fix(None, issue_body, {}, builder_n=0, diff_override=diff,
-                            repo=repo, head_sha=head_sha)
+                            repo=repo, head_sha=head_sha, progress=("PRReview", "Panel 2"))
     except Exception as e:  # noqa: BLE001
         logger.warning("pr_review: state-logic panel skipped (review_fix error: %s)", e, exc_info=True)
         return None
@@ -1974,14 +1974,14 @@ def _review_one(gh, repo, pr, config, force=False):
     # instead of one opaque "scanning open PRs" line for the whole cycle. The
     # task_id is constant ("PRReview"); set_task_step is a no-op when the review
     # is invoked outside the scan loop (Reprocess/Fix buttons).
-    def _step(what):
-        """Show the current review stage on the Active Tasks card."""
-        set_task_step("PRReview", "%s #%s — %s" % (repo.full_name, pr.number, what))
+    def _step(what, stage=None):
+        """Show the current review stage (and its pipeline step) on the Working on now card."""
+        set_task_step("PRReview", "%s #%s — %s" % (repo.full_name, pr.number, what), stage=stage)
     # Compute findings every scan (cheap, deterministic, no LLM) so the UI
     # 'PRs Reviewed' list stays populated even after a restart. The COMMENT +
     # status are only (re)posted when the head SHA changed — dedup keeps us from
     # spamming, but we still RECORD the review below regardless.
-    _step("fetching changed files")
+    _step("fetching changed files", stage="triage")
     # Run the deterministic Tier-1 checks on the changed files.
     files = list(pr.get_files())
     changed = [f.filename for f in files]
@@ -2069,10 +2069,10 @@ def _review_one(gh, repo, pr, config, force=False):
         # every poll of an unchanged PR. OFF by default
         # (pr_test_regression_enabled); see check_test_regressions.py.
         token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
-        _step("running test-regression check")
+        _step("running test-regression check", stage="tests")
         findings += check_test_regressions(repo, pr, config, token)
         # LLM change summary and both review panels.
-        _step("summarising the change (LLM)")
+        _step("summarising the change (LLM)", stage="review")
         summary = _summarize_changes(pr, files, config, repo=repo)
         _step("running the skeptical reviewer panel (LLM)")
         review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh,
@@ -2080,7 +2080,7 @@ def _review_one(gh, repo, pr, config, force=False):
         _step("running the state-logic reviewer panel (LLM) if panel 1 approved")
         state_review = _state_panel_after(review, pr, files, config, repo=repo, head_sha=head_sha)
         # Build the comment text.
-        _step("rendering and posting the review comment")
+        _step("rendering and posting the review comment", stage="pr")
         body = _render(findings, head_sha, summary, review=review, state_review=state_review,
                        base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
                        head_ref=_head_ref,
@@ -2156,11 +2156,13 @@ def _review_one(gh, repo, pr, config, force=False):
     # describes the PREVIOUS commit. Merging on that stale record would merge
     # code no panel has seen. Skip the merge this cycle — the push re-triggers
     # a full review, and the merge is reconsidered against the new head.
+    _step("checking whether the findings need an automatic fix")
     if _maybe_auto_remediate(gh, repo, pr, config):
         logger.info("pr_review: %s #%s — remediation pushed a fix; deferring the auto-merge "
                     "decision to the re-review of the new head", repo.full_name, pr.number)
         return
     # Nothing pushed: consider merging.
+    _step("checking CI and whether it can auto-merge", stage="merge")
     _maybe_auto_merge(gh, repo, pr, config)
 
 
@@ -2804,7 +2806,9 @@ def _scan_repos(gh, config, repos):
         for i, repo_name in enumerate(repos, 1):
             try:
                 repo = gh.get_repo(repo_name)
-                set_task_step("PRReview", "repo %d/%d — %s: listing open PRs" % (i, len(repos), repo_name))
+                # "repo 3/4" only means something when the scan covers several repos.
+                set_task_step("PRReview", "repo %d/%d — %s: listing open PRs" % (i, len(repos), repo_name),
+                              scope=("repo %d/%d" % (i, len(repos))) if len(repos) > 1 else "")
                 # Materialised so the UI can show "PR 2 of 7" rather than an
                 # opaque, unbounded stream of pages.
                 prs = list(repo.get_pulls(state="open"))
@@ -2817,7 +2821,8 @@ def _scan_repos(gh, config, repos):
                                           "Reviewing %s PR #%s (%d/%d)" % (repo.full_name, pr.number, j, len(prs)),
                                           "start", kind="pr")
                         set_task_step("PRReview", "%s #%s — %s" % (
-                            repo.full_name, pr.number, (pr.title or "")[:80]))
+                            repo.full_name, pr.number, (pr.title or "")[:80]),
+                            subject="%s#%s" % (repo.full_name, pr.number), stage="triage")
                         _review_one(gh, repo, pr, config)
                         seen_open.add("%s#%s" % (repo.full_name, pr.number))
                         reviewed += 1
@@ -2829,6 +2834,7 @@ def _scan_repos(gh, config, repos):
         # Backfill the target-branch badge on older records (see below), then
         # self-heal listed PRs that are no longer open (merged elsewhere or closed).
         update_task_state("PRReview", "PR pre-review — housekeeping", "start", kind="pr")
+        set_task_step("PRReview", subject="", scope="")
         set_task_step("PRReview", "backfilling target-branch badges on older records")
         _backfill_pr_review_refs(gh)
         set_task_step("PRReview", "reconciling PRs that are no longer open")

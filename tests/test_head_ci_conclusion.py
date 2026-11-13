@@ -30,7 +30,7 @@ def _load():
     tree = ast.parse(src)
     fn = next(n for n in tree.body
               if isinstance(n, ast.FunctionDef) and n.name == "head_ci_conclusion")
-    ns = {"requests": _FakeRequests, "logger": _quiet_logger()}
+    ns = {"requests": _FakeRequests, "logger": _quiet_logger(), "_remember_ci": lambda *a: None}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<head_ci>", "exec"), ns)
     return ns["head_ci_conclusion"]
 
