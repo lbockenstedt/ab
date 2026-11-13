@@ -4898,6 +4898,11 @@ def parse_and_apply(content, repo_path):
                 search = ed.get("search")
                 replace = ed.get("replace")
                 if not isinstance(filepath, str) or not isinstance(search, str) or replace is None:
+                    # A model that writes a new file whole under "fixes" often also
+                    # lists it here with no search/replace. The stub has nothing to
+                    # apply and the file is in "fixes", so it is not an error (ab#539).
+                    if isinstance(filepath, str) and isinstance(fixes, dict) and filepath in fixes:
+                        continue
                     logger.error(f"Skipping malformed edit (need file/search/replace): {str(ed)[:160]!r}")
                     continue
                 # An empty search would match everywhere.
