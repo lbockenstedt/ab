@@ -1926,6 +1926,9 @@ def poller_worker():
         else:
             logger.debug("Poller worker is paused. Skipping scan cycle.")
             interval = int(cfg.get("POLL_INTERVAL_SECONDS") or os.getenv("POLL_INTERVAL_SECONDS", 3600))
+        # When the next scan cycle (issues and the PR scan) starts, for the dashboard;
+        # none while paused, since no scan will run.
+        state["next_poll_at"] = None if state.get("paused") else time.time() + interval
         time.sleep(interval)
 
 

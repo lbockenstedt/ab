@@ -5,6 +5,7 @@ Built from the same stores the Status table lists (processed issues and PR
 reviews), so every item here is also a row there. The dashboard renders it and
 GET /api/mission-control returns it as JSON.
 """
+import time
 from datetime import datetime, timezone
 
 from pr_review_retry import MAX_AUTO_QUEUE_RETRIES
@@ -44,6 +45,10 @@ _ISSUE_WORKING = {
     "reopened": "Reopened, fixing again",
     "feature_built": "Feature built, PR open",
 }
+# A fix that is done: verified or resolved, the set the Resolved filter shows
+# (pending_verification is NOT in it: a commit nobody has checked yet). Fixed · 7d,
+# success % and Median fix time all count this same set.
+_FIX_LANDED = {"fixed", "verified", "awaiting_prod_verification", "resolved"}
 _ISSUE_DONE = {
     "fixed": "fixed",
     "verified": "verified in prod",
@@ -230,15 +235,414 @@ def _pr_state(pr):
     return "needs", "Awaiting review", "Reviewed. Approve, Fix or Deny it."
 
 
-def build(processed, pr_reviews, active_tasks=None, now=None):
-    """The dashboard summary: {"kpis", "working", "attention", "in_flight", "outcomes"}."""
+# The Working on now stepper: every bug fix, PR and promotion walks these steps.
+STEPS = (("triage", "Triage"), ("fix", "Fix"), ("tests", "Tests"),
+         ("review", "Review panels"), ("pr", "PR"), ("merge", "Merge"))
+_STEP_KEYS = tuple(k for k, _ in STEPS)
+# Fix-pipeline phase names (fix_engine's update_task_state) -> step, for tasks
+# that started before set_task_step recorded a stage.
+_PHASE_STAGE = (("Triaging", "triage"), ("Fix Attempt", "fix"), ("Reviewing", "review"), ("Verifying", "tests"))
+# Branch pairs a promotion PR moves code along.
+_PROMOTION_ROUTES = {("dev", "qa"), ("qa", "main"), ("dev", "main")}
+
+
+def stepper(current, done=(), unknown=None):
+    """The six steps as [{"key", "label", "state"}]; state is done, current, todo,
+    skipped, unknown or none.
+
+    ``done`` holds the steps really completed (a fix that was reviewed before it
+    was tested shows Review panels done while Tests is current). The stage
+    "commit" is a fix published without a PR: the PR step is skipped and the
+    last step reads Commit. ``unknown`` marks a not-done Tests step whose CI
+    AppBuilder has not read ("unknown") or that has no checks ("none")."""
+    committed = current == "commit" or "commit" in done
+    out = []
+    for k, label in STEPS:
+        if committed and k == "pr":
+            state = "skipped"
+        elif committed and k == "merge":
+            label, state = "Commit", "current" if current == "commit" else "done"
+        elif k == current:
+            state = "current"
+        elif k in done:
+            state = "done"
+        elif k == "tests" and unknown:
+            state = unknown
+        else:
+            state = "todo"
+        out.append({"key": k, "label": label, "state": state})
+    return out
+
+
+def _duration(seconds):
+    """"45s", "12m", "2h 10m" or "3d 4h" for a time spent in a state."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "%ds" % seconds
+    minutes = seconds // 60
+    if minutes < 60:
+        return "%dm" % minutes
+    if minutes < 48 * 60:
+        return "%dh %dm" % (minutes // 60, minutes % 60)
+    return "%dd %dh" % (minutes // 1440, (minutes % 1440) // 60)
+
+
+def _until(next_at, now_ts):
+    """"in 12m" until a unix time, or "" when it is unknown."""
+    if not next_at:
+        return ""
+    return "in %s" % _duration(max(0, next_at - now_ts))
+
+
+def _last_line(stream):
+    """Last non-blank line of a task's streamed LLM reply, cut to 160 characters."""
+    for line in reversed(str(stream or "").strip().splitlines()):
+        if line.strip():
+            return line.strip()[:160]
+    return ""
+
+
+def next_poll_label(next_poll_at, now_ts=None):
+    """Header pill text: "Next poll 3m", "Next poll now" or "" when no poll is scheduled."""
+    if not next_poll_at:
+        return ""
+    left = next_poll_at - (now_ts if now_ts is not None else time.time())
+    return "Next poll now" if left < 60 else "Next poll %s" % _duration(left)
+
+
+def promotion_route(pr):
+    """(source, target) branches of a promotion or backmerge PR, else None.
+
+    Promotions are raised from ``promote/<src>-to-<tgt>`` (backmerges from
+    ``backmerge/<src>-to-<tgt>``), the prefixes pr_remediate._PROMOTION_HEAD_RE
+    guards; a PR straight from dev or qa into the next branch also counts."""
+    from pr_remediate import _PROMOTION_HEAD_RE
+    head, base = str(pr.get("head_ref") or ""), str(pr.get("base_ref") or "")
+    if _PROMOTION_HEAD_RE.match(head):
+        src, _, tgt = head.split("/", 1)[1].partition("-to-")
+        return (src.lower() or "?", base or tgt.lower())
+    return (head, base) if (head, base) in _PROMOTION_ROUTES else None
+
+
+def is_promotion(pr):
+    """True for a promotion or backmerge PR (see promotion_route)."""
+    return promotion_route(pr) is not None
+
+
+def _pr_kind(pr):
+    """Kind chip of a PR card: Promotion, Feature (an ai-feature/ branch) or PR review."""
+    if is_promotion(pr):
+        return "Promotion"
+    if str(pr.get("head_ref") or "").startswith("ai-feature/"):
+        return "Feature"
+    return "PR review"
+
+
+def task_card(tid, task, processed=None, pr_reviews=None, now=None):
+    """One running task as a Working on now card.
+
+    Everything comes from the task entry the workers keep current
+    (app_state.update_task_state / set_task_step): the stage reached, the step
+    text, the item worked on (subject) and the models that worked on it."""
+    now = now or datetime.now()
+    processed, pr_reviews = processed or {}, pr_reviews or {}
+    name = task.get("name") or str(tid)
+    stage = task.get("stage") or next((st for prefix, st in _PHASE_STAGE if name.startswith(prefix)), "")
+    subject = task.get("subject") or ""
+    card = {"id": tid, "live": True, "title": name, "desc": "", "kind": "Task", "url": "",
+            "started": iso_utc(task.get("start_time"))}
+    if subject and subject in pr_reviews:
+        pr = pr_reviews[subject]
+        repo, number = _repo_and_number(subject, "#")
+        card.update(kind=_pr_kind(pr), title="%s #%s" % (repo, number), desc=pr.get("title") or "",
+                    url=pr.get("url") or "")
+    elif subject:
+        repo, number = _repo_and_number(subject, "#")
+        card.update(kind="PR review", title="%s #%s" % (repo, number))
+    elif ":" in str(tid) and str(tid).rpartition(":")[2].isdigit():
+        info = processed.get(tid) or {}
+        repo, number = _repo_and_number(tid, ":")
+        card.update(kind="Feature" if str(info.get("status", "")).startswith("feature") else "Bug fix",
+                    title="%s #%s" % (repo, number), desc=info.get("title") or name,
+                    url=info.get("issue_url") or "")
+    elif task.get("kind") == "pr":
+        card.update(kind="PR review", desc=name)
+    if not card["desc"]:
+        card["desc"] = name if name != card["title"] else ""
+    step = task.get("step") or _last_line(task.get("stream"))
+    scope = task.get("scope") or ""
+    card["now"] = "%s — %s" % (scope, step) if scope and step else step or scope or "starting"
+    card["models"] = " → ".join(task.get("models") or [])
+    done = [s for s in (task.get("stages") or []) if s != stage]
+    if subject and stage != "pr":
+        done.append("pr")  # a PR being reviewed or improved already exists
+    if stage == "commit" or "commit" in done:
+        done = [s for s in done if s != "pr"]
+    if stage:
+        # Steps before the first one recorded were passed before tracking began.
+        first = min((_STEP_KEYS.index(s) for s in [stage] + done if s in _STEP_KEYS), default=0)
+        done += list(_STEP_KEYS[:first])
+    card["steps"] = stepper(stage, done) if stage or card["kind"] != "Task" else None
+    return card
+
+
+def _ci_passed(ci):
+    """Checks that passed; older cache entries without "passed" only knew done and failed."""
+    return ci["passed"] if "passed" in ci else ci["done"] - ci["failed"]
+
+
+def _ci_wait(ci):
+    """The Now text for CI that has not passed yet and has not failed."""
+    if ci["done"] < ci["total"]:
+        return "waiting for CI (%d/%d checks done)" % (ci["done"], ci["total"])
+    if ci.get("parked"):
+        return "waiting for CI (%d of %d checks parked for approval)" % (ci["parked"], ci["total"])
+    return "CI finished without a verdict (%d/%d passed) — Re-run CI" % (_ci_passed(ci), ci["total"])
+
+
+def _ci_chip(ci):
+    """(text, tone) of the attention CI chip; tone is ok, bad or wait."""
+    if not ci or not ci["total"]:
+        return "", ""
+    if ci["failed"]:
+        return "CI ✕ %d/%d" % (ci["failed"], ci["total"]), "bad"
+    if _ci_passed(ci) == ci["total"]:
+        return "CI ✓ %d/%d" % (ci["total"], ci["total"]), "ok"
+    return "CI … %d/%d" % (_ci_passed(ci), ci["total"]), "wait"
+
+
+def _ci_for(key, pr, ci_seen):
+    """The CI_SEEN entry for the PR's current head, or None when AppBuilder has not read its checks."""
+    return (ci_seen or {}).get((pr.get("repo") or key.rpartition("#")[0], pr.get("head")))
+
+
+def _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now):
+    """(stage, done, now_text, ci) of an open PR, from its cached review record.
+
+    ``ci`` is the CI_SEEN entry when the Now line was read from CI (so time in
+    state counts from CI's last change too), else None."""
+    where, label, why = _pr_state(pr)
+    ci = _ci_for(key, pr, ci_seen)
+    # Steps already behind the PR: it exists, so triage and PR are done.
+    done = {"triage", "pr"}
+    if int(pr.get("remediation_attempts") or 0):
+        done.add("fix")
+    if ci and ci["total"] and _ci_passed(ci) == ci["total"]:
+        done.add("tests")
+    if pr.get("panel_verdict") or pr.get("panel2_verdict"):
+        done.add("review")
+    # Facts the Now line quotes: next poll, attempts used, CI still running.
+    poll = _until(next_poll_at, now.timestamp())
+    attempts = int(pr.get("remediation_attempts") or 0)
+    pending_ci = ci and not ci["failed"] and _ci_passed(ci) < ci["total"]
+    # Being fixed or waiting on CI.
+    if label == "Improving" and "improves" in why:
+        return "fix", done, "improving: attempt %d/%d" % (min(attempts + 1, max_attempts), max_attempts), None
+    if label in ("Improving", "Auto-merging") and pending_ci:
+        return "tests", done, _ci_wait(ci), ci
+    if label == "Improving" and "waiting on GitHub Actions" in why:
+        return "tests", done, "waiting for CI (checks not started yet)", ci
+    # CI no longer pending: these lines changed when CI did.
+    if label == "Auto-merging":
+        return "merge", done, "auto-merge approved — merges on the next poll" + (" (%s)" % poll if poll else ""), ci
+    if label == "Improving":
+        return "merge", done, "held: " + _short(why, 120), ci
+    # Waiting on a review, or stopped and needing a person.
+    if label == "Review queued":
+        return "review", done, "queued: next PR scan %s" % poll if poll else "queued for the next PR scan", None
+    if label == "Fixes stopped":
+        return "fix", done, "held: remediation limit %d/%d, needs human" % (attempts, max_attempts), None
+    if label == "Panel unavailable":
+        return "review", done, "held: review panel unavailable, retries used up — needs human", None
+    # Held: say what it is held on.
+    if label in ("Auto-merge held", "Merge refused"):
+        if ci and ci["failed"]:
+            return "tests", done, "held: CI failing (%d of %d checks failed)" % (ci["failed"], ci["total"]), ci
+        if pending_ci:
+            return "tests", done, "held: " + _ci_wait(ci), ci
+        # CI passed (or was never read): the hold is on something else.
+        return "merge", done, "held: " + _short(why, 120), ci
+    # Otherwise it waits on a human (approval, review or promotion).
+    if label == "Approved":
+        return "merge", done, "approved — waiting for a Merge click", None
+    if is_promotion(pr):
+        return "review", done, "awaiting review before promotion to %s" % pr.get("base_ref"), None
+    verdicts = " · ".join(c["label"] for c in panel_chips(pr))
+    return "review", done, "awaiting your review" + (" (%s)" % verdicts if verdicts else ""), None
+
+
+def flight_cards(processed, pr_reviews, active_tasks=None, ci_seen=None, next_poll_at=None,
+                 max_attempts=3, now=None):
+    """Items AppBuilder owns that are not running this second, with their true state.
+
+    Open PRs (being improved, awaiting review, CI or merge, promotions), issues
+    still in the pipeline, built features and fixes pending verification. Each
+    card's step, Now line and time-in-state come from cached records only."""
+    now = now or datetime.now()
+    running = {t.get("subject") for t in (active_tasks or {}).values()} | set(active_tasks or {})
+    poll = _until(next_poll_at, now.timestamp())
+    cards = []
+    pr_urls = set()
+    for key, pr in (pr_reviews or {}).items():
+        if pr.get("auto_merged") or pr.get("merged") or pr.get("denied") or pr.get("closed") or key in running:
+            continue
+        pr_urls.add(pr.get("url"))
+        stage, done, text, from_ci = _pr_flight(key, pr, ci_seen, next_poll_at, max_attempts, now)
+        repo, number = _repo_and_number(key, "#")
+        since = _when(pr.get("state_since") or pr.get("reviewed_at"))
+        # A Now line read from CI started when CI last changed, if that is later.
+        ci_since = _when((from_ci or {}).get("since"))
+        if ci_since and (not since or ci_since > since):
+            since = ci_since
+        ci = _ci_for(key, pr, ci_seen)
+        unknown = "unknown" if ci is None else "none" if not ci["total"] else None
+        cards.append({"id": key, "live": False, "kind": _pr_kind(pr), "title": "%s #%s" % (repo, number),
+                      "desc": pr.get("title") or "", "url": pr.get("url") or "", "base_ref": pr.get("base_ref") or "",
+                      "steps": stepper(stage, done, unknown), "now": text,
+                      "for": _duration((now - since).total_seconds()) if since else "", "_t": since})
+    for key, info in (processed or {}).items():
+        status = info.get("status")
+        if key in running or (status == "feature_built" and info.get("pr_url") in pr_urls):
+            continue
+        attempts = "attempt %s/%s" % (info["attempts"], info.get("max_attempts") or "?") if info.get("attempts") else ""
+        flight = {
+            "pending_verification": (("pr", {"triage", "fix", "tests", "review"}, "fix PR open — awaiting merge, then verification")
+                                     if info.get("commit_type") == "Pull Request"
+                                     else ("", {"triage", "fix", "tests", "review", "commit"},
+                                           "committed, awaiting verification")),
+            "processing": ("fix", {"triage"}, "fixing — continues on the next scan" + (" (%s)" % poll if poll else "")),
+            "awaiting_review": ("review", {"triage", "fix"}, "queued: waiting for reviewers"),
+            "reopened": ("triage", set(), "reopened — fixing again on the next scan" + (" (%s)" % poll if poll else "")),
+            "feature_classify_retry": ("triage", set(), "re-classifying" + (": " + attempts if attempts else "")),
+            "feature_needs_info": ("triage", set(), "waiting on requester: %d question(s) posted" % len(info.get("questions") or [])),
+            "feature_built": ("review", {"triage", "fix", "tests", "pr"}, "feature built — PR open, awaiting review"),
+        }.get(status)
+        if not flight:
+            continue
+        stage, done, text = flight
+        repo, number = _repo_and_number(key, ":")
+        since = _when(info.get("timestamp"))
+        cards.append({"id": key, "live": False, "title": "%s #%s" % (repo, number),
+                      "kind": "Feature" if str(status).startswith("feature") else "Bug fix",
+                      "desc": info.get("title") or "", "url": info.get("pr_url") or info.get("issue_url") or "",
+                      "steps": stepper(stage, done), "now": text,
+                      "for": _duration((now - since).total_seconds()) if since else "", "_t": since})
+    cards.sort(key=lambda c: c["_t"] or datetime.min)
+    for c in cards:
+        c.pop("_t", None)
+    return cards
+
+
+def stamp_state_since(rec, prev=None, now=None):
+    """Set rec["state_since"] to when the PR entered its current dashboard state.
+
+    The state is _pr_state's label and reason (or the outcome once closed); it is
+    kept from ``prev`` while unchanged, so "for 2h 10m" is time in THIS state."""
+    if rec.get("auto_merged") or rec.get("merged") or rec.get("denied") or rec.get("closed"):
+        label = pr_chip(rec)[1]
+    else:
+        # Label plus reason: "Improving" while fixing and while release-locked differ.
+        label = "%s: %s" % _pr_state(rec)[1:] + (" (split)" if _split_verdict(rec) else "")
+    prev = prev or {}
+    if prev.get("state_label") == label and prev.get("state_since"):
+        rec["state_since"] = prev["state_since"]
+    else:
+        rec["state_since"] = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    rec["state_label"] = label
+
+
+def _median_minutes(values):
+    """Median of a list of minutes, or None when it is empty."""
+    values = sorted(values)
+    if not values:
+        return None
+    mid = len(values) // 2
+    return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+
+
+def fmt_minutes(minutes):
+    """"38m" or "2h 5m" for the Median fix time card; "—" when unknown."""
+    if minutes is None:
+        return "—"
+    return _duration(minutes * 60)
+
+
+def _split_verdict(pr):
+    """True when both review panels ran and one approved while the other did not."""
+    v1, v2 = pr.get("panel_verdict"), pr.get("panel2_verdict")
+    if not v1 or not v2 or pr.get("panel_status") or pr.get("panel2_status"):
+        return False
+    return (v1 == "Approve") != (v2 == "Approve")
+
+
+def _outcome_detail(pr):
+    """Second line of a PR outcome: the panel verdicts with their confidences."""
+    return " · ".join(c["label"] for c in panel_chips(pr) if c["label"].startswith("Panel"))
+
+
+def promotion_lanes(repos, pr_reviews, now=None):
+    """One row per monitored repo (or repo with promotion PRs): its dev -> qa -> main lanes from cached PR reviews.
+
+    A lane shows the open promotion PR on it (number and state). The note says
+    what is known: a promotion waiting, or when the repo was last promoted.
+    Ahead/behind commit counts are not cached, so they are not shown."""
+    now = now or datetime.now()
+    rows = []
+    repos = sorted(repos or [])
+    # A repo with promotion PRs on record gets a row even when it is not monitored.
+    repos += sorted({k.rpartition("#")[0] for k, pr in (pr_reviews or {}).items() if is_promotion(pr)} - set(repos))
+    for full in repos:
+        lanes = {("dev", "qa"): None, ("qa", "main"): None}
+        last, off_lane = None, []
+        for key, pr in (pr_reviews or {}).items():
+            if key.rpartition("#")[0] != full or not is_promotion(pr):
+                continue
+            route = promotion_route(pr)
+            if pr.get("merged") or pr.get("auto_merged"):
+                then = _when(pr.get("outcome_at") or pr.get("reviewed_at"))
+                # A backmerge (main -> qa/dev) is not a promotion.
+                if then and route[0] != "main" and (last is None or then > last[0]):
+                    last = (then, route[1])
+            elif not (pr.get("denied") or pr.get("closed")):
+                lane = {"number": key.rpartition("#")[2], "url": pr.get("url") or "",
+                        "label": _pr_state(pr)[1], "held": _pr_state(pr)[0] == "needs"}
+                if route in lanes:
+                    lanes[route] = lane
+                else:
+                    off_lane.append((route, lane))
+        # Open PRs on the lanes, then backmerge or override (dev -> main) ones.
+        waiting = [(r, l) for r, l in lanes.items() if l] + off_lane
+        if waiting:
+            (src, dst), lane = waiting[-1]
+            note = "#%s %s → %s: %s" % (lane["number"], src, dst, lane["label"].lower())
+        elif last:
+            note = "last promoted to %s %s ago" % (last[1], _age(last[0], now))
+        else:
+            note = "no promotion PRs seen"
+        rows.append({"repo": full.rsplit("/", 1)[-1], "full": full,
+                     "qa": lanes[("dev", "qa")], "main": lanes[("qa", "main")], "note": note})
+    # Same repo name under two owners: show owner/repo so the rows differ.
+    names = [r["repo"] for r in rows]
+    for r in rows:
+        if names.count(r["repo"]) > 1:
+            r["repo"] = r["full"]
+    return rows
+
+
+def build(processed, pr_reviews, active_tasks=None, now=None, ci_seen=None, next_poll_at=None,
+          max_attempts=3, repos=None):
+    """The dashboard summary: {"kpis", "working", "flight", "attention", "in_flight", "outcomes", "lanes"}.
+
+    "working" are the running tasks' cards and "flight" the waiting in-flight
+    cards (Working on now); "in_flight" is the plain list the JSON API has always returned."""
     now = now or datetime.now()
     attention, in_flight, outcomes = [], [], []
-    fixed_recent = failed_recent = auto_merged_recent = 0
+    fixed_recent = fixed_prev = failed_recent = auto_merged_recent = 0
+    fix_minutes = []
 
-    def recent(then):
-        """True when `then` is inside the last WINDOW_DAYS days."""
-        return then is not None and (now - then).days < WINDOW_DAYS
+    def recent(then, weeks=1):
+        """True when `then` is inside the last `weeks` * WINDOW_DAYS days."""
+        return then is not None and (now - then).days < WINDOW_DAYS * weeks
 
     for key, info in (processed or {}).items():
         status = info.get("status")
@@ -249,17 +653,36 @@ def build(processed, pr_reviews, active_tasks=None, now=None):
                 "age": _age(then, now), "_t": then}
         if status in _ISSUE_NEEDS:
             group, label = _ISSUE_NEEDS[status]
-            attention.append({**base, "kind": "issue", "status": status, "group": group,
-                              "label": label, "why": _short(_issue_why(info))})
+            item = {**base, "kind": "issue", "status": status, "group": group,
+                    "label": label, "why": _short(_issue_why(info))}
+            if status == "failed":
+                if info.get("attempts"):
+                    item["label"] = "Fix failed · attempt %s/%s" % (info["attempts"], info.get("max_attempts") or info["attempts"])
+                item["reply"] = _short(info.get("failure_raw_excerpt") or "", 2000)
+                item["reply_model"] = info.get("failure_model") or ""
+            elif status == "feature_flagged" and info.get("flag_kind") == "boundary":
+                item["label"] = "Feature flagged · crosses boundary"
+                item["boundary"] = ", ".join(info.get("boundary_ids") or [])
+            attention.append(item)
         elif status in _ISSUE_WORKING:
             in_flight.append({**base, "kind": "issue", "label": _ISSUE_WORKING[status]})
         if status == "failed" and recent(then):
             failed_recent += 1
+        landed = _when(info.get("fixed_at")) or then
+        if status in _FIX_LANDED and recent(landed, 2) and not recent(landed):
+            fixed_prev += 1
+        if status in _FIX_LANDED and recent(landed):
+            fixed_recent += 1
         if status in _ISSUE_DONE and recent(then):
-            # "Fixed" counts what the Resolved filter shows; a plain close is not a fix.
-            fixed_recent += status != "closed"
-            outcomes.append({**base, "kind": "issue", "text": _ISSUE_DONE[status],
+            detail = {"verified": "verified in prod"}.get(status) or (
+                "%d file(s) changed" % len(info["files"]) if info.get("files") else "")
+            outcomes.append({**base, "kind": "issue", "text": _ISSUE_DONE[status], "detail": detail,
                              "tone": "muted" if status == "closed" else "ok"})
+        # Median fix time: issue opened -> fix committed (fixed_at never moves when
+        # a person later clicks Resolved), for fixes in the window.
+        opened, fixed_at = _when(info.get("opened_at")), _when(info.get("fixed_at"))
+        if status in _FIX_LANDED and opened and recent(fixed_at):
+            fix_minutes.append(max(0, (fixed_at - opened).total_seconds() / 60))
 
     for key, pr in (pr_reviews or {}).items():
         repo, number = _repo_and_number(key, "#")
@@ -280,11 +703,20 @@ def build(processed, pr_reviews, active_tasks=None, now=None):
                 text, tone = "denied", "bad"
             else:
                 text, tone = "closed without merging", "muted"
-            outcomes.append({**base, "kind": "pr", "text": text, "tone": tone, "panels": panel_chips(pr)})
+            outcomes.append({**base, "kind": "pr", "text": text, "tone": tone, "panels": panel_chips(pr),
+                             "detail": _outcome_detail(pr)})
             continue
         where, label, why = _pr_state(pr)
+        ci = (ci_seen or {}).get((key.rpartition("#")[0], pr.get("head")))
+        chip = _ci_chip(ci)
+        since = _when(pr.get("state_since") or pr.get("reviewed_at"))
         item = {**base, "kind": "pr", "label": label, "why": _short(why), "panels": panel_chips(pr),
-                "approved": bool(pr.get("approved")), "findings": pr.get("findings") or 0}
+                "approved": bool(pr.get("approved")), "findings": pr.get("findings") or 0,
+                "ci": chip[0], "ci_tone": chip[1],
+                "held_for": _duration((now - since).total_seconds()) if since and label == "Auto-merge held" else ""}
+        panel_hold = label == "Auto-merge held" and "panel" in why.lower()
+        if (label == "Awaiting review" or panel_hold) and _split_verdict(pr):
+            item["label"], item["split"] = "Split verdict", True
         if where == "needs":
             attention.append({**item, "group": "pr"})
         else:
@@ -297,27 +729,39 @@ def build(processed, pr_reviews, active_tasks=None, now=None):
     for item in attention + in_flight + outcomes:
         item.pop("_t", None)
 
-    # The tasks running right now (the dashboard's "Working on now"), oldest first.
-    working = []
-    for tid, task in (active_tasks or {}).items():
-        started = task.get("start_time")
-        working.append({"id": tid, "name": task.get("name") or "", "kind": task.get("kind") or "",
-                        "started": iso_utc(started)})
+    # The tasks running right now (Working on now), oldest first, then everything else in flight.
+    working = [task_card(tid, task, processed, pr_reviews, now) for tid, task in (active_tasks or {}).items()]
     working.sort(key=lambda t: str(t["started"] or ""))
+    flight = flight_cards(processed, pr_reviews, active_tasks, ci_seen, next_poll_at, max_attempts, now)
 
+    # Running, in flight and needs you are disjoint: flight_cards already drops
+    # running items; a running task on an item that needs you is counted there,
+    # and the PR scan between PRs (no subject) is housekeeping, not an item.
+    needs = {i["id"] for i in attention}
+    running = [tid for tid, task in (active_tasks or {}).items()
+               if not (tid == "PRReview" and not task.get("subject"))
+               and tid not in needs and task.get("subject") not in needs]
+    waiting = [c for c in flight if c["id"] not in needs]
+    done_7d = fixed_recent + failed_recent
     groups = {g: sum(1 for i in attention if i["group"] == g) for g in _GROUP_ORDER}
     return {
         "kpis": {
             "needs_you": len(attention),
-            "running": len(working),
-            "in_flight": len(in_flight),
+            "running": len(running),
+            "in_flight": len(waiting),
+            "in_progress": len(running) + len(waiting),
             "fixed_7d": fixed_recent,
+            "fixed_delta": fixed_recent - fixed_prev,
             "auto_merged_7d": auto_merged_recent,
             "failed_7d": failed_recent,
+            "success_pct": round(100 * fixed_recent / done_7d) if done_7d else None,
+            "median_fix_min": _median_minutes(fix_minutes),
         },
         "groups": groups,
         "working": working,
+        "flight": flight,
         "attention": attention,
         "in_flight": in_flight,
         "outcomes": outcomes[:OUTCOMES_MAX],
+        "lanes": promotion_lanes(repos, pr_reviews, now),
     }
