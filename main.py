@@ -537,6 +537,7 @@ import mission_control as _mission_control  # noqa: E402
 # One look for the dashboard: the All activity rows use Mission Control's chips.
 templates.env.globals.update(
     issue_chip=_mission_control.issue_chip, pr_chip=_mission_control.pr_chip,
+    pr_filter_counts=_mission_control.pr_filter_counts,
     panel_chips=_mission_control.panel_chips, age_of=_mission_control.age_of,
     iso_utc=_mission_control.iso_utc)
 import app_state as _app_state  # noqa: E402

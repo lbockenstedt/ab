@@ -129,16 +129,55 @@ def test_why_line_only_on_open_prs(page):
     assert "Why:" not in denied and "stale hold" not in denied
 
 
-def test_pr_chip_agrees_with_mission_control_on_self_clearing_holds():
-    """A hold AppBuilder clears by itself is in flight in Mission Control, so
-    the row chip must not call it Held; a hold on a person is Held in both."""
+def test_pr_chip_follows_mission_control_state():
+    """The row's filter key, chip and Why come from _pr_state, so an approved
+    PR that still needs a person is never a green Approved row."""
+    def chip(**pr):
+        return mission_control.pr_chip(pr)
+    # Approved, but GitHub refused the merge or a hold waits on a person: Pending filter.
+    assert chip(approved=True, merge_blocked_reason="branch protected")[:3] == ("reviewed", "Merge refused", "red")
+    assert chip(approved=True, auto_merge_blocked_reason=HOLD) == ("reviewed", "Held", "amber", HOLD)
+    # Approved and AppBuilder is merging it: working, under Pending until it lands.
+    assert chip(approved=True, auto_merge_reason="clean")[:3] == ("reviewed", "Auto-merging", "blue")
+    # Plainly approved, waiting for Merge: the only open PR under Approved.
+    assert chip(approved=True)[:3] == ("approved", "Approved", "green")
+    # Other needs-you states keep their own label instead of a generic Pending.
+    assert chip(auto_remediate_status="exhausted_human_review")[:2] == ("reviewed", "Fixes stopped")
+    assert chip()[:3] == ("reviewed", "Awaiting review", "indigo")
+    # Self-clearing holds are in flight in Mission Control, so not Held here.
     for hold in ("waiting on GitHub Actions — outage", "under a release lock", "in a blackout window"):
-        pr = {"auto_merge_blocked_reason": hold}
-        assert mission_control._pr_state(pr)[0] == "working"
-        assert mission_control.pr_chip(pr)[0] == "Pending"
-    pr = {"auto_merge_blocked_reason": HOLD}
-    assert mission_control._pr_state(pr)[:2] == ("needs", "Auto-merge held")
-    assert mission_control.pr_chip(pr)[:2] == ("Held", "amber")
+        assert mission_control._pr_state({"auto_merge_blocked_reason": hold})[0] == "working"
+        assert chip(auto_merge_blocked_reason=hold)[:3] == ("reviewed", "Improving", "blue")
+    # Finished PRs are unchanged; auto-merged wins over merged.
+    assert chip(approved=True, merged=True, auto_merged=True)[:2] == ("auto_merged", "Auto-merged")
+    assert chip(approved=True, merged=True)[:2] == ("merged", "Merged")
+    assert chip(denied=True, auto_merge_blocked_reason=HOLD) == ("denied", "Denied", "red", "")
+
+
+def test_approved_prs_that_need_a_person_are_pending_rows_and_counts(page, monkeypatch):
+    client, _, _ = page
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    def pr(n, **kw):
+        return {"repo": "o/lm", "number": n, "title": "PR %d" % n, "url": "u", "items": [], "reviewed_at": now, **kw}
+    monkeypatch.setitem(state, "pr_reviews", {
+        "o/lm#10": pr(10, approved=True, auto_merge_blocked_reason=HOLD),
+        "o/lm#11": pr(11, approved=True, merge_blocked_reason="branch protected"),
+        "o/lm#12": pr(12, approved=True),
+        "o/lm#13": pr(13, auto_merge_blocked_reason="feature_automerge_enabled is off"),
+    })
+    html = client.get("/").text
+    rows = {n: next(r for r in _rows(html) if "PR %d<" % n in r or "#%d<" % n in r) for n in (10, 11, 12, 13)}
+    def state_and_chip(r):
+        return (re.search(r'data-pr-state="(\w+)"', r).group(1), re.search(r'act-status[^>]*>([^<]+)<', r).group(1))
+    assert state_and_chip(rows[10]) == ("reviewed", "Held")
+    assert state_and_chip(rows[11]) == ("reviewed", "Merge refused")
+    assert state_and_chip(rows[12]) == ("approved", "Approved")
+    assert state_and_chip(rows[13]) == ("reviewed", "Awaiting review")
+    assert re.search(r'data-filter="pr_review"[^>]*>Pending <span class="act-count">3</span>', html)
+    assert re.search(r'data-filter="pr_approved"[^>]*>Approved <span class="act-count">1</span>', html)
+    # The Why line is _pr_state's why, not the raw hold string.
+    assert "GitHub refused the merge: branch protected" in rows[11]
+    assert "auto-merge does not apply (feature_automerge_enabled is off)" in rows[13]
 
 
 class _Ancestors(HTMLParser):

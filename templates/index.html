@@ -667,13 +667,11 @@
             <!-- Filters: the same keys filterActivity() has always used, with counts
                  (these replaced the old sidebar System Health counters). -->
             {% set _fc = feed_counts(state.processed) %}
-            {# PENDING = reviewed and still awaiting a human: NOT approved/merged/denied/closed/
-               auto_merged. This must be the `else` of the same chain that fills the other
-               buckets, mirroring the data-pr-state on the rows so the count and the filter
-               agree. auto_merged is checked FIRST (an auto-merged PR is ALSO merged=True). #}
-            {% set _pr_ns = namespace(pending=0, approved=0, merged=0, denied=0, auto_merged=0, closed=0) %}
+            {# Each PR filter chip counts the rows that filter shows: pr_filter_counts uses the
+               same pr_chip() classification as each row's data-pr-state, so a held or refused
+               approval counts (and filters) as Pending, as Mission Control files it. #}
+            {% set _pr_ns = pr_filter_counts(state.pr_reviews) %}
             {% set _pr_totals = state.pr_merge_totals or {'merged': 0, 'auto_merged': 0} %}
-            {% for _pk, _pr in (state.pr_reviews or {}).items() %}{% if _pr.auto_merged %}{% set _pr_ns.auto_merged = _pr_ns.auto_merged + 1 %}{% elif _pr.merged %}{% set _pr_ns.merged = _pr_ns.merged + 1 %}{% elif _pr.denied %}{% set _pr_ns.denied = _pr_ns.denied + 1 %}{% elif _pr.closed %}{% set _pr_ns.closed = _pr_ns.closed + 1 %}{% elif _pr.approved %}{% set _pr_ns.approved = _pr_ns.approved + 1 %}{% else %}{% set _pr_ns.pending = _pr_ns.pending + 1 %}{% endif %}{% endfor %}
             <div class="px-5 py-3 border-b border-slate-200 flex flex-col gap-2">
                 <div class="flex items-start gap-2">
                     <span class="text-xs font-bold text-slate-500 w-24 flex-none pt-1">Issues</span>
@@ -693,8 +691,8 @@
                 <div class="flex items-start gap-2">
                     <span class="text-xs font-bold text-slate-500 w-24 flex-none pt-1">Pull requests</span>
                     <div class="flex flex-wrap items-center gap-2">
-                    {{ filter_chip('pr_review', 'Pending', _pr_ns.pending, 'PRs AppBuilder has pre-reviewed that still wait on a person (held ones included)') }}
-                    {{ filter_chip('pr_approved', 'Approved', _pr_ns.approved, 'Reviewed PRs a human has Approved') }}
+                    {{ filter_chip('pr_review', 'Pending', _pr_ns.reviewed, 'PRs AppBuilder has pre-reviewed that still wait on a person (held ones included)') }}
+                    {{ filter_chip('pr_approved', 'Approved', _pr_ns.approved, 'PRs a human has Approved that now only wait for a Merge (held or refused approvals stay under Pending)') }}
                     {{ filter_chip('pr_merged', 'Merged', _pr_totals.merged, 'PRs merged (lifetime total; the list shows only the most recent reviews)') }}
                     {{ filter_chip('pr_auto_merged', 'Auto-merged', _pr_totals.auto_merged, 'PRs auto-merged with no human click (lifetime total; the list shows only the most recent reviews)') }}
                     {{ filter_chip('pr_denied', 'Denied', _pr_ns.denied, 'Reviewed PRs a human has Denied') }}
@@ -842,16 +840,16 @@
                 {% set _chip = pr_chip(pr) %}
                 {% set p1_conf = pr.get('panel_confidence') %}
                 {% set p2_conf = pr.get('panel2_confidence') %}
-                {% set _hold = pr.get('auto_merge_blocked_reason') if not (pr.merged or pr.auto_merged or pr.denied or pr.closed) else '' %}
+                {% set _hold = _chip[3] %}
                 {% set _done = pr.auto_merged or pr.merged %}
-                <div class="act-row px-5 py-3 hover:bg-slate-50 last:rounded-b-lg" data-status="pr_review" data-pr-state="{% if pr.auto_merged %}auto_merged{% elif pr.merged %}merged{% elif pr.denied %}denied{% elif pr.closed %}closed{% elif pr.approved %}approved{% else %}reviewed{% endif %}" style="display:none">
+                <div class="act-row px-5 py-3 hover:bg-slate-50 last:rounded-b-lg" data-status="pr_review" data-pr-state="{{ _chip[0] }}" style="display:none">
                     <div class="flex items-center gap-3 min-w-0">
                         <a href="{{ pr.url }}" target="_blank" class="font-bold text-navy hover:underline whitespace-nowrap"><i class="fas fa-code-branch mr-1 text-slate-500"></i>{{ pr.repo.rsplit('/', 1)[-1] }} #{{ pr.number }}</a>
                         {# Where this PR is HEADED: in a dev -> qa -> main chain the target branch
                            is the most important fact about a PR. Older records have no base_ref. #}
                         {% if pr.base_ref %}<span class="text-xs px-1.5 py-0.5 rounded whitespace-nowrap {{ 'bg-amber-100 text-amber-800 border border-amber-300' if pr.base_ref in ('main', 'master') else 'bg-slate-100 text-slate-600' }}" title="This PR merges into {{ pr.base_ref }}{% if pr.head_ref %} from {{ pr.head_ref }}{% endif %}.{% if pr.base_ref in ('main', 'master') %} This is a protected branch.{% endif %}"><i class="fas fa-arrow-right-long mr-1"></i>{{ pr.base_ref }}</span>{% endif %}
                         <span class="flex-1 min-w-0 text-sm text-slate-700 truncate" title="{{ pr.title or '' }}">{{ pr.title or '' }}</span>
-                        <span class="act-status text-xs px-1.5 py-0.5 rounded whitespace-nowrap bg-{{ _chip[1] }}-50 text-{{ _chip[1] }}-700" title="{% if pr.auto_merged %}Auto-merged by feature auto-drive, no human clicked Approve/Merge. {{ pr.auto_merge_reason or '' }}{% else %}{{ _chip[2] or _chip[0] }}{% endif %}">{{ _chip[0] }}{% if pr.auto_merged and pr.get('auto_merge_score') is not none %} · {{ (pr.auto_merge_score * 100)|round|int }}%{% endif %}</span>
+                        <span class="act-status text-xs px-1.5 py-0.5 rounded whitespace-nowrap bg-{{ _chip[2] }}-50 text-{{ _chip[2] }}-700" title="{% if pr.auto_merged %}Auto-merged by feature auto-drive, no human clicked Approve/Merge. {{ pr.auto_merge_reason or '' }}{% else %}{{ _chip[3] or _chip[1] }}{% endif %}">{{ _chip[1] }}{% if pr.auto_merged and pr.get('auto_merge_score') is not none %} · {{ (pr.auto_merge_score * 100)|round|int }}%{% endif %}</span>
                         <span class="text-xs text-slate-500 whitespace-nowrap w-8 text-right" title="Reviewed {{ pr.reviewed_at or '' }}">{{ age_of(pr.reviewed_at) }}</span>
                         <div class="act-actions flex-none flex items-center gap-1.5 justify-end w-40">
                             {% if _done %}

@@ -157,27 +157,41 @@ def issue_chip(status):
 
 
 def pr_chip(pr):
-    """(label, tone, why) of the one status chip on an All activity PR row.
+    """(filter_key, label, tone, why) of an All activity PR row.
 
-    Same precedence as the row's data-pr-state: auto_merged is checked before
-    merged because an auto-merged PR is also merged=True. An open PR reads as
-    Mission Control files it (_pr_state): "Held" only when the hold waits on a
-    person, so a self-clearing hold (GitHub Actions, release lock, blackout)
-    stays "Pending" here just as it stays in flight up there."""
+    One classification feeds the row's data-pr-state (filter_key), its status
+    chip, its Why line and the filter chip counts (pr_filter_counts), so none of
+    them can drift from Mission Control. auto_merged is checked before merged
+    because an auto-merged PR is also merged=True. An open PR follows _pr_state:
+    it files under 'approved' only when it is plainly approved and waits for a
+    Merge; every other open PR (held or refused approvals included) is pending
+    ('reviewed')."""
     if pr.get("auto_merged"):
-        return "Auto-merged", "teal", ""
+        return "auto_merged", "Auto-merged", "teal", ""
     if pr.get("merged"):
-        return "Merged", "purple", ""
+        return "merged", "Merged", "purple", ""
     if pr.get("denied"):
-        return "Denied", "red", ""
+        return "denied", "Denied", "red", ""
     if pr.get("closed"):
-        return "Closed", "slate", ""
+        return "closed", "Closed", "slate", ""
     kind, label, why = _pr_state(pr)
-    if pr.get("approved"):
-        return "Approved", "green", why
-    if kind == "needs" and label == "Auto-merge held":
-        return "Held", "amber", why
-    return "Pending", "indigo", why
+    if kind == "working":
+        return "reviewed", label, "blue", why
+    if label == "Approved":
+        return "approved", "Approved", "green", why
+    if label == "Merge refused":
+        return "reviewed", label, "red", why
+    if label == "Auto-merge held":
+        return "reviewed", "Held", "amber", why
+    return "reviewed", label, "indigo", why
+
+
+def pr_filter_counts(pr_reviews):
+    """How many PR rows each Pull requests filter chip shows, keyed by data-pr-state."""
+    counts = dict.fromkeys(("reviewed", "approved", "merged", "auto_merged", "denied", "closed"), 0)
+    for pr in (pr_reviews or {}).values():
+        counts[pr_chip(pr)[0]] += 1
+    return counts
 
 
 def _pr_state(pr):
