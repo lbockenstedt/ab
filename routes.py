@@ -29,6 +29,7 @@ def _model_stage_rows(config, model_options):
 
 
 # Shared config, state, helpers and workers re-exported by main.
+from log_scan import _explicit_log_level  # main re-exports only public names
 from main import (
     CHAT_CONFIG_DEFAULTS,
     CONFIG_DIR,
@@ -740,7 +741,7 @@ async def pr_review_deny(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Branch promotion (dev -> qa -> main), driven from the footer action bar.
+# Branch promotion (dev -> qa -> main), driven from the Release Management view.
 #
 # These endpoints only ever DISPATCH .github/workflows/promote.yml, which
 # prepares a `promote/<src>-to-<tgt>` branch and OPENS a pull request. Nothing
@@ -2075,6 +2076,53 @@ async def toggle_model(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+_LOG_LINE = re.compile(
+    r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)\S*\s+-\s+(.+?)\s+-\s+"
+    r"(CRITICAL|FATAL|ERROR|WARNING|WARN|NOTICE|INFO|DEBUG|TRACE)\s+-\s?([\s\S]*)$")
+_LOG_TS = re.compile(r"^(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d)\S*\s*([\s\S]*)$")
+# The viewer's filters know these levels; the rest map onto them.
+_LOG_LEVEL_ALIAS = {"warn": "warning", "fatal": "critical", "notice": "info", "trace": "debug"}
+
+
+def log_entry(line, module=""):
+    """Split one "TS - logger - LEVEL - msg" log line for the log viewer.
+
+    A timestamped line in another shape keeps its time with no level; a line
+    with no timestamp keeps its text as the message, with no time or level.
+    """
+    m = _LOG_LINE.match(line)
+    if m:
+        ts, logger_name, level, msg = m.groups()
+        level = _LOG_LEVEL_ALIAS.get(level.lower(), level.lower())
+        return {"module": module or logger_name, "ts": ts, "level": level, "msg": msg}
+    m = _LOG_TS.match(line)
+    if m:
+        level = (_explicit_log_level(line) or "").lower()  # e.g. "[ERROR]"
+        return {"module": module, "ts": m.group(1), "level": level, "msg": m.group(2)}
+    return {"module": module, "ts": "", "level": "", "msg": line}
+
+
+def group_log_lines(lines):
+    """Turn log lines (oldest first) into viewer entries, newest first.
+
+    Lines without a timestamp (tracebacks, multi-line banners) belong to the entry
+    above them, so they join its message instead of becoming rows of their own.
+    """
+    entries = []
+    for line in lines:
+        if not line.strip():
+            continue
+        entry = log_entry(line)
+        # Only a timestamped entry has continuation lines; a source with no
+        # timestamps at all keeps one row per line.
+        if not entry["ts"] and entries and entries[-1]["ts"]:
+            above = entries[-1]
+            above["msg"] = above["msg"] + "\n" + line if above["msg"] else line
+        else:
+            entries.append(entry)
+    return entries[::-1]
+
+
 @router.get("/logs")
 async def get_logs(request: Request):
     """Show the last 100 lines of AppBuilder's own log, newest first."""
@@ -2085,21 +2133,17 @@ async def get_logs(request: Request):
         current_log = get_log_path()
         with open(current_log, "r") as f:
             lines = f.readlines()
-        tail = [l.rstrip("\n") for l in lines[-100:]]
+        # Start the last 100 lines at an entry's first line, so a traceback
+        # that crosses the cut is not shown without its entry.
+        start = max(len(lines) - 100, 0)
+        while start > 0 and not _LOG_TS.match(lines[start]):
+            start -= 1
+        tail = [l.rstrip("\n") for l in lines[start:]]
         logs = "\n".join(reversed(tail))  # raw string kept for the Copy button
-        # Structured rows (newest first) so the Logs view renders in the SAME
-        # Component | Timestamp | Message table as Hub Logs. Parse "TS - COMPONENT
-        # - LEVEL - msg"; a line without that shape (traceback continuation) gets
-        # a blank component and shows verbatim.
-        for line in reversed(tail):
-            if not line.strip():
-                continue
-            parts = line.split(" - ", 2)
-            module = parts[1].strip() if len(parts) >= 3 and line[:4].isdigit() else ""
-            log_rows.append({"module": module, "log": line})
+        log_rows = group_log_lines(tail)
     except Exception as e:
         logs = f"Error reading logs from {get_log_path()}: {e}"
-        log_rows = [{"module": "", "log": logs}]
+        log_rows = [{**log_entry(logs), "level": "error"}]  # never hidden by the Errors filter
     # Render the logs view.
     return templates.TemplateResponse(request=request, name="index.html",
                                       context={"view": "logs", "logs": logs,
@@ -2141,10 +2185,10 @@ async def get_hub_logs_page(request: Request):
     # (still large) result is truncated to that after the sort rather than
     # handing Jinja an unbounded table to render.
     loop = asyncio.get_event_loop()
-    all_logs = await loop.run_in_executor(None, get_hub_logs, HUB_LOGS_PAGE_LIMIT)
+    all_logs = await loop.run_in_executor(None, get_hub_logs, HUB_LOGS_PAGE_LIMIT, True)
     total_logs = await loop.run_in_executor(None, hub_log_line_count)
     # Keep the newest rows, or explain why there are none.
-    logs = all_logs[:HUB_LOGS_PAGE_LIMIT]
+    logs = [log_entry(row["log"], row["module"]) for row in all_logs[:HUB_LOGS_PAGE_LIMIT]]
     if logs:
         fetch_status = 200
     else:

@@ -61,7 +61,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script>
       // Auto-refresh is JS-driven (not <meta http-equiv="refresh">) so the
-      // footer "Pause Refresh" button can stop/resume it. Intervals come from
+      // topbar Actions → "Pause refresh" item can stop/resume it. Intervals come from
       // config.json via the hub state dict.
       window.BF_REFRESH = {
         view: "{{ view }}",
@@ -234,8 +234,8 @@
         .chat-user { align-self: flex-end; align-items: flex-end; }
         .chat-assistant { align-self: flex-start; align-items: flex-start; }
         .chat-bubble { border-radius: 12px; padding: 10px 14px; font-size: 0.875rem; line-height: 1.4; }
-        .chat-user .chat-bubble { background-color: #334155; color: #fff; border-bottom-right-radius: 3px; }
-        .chat-assistant .chat-bubble { background-color: #1e293b; color: #4ade80; border-bottom-left-radius: 3px; }
+        .chat-user .chat-bubble { background-color: #006750; color: #fff; border-bottom-right-radius: 3px; }
+        .chat-assistant .chat-bubble { background-color: #fff; color: #1e293b; border: 1px solid #e2e8f0; border-bottom-left-radius: 3px; }
         .chat-role { font-size: 0.75rem; color: #64748b; margin-bottom: 2px; }
         .chat-pending { opacity: 0.7; }
         .chat-cursor::after {
@@ -243,7 +243,7 @@
             display: inline-block;
             margin-left: 2px;
             animation: blink 1s step-end infinite;
-            color: #4ade80;
+            color: #01A982;
         }
         .chat-side-item {
             display: flex;
@@ -430,6 +430,30 @@
             {% set _hs_color = 'bg-green-500' if (_hs == 'approved' and state.hub_agent_connected)
                 else 'bg-amber-500' if _hs == 'approved'
                 else {'pending':'bg-yellow-500','error':'bg-red-500'}.get(_hs, 'bg-slate-500') %}
+            <!-- Run controls (were the footer action bar): Scan Now stays one click; the
+                 rest sit in the Actions menu. A chip shows while Blackout or Stop is on
+                 so the state is visible without opening the menu. -->
+            <span id="hdr-blackout-chip" class="{{ '' if state.blackout else 'hidden ' }}px-2 py-0.5 rounded-full text-xs font-bold bg-violet-500/20 text-violet-200" title="Triage only — no fix commits pushed">Blackout ON</span>
+            <span id="hdr-paused-chip" class="{{ '' if state.paused else 'hidden ' }}px-2 py-0.5 rounded-full text-xs font-bold bg-orange-500/20 text-orange-200" title="AppBuilder is stopped — Actions → Resume">Stopped</span>
+            <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')" class="inline">
+                <button type="submit" title="Check for issues now" class="px-3 py-1 rounded-full text-xs font-bold border border-white/30 text-white/90 hover:border-white hover:text-white"><i class="fas fa-search mr-1"></i>Scan Now</button>
+            </form>
+            <!-- Fleet rule 7.6: the version and the Update button are always visible. -->
+            <span id="hdr-version" class="text-xs opacity-70" title="AppBuilder version">v{{ state.version }}</span>
+            <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')" class="inline">
+                <button type="submit" title="Check for AppBuilder updates" class="px-3 py-1 rounded-full text-xs font-bold border border-white/30 text-white/90 hover:border-white hover:text-white"><i class="fas fa-cloud-download-alt mr-1"></i>Update</button>
+            </form>
+            <details id="hdr-actions" class="act-menu relative">
+                <summary class="px-3 py-1 rounded-full text-xs font-bold border border-white/30 text-white/90 hover:border-white cursor-pointer select-none" title="Restart, hub update, blackout, stop">Actions ▾</summary>
+                <div class="absolute right-0 z-50 mt-2 min-w-[13rem] bg-white border border-slate-200 rounded shadow-lg py-1">
+                    <form action="/restart" method="post" onsubmit="handleFormSubmit(event, '/restart')"><button type="submit" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Restart AppBuilder"><i class="fas fa-sync-alt w-4 mr-1"></i>Restart AppBuilder</button></form>
+                    <form action="/trigger_hub_update" method="post" onsubmit="handleFormSubmit(event, '/trigger_hub_update')"><button type="submit" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Trigger a hub update"><i class="fas fa-network-wired w-4 mr-1"></i>Hub update</button></form>
+                    <div class="border-t border-slate-200 my-1"></div>
+                    <button type="button" onclick="toggleBlackout()" id="blackout-btn" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Triage only — no fix commits pushed"><i class="fas fa-ban w-4 mr-1"></i>{% if state.blackout %}Turn Blackout off{% else %}Blackout{% endif %}</button>
+                    <button type="button" onclick="togglePause()" id="pause-btn" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Stop or resume scanning and fixing">{% if state.paused %}<i class="fas fa-play w-4 mr-1"></i>Resume{% else %}<i class="fas fa-pause w-4 mr-1"></i>Stop{% endif %}</button>
+                    <button type="button" onclick="toggleRefreshPause()" id="refresh-pause-btn" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 whitespace-nowrap" title="Pause / resume page auto-refresh"><i class="fas fa-pause w-4 mr-1"></i>Pause refresh</button>
+                </div>
+            </details>
             <div id="hub-status-group" class="flex items-center gap-2 group relative cursor-pointer" onclick="location.href='/diagnostics'" title="Hub agent connection status">
                 <div id="hub-status-dot" class="w-2 h-2 rounded-full transition-all shadow-[0_0_5px_rgba(0,0,0,0.6)] {{ _hs_color }}"></div>
                 <span class="text-xs opacity-60">Hub</span>
@@ -443,7 +467,7 @@
         </div>
     </header>
 
-    <!-- MIDDLE AREA: sidebar + viewport (header/footer span full width above/below) -->
+    <!-- MIDDLE AREA: sidebar + viewport (header spans full width above) -->
     <div class="flex flex-1 min-h-0 overflow-hidden">
     <!-- Sidebar (LM-HUB shell: white left nav) -->
     <aside class="hpe-sidebar w-56 flex-none flex flex-col">
@@ -948,6 +972,57 @@
         </div>
         {% endif %}
 
+        {% macro log_viewer(rows, empty) -%}
+        {# Log viewer shared by Logs and Hub Logs: one compact line per entry
+           (continuation lines are already folded into their entry by the route),
+           a level chip, and client-side level + text filters (filterLogs). #}
+        <div class="px-6 py-2 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center gap-2">
+            {% for key, label in [('all', 'All'), ('warning', 'Warnings+'), ('error', 'Errors')] %}
+            <button type="button" data-log-level="{{ key }}" class="log-level-btn filter-btn px-3 py-1 rounded-full text-xs font-bold border transition-all {{ 'bg-navy text-white border-navy' if key == 'all' else 'bg-white text-slate-600 border-slate-300 hover:border-brand' }}">{{ label }}</button>
+            {% endfor %}
+            <input id="log-search" type="search" placeholder="Filter text…" class="ml-auto w-64 max-w-full px-3 py-1 text-xs rounded-full border border-slate-300 focus:border-brand focus:outline-none">
+        </div>
+        <div id="log-rows" class="font-mono text-xs">
+            {% for log in rows %}
+            <div class="log-row flex gap-3 px-6 py-1.5 border-b border-slate-100 hover:bg-slate-50" data-level="{{ log.level }}">
+                <span class="w-16 shrink-0 text-slate-500 tabular-nums" title="{{ log.ts }}">{{ log.ts[11:19] }}</span>
+                <span class="w-16 shrink-0">{% if log.level %}<span class="px-1.5 rounded font-bold {{ {'error': 'bg-red-100 text-red-700', 'critical': 'bg-red-100 text-red-700', 'warning': 'bg-amber-100 text-amber-800', 'debug': 'text-slate-400'}.get(log.level, 'text-slate-500') }}">{{ log.level|upper }}</span>{% endif %}</span>
+                <span class="w-44 shrink-0 truncate text-slate-600" title="{{ log.module }}">{{ log.module }}</span>
+                <span class="flex-1 min-w-0 text-slate-800 whitespace-pre-wrap break-words">{{ log.msg }}</span>
+            </div>
+            {% endfor %}
+            <div id="log-empty" class="{{ 'hidden ' if rows }}px-6 py-8 text-center text-slate-500 italic font-sans text-sm">{{ empty }}</div>
+        </div>
+        <script>
+        // Show only the log rows at or above the chosen level that contain the search text.
+        function filterLogs(level) {
+            const btns = document.querySelectorAll('.log-level-btn');
+            if (level) btns.forEach(b => {
+                const on = b.dataset.logLevel === level;
+                b.classList.toggle('bg-navy', on); b.classList.toggle('text-white', on); b.classList.toggle('border-navy', on);
+                b.classList.toggle('bg-white', !on); b.classList.toggle('text-slate-600', !on); b.classList.toggle('border-slate-300', !on);
+            });
+            const active = document.querySelector('.log-level-btn.bg-navy');
+            const want = active ? active.dataset.logLevel : 'all';
+            const allowed = {all: null, warning: ['warning', 'error', 'critical'], error: ['error', 'critical']}[want];
+            const q = (document.getElementById('log-search').value || '').toLowerCase();
+            let shown = 0;
+            document.querySelectorAll('#log-rows .log-row').forEach(r => {
+                const ok = (!allowed || allowed.includes(r.dataset.level)) && (!q || r.textContent.toLowerCase().includes(q));
+                r.style.display = ok ? '' : 'none';
+                if (ok) shown++;
+            });
+            const empty = document.getElementById('log-empty');
+            if (document.querySelector('#log-rows .log-row')) {
+                empty.textContent = 'No entries match the filter.';
+                empty.classList.toggle('hidden', shown > 0);
+            }
+        }
+        document.querySelectorAll('.log-level-btn').forEach(b => b.addEventListener('click', () => filterLogs(b.dataset.logLevel)));
+        document.getElementById('log-search').addEventListener('input', () => filterLogs());
+        </script>
+        {%- endmacro %}
+
         {% if view == 'logs' %}
         <div class="hpe-card rounded-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white flex-wrap gap-2">
@@ -969,32 +1044,7 @@
                 </div>
                 <div id="log-analysis-body" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded-lg border border-slate-200 p-4 max-h-96 overflow-y-auto">—</div>
             </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0">
-                        <tr class="border-b border-slate-200">
-                            <th class="px-6 py-3 font-medium w-28">Component</th>
-                            <th class="px-6 py-3 font-medium w-40">Timestamp</th>
-                            <th class="px-6 py-3 font-medium">Log Message</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-200">
-                        {% if log_rows %}
-                            {% for log in log_rows %}
-                            <tr class="hover:bg-slate-50 transition-colors">
-                                <td class="px-6 py-4 font-mono text-xs text-slate-600 align-top">{{ log.module }}</td>
-                                <td class="px-6 py-4 text-slate-500 text-xs font-mono align-top whitespace-nowrap">{{ log.log[:19] if log.log and log.log[0].isdigit() else '' }}</td>
-                                <td class="px-6 py-4 text-slate-700 font-mono text-xs whitespace-pre-wrap">{{ log.log }}</td>
-                            </tr>
-                            {% endfor %}
-                        {% else %}
-                            <tr>
-                                <td colspan="3" class="px-6 py-8 text-center text-slate-500 italic">No logs available.</td>
-                            </tr>
-                        {% endif %}
-                    </tbody>
-                </table>
-            </div>
+            {{ log_viewer(log_rows, 'No logs available.') }}
             <pre id="system-logs-text" class="hidden">{{ logs }}</pre>
         </div>
         {% endif %}
@@ -1127,7 +1177,7 @@
                     <p class="text-xs text-slate-500">Newest entries first · Fetched {{ hub_fetch_time or 'now' }}
                         {% if hub_logs %}
                             {% if hub_logs_total and hub_logs_total > hub_logs|length %}
-                                · showing newest {{ hub_logs|length }} of {{ hub_logs_total }} entries
+                                · showing newest {{ hub_logs|length }} entries ({{ hub_logs_total }} lines synced)
                             {% else %}
                                 · {{ hub_logs|length }} entries
                             {% endif %}
@@ -1157,34 +1207,7 @@
             <div id="hub-raw-output" class="hidden px-6 py-3 bg-slate-900 border-b border-slate-700">
                 <pre class="text-xs text-green-300 max-h-64 overflow-y-auto whitespace-pre-wrap" id="hub-raw-pre">Loading…</pre>
             </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-50 text-slate-500 text-xs sticky top-0">
-                        <tr class="border-b border-slate-200">
-                            <th class="px-6 py-3 font-medium w-28">Module</th>
-                            <th class="px-6 py-3 font-medium w-40">Timestamp</th>
-                            <th class="px-6 py-3 font-medium">Log Message</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-200">
-                        {% if hub_logs %}
-                            {% for log in hub_logs %}
-                            <tr class="hover:bg-slate-50 transition-colors">
-                                <td class="px-6 py-4 font-mono text-xs text-slate-600 align-top">{{ log.module }}</td>
-                                <td class="px-6 py-4 text-slate-500 text-xs font-mono align-top whitespace-nowrap">{{ log.log[:19] if log.log and log.log[0].isdigit() else '' }}</td>
-                                <td class="px-6 py-4 text-slate-700 font-mono text-xs whitespace-pre-wrap">{{ log.log }}</td>
-                            </tr>
-                            {% endfor %}
-                        {% else %}
-                            <tr>
-                                <td colspan="3" class="px-6 py-8 text-center text-slate-500 italic">
-                                    {% if hub_fetch_error %}{{ hub_fetch_error }}{% else %}No logs retrieved from Hub. Check HUB_QUERY_URL in settings.{% endif %}
-                                </td>
-                            </tr>
-                        {% endif %}
-                    </tbody>
-                </table>
-            </div>
+            {{ log_viewer(hub_logs, hub_fetch_error or 'No logs retrieved from Hub. Check HUB_QUERY_URL in settings.') }}
         </div>
         <script>
         async function showHubRaw() {
@@ -2827,7 +2850,7 @@
                                 <div class="space-y-2">
                                     <label class="text-sm font-medium text-slate-600">Repository scope</label>
                                     <input type="text" name="promote_schedule_repo" value="{{ settings.get('promote_schedule_repo', '__all__') }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                    <span class="text-xs text-slate-500"><code>__all__</code> (default) = every promotable repo, exactly like the footer "All" button. Or a single <code>owner/name</code>.</span>
+                                    <span class="text-xs text-slate-500"><code>__all__</code> (default) = every promotable repo. Or a single <code>owner/name</code>.</span>
                                 </div>
                             </div>
                         </div>
@@ -2888,7 +2911,7 @@
                     </button>
                 </div>
 
-                <div id="chat-transcript" class="flex flex-col gap-3 overflow-y-auto bg-slate-900 rounded-lg p-4 flex-grow min-h-0">
+                <div id="chat-transcript" class="flex flex-col gap-3 overflow-y-auto bg-slate-50 border border-slate-200 rounded-lg p-4 flex-grow min-h-0">
                     {% for msg in chat_history %}
                     <div class="chat-msg {{ 'chat-user' if msg.role == 'user' else 'chat-assistant' }}">
                         <div class="chat-role">{{ msg.role }}</div>
@@ -3259,53 +3282,6 @@
     </main>
     </div><!-- /middle row -->
 
-    <footer class="h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all shrink-0" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
-        <div class="flex justify-between w-full items-center">
-            <div class="flex items-center gap-4 opacity-70">
-                <span>© 2026 AppBuilder</span>
-            </div>
-            <div class="flex items-center gap-2">
-                <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')" class="inline">
-                    <button type="submit" title="Check for Updates"
-                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
-                        <i class="fas fa-cloud-download-alt mr-1"></i>Updates
-                    </button>
-                </form>
-                <form action="/scan_now" method="post" onsubmit="handleFormSubmit(event, '/scan_now')" class="inline">
-                    <button type="submit" title="Check for Issues Now"
-                        class="text-xs opacity-70 hover:opacity-100 border border-brand hover:border-brand text-primary-text px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
-                        <i class="fas fa-search mr-1"></i>Scan Now
-                    </button>
-                </form>
-                <form action="/restart" method="post" onsubmit="handleFormSubmit(event, '/restart')" class="inline">
-                    <button type="submit" title="Restart AppBuilder"
-                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
-                        <i class="fas fa-sync-alt mr-1"></i>Restart
-                    </button>
-                </form>
-                <form action="/trigger_hub_update" method="post" onsubmit="handleFormSubmit(event, '/trigger_hub_update')" class="inline">
-                    <button type="submit" title="Trigger Hub Update"
-                        class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
-                        <i class="fas fa-network-wired mr-1"></i>Hub Update
-                    </button>
-                </form>
-                <span class="border-l border-slate-600 h-4 mx-1"></span>
-                <button onclick="toggleBlackout()" id="blackout-btn" title="Triage only — no fix commits pushed"
-                    class="text-xs px-2 py-0.5 rounded-full transition-all whitespace-nowrap {% if state.blackout %}opacity-100 border border-violet-400 text-violet-300{% else %}opacity-70 hover:opacity-100 border border-slate-500 hover:border-white{% endif %}">
-                    <i class="fas fa-ban mr-1"></i>{% if state.blackout %}Blackout ON{% else %}Blackout{% endif %}
-                </button>
-                <button onclick="togglePause()" id="pause-btn"
-                    class="text-xs px-2 py-0.5 rounded-full transition-all whitespace-nowrap {% if state.paused %}opacity-100 border border-green-400 text-green-300{% else %}opacity-70 hover:opacity-100 border border-orange-400 text-orange-300 hover:border-orange-300{% endif %}">
-                    {% if state.paused %}<i class="fas fa-play mr-1"></i>Resume{% else %}<i class="fas fa-pause mr-1"></i>Stop{% endif %}
-                </button>
-                <button onclick="toggleRefreshPause()" id="refresh-pause-btn" title="Pause / resume page auto-refresh"
-                    class="text-xs opacity-70 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all whitespace-nowrap">
-                    <i class="fas fa-pause mr-1"></i>Pause Refresh
-                </button>
-                <span class="text-xs opacity-60 ml-2">v{{ state.version }}</span>
-            </div>
-        </div>
-    </footer>
     <script>
         // Lightweight toast notifier — replaces alert() for completion/error
         // messages so an action doesn't pop a blocking modal. Types: success |
@@ -3738,7 +3714,7 @@
             });
         };
 
-        // ---- Configurable page auto-refresh + Pause Refresh (footer) ----
+        // ---- Configurable page auto-refresh + Pause refresh (topbar Actions menu) ----
         // Replaces the old <meta http-equiv="refresh"> so the auto-reload can be
         // paused/resumed. Pause state persists in localStorage across reloads.
         (function () {
@@ -3762,13 +3738,9 @@
 
             function syncBtn(btn) {
                 if (!btn) return;
-                if (isPaused()) {
-                    btn.innerHTML = '<i class="fas fa-play mr-1"></i>Resume Refresh';
-                    btn.className = 'text-xs px-2 py-0.5 rounded transition-all whitespace-nowrap opacity-100 border border-green-400 text-green-300';
-                } else {
-                    btn.innerHTML = '<i class="fas fa-pause mr-1"></i>Pause Refresh';
-                    btn.className = 'text-xs px-2 py-0.5 rounded transition-all whitespace-nowrap opacity-70 hover:opacity-100 border border-slate-500 hover:border-white';
-                }
+                btn.innerHTML = isPaused()
+                    ? '<i class="fas fa-play w-4 mr-1"></i>Resume refresh'
+                    : '<i class="fas fa-pause w-4 mr-1"></i>Pause refresh';
             }
             window.toggleRefreshPause = function () {
                 const btn = document.getElementById('refresh-pause-btn');
@@ -4287,19 +4259,15 @@
 
         document.addEventListener('DOMContentLoaded', loadPromoteRepos);
 
+        // Topbar Actions menu: relabel the item and show/hide the state chip.
         async function togglePause() {
             try {
                 const resp = await fetch('/api/toggle-pause', { method: 'POST' });
                 const data = await resp.json();
-                const btn = document.getElementById('pause-btn');
-                const base = 'text-xs px-2 py-0.5 rounded transition-all whitespace-nowrap ';
-                if (data.paused) {
-                    btn.innerHTML = '<i class="fas fa-play mr-1"></i>Resume';
-                    btn.className = base + 'opacity-100 border border-green-400 text-green-300';
-                } else {
-                    btn.innerHTML = '<i class="fas fa-pause mr-1"></i>Stop';
-                    btn.className = base + 'opacity-70 hover:opacity-100 border border-orange-400 text-orange-300 hover:border-orange-300';
-                }
+                document.getElementById('pause-btn').innerHTML = data.paused
+                    ? '<i class="fas fa-play w-4 mr-1"></i>Resume'
+                    : '<i class="fas fa-pause w-4 mr-1"></i>Stop';
+                document.getElementById('hdr-paused-chip').classList.toggle('hidden', !data.paused);
             } catch (e) {
                 showToast('Failed to toggle pause state', 'error');
             }
@@ -4309,15 +4277,9 @@
             try {
                 const resp = await fetch('/api/toggle-blackout', { method: 'POST' });
                 const data = await resp.json();
-                const btn = document.getElementById('blackout-btn');
-                const base = 'text-xs px-2 py-0.5 rounded transition-all whitespace-nowrap ';
-                if (data.blackout) {
-                    btn.innerHTML = '<i class="fas fa-ban mr-1"></i>Blackout ON';
-                    btn.className = base + 'opacity-100 border border-violet-400 text-violet-300';
-                } else {
-                    btn.innerHTML = '<i class="fas fa-ban mr-1"></i>Blackout';
-                    btn.className = base + 'opacity-70 hover:opacity-100 border border-slate-500 hover:border-white';
-                }
+                document.getElementById('blackout-btn').innerHTML = '<i class="fas fa-ban w-4 mr-1"></i>' +
+                    (data.blackout ? 'Turn Blackout off' : 'Blackout');
+                document.getElementById('hdr-blackout-chip').classList.toggle('hidden', !data.blackout);
             } catch (e) {
                 showToast('Failed to toggle blackout', 'error');
             }
