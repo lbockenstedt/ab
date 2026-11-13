@@ -431,7 +431,7 @@ def test_promote_yml_case_pattern_has_no_shell_redirection():
 
 # --------------------------------------------------------------------------
 # Placement: the promotion controls live in the Release Management view,
-# not the footer action bar.
+# not the topbar Actions menu.
 # --------------------------------------------------------------------------
 def _index_html():
     return open(os.path.join(ROOT, "templates", "index.html")).read()
@@ -504,12 +504,12 @@ def test_normal_hops_promote_without_a_confirmation():
 
 
 
-def test_footer_no_longer_carries_the_promotion_controls():
+def test_topbar_actions_menu_does_not_carry_the_promotion_controls():
     text = _index_html()
-    footer = text[text.index("<footer"):text.index("</footer>")]
+    header = text[text.index("<header"):text.index("</header>")]
     for needle in ("promoteBranch(", 'id="promote-repo"'):
-        assert needle not in footer, (
-            f"{needle} is still in the footer action bar; it belongs in the Release view")
+        assert needle not in header, (
+            f"{needle} is in the topbar Actions menu; it belongs in the Release view")
 
 
 def test_release_route_is_registered_and_renders_the_release_view():

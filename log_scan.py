@@ -227,7 +227,7 @@ def sync_hub_logs():
     return sorted(raw_logs, key=_log_ts, reverse=True)
 
 
-def get_hub_logs(max_per_module=None):
+def get_hub_logs(max_per_module=None, fold=False):
     """Read hub logs from the LOCAL sync mirror
     (``<HUB_LOG_DIR>/<module>.log``) instead of a live GET_LOGS pull. Returns a
     list of {"module","log"} entries sorted newest-first, or [] when the
@@ -237,7 +237,9 @@ def get_hub_logs(max_per_module=None):
     Returns [] (NOT None) — a local read is never "unreachable"; the None
     contract belongs to sync_hub_logs(). max_per_module reads only the newest
     N lines of each file (files are oldest→newest), which is all a
-    "newest N rows" reader needs and avoids loading the whole mirror."""
+    "newest N rows" reader needs and avoids loading the whole mirror.
+    fold=True joins lines without a timestamp (tracebacks, banners) to the line
+    above them in the same file, so the newest-first sort cannot separate them."""
     # No mirror directory yet: no logs.
     try:
         if not os.path.isdir(HUB_LOG_DIR):
@@ -258,7 +260,18 @@ def get_hub_logs(max_per_module=None):
                 else:
                     with open(path, "r") as f:
                         lines = [line.rstrip("\n") for line in f]
-                out.extend({"module": mod, "log": line} for line in lines if line)
+                rows = []
+                for line in lines:
+                    if not line:
+                        continue
+                    # Fold only under a timestamped line: a file with no ISO
+                    # timestamps (syslog style) keeps one row per line.
+                    if (fold and rows and not _TS_PAT.match(line.strip())
+                            and _TS_PAT.match(rows[-1]["log"])):
+                        rows[-1]["log"] += "\n" + line
+                    else:
+                        rows.append({"module": mod, "log": line})
+                out.extend(rows)
             except Exception as e:
                 logger.debug(f"hub_log_sync: could not read {path}: {e}")
     except Exception as e:
