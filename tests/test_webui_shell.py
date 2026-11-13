@@ -203,3 +203,15 @@ def test_working_on_now_renders_the_live_card_and_its_fragment_endpoint(client, 
     assert frag.count("wk-step wk-done") >= 1 and frag.count("wk-step wk-current") >= 1
     # The held PR is in flight too, with its own stepper and Now line.
     assert "lm #4" in frag and "held: CI is failing" in frag
+
+
+def test_a_stopped_app_shows_no_next_poll(client, monkeypatch):
+    import time
+    stub = sys.modules.get("fix_engine")
+    if stub is not None and not getattr(stub, "__file__", None):
+        monkeypatch.delitem(sys.modules, "fix_engine")
+    monkeypatch.setitem(routes.state, "next_poll_at", time.time() + 600)
+    monkeypatch.setitem(routes.state, "paused", False)
+    assert "Next poll" in client.get("/settings").text
+    monkeypatch.setitem(routes.state, "paused", True)
+    assert "Next poll" not in client.get("/settings").text

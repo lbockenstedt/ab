@@ -82,9 +82,10 @@ def test_issues_route_by_status_and_only_recent_finishes_count():
     assert [i["id"] for i in mc["in_flight"]] == ["o/lm:5"]
     # A plain close is an outcome but not a fix.
     assert [o["id"] for o in mc["outcomes"]] == ["o/lm:6", "o/lm:8"]
-    assert mc["kpis"] == {"needs_you": 8, "running": 1, "in_flight": 1, "in_progress": 4,
-                          "fixed_7d": 2, "fixed_delta": 2, "auto_merged_7d": 0, "failed_7d": 1,
-                          "success_pct": 67, "median_fix_min": None}
+    # In progress never counts what needs you (o/lm:2 is a flight card and needs you).
+    assert mc["kpis"] == {"needs_you": 8, "running": 1, "in_flight": 1, "in_progress": 2,
+                          "fixed_7d": 1, "fixed_delta": 1, "auto_merged_7d": 0, "failed_7d": 1,
+                          "success_pct": 50, "median_fix_min": None}
     assert mc["groups"] == {"pr": 1, "failed": 1, "verify": 1, "feature": 2, "other": 3}
 
 
@@ -341,14 +342,17 @@ def test_each_open_pr_state_maps_to_its_step_and_now_text(pr, ci, step, now_text
 
 
 @pytest.mark.parametrize("status, step, now_text", [
-    ("pending_verification", None, "merged, awaiting verification"),
+    ("pending_verification", None, "committed, awaiting verification"),
+    ({"status": "pending_verification", "commit_type": "Pull Request"}, "pr",
+     "fix PR open — awaiting merge, then verification"),
     ("processing", "fix", "fixing — continues on the next scan (in 12m)"),
     ("reopened", "triage", "reopened — fixing again on the next scan (in 12m)"),
     ("awaiting_review", "review", "queued: waiting for reviewers"),
     ("feature_built", "review", "feature built — PR open, awaiting review"),
 ])
 def test_each_issue_in_flight_maps_to_its_step_and_now_text(status, step, now_text):
-    processed = {"o/lm:4": {"status": status, "timestamp": _ago(1)}}
+    info = status if isinstance(status, dict) else {"status": status}
+    processed = {"o/lm:4": dict(info, timestamp=_ago(1))}
     cards = mission_control.flight_cards(processed, {}, {}, {}, NOW.timestamp() + 12 * 60, 3, NOW)
     current = [s["key"] for s in cards[0]["steps"] if s["state"] == "current"]
     assert (current, cards[0]["now"], cards[0]["for"]) == ([step] if step else [], now_text, "1h 0m")
@@ -389,11 +393,11 @@ def test_kpis_compare_weeks_and_take_the_median_fix_time():
         "o/lm:3": {"status": "resolved", "timestamp": _ago(6), "opened_at": _ago(7)},
         "o/lm:4": {"status": "failed", "timestamp": _ago(3)},
         "o/lm:5": {"status": "fixed", "timestamp": _ago(24 * 9)},
-        # Committed, waiting for a person to verify: a fix that landed.
+        # Committed but not yet verified: not counted (the tile matches the Resolved filter).
         "o/lm:6": {"status": "pending_verification", "timestamp": _ago(2)},
     }
     k = mission_control.build(processed, {}, now=NOW)["kpis"]
-    assert (k["fixed_7d"], k["fixed_delta"], k["failed_7d"], k["success_pct"]) == (4, 3, 1, 80)
+    assert (k["fixed_7d"], k["fixed_delta"], k["failed_7d"], k["success_pct"]) == (3, 2, 1, 75)
     assert k["median_fix_min"] == 45 and mission_control.fmt_minutes(k["median_fix_min"]) == "45m"
     assert mission_control.fmt_minutes(mission_control.build({}, {}, now=NOW)["kpis"]["median_fix_min"]) == "—"
 

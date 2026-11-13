@@ -47,7 +47,7 @@ _ISSUE_WORKING = {
 }
 # A fix that landed: committed (awaiting verification) or later. Fixed · 7d,
 # success % and Median fix time all count this same set.
-_FIX_LANDED = {"pending_verification", "fixed", "verified", "awaiting_prod_verification", "resolved"}
+_FIX_LANDED = {"fixed", "verified", "awaiting_prod_verification", "resolved"}
 _ISSUE_DONE = {
     "fixed": "fixed",
     "verified": "verified in prod",
@@ -469,7 +469,9 @@ def flight_cards(processed, pr_reviews, active_tasks=None, ci_seen=None, next_po
             continue
         attempts = "attempt %s/%s" % (info["attempts"], info.get("max_attempts") or "?") if info.get("attempts") else ""
         flight = {
-            "pending_verification": ("", set(_STEP_KEYS), "merged, awaiting verification"),
+            "pending_verification": (("pr", {"triage", "fix", "tests", "review"}, "fix PR open — awaiting merge, then verification")
+                                     if info.get("commit_type") == "Pull Request"
+                                     else ("", set(_STEP_KEYS), "committed, awaiting verification")),
             "processing": ("fix", {"triage"}, "fixing — continues on the next scan" + (" (%s)" % poll if poll else "")),
             "awaiting_review": ("review", {"triage", "fix"}, "queued: waiting for reviewers"),
             "reopened": ("triage", set(), "reopened — fixing again on the next scan" + (" (%s)" % poll if poll else "")),
@@ -701,7 +703,7 @@ def build(processed, pr_reviews, active_tasks=None, now=None, ci_seen=None, next
             "needs_you": len(attention),
             "running": len(working),
             "in_flight": len(in_flight),
-            "in_progress": len(working) + len(flight),
+            "in_progress": len(working) + len(in_flight),
             "fixed_7d": fixed_recent,
             "fixed_delta": fixed_recent - fixed_prev,
             "auto_merged_7d": auto_merged_recent,

@@ -410,7 +410,7 @@
             <a href="/#mc-working" id="hdr-busy" class="hdr-pill {{ 'hdr-pill-busy' if _busy else 'hdr-pill-idle' }} hidden lg:flex" title="Run status: {{ state.status }}">
                 <span class="w-2 h-2 rounded-full {{ 'bg-brand animate-pulse' if _busy else 'bg-slate-400' }}"></span><span id="hdr-status">{{ ('Busy · %d task%s' % (_busy, '' if _busy == 1 else 's')) if _busy else 'Idle' }}</span>
             </a>
-            {% set _np = next_poll_label(state.next_poll_at) %}
+            {% set _np = "" if state.paused else next_poll_label(state.next_poll_at) %}
             {% if _np %}<span class="hdr-pill hdr-pill-idle hidden xl:flex" title="When the scheduler next checks for issues">{{ _np }}</span>{% endif %}
             <span id="hdr-blackout-chip" class="{{ '' if state.blackout else 'hidden ' }}hdr-pill hdr-pill-warn" title="Triage only — no fix commits pushed">Blackout ON</span>
             <span id="hdr-paused-chip" class="{{ '' if state.paused else 'hidden ' }}hdr-pill hdr-pill-warn" title="AppBuilder is stopped — Actions → Resume">Stopped</span>

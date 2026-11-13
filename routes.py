@@ -1102,7 +1102,7 @@ def _mission(config=None):
         repos = []
     return mission_control.build(
         state["processed"], state.get("pr_reviews"), state["active_tasks"], ci_seen=ci_seen,
-        next_poll_at=state.get("next_poll_at"),
+        next_poll_at=None if state.get("paused") else state.get("next_poll_at"),
         max_attempts=int(config.get("pr_auto_remediate_max_attempts", 3) or 3), repos=repos)
 
 
