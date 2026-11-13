@@ -6280,8 +6280,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 "decision_reason": decision_reason,
                 "reopened": was_reopened,
                 "original_body": issue.body,
-                # When the issue was opened, for the dashboard's Median fix time.
+                # When the issue was opened and the fix landed, for the dashboard's
+                # Median fix time (timestamp moves when a person clicks Resolved).
                 "opened_at": _opened_at(issue),
+                "fixed_at": datetime.now().isoformat(timespec="seconds"),
             }
 
             save_processed(processed)

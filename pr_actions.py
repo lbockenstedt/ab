@@ -162,7 +162,10 @@ def _remember_ci(repo_name, head_sha, runs, failing):
     done = sum(1 for r in runs if r.get("status") == "completed")
     passed = sum(1 for r in runs if r.get("status") == "completed"
                  and r.get("conclusion") in ("success", "neutral", "skipped"))
-    CI_SEEN[(repo_name, head_sha)] = {"done": done, "passed": passed, "total": len(runs), "failed": len(failing),
+    # Parked runs wait for approval (_release_parked_checks); they are not a lost verdict.
+    parked = sum(1 for r in runs if r.get("status") == "completed" and r.get("conclusion") == "action_required")
+    CI_SEEN[(repo_name, head_sha)] = {"done": done, "passed": passed, "parked": parked, "total": len(runs),
+                                      "failed": len(failing),
                                       "at": datetime.now().isoformat(timespec="seconds")}
     while len(CI_SEEN) > _CI_SEEN_MAX:
         CI_SEEN.pop(next(iter(CI_SEEN)))

@@ -2069,7 +2069,9 @@ def _review_one(gh, repo, pr, config, force=False):
         # every poll of an unchanged PR. OFF by default
         # (pr_test_regression_enabled); see check_test_regressions.py.
         token = config.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
-        _step("running test-regression check", stage="tests")
+        # The Tests step only when the (default-off) regression check really runs.
+        _step("running test-regression check",
+              stage="tests" if config.get("pr_test_regression_enabled", False) else None)
         findings += check_test_regressions(repo, pr, config, token)
         # LLM change summary and both review panels.
         _step("summarising the change (LLM)", stage="review")
@@ -2162,7 +2164,8 @@ def _review_one(gh, repo, pr, config, force=False):
                     "decision to the re-review of the new head", repo.full_name, pr.number)
         return
     # Nothing pushed: consider merging.
-    _step("checking CI and whether it can auto-merge", stage="merge")
+    # No Merge stage here: _maybe_auto_merge is often a no-op (allowlist, holds).
+    _step("checking CI and whether it can auto-merge")
     _maybe_auto_merge(gh, repo, pr, config)
 
 

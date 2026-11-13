@@ -83,8 +83,8 @@ def test_issues_route_by_status_and_only_recent_finishes_count():
     # A plain close is an outcome but not a fix.
     assert [o["id"] for o in mc["outcomes"]] == ["o/lm:6", "o/lm:8"]
     assert mc["kpis"] == {"needs_you": 8, "running": 1, "in_flight": 1, "in_progress": 4,
-                          "fixed_7d": 1, "fixed_delta": 1, "auto_merged_7d": 0, "failed_7d": 1,
-                          "success_pct": 50, "median_fix_min": None}
+                          "fixed_7d": 2, "fixed_delta": 2, "auto_merged_7d": 0, "failed_7d": 1,
+                          "success_pct": 67, "median_fix_min": None}
     assert mc["groups"] == {"pr": 1, "failed": 1, "verify": 1, "feature": 2, "other": 3}
 
 
@@ -306,9 +306,9 @@ def test_ci_checks_seen_are_cached_for_the_dashboard(monkeypatch):
     monkeypatch.setattr(pr_actions, "CI_SEEN", {})
     runs = [{"status": "completed", "conclusion": "success"}, {"status": "completed", "conclusion": "cancelled"},
             {"status": "completed", "conclusion": "failure"}, {"status": "in_progress"}]
-    pr_actions._remember_ci("o/lm", "abc", runs, ["lint: failure"])
+    pr_actions._remember_ci("o/lm", "abc", runs + [{"status": "completed", "conclusion": "action_required"}], ["lint: failure"])
     assert {k: v for k, v in pr_actions.CI_SEEN[("o/lm", "abc")].items() if k != "at"} == {
-        "done": 3, "passed": 1, "total": 4, "failed": 1}
+        "done": 4, "passed": 1, "parked": 1, "total": 5, "failed": 1}
 
 
 @pytest.mark.parametrize("pr, ci, step, now_text", [
@@ -320,6 +320,9 @@ def test_ci_checks_seen_are_cached_for_the_dashboard(monkeypatch):
      "tests", "waiting for CI (2/6 checks done)"),
     (dict(approved=True, auto_merge_reason="both panels approve", head="h"),
      {"done": 6, "passed": 0, "total": 6, "failed": 0}, "tests", "CI finished without a verdict (0/6 passed) — Re-run CI"),
+    (dict(approved=True, auto_merge_reason="both panels approve", head="h"),
+     {"done": 6, "passed": 2, "parked": 4, "total": 6, "failed": 0}, "tests",
+     "waiting for CI (4 of 6 checks parked for approval)"),
     (dict(panel_status="queue_for_retry", queue_retry_count=1), None, "review", "queued: next PR scan in 12m"),
     (dict(auto_merge_blocked_reason="holding the merge while AppBuilder improves", remediation_attempts=4,
           auto_remediate_status="exhausted_human_review"), None, "fix", "held: remediation limit 4/3, needs human"),
@@ -372,18 +375,25 @@ def test_time_in_state_resets_only_when_the_state_changes():
     rec = dict(held, auto_merge_blocked_reason="panel 2 did not Approve")
     mission_control.stamp_state_since(rec, prev, NOW)
     assert rec["state_since"] == "2026-11-12 12:00:00"
+    # Same hold, panels now split: a new state too.
+    rec = dict(held, panel_verdict="Approve", panel2_verdict="Reject")
+    mission_control.stamp_state_since(rec, prev, NOW)
+    assert rec["state_since"] == "2026-11-12 12:00:00"
 
 
 def test_kpis_compare_weeks_and_take_the_median_fix_time():
     processed = {
-        "o/lm:1": {"status": "fixed", "timestamp": _ago(1), "opened_at": _ago(2)},
-        "o/lm:2": {"status": "verified", "timestamp": _ago(5), "opened_at": _ago(5.5)},
-        "o/lm:3": {"status": "resolved", "timestamp": _ago(6)},
+        "o/lm:1": {"status": "fixed", "timestamp": _ago(1), "opened_at": _ago(2), "fixed_at": _ago(1)},
+        # Resolved later by a person: the click moves timestamp, not fixed_at.
+        "o/lm:2": {"status": "resolved", "timestamp": _ago(0.1), "opened_at": _ago(5.5), "fixed_at": _ago(5)},
+        "o/lm:3": {"status": "resolved", "timestamp": _ago(6), "opened_at": _ago(7)},
         "o/lm:4": {"status": "failed", "timestamp": _ago(3)},
         "o/lm:5": {"status": "fixed", "timestamp": _ago(24 * 9)},
+        # Committed, waiting for a person to verify: a fix that landed.
+        "o/lm:6": {"status": "pending_verification", "timestamp": _ago(2)},
     }
     k = mission_control.build(processed, {}, now=NOW)["kpis"]
-    assert (k["fixed_7d"], k["fixed_delta"], k["failed_7d"], k["success_pct"]) == (3, 2, 1, 75)
+    assert (k["fixed_7d"], k["fixed_delta"], k["failed_7d"], k["success_pct"]) == (4, 3, 1, 80)
     assert k["median_fix_min"] == 45 and mission_control.fmt_minutes(k["median_fix_min"]) == "45m"
     assert mission_control.fmt_minutes(mission_control.build({}, {}, now=NOW)["kpis"]["median_fix_min"]) == "—"
 
@@ -434,8 +444,14 @@ def test_promotion_lanes_show_the_open_promotion_and_the_last_one():
     assert rows["lm"]["note"] == "#7 qa → main: auto-merge held"
     assert rows["nw"]["note"] == "last promoted to qa 3h ago"
     assert rows["cs"]["note"] == "no promotion PRs seen"
+    # A backmerge is noted but is not the "last promoted".
+    prs["o/nw#4"] = _pr(4, hours=1, head_ref="backmerge/main-to-qa", base_ref="qa", merged=True)
+    prs["o/cs#5"] = _pr(5, head_ref="promote/dev-to-main", base_ref="main")
+    rows = {r["repo"]: r for r in mission_control.promotion_lanes(["o/nw", "o/cs"], prs, NOW)}
+    assert rows["nw"]["note"] == "last promoted to qa 3h ago"
+    assert rows["cs"]["note"].startswith("#5 dev → main:")
     names = [r["repo"] for r in mission_control.promotion_lanes(["a/lm"], prs, NOW)]
-    assert names == ["a/lm", "o/lm", "nw"]
+    assert names == ["a/lm", "cs", "o/lm", "nw"]
 
 
 @pytest.mark.parametrize("head, base, route", [

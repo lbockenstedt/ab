@@ -45,6 +45,9 @@ _ISSUE_WORKING = {
     "reopened": "Reopened, fixing again",
     "feature_built": "Feature built, PR open",
 }
+# A fix that landed: committed (awaiting verification) or later. Fixed · 7d,
+# success % and Median fix time all count this same set.
+_FIX_LANDED = {"pending_verification", "fixed", "verified", "awaiting_prod_verification", "resolved"}
 _ISSUE_DONE = {
     "fixed": "fixed",
     "verified": "verified in prod",
@@ -371,6 +374,8 @@ def _ci_wait(ci):
     """The Now text for CI that has not passed yet and has not failed."""
     if ci["done"] < ci["total"]:
         return "waiting for CI (%d/%d checks done)" % (ci["done"], ci["total"])
+    if ci.get("parked"):
+        return "waiting for CI (%d of %d checks parked for approval)" % (ci["parked"], ci["total"])
     return "CI finished without a verdict (%d/%d passed) — Re-run CI" % (_ci_passed(ci), ci["total"])
 
 
@@ -497,7 +502,7 @@ def stamp_state_since(rec, prev=None, now=None):
         label = pr_chip(rec)[1]
     else:
         # Label plus reason: "Improving" while fixing and while release-locked differ.
-        label = "%s: %s" % _pr_state(rec)[1:]
+        label = "%s: %s" % _pr_state(rec)[1:] + (" (split)" if _split_verdict(rec) else "")
     prev = prev or {}
     if prev.get("state_label") == label and prev.get("state_since"):
         rec["state_since"] = prev["state_since"]
@@ -548,19 +553,25 @@ def promotion_lanes(repos, pr_reviews, now=None):
     repos += sorted({k.rpartition("#")[0] for k, pr in (pr_reviews or {}).items() if is_promotion(pr)} - set(repos))
     for full in repos:
         lanes = {("dev", "qa"): None, ("qa", "main"): None}
-        last = None
+        last, off_lane = None, []
         for key, pr in (pr_reviews or {}).items():
             if key.rpartition("#")[0] != full or not is_promotion(pr):
                 continue
             route = promotion_route(pr)
             if pr.get("merged") or pr.get("auto_merged"):
                 then = _when(pr.get("outcome_at") or pr.get("reviewed_at"))
-                if then and (last is None or then > last[0]):
+                # A backmerge (main -> qa/dev) is not a promotion.
+                if then and route[0] != "main" and (last is None or then > last[0]):
                     last = (then, route[1])
-            elif not (pr.get("denied") or pr.get("closed")) and route in lanes:
-                lanes[route] = {"number": key.rpartition("#")[2], "url": pr.get("url") or "",
-                                "label": _pr_state(pr)[1], "held": _pr_state(pr)[0] == "needs"}
-        waiting = [(r, l) for r, l in lanes.items() if l]
+            elif not (pr.get("denied") or pr.get("closed")):
+                lane = {"number": key.rpartition("#")[2], "url": pr.get("url") or "",
+                        "label": _pr_state(pr)[1], "held": _pr_state(pr)[0] == "needs"}
+                if route in lanes:
+                    lanes[route] = lane
+                else:
+                    off_lane.append((route, lane))
+        # Open PRs on the lanes, then backmerge or override (dev -> main) ones.
+        waiting = [(r, l) for r, l in lanes.items() if l] + off_lane
         if waiting:
             (src, dst), lane = waiting[-1]
             note = "#%s %s → %s: %s" % (lane["number"], src, dst, lane["label"].lower())
@@ -617,18 +628,20 @@ def build(processed, pr_reviews, active_tasks=None, now=None, ci_seen=None, next
             in_flight.append({**base, "kind": "issue", "label": _ISSUE_WORKING[status]})
         if status == "failed" and recent(then):
             failed_recent += 1
-        if status in _ISSUE_DONE and status != "closed" and recent(then, 2) and not recent(then):
+        landed = _when(info.get("fixed_at")) or then
+        if status in _FIX_LANDED and recent(landed, 2) and not recent(landed):
             fixed_prev += 1
+        if status in _FIX_LANDED and recent(landed):
+            fixed_recent += 1
         if status in _ISSUE_DONE and recent(then):
-            # "Fixed" counts what the Resolved filter shows; a plain close is not a fix.
-            fixed_recent += status != "closed"
             detail = {"verified": "verified in prod"}.get(status) or (
                 "%d file(s) changed" % len(info["files"]) if info.get("files") else "")
             outcomes.append({**base, "kind": "issue", "text": _ISSUE_DONE[status], "detail": detail,
                              "tone": "muted" if status == "closed" else "ok"})
-        # Median fix time: issue opened -> fix committed, for fixes in the window.
-        opened, fixed_at = _when(info.get("opened_at")), _when(info.get("timestamp"))
-        if status in ("pending_verification", "fixed", "verified", "resolved") and opened and recent(fixed_at):
+        # Median fix time: issue opened -> fix committed (fixed_at never moves when
+        # a person later clicks Resolved), for fixes in the window.
+        opened, fixed_at = _when(info.get("opened_at")), _when(info.get("fixed_at"))
+        if status in _FIX_LANDED and opened and recent(fixed_at):
             fix_minutes.append(max(0, (fixed_at - opened).total_seconds() / 60))
 
     for key, pr in (pr_reviews or {}).items():
