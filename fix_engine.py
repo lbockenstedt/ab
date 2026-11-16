@@ -1513,6 +1513,16 @@ def run_sandboxed_command(command, cwd, network=True, timeout=SANDBOX_TEST_TIMEO
         return MockResult("", f"Docker execution error: {e}", 1)
 
 
+# workers' automatic-retry budget; every record rewrite must keep it, or a
+# failed issue would be retried forever (see workers.failed_retry_decision).
+_RETRY_BUDGET_KEYS = ("auto_retries", "needs_human_at")
+
+
+def _retry_budget(rec):
+    """The automatic-retry fields of an issue record, to carry into its next record."""
+    return {k: rec[k] for k in _RETRY_BUDGET_KEYS if k in (rec or {})}
+
+
 _SENTINEL_ESCALATION = "**Escalated by the LM hub log sentinel**"
 
 
@@ -5423,8 +5433,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 # Keep a feature hand-off's markers so the UI/route can send
                 # it back to the feature drive (Re-evaluate).
                 **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
-                                          "classifier_reason", "auto_retries", "needs_human_at")
-                                          if k in _prior},
+                                          "classifier_reason") if k in _prior},
+                **_retry_budget(_prior),
                 "status": "non-actionable",
                 "timestamp": datetime.now().isoformat(),
                 "reason": request_msg,
@@ -5774,6 +5784,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 logger.info(f"Review queued for {issue_id}: {_q_reason}. Saving fix for retry in 1 hour.")
                                 processed = load_processed()
                                 processed[issue_id] = {
+                                    **_retry_budget(issue_info),
                                     "status": "awaiting_review",
                                     "timestamp": datetime.now().isoformat(),
                                     "pending_fix": {"confidence": confidence, "fixes": fixes},
@@ -5927,6 +5938,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     # Record the issue as awaiting a human.
                     processed = load_processed()
                     processed[issue_id] = {
+                        **_retry_budget(issue_info),
                         "status": "awaiting_human",
                         "timestamp": datetime.now().isoformat(),
                         "reason": "no configured model meets this fix's requirements",
@@ -5999,8 +6011,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     # Keep a feature request's hand-off context (feature_build ->
                     # this pipeline) so the failed row still says how it got here.
                     **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
-                                              "classifier_reason", "auto_retries", "needs_human_at")
-                                          if k in _prior},
+                                              "classifier_reason") if k in _prior},
+                    **_retry_budget(_prior),
                     "status": "failed",
                     "timestamp": datetime.now().isoformat(),
                     "error": failure_reason,
@@ -6042,6 +6054,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 # Record the issue as triaged.
                 processed = load_processed()
                 processed[f"{repo_name}:{issue_num}"] = {
+                    **_retry_budget(issue_info),
                     "status": "triaged",
                     "timestamp": datetime.now().isoformat(),
                     "reason": "Fix identified; commit deferred (triage-only mode)",

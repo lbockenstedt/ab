@@ -1791,7 +1791,10 @@ def reclassify_ops_alerts(repo_obj):
     fixer, and some never recur. Returns the moved issue numbers."""
     moved = []
     for issue in repo_obj.get_issues(labels=[OPS_ALERT_LABEL], state="open"):
-        if is_performance_finding(issue.title) and _unmark_ops_alert(issue):
+        # Keep findings whose log names another fault (escalation_is_operational).
+        if (is_performance_finding(issue.title)
+                and not escalation_is_operational(issue.title, issue.body, "", "")
+                and _unmark_ops_alert(issue)):
             moved.append(issue.number)
     if moved:
         logger.info(f"{repo_obj.full_name}: performance findings moved from {OPS_ALERT_LABEL} "

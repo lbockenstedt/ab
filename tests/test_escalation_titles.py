@@ -253,17 +253,20 @@ def test_reclassify_moves_only_ab_filed_performance_findings():
                   body=ab_body, number=1)
     cert = _Issue("ops-alert", title="Hub log alert (le): renew failed for *.example", body=ab_body, number=2)
     by_hand = _Issue("ops-alert", title="Health check: slow page GET /api/x", body="filed by a person", number=3)
+    refused = _Issue("ops-alert", title="Health check: slow command Y on z",
+                     body=ab_body + "\nx - ERROR - HTTP error 401 Unauthorized", number=4)
 
     class Repo:
         full_name = "o/lm"
 
         def get_issues(self, labels, state):
             assert labels == ["ops-alert"] and state == "open"
-            return [slow, cert, by_hand]
+            return [slow, cert, by_hand, refused]
 
     assert _filer(None)["reclassify_ops_alerts"](Repo()) == [1]
     assert [lbl.name for lbl in slow.labels] == ["automated-fix"]
-    assert [lbl.name for lbl in cert.labels] == [lbl.name for lbl in by_hand.labels] == ["ops-alert"]
+    for kept in (cert, by_hand, refused):
+        assert [lbl.name for lbl in kept.labels] == ["ops-alert"]
 
 
 if __name__ == "__main__":

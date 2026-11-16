@@ -85,3 +85,23 @@ def test_a_failed_hand_off_is_tried_again(monkeypatch):
     monkeypatch.setattr(main, "_ensure_label", lambda repo, name: 1 / 0)
     assert workers._retry_failed_issue(_Issue(), "o/lm:1", {}, CFG) is False
     assert "needs_human_at" not in store["data"]["o/lm:1"]
+
+
+def test_every_unfinished_record_write_keeps_the_retry_budget():
+    """A record rewritten without auto_retries reset the budget, so a failed
+    issue (e.g. one that went through awaiting_review) was retried forever."""
+    import ast
+    tree = ast.parse(open("fix_engine.py").read())
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "process_single_issue")
+    unfinished = {"failed", "non-actionable", "awaiting_review", "awaiting_human", "triaged"}
+    seen = set()
+    for d in (n for n in ast.walk(fn) if isinstance(n, ast.Dict)):
+        status = [v.value for k, v in zip(d.keys, d.values)
+                  if isinstance(k, ast.Constant) and k.value == "status" and isinstance(v, ast.Constant)]
+        if not status or status[0] not in unfinished:
+            continue
+        seen.add(status[0])
+        spreads = [ast.unparse(v) for k, v in zip(d.keys, d.values) if k is None]
+        assert any(s.startswith("_retry_budget(") or s in ("prev", "issue_info") for s in spreads), (
+            f"fix_engine.py:{d.lineno} writes {status[0]} without the retry budget")
+    assert seen == unfinished
