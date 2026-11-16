@@ -1712,6 +1712,9 @@ _PERFORMANCE_FINDING = re.compile(
     r"Health check: (?:slow (?:command|page) |\S+ keeps timing out|\S+ is called very often)", re.I)
 
 
+_SLOWNESS = re.compile(r"time[sd]?[ -]?out|timing out|curl: \(28\)", re.I)
+
+
 def is_performance_finding(title):
     """True when an escalation's title is a health-check performance finding."""
     return bool(_PERFORMANCE_FINDING.search(title or ""))
@@ -1729,16 +1732,21 @@ def escalation_is_operational(summary, log_slice, analysis, verdict):
     title alone misses most: its numbers are masked ("HTTP error #") and it is
     cut at 90 chars. Sentinel analysis is LLM prose that mentions timeouts
     loosely, so it is not used; health-check analysis is fixed text.
-    A performance finding is never operational: its log lines quote the
-    timeouts it measured."""
-    if is_performance_finding(summary):
-        return False
+    A performance finding is operational only when its first ERROR line names
+    a fault other than slowness (a refused credential, an unreachable host)."""
     first_error = next((ln for ln in (log_slice or "").splitlines()
                         if re.search(r"\b(?:ERROR|CRITICAL)\b", ln)), "")
+    if is_performance_finding(summary):
+        # Its log quotes the timeouts it measured; only another fault counts.
+        return bool(_OPERATIONAL_FAULT.search(_SLOWNESS.sub("", first_error)))
     texts = [summary, first_error]
     if verdict == "health-check":
         texts.append(analysis)
     return any(is_operational_fault(t) for t in texts)
+
+
+_OPS_SECTION = "### Operational fault"  # in the body of every issue AB files as ops-alert
+_OPS_MARK = "<!-- ab-ops-alert -->"  # added to the body when AB relabels an older issue
 
 
 def _mark_ops_alert(issue):
@@ -1750,11 +1758,12 @@ def _mark_ops_alert(issue):
             issue.add_to_labels(OPS_ALERT_LABEL)
         if "automated-fix" in names:
             issue.remove_from_labels("automated-fix")
+        if _OPS_SECTION not in (issue.body or "") and _OPS_MARK not in (issue.body or ""):
+            issue.edit(body=(issue.body or "") + "\n\n" + _OPS_MARK)
     except Exception as e:  # noqa: BLE001 - labelling must not break filing
         logger.warning(f"Could not mark #{getattr(issue, 'number', '?')} {OPS_ALERT_LABEL}: {e}")
 
 
-_OPS_SECTION = "### Operational fault"  # in the body of every issue AB files as ops-alert
 
 
 def _unmark_ops_alert(issue):
@@ -1763,7 +1772,8 @@ def _unmark_ops_alert(issue):
     and stays. Best effort; True when the issue is in the fixer lane."""
     try:
         names = [lbl.name for lbl in (issue.labels or [])]
-        if OPS_ALERT_LABEL in names and _OPS_SECTION not in (issue.body or ""):
+        body = issue.body or ""
+        if OPS_ALERT_LABEL in names and _OPS_SECTION not in body and _OPS_MARK not in body:
             return False
         if "automated-fix" not in names:
             issue.add_to_labels("automated-fix")

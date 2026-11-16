@@ -75,7 +75,7 @@ def test_post_deploy_watch_lists_recent_commits_on_the_deployed_branch():
 
 
 _CONSTS = ("_OPERATIONAL_FAULT", "OPS_ALERT_LABEL", "_PERFORMANCE_FINDING", "_ESCALATION_HEADER",
-           "_OPS_SECTION")
+           "_OPS_SECTION", "_OPS_MARK", "_SLOWNESS")
 
 
 def _fns(*names):
@@ -162,6 +162,8 @@ def test_performance_findings_go_to_the_fixer_despite_timeouts_in_the_log():
     assert not op(title, log, title + "\nThe spoke handler is slow", "health-check")
     assert not op("Health check: NETBOX_GET_IPS keeps timing out on lm-agent-netbox", "",
                   "keeps timing out", "health-check")
+    # Another fault in the first ERROR line still makes it operational.
+    assert op(title, "x - ERROR - HTTP error 401 Unauthorized", "", "health-check")
 
 
 def test_code_faults_stay_with_the_fixer_on_all_inputs():
@@ -190,6 +192,9 @@ class _Issue:
 
     def remove_from_labels(self, name):
         self.labels = [lbl for lbl in self.labels if lbl.name != name]
+
+    def edit(self, body):
+        self.body = body
 
 
 def _filer(issue):
@@ -225,6 +230,8 @@ def test_operational_match_on_an_existing_issue_moves_it_to_ops_alert():
         "**CPPM rejects us**", config={"GITHUB_TOKEN": "t"})
     assert ok
     assert [lbl.name for lbl in issue.labels] == ["log-detected", "ops-alert"]
+    # AB's own relabel is marked, so a later performance repeat may undo it.
+    assert _filer(issue)["_unmark_ops_alert"](issue) is True
 
 
 def test_performance_repeat_on_an_ops_alert_issue_moves_it_to_the_fixer():
