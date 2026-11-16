@@ -38,7 +38,8 @@ def _load_fix_engine_ns(want_funcs, extra_ns=None):
         if isinstance(node, ast.FunctionDef) and node.name in want_funcs:
             segs.append(ast.get_source_segment(src, node))
         if isinstance(node, ast.Assign) and any(
-                getattr(t, "id", None) == "_BUG_REPORT_ID_RE" for t in node.targets):
+                getattr(t, "id", None) in ("_BUG_REPORT_ID_RE", "_SENTINEL_ESCALATION")
+                for t in node.targets):
             segs.append(ast.get_source_segment(src, node))
     ns = {"re": re, "json": json, "os": os, "logger": _NoLog()}
     if extra_ns:
