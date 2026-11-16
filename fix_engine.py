@@ -5412,7 +5412,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 # Keep a feature hand-off's markers so the UI/route can send
                 # it back to the feature drive (Re-evaluate).
                 **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
-                                          "classifier_reason") if k in _prior},
+                                          "classifier_reason", "auto_retries") if k in _prior},
                 "status": "non-actionable",
                 "timestamp": datetime.now().isoformat(),
                 "reason": request_msg,
@@ -5982,7 +5982,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     # Keep a feature request's hand-off context (feature_build ->
                     # this pipeline) so the failed row still says how it got here.
                     **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
-                                              "classifier_reason") if k in _prior},
+                                              "classifier_reason", "auto_retries") if k in _prior},
                     "status": "failed",
                     "timestamp": datetime.now().isoformat(),
                     "error": failure_reason,
