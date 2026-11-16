@@ -4933,6 +4933,21 @@ def parse_and_apply(content, repo_path):
         repo_root = os.path.abspath(repo_path)
         applied = {}
 
+        # Validate empty anchors before any writes: otherwise a mixed batch can
+        # report success while silently dropping part of the requested fix.
+        if isinstance(edits, list):
+            for ed in edits:
+                if isinstance(ed, dict) and ed.get("search") == "":
+                    filepath = ed.get("file") or ed.get("filepath") or ed.get("path")
+                    parse_and_apply.last_failures.append(
+                        f"{filepath}: search must be non-empty exact text from the file; "
+                        "to create a new file, provide its full content under 'fixes'")
+            if parse_and_apply.last_failures:
+                parse_and_apply.last_reason = "edit_anchor_miss"
+                logger.warning("Rejected edit batch before writing: %s",
+                               "; ".join(parse_and_apply.last_failures))
+                return False, {}, 0.0
+
         # --- 1) Targeted search/replace edits (preferred) -------------------
         # An edit changes only the snippet it names, so it scales to files the
         # model cannot reproduce whole and never trips the truncated-rewrite
@@ -4962,10 +4977,6 @@ def parse_and_apply(content, repo_path):
                     if isinstance(filepath, str) and isinstance(fixes, dict) and filepath in fixes:
                         continue
                     logger.error(f"Skipping malformed edit (need file/search/replace): {str(ed)[:160]!r}")
-                    continue
-                # An empty search would match everywhere.
-                if search == "":
-                    logger.error(f"Skipping edit with empty search for {filepath!r}")
                     continue
                 # The target must be a safe path to an existing file.
                 full_path = _safe_repo_target(repo_root, filepath)
