@@ -29,3 +29,14 @@ def test_fix_and_feature_builds_clone_the_integration_branch():
             branch = [k.value for k in call.keywords if k.arg == "branch"]
             assert branch and getattr(branch[0], "id", None) == "base_branch", (
                 f"{filename}:{call.lineno} clones the default branch (main)")
+
+
+def test_fix_clone_sets_a_commit_identity_for_the_rebase():
+    """`pull --rebase` failed "unable to auto-detect email address" (ab#556)."""
+    tree = ast.parse(open(os.path.join(_ROOT, "fix_engine.py")).read())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "process_single_issue")
+    sets = {(c.args[0].value, c.args[1].value) for c in ast.walk(fn)
+            if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "set_value"
+            and len(c.args) == 3 and isinstance(c.args[1], ast.Constant)}
+    assert ("user", "name") in sets and ("user", "email") in sets
