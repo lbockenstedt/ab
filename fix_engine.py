@@ -1513,6 +1513,9 @@ def run_sandboxed_command(command, cwd, network=True, timeout=SANDBOX_TEST_TIMEO
         return MockResult("", f"Docker execution error: {e}", 1)
 
 
+_SENTINEL_ESCALATION = "**Escalated by the LM hub log sentinel**"
+
+
 def analyze_issue(issue):
     """Decide whether an issue has enough information to attempt a fix.
 
@@ -1526,6 +1529,13 @@ def analyze_issue(issue):
     # can't re-supply. A genuinely unfixable report surfaces at the FIX step, not here.
     if _BUG_REPORT_ID_RE.search(issue.body or ""):
         logger.info("Triage: user-filed 'File a Bug' report — treating as actionable (skipping LLM triage).")
+        return True, ""
+    # The LM hub log sentinel already triaged an escalation: its body carries the
+    # log slice and the sentinel's analysis, and operational faults are filed as
+    # ops-alert, never reaching here. The LLM check kept asking for "the code"
+    # (lm#1876, ldap#63) although the fixer reads the repo itself.
+    if _SENTINEL_ESCALATION in (issue.body or ""):
+        logger.info("Triage: LM hub sentinel escalation — treating as actionable (skipping LLM triage).")
         return True, ""
 
     # Gather the issue title, body and every comment as context.
@@ -1551,6 +1561,7 @@ def analyze_issue(issue):
         f"Determine if this issue contains enough information to provide a code fix. \n"
         f"{strictness_instruction}\n"
         f"Note: If this is an automated log alert, the provided log snippet is the primary evidence. Do not request a stack trace if a clear error is already present in the logs.\n"
+        f"The fixer has the repository's full source code and runs its tests itself, so never ask for source code, file contents or test output.\n"
         f"If information is missing, specify exactly what is needed (e.g., 'Please provide the browser console output').\n\n"
         "Return ONLY a JSON object: {\"actionable\": boolean, \"request\": \"message if not actionable\"}"
     )
@@ -5464,6 +5475,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # URL and exfiltrate it. The token is re-applied only transiently, right
             # before each push/pull, via _authenticated_remote().
             repo_git.remotes.origin.set_url(repo_obj.clone_url)
+            # A commit identity for the CLI `pull --rebase` below: without one it
+            # fails "unable to auto-detect email address" (ab#556).
+            with repo_git.config_writer() as cw:
+                cw.set_value("user", "name", "AppBuilder")
+                cw.set_value("user", "email", "223556219+Copilot@users.noreply.github.com")
 
             # Retry loop settings: attempts, confidence bar, and the starting requirements.
             max_attempts = 3
@@ -6144,6 +6160,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         logger.info(f"Push successful after rebase for {repo_name}")
                     except Exception as re_err:
                         logger.warning(f"Direct push failed even after rebase: {re_err}. Falling back to PR.")
+                        # A half-done rebase would make the PR fallback's checkout fail.
+                        try:
+                            repo_git.git.rebase("--abort")
+                        except Exception:  # noqa: BLE001 - no rebase in progress
+                            pass
                         decision_reason = f"Direct push failed: {re_err}"
                         can_actually_direct_push = False
 

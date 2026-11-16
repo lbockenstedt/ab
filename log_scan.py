@@ -405,7 +405,11 @@ _SELF_SCAN_NOISE = re.compile(
     # (6) transient GitHub server errors (500/502/503/504). An external outage
     # that the next poll simply retries; triage can only ever ask the reporter
     # for "timestamps and endpoints", so these ended up non-actionable.
-    r'|Git[Hh]ub(?:Exception)?\b[^\n]{0,80}\b(?:500|502|503|504)\b',
+    r'|Git[Hh]ub(?:Exception)?\b[^\n]{0,80}\b(?:500|502|503|504)\b'
+    # (7) a candidate fix failing a fleet repo's tests during QA. The fixer
+    # records that failure on the fleet issue itself; filed again here it
+    # landed in ab as a fake ab test failure (ab#555).
+    r'|Per-repo tests for [\w.-]+/[\w.-]+ failed:',
     re.IGNORECASE,
 )
 
