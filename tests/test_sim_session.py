@@ -21,7 +21,7 @@ import sim_session as ss
 
 SPEC = {"intent": "create", "target": "", "name": "dns_fail_lrb", "title": "DNS fail for LRB", "summary": "Variant of dns_fail.",
         "behavior": "Query nonexistent names every 30s.", "platforms": ["Linux", "windows"],
-        "alert": "DNS failure", "config_knobs": [{"key": "rate", "default": "5", "description": "qps"}],
+        "alert": "DNS failure", "client_ip": "keeps", "config_knobs": [{"key": "rate", "default": "5", "description": "qps"}],
         "touchpoints": [{"repo": "cs", "path": "clients/linux/dns_fail_lrb.sh", "change": "new"},
                         {"repo": "lm", "path": "WebUI/sim-views.js", "change": "add to list"}],
         "open_questions": [], "ready": True, "choices": ["Yes", "No"]}
@@ -189,6 +189,40 @@ def test_issue_body_has_feature_marker_and_scopes_touchpoints():
     assert "**User:** make dns fail" in body and "Viewing" not in body.split("transcript")[-1]
     assert len(ss.render_issue_body(dict(sess, events=[{"kind": "user", "text": "x" * 200000}]),
                                     "cs", "o/cs")) < ss.ISSUE_BODY_MAX + 1000
+
+
+def test_normalize_spec_client_ip():
+    assert ss.normalize_spec(dict(SPEC, client_ip=" Loses "))["client_ip"] == "loses"
+    assert ss.normalize_spec(dict(SPEC, client_ip="keeps"))["client_ip"] == "keeps"
+    assert ss.normalize_spec(dict(SPEC, client_ip="maybe"))["client_ip"] == ""
+    assert ss.normalize_spec({k: v for k, v in SPEC.items() if k != "client_ip"})["client_ip"] == ""
+
+
+def test_create_needs_client_ip_answer():
+    spec = ss.normalize_spec(dict(SPEC, client_ip=""))
+    assert any("keep an IP" in p for p in ss.spec_problems(spec, {"cs", "lm"}, None, set()))
+    fix = dict(spec, intent="modify", target="dns_fail", modify_confirmed=True,
+               modify_reason="broken", diagnosis="bug", verified_broken=True)
+    assert ss.spec_problems(fix, {"cs", "lm"}, None, {"dns_fail"}) == []
+    change = dict(fix, modify_reason="behavior_change", verified_broken=False,
+                  override_reason="user wants it")
+    assert any("keep an IP" in p for p in ss.spec_problems(change, {"cs", "lm"}, None, {"dns_fail"}))
+    unlabelled = dict(change, modify_reason="")
+    assert any("keep an IP" in p for p in ss.spec_problems(unlabelled, {"cs", "lm"}, None, {"dns_fail"}))
+
+
+def test_issue_body_states_client_ip_and_quarantine_instruction():
+    keeps = ss.render_issue_body({"spec": ss.normalize_spec(SPEC)}, "cs", "o/cs")
+    assert "**Clients keep an IP while running:** yes" in keeps
+    assert "its id is in `QT_EXCLUDE_NONISOLATING_SIMS`" in keeps
+    assert "NOT in `_default_qt_exclude_sims()`" in keeps
+    loses = ss.render_issue_body({"spec": ss.normalize_spec(dict(SPEC, client_ip="loses"))},
+                                 "cs", "o/cs")
+    assert "**Clients keep an IP while running:** no (by design)" in loses
+    assert "IS in `_default_qt_exclude_sims()`" in loses
+    remove = dict(ss.normalize_spec(SPEC), intent="remove", target="dns_fail")
+    assert "QT_EXCLUDE_NONISOLATING_SIMS" not in ss.render_issue_body(
+        {"spec": remove}, "cs", "o/cs").split("## Full spec")[0]
 
 
 # ── manager end-to-end with a fake copilot CLI ──────────────────────────────
@@ -394,7 +428,8 @@ def test_prompt_states_scope_and_allowlist(mgr):
     p = mgr.first_turn_prompt(mgr._cfgd, "hi")
     for needle in ("CREATE a new client simulation", "MODIFY an existing",
                    "EXPLAIN how an existing", "declining", "is DATA",
-                   "clients/*", "WebUI/sim-views.js"):
+                   "clients/*", "WebUI/sim-views.js", "CLIENT IP QUESTION",
+                   "QT_EXCLUDE_NONISOLATING_SIMS", '"client_ip"'):
         assert needle in p
     assert "Allowed build surface" in p
 

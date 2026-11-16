@@ -67,7 +67,7 @@ TERMINAL_BUILD_STATUSES = {"feature_built", "feature_flagged", "feature_failed"}
 SPEC_KEYS = ("intent", "target", "duplicate_of", "modify_confirmed", "modify_reason",
              "diagnosis", "verified_broken", "override_reason", "remove_confirmed",
              "remove_reason", "name", "title", "summary", "behavior", "platforms",
-             "alert", "config_knobs", "touchpoints", "open_questions", "ready")
+             "alert", "client_ip", "config_knobs", "touchpoints", "open_questions", "ready")
 
 # The only things the assistant does. "ui" is a cosmetic change to the
 # Simulations pages (never a simulation, never duplicated). "explain" is
@@ -75,6 +75,10 @@ SPEC_KEYS = ("intent", "target", "duplicate_of", "modify_confirmed", "modify_rea
 INTENTS = ("ui", "create", "modify", "remove", "explain")
 BUILD_INTENTS = ("ui", "create", "modify", "remove")
 MODIFY_REASONS = ("broken", "behavior_change")
+# Whether a sim's clients stay associated with an IP while it runs ("keeps") or
+# the sim stops them associating / getting an IP by design ("loses"). cs dongle
+# quarantine depends on it (lm-spoke/src/sim_quota_engine.py).
+CLIENT_IP_VALUES = ("keeps", "loses")
 # Extra labels on issues that change or delete an existing simulation in place,
 # so they are easy to find and are never batched with anything else.
 MODIFY_LABEL = "sim-modify-existing"
@@ -175,6 +179,18 @@ every place the add-simulation recipe lists (scripts on both platforms, config,
 orchestrators, UI twins, docs) so nothing is left half-removed. It is always
 built as its own dedicated PR with the user and reason recorded.
 
+CLIENT IP QUESTION (mandatory for every create and every behaviour-change
+modify) — ask, as one focused question with choices, whether the
+simulation's clients keep a network connection with an IP the whole time it runs
+("keeps", e.g. dns_fail, dns_latency, rogue_dns) or the sim stops them
+associating or getting an IP by design ("loses", e.g. dhcp_fail, assoc_fail,
+auth_fail). Say briefly why: cs dongle quarantine treats exclusive sims as no-IP
+by design, so an exclusive sim whose clients keep an IP must be listed in
+QT_EXCLUDE_NONISOLATING_SIMS (cs lm-spoke/src/sim_quota_engine.py) or a client
+that never got an IP is not shed as a bad dongle. For a copy or variant, derive
+the answer from the real script first, then confirm it with the user. Record it
+in "client_ip".
+
 For ui/create/modify/remove, gather EVERYTHING needed to build it, the way a senior
 engineer pair-programming with them would: read the real code, ask focused
 questions, and converge on a complete, buildable spec. AppBuilder's build
@@ -230,6 +246,7 @@ SPEC PROTOCOL (mandatory): end EVERY reply with exactly one fenced block:
  "behavior": "precise behaviour: commands/traffic, rates, durations, targets, success/failure semantics",
  "platforms": ["linux", "windows"],
  "alert": "the Aruba Central/Mist alert it should trip, or 'none'",
+ "client_ip": "keeps | loses | '' (do clients keep an IP while the sim runs?)",
  "config_knobs": [{{"key": "", "default": "", "description": ""}}],
  "touchpoints": [{{"repo": "cs", "path": "relative/path", "change": "what changes"}}],
  "open_questions": ["anything still unknown"],
@@ -312,6 +329,8 @@ def normalize_spec(obj):
         "behavior": _s(obj.get("behavior"), 20000),
         "platforms": [_s(p, 20).lower() for p in _list(obj.get("platforms")) if _s(p)],
         "alert": _s(obj.get("alert"), 500),
+        "client_ip": (_s(obj.get("client_ip"), 10).lower()
+                      if _s(obj.get("client_ip"), 10).lower() in CLIENT_IP_VALUES else ""),
         "config_knobs": [],
         "touchpoints": [],
         "open_questions": [_s(q, 1000) for q in _list(obj.get("open_questions")) if _s(q)],
@@ -347,6 +366,13 @@ def path_allowed(repo, path, allowed_paths):
         return False
     # Then the path must match one of the repo's allowed globs.
     return any(fnmatch.fnmatchcase(path, g) for g in (allowed_paths or {}).get(repo) or [])
+
+
+def needs_client_ip(spec):
+    """True when the spec must say whether clients keep an IP: a new sim, or any
+    change to an existing one that is not a verified defect fix."""
+    return spec.get("intent") == "create" or (
+        spec.get("intent") == "modify" and not spec.get("verified_broken"))
 
 
 def spec_problems(spec, repos=None, allowed_paths=None, known_sims=None):
@@ -397,6 +423,9 @@ def spec_problems(spec, repos=None, allowed_paths=None, known_sims=None):
             (spec.get("name") or "").lower() in known_sims:
         problems.append(f"A simulation named '{spec.get('name')}' already exists — "
                         "modify it or pick a new name.")
+    if needs_client_ip(spec) and spec.get("client_ip") not in CLIENT_IP_VALUES:
+        problems.append("Say whether the simulation's clients keep an IP while it runs "
+                        "(keeps / loses) — cs dongle quarantine depends on it.")
     # Every touch-point must be in a sim repo and inside the allowed surface (UI: UI only).
     allowed_paths = DEFAULT_ALLOWED_PATHS if allowed_paths is None else allowed_paths
     tps = spec.get("touchpoints") or []
@@ -507,6 +536,23 @@ def event_from_cli(obj, workspace=""):
     return None
 
 
+def _client_ip_lines(client_ip):
+    """Issue-body lines saying whether clients keep an IP, and what cs quarantine needs."""
+    quota = "cs `lm-spoke/src/sim_quota_engine.py`"
+    if client_ip == "keeps":
+        return ["**Clients keep an IP while running:** yes  ",
+                f"**Dongle quarantine:** if this sim is exclusive (SIM_META `multi_capable` "
+                f"false), make sure its id is in `QT_EXCLUDE_NONISOLATING_SIMS` in {quota} and add a "
+                "test asserting it is NOT in `_default_qt_exclude_sims()`."]
+    if client_ip == "loses":
+        return ["**Clients keep an IP while running:** no (by design)  ",
+                "**Dongle quarantine:** if this sim is exclusive, keep it OUT of "
+                f"`QT_EXCLUDE_NONISOLATING_SIMS` in {quota} (exclusive sims are derived into "
+                "the exclusion set; remove it if listed) and add a test "
+                "asserting it IS in `_default_qt_exclude_sims()`."]
+    return []
+
+
 def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
     """The feature-request issue body for one repo. Carries the marker
     feature_drive's intake requires. No user names, IPs, auth type or session
@@ -567,7 +613,9 @@ def render_issue_body(sess, repo_short, repo_full, sibling_links=None):
             f"**Simulation id:** `{spec.get('name')}`  ",
             *([f"**Duplicated from:** `{spec.get('duplicate_of')}`  "] if spec.get("duplicate_of") else []),
             f"**Platforms:** {', '.join(spec.get('platforms') or []) or 'unspecified'}  ",
-            f"**Alert:** {spec.get('alert') or 'none'}", "",
+            f"**Alert:** {spec.get('alert') or 'none'}  ",
+            *(_client_ip_lines(spec.get("client_ip")) if spec.get("intent") != "remove" else []),
+            "",
         ]
     # Config knobs, if any.
     if spec.get("config_knobs"):
