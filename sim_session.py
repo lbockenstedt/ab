@@ -548,8 +548,9 @@ def _client_ip_lines(client_ip):
         return ["**Clients keep an IP while running:** no (by design)  ",
                 "**Dongle quarantine:** if this sim is exclusive, keep it OUT of "
                 f"`QT_EXCLUDE_NONISOLATING_SIMS` in {quota} (exclusive sims are derived into "
-                "the exclusion set; remove it if listed) and add a test "
-                "asserting it IS in `_default_qt_exclude_sims()`."]
+                "the exclusion set; remove it if listed), add it to the literal fallback "
+                "`QT_EXCLUDE_SIMS_DEFAULT` (cs tests require derived == fallback), and add "
+                "a test asserting it IS in `_default_qt_exclude_sims()`."]
     return []
 
 
