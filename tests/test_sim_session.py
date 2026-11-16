@@ -220,6 +220,7 @@ def test_issue_body_states_client_ip_and_quarantine_instruction():
                                  "cs", "o/cs")
     assert "**Clients keep an IP while running:** no (by design)" in loses
     assert "IS in `_default_qt_exclude_sims()`" in loses
+    assert "add it to the literal fallback `QT_EXCLUDE_SIMS_DEFAULT`" in loses
     remove = dict(ss.normalize_spec(SPEC), intent="remove", target="dns_fail")
     assert "QT_EXCLUDE_NONISOLATING_SIMS" not in ss.render_issue_body(
         {"spec": remove}, "cs", "o/cs").split("## Full spec")[0]
