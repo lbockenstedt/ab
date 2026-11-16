@@ -34,13 +34,15 @@ def test_after_the_cap_it_goes_to_a_human_once():
     assert workers.failed_retry_decision(_rec(auto_retries=2), CFG, NOW) == "needs_human"
     assert workers.failed_retry_decision(
         _rec(auto_retries=2, needs_human_at="x"), CFG, NOW) == "wait"
+    assert workers.failed_retry_decision(
+        _rec(auto_retries=2, last_recurrence_at=None), CFG, NOW) == "wait"
     assert workers.failed_retry_decision(_rec(), {"failed_retry_max": 0}, NOW) == "wait"
 
 
 class _Issue:
     def __init__(self):
         self.labels, self.comments = [], []
-        self.repository = N()
+        self.repository, self.number = N(), 1
 
     def add_to_labels(self, name):
         self.labels.append(name)
@@ -53,16 +55,17 @@ def _store(monkeypatch, rec):
     store = {"data": {"o/lm:1": rec}}
     monkeypatch.setattr(workers, "load_processed", lambda: copy.deepcopy(store["data"]))
     monkeypatch.setattr(workers, "save_processed", lambda p: store.update(data=copy.deepcopy(p)))
-    monkeypatch.setattr(main, "_ensure_label", lambda repo, name: None, raising=False)
+    monkeypatch.setattr(main, "_ensure_label", lambda repo, name: None)
     return store
 
 
-def test_retry_counts_and_persists(monkeypatch):
+def test_a_retry_is_charged_only_when_dispatched(monkeypatch):
     store = _store(monkeypatch, _rec(timestamp="2000-01-01 00:00:00"))
     processed = copy.deepcopy(store["data"])
     assert workers._retry_failed_issue(_Issue(), "o/lm:1", processed, CFG) is True
-    assert store["data"]["o/lm:1"]["auto_retries"] == 1
-    assert processed["o/lm:1"]["auto_retries"] == 1
+    assert "auto_retries" not in store["data"]["o/lm:1"]
+    workers._count_retry("o/lm:1", processed, CFG)
+    assert store["data"]["o/lm:1"]["auto_retries"] == processed["o/lm:1"]["auto_retries"] == 1
 
 
 def test_cap_labels_and_comments_once(monkeypatch):
@@ -75,3 +78,10 @@ def test_cap_labels_and_comments_once(monkeypatch):
     assert "Reviewers rejected the fix" in issue.comments[0]
     assert workers._retry_failed_issue(issue, "o/lm:1", processed, CFG) is False
     assert len(issue.comments) == 1
+
+
+def test_a_failed_hand_off_is_tried_again(monkeypatch):
+    store = _store(monkeypatch, _rec(auto_retries=2))
+    monkeypatch.setattr(main, "_ensure_label", lambda repo, name: 1 / 0)
+    assert workers._retry_failed_issue(_Issue(), "o/lm:1", {}, CFG) is False
+    assert "needs_human_at" not in store["data"]["o/lm:1"]

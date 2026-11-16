@@ -8,6 +8,9 @@ import main  # noqa: F401 - loads github_ops in import order
 import github_ops
 
 
+_IP = ".".join(("198", "51", "100", "9"))  # documentation range, built not literal
+
+
 class Comment:
     def __init__(self, body):
         self.body = body
@@ -49,7 +52,7 @@ def test_redact_identity_masks_ids_but_keeps_log_numbers():
 
 
 def test_repeats_edit_one_comment_and_count_the_old_ones():
-    issue = Issue(comments=["🤖 **AppBuilder Update**\n\nAdditional instance of this error detected in x",
+    issue = Issue(comments=["🤖 **AppBuilder Update**\n\nAdditional instance of this error detected in x (c73fbb13)",
                             "a human comment",
                             "🤖 **AppBuilder Update**\n\nAdditional instance of this error detected in x"])
     t1 = datetime(2026, 11, 16, 10, 0, tzinfo=timezone.utc)
@@ -60,11 +63,12 @@ def test_repeats_edit_one_comment_and_count_the_old_ones():
     mine = issue.comments[-1].body
     assert "**4** time(s)" in mine and "2026-11-16 10:00 UTC" in mine and "2026-11-16 11:00 UTC" in mine
     assert "````\nsecond\n````" in mine and "````\nfirst" not in mine
+    assert "c73fbb13" not in issue.comments[0].body
 
 
 def test_open_duplicate_updates_the_comment_redacts_and_stamps_the_record(monkeypatch):
     issue = Issue(title="Hub log alert (nw): slow command NW_GET_ARP on agent-network (c73fbb13)",
-                  body="evidence from 10.1.2.3")
+                  body="evidence from " + _IP)
     store = {"o/nw:211": {"status": "failed", "timestamp": "2026-11-13T10:00:00"}}
     monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
     monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", False))
@@ -77,5 +81,5 @@ def test_open_duplicate_updates_the_comment_redacts_and_stamps_the_record(monkey
         assert got is issue
     assert len(issue.comments) == 1
     assert "**3** time(s)" in issue.comments[0].body and "10.9.8.7" not in issue.comments[0].body
-    assert "c73fbb13" not in issue.title and "10.1.2.3" not in issue.body
+    assert "c73fbb13" not in issue.title and _IP not in issue.body
     assert store["o/nw:211"]["last_recurrence_at"]

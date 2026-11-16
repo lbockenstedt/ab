@@ -74,7 +74,8 @@ def test_post_deploy_watch_lists_recent_commits_on_the_deployed_branch():
     assert _recent_fn()(Repo(), {"post_deploy_window_h": 0}) == []
 
 
-_CONSTS = ("_OPERATIONAL_FAULT", "OPS_ALERT_LABEL", "_PERFORMANCE_FINDING", "_ESCALATION_HEADER")
+_CONSTS = ("_OPERATIONAL_FAULT", "OPS_ALERT_LABEL", "_PERFORMANCE_FINDING", "_ESCALATION_HEADER",
+           "_OPS_SECTION")
 
 
 def _fns(*names):
@@ -227,12 +228,15 @@ def test_operational_match_on_an_existing_issue_moves_it_to_ops_alert():
 
 
 def test_performance_repeat_on_an_ops_alert_issue_moves_it_to_the_fixer():
-    issue = _Issue("log-detected", "ops-alert")
-    ok, _ = _filer(issue)["file_escalated_issue"](
-        "hub", "26 of 72 calls >= 5.0s", "Health check: slow command NW_GET_ARP on agent-network\n",
-        verdict="health-check", config={"GITHUB_TOKEN": "t"})
-    assert ok
+    issue = _Issue("log-detected", "ops-alert", body="### Operational fault\nenvironment")
+    by_hand = _Issue("log-detected", "ops-alert", body="labelled by a person")
+    for target in (issue, by_hand):
+        ok, _ = _filer(target)["file_escalated_issue"](
+            "hub", "26 of 72 calls >= 5.0s", "Health check: slow command NW_GET_ARP on agent-network\n",
+            verdict="health-check", config={"GITHUB_TOKEN": "t"})
+        assert ok
     assert [lbl.name for lbl in issue.labels] == ["log-detected", "automated-fix"]
+    assert [lbl.name for lbl in by_hand.labels] == ["log-detected", "ops-alert"]
 
 
 def test_reclassify_moves_only_ab_filed_performance_findings():

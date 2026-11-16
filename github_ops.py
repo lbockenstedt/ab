@@ -501,7 +501,7 @@ _SECURITY_MONITOR_MARKERS = (" - security - ", " - threatmonitor - ", "security 
 # addresses, and the short spoke-id fragment the hub appends to spoke names,
 # e.g. "lm-agent-netbox (0c647084)".
 _UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
-_SPOKE_ID_RE = re.compile(r" ?\((?=[0-9a-f]*\d)[0-9a-f]{8}\)", re.I)
+_SPOKE_ID_RE = re.compile(r" ?\([0-9a-f]{8}\)", re.I)
 _IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\.?\d)")  # not inside an SNMP OID
 
 
@@ -522,15 +522,20 @@ def upsert_recurrence_comment(issue, repo_name, body_text, now=None):
     """Record one more occurrence of an issue's error in a single AppBuilder
     comment that is edited in place (count, first/last seen, latest excerpt).
     A new comment per repeat buried issues (nw#211 reached 100 comments).
-    Older per-repeat comments are counted once, when the comment is created."""
+    Older per-repeat comments are counted (and stripped of identity data)
+    once, when the comment is created."""
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M UTC")
-    mine, legacy = None, 0
-    for comment in issue.get_comments():
-        text = comment.body or ""
-        if text.startswith(_RECURRENCE_MARKER):
-            mine = comment
-        elif _LEGACY_RECURRENCE in text:
-            legacy += 1
+    comments = list(issue.get_comments())
+    mine = next((c for c in comments if (c.body or "").startswith(_RECURRENCE_MARKER)), None)
+    legacy = [c for c in comments if _LEGACY_RECURRENCE in (c.body or "")]
+    if mine is None:
+        for comment in legacy:
+            if redact_identity(comment.body) != comment.body:
+                try:
+                    comment.edit(redact_identity(comment.body))
+                except Exception as e:  # noqa: BLE001 - best effort
+                    logger.warning(f"Could not redact an old comment on #{issue.number}: {e}")
+    legacy = len(legacy)
     data = {"count": legacy, "first_seen": stamp}
     if mine is not None:
         try:

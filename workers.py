@@ -1110,13 +1110,15 @@ NEEDS_HUMAN_LABEL = "ab-needs-human"
 
 
 def failed_retry_decision(rec, config, now=None):
-    """"retry", "needs_human" or "wait" for a failed/non-actionable record."""
-    cap = int(config.get("failed_retry_max", 2) or 0)
+    """"retry", "needs_human" or "wait" for a failed/non-actionable record.
+    Only an error that recurred after the last run counts; the wait runs from
+    that run (``timestamp``, rewritten by every fix attempt)."""
+    # Retries switched off.
+    cap = int(float(config.get("failed_retry_max", 2) or 0))
     hours = float(config.get("failed_retry_hours", 24) or 0)
     if cap <= 0:
         return "wait"
-    if int(rec.get("auto_retries") or 0) >= cap:
-        return "wait" if rec.get("needs_human_at") else "needs_human"
+    # The error must have come back since the last run.
     try:
         failed_at = datetime.fromisoformat(str(rec.get("timestamp")))
         recurred_at = datetime.fromisoformat(str(rec.get("last_recurrence_at")))
@@ -1124,45 +1126,60 @@ def failed_retry_decision(rec, config, now=None):
         return "wait"
     if recurred_at <= failed_at:
         return "wait"
+    # Budget spent: hand it to a person once.
+    if int(rec.get("auto_retries") or 0) >= cap:
+        return "wait" if rec.get("needs_human_at") else "needs_human"
+    # At most one retry per failed_retry_hours.
     if ((now or datetime.now()) - failed_at).total_seconds() < hours * 3600:
         return "wait"
     return "retry"
 
 
 def _hand_to_human(issue, rec):
-    """Label a failed issue ab-needs-human with a short summary of why. Best effort."""
+    """Label a failed issue ab-needs-human with a short summary of why.
+    True when both the label and the comment were posted."""
     runs = 1 + int(rec.get("auto_retries") or 0)
     why = main.redact_identity(str(rec.get("error") or rec.get("reason") or "unknown")[:600])
     try:
         main._ensure_label(issue.repository, NEEDS_HUMAN_LABEL)
         issue.add_to_labels(NEEDS_HUMAN_LABEL)
         issue.create_comment(
-            f"🧑‍⚖️ **AppBuilder — needs a human**\n\nThis error keeps recurring and AppBuilder "
-            f"could not fix it in {runs} run(s) ({rec.get('failure_kind') or rec.get('status')}).\n\n"
+            f"🧑‍⚖️ **AppBuilder — needs a human**\n\nThis error came back after AppBuilder "
+            f"failed to fix it in {runs} run(s) ({rec.get('failure_kind') or rec.get('status')}).\n\n"
             f"**Last result:** {why}\n\nAdd guidance here and press Retry in AppBuilder, "
             f"or close the issue if the error is expected.")
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not hand #{issue.number} to a human: {e}")
+        return False
+
+
+def _update_record(issue_id, processed, **fields):
+    """Set fields on an issue's record in both the saved and the cycle's store."""
+    fresh = load_processed()
+    rec = {**(processed.get(issue_id) or {}), **(fresh.get(issue_id) or {}), **fields}
+    fresh[issue_id] = processed[issue_id] = rec
+    save_processed(fresh)
 
 
 def _retry_failed_issue(issue, issue_id, processed, config):
-    """True when a failed/non-actionable issue should be re-run this cycle
-    (see failed_retry_decision). Updates both the saved and the cycle's store."""
-    fresh = load_processed()
-    rec = fresh.get(issue_id) or processed.get(issue_id) or {}
+    """True when a failed/non-actionable issue is due a re-run this cycle (see
+    failed_retry_decision). The retry is only counted when it is dispatched
+    (_count_retry), so a gate that drops it this cycle costs nothing."""
+    rec = load_processed().get(issue_id) or processed.get(issue_id) or {}
     decision = failed_retry_decision(rec, config)
-    if decision == "wait":
-        return False
-    if decision == "needs_human":
-        _hand_to_human(issue, rec)
-        rec["needs_human_at"] = datetime.now().isoformat()
-    else:
-        rec["auto_retries"] = int(rec.get("auto_retries") or 0) + 1
-        logger.info(f"{issue_id}: error still recurring — automatic retry "
-                    f"{rec['auto_retries']}/{config.get('failed_retry_max', 2)} with the previous feedback.")
-    fresh[issue_id] = processed[issue_id] = rec
-    save_processed(fresh)
+    if decision == "needs_human" and _hand_to_human(issue, rec):
+        _update_record(issue_id, processed, needs_human_at=datetime.now().isoformat())
     return decision == "retry"
+
+
+def _count_retry(issue_id, processed, config):
+    """Charge one automatic retry to an issue that is being dispatched."""
+    rec = load_processed().get(issue_id) or processed.get(issue_id) or {}
+    n = int(rec.get("auto_retries") or 0) + 1
+    _update_record(issue_id, processed, auto_retries=n)
+    logger.info(f"{issue_id}: error still recurring — automatic retry "
+                f"{n}/{config.get('failed_retry_max', 2)} with the previous feedback.")
 
 
 # Fleet PRs merge into dev and are promoted to main later, and GitHub only
@@ -1270,6 +1287,7 @@ def scan_repo_issues(gh_current, config, processed):
                 to_fix = []           # log-detected / generic automated-fix issues
                 critical_to_fix = []  # SCHEDULER_CRITICAL_LABEL — always run, first, uncapped
                 bug_to_fix = []       # bug-label (human-filed Bug) — run before log-detected
+                retrying = set()      # failed issues due an automatic retry
                                       # and bypass the scheduler window (processed now, not at
                                       # the next allowed slot). Subject to the per-cycle cap,
                                       # but takes cap slots ahead of log-detected.
@@ -1307,6 +1325,7 @@ def scan_repo_issues(gh_current, config, processed):
                             if status in FAILED_RETRY_STATUSES:
                                 if not _retry_failed_issue(issue, issue_id, processed, config):
                                     continue
+                                retrying.add(issue_id)
                             elif status in ["fixed", "awaiting_prod_verification"]:
                                 continue
                             if status == "awaiting_local":
@@ -1385,6 +1404,9 @@ def scan_repo_issues(gh_current, config, processed):
                             logger.info(f"Found {len(all_to_fix)} issues to process in {repo_name} (max workers={max_workers}).")
                         # Fix the batch in parallel and wait for all of them.
                         batch = critical_to_fix + capped_bugs + capped_normal
+                        for r, n in batch:
+                            if f"{r}:{n}" in retrying:
+                                _count_retry(f"{r}:{n}", processed, config)
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(main.process_single_issue, r, n) for r, n in batch]
                             for future in futures:

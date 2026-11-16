@@ -1754,16 +1754,25 @@ def _mark_ops_alert(issue):
         logger.warning(f"Could not mark #{getattr(issue, 'number', '?')} {OPS_ALERT_LABEL}: {e}")
 
 
+_OPS_SECTION = "### Operational fault"  # in the body of every issue AB files as ops-alert
+
+
 def _unmark_ops_alert(issue):
-    """Send an issue back to the fixer: drop ops-alert, add automated-fix. Best effort."""
+    """Send an issue back to the fixer: drop ops-alert, add automated-fix. An
+    ops-alert label on an issue AB did not file that way is a person's call
+    and stays. Best effort; True when the issue is in the fixer lane."""
     try:
         names = [lbl.name for lbl in (issue.labels or [])]
+        if OPS_ALERT_LABEL in names and _OPS_SECTION not in (issue.body or ""):
+            return False
         if "automated-fix" not in names:
             issue.add_to_labels("automated-fix")
         if OPS_ALERT_LABEL in names:
             issue.remove_from_labels(OPS_ALERT_LABEL)
+        return True
     except Exception as e:  # noqa: BLE001 - labelling must not break filing
         logger.warning(f"Could not move #{getattr(issue, 'number', '?')} to the fixer: {e}")
+        return False
 
 
 def reclassify_ops_alerts(repo_obj):
@@ -1772,9 +1781,7 @@ def reclassify_ops_alerts(repo_obj):
     fixer, and some never recur. Returns the moved issue numbers."""
     moved = []
     for issue in repo_obj.get_issues(labels=[OPS_ALERT_LABEL], state="open"):
-        # Only issues AB itself filed as ops-alert; a person's label stays.
-        if is_performance_finding(issue.title) and "### Operational fault" in (issue.body or ""):
-            _unmark_ops_alert(issue)
+        if is_performance_finding(issue.title) and _unmark_ops_alert(issue):
             moved.append(issue.number)
     if moved:
         logger.info(f"{repo_obj.full_name}: performance findings moved from {OPS_ALERT_LABEL} "
@@ -1845,7 +1852,7 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
         )
         operational = escalation_is_operational(summary, log_slice, analysis, verdict)
         if operational:
-            body += ("\n### Operational fault\nThis looks like an environment problem (a device or "
+            body += ("\n" + _OPS_SECTION + "\nThis looks like an environment problem (a device or "
                      "service not answering, a rejected credential, a certificate), not a code bug, "
                      f"so the code fixer skips it (`{OPS_ALERT_LABEL}` label). Repeats update one "
                      "recurrence comment. Remove the label to send it to the fixer.\n")
