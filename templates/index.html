@@ -2174,6 +2174,14 @@
                                 <label class="text-sm font-medium text-slate-600" title="A hub-escalated error filed within this many hours of a deploy lists the commits that just shipped and is labelled regression-suspect. 0 turns it off.">Post-Deploy Watch (hours)</label>
                                 <input type="number" name="post_deploy_window_h" value="{{ settings.post_deploy_window_h }}" min="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600" title="A failed or non-actionable issue whose error comes back is re-run once per this many hours, with the previous review feedback.">Failed Issue Retry (hours)</label>
+                                <input type="number" name="failed_retry_hours" value="{{ settings.failed_retry_hours }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600" title="Automatic re-runs before the issue is labelled ab-needs-human. 0 turns automatic retries off.">Failed Issue Max Retries</label>
+                                <input type="number" name="failed_retry_max" value="{{ settings.failed_retry_max }}" min="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
                         </div>
                         <div class="space-y-2 pt-6">
                             <label class="text-sm font-medium text-slate-600">Trigger Labels</label>

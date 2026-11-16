@@ -96,6 +96,16 @@ def test_rejected_syntax_edit_is_not_a_product_error():
     assert [row["log"] for row in kept] == [row["log"] for row in real]
 
 
+def test_fleet_qa_test_failure_is_not_an_ab_fault():
+    """A fleet repo's tests failing a candidate fix were filed in ab (ab#555)."""
+    fel = _load_filter()
+    noise = {"module": "ab-core",
+             "log": "2026-11-13 10:32:31 - AppBuilder - ERROR - Per-repo tests for "
+                    "lbockenstedt/cs failed: test_windows_orchestrator_wiring"}
+    real = {"module": "ab-core", "log": "[ERROR] Per-repo tests could not start: no venv"}
+    assert [row["log"] for row in fel([noise, real])] == [real["log"]]
+
+
 def main():
     fel = _load_filter()
 

@@ -22,6 +22,7 @@ import git
 import json
 import os
 import py_compile
+import re
 import requests
 import subprocess
 import sys
@@ -1099,6 +1100,154 @@ def sync_github_issue_state(gh_current, limit=GITHUB_SYNC_PER_CYCLE, shared=None
     return changed
 
 
+# A failed or non-actionable issue whose error keeps recurring is re-run once
+# every failed_retry_hours, at most failed_retry_max times; the re-run replays
+# the previous reviewer/QA feedback (fix_engine._prior_failure_context). After
+# the cap it is labelled ab-needs-human once. Before this, a failed issue was
+# skipped forever while its error kept recurring (lm#1931, netbox#290).
+FAILED_RETRY_STATUSES = ("failed", "non-actionable")
+NEEDS_HUMAN_LABEL = "ab-needs-human"
+
+
+def failed_retry_decision(rec, config, now=None):
+    """"retry", "needs_human" or "wait" for a failed/non-actionable record.
+    Only an error that recurred after the last run counts; the wait runs from
+    that run (``timestamp``, rewritten by every fix attempt)."""
+    # Retries switched off.
+    cap = int(float(config.get("failed_retry_max", 2) or 0))
+    hours = float(config.get("failed_retry_hours", 24) or 0)
+    if cap <= 0:
+        return "wait"
+    # The error must have come back since the last run.
+    try:
+        failed_at = datetime.fromisoformat(str(rec.get("timestamp")))
+        recurred_at = datetime.fromisoformat(str(rec.get("last_recurrence_at")))
+    except ValueError:
+        return "wait"
+    if recurred_at <= failed_at:
+        return "wait"
+    # Budget spent: hand it to a person once.
+    if int(rec.get("auto_retries") or 0) >= cap:
+        return "wait" if rec.get("needs_human_at") else "needs_human"
+    # At most one retry per failed_retry_hours.
+    if ((now or datetime.now()) - failed_at).total_seconds() < hours * 3600:
+        return "wait"
+    return "retry"
+
+
+def _hand_to_human(issue, rec):
+    """Label a failed issue ab-needs-human with a short summary of why.
+    True when both the label and the comment were posted."""
+    runs = 1 + int(rec.get("auto_retries") or 0)
+    why = main.redact_identity(str(rec.get("error") or rec.get("reason") or "unknown")[:600])
+    try:
+        main._ensure_label(issue.repository, NEEDS_HUMAN_LABEL)
+        issue.add_to_labels(NEEDS_HUMAN_LABEL)
+        issue.create_comment(
+            f"🧑‍⚖️ **AppBuilder — needs a human**\n\nThis error came back after AppBuilder "
+            f"failed to fix it in {runs} run(s) ({rec.get('failure_kind') or rec.get('status')}).\n\n"
+            f"**Last result:** {why}\n\nAdd guidance here and press Retry in AppBuilder, "
+            f"or close the issue if the error is expected.")
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not hand #{issue.number} to a human: {e}")
+        return False
+
+
+def _update_record(issue_id, processed, **fields):
+    """Set fields on an issue's record in both the saved and the cycle's store."""
+    fresh = load_processed()
+    rec = {**(processed.get(issue_id) or {}), **(fresh.get(issue_id) or {}), **fields}
+    fresh[issue_id] = processed[issue_id] = rec
+    save_processed(fresh)
+
+
+def _retry_failed_issue(issue, issue_id, processed, config):
+    """True when a failed/non-actionable issue is due a re-run this cycle (see
+    failed_retry_decision). The retry is only counted when it is dispatched
+    (_count_retry), so a gate that drops it this cycle costs nothing."""
+    rec = load_processed().get(issue_id) or processed.get(issue_id) or {}
+    decision = failed_retry_decision(rec, config)
+    if decision == "needs_human" and _hand_to_human(issue, rec):
+        _update_record(issue_id, processed, needs_human_at=datetime.now().isoformat())
+    return decision == "retry"
+
+
+def _count_retry(issue_id, processed, config):
+    """Charge one automatic retry to an issue that is being dispatched."""
+    rec = load_processed().get(issue_id) or processed.get(issue_id) or {}
+    n = int(rec.get("auto_retries") or 0) + 1
+    _update_record(issue_id, processed, auto_retries=n)
+    logger.info(f"{issue_id}: error still recurring — automatic retry "
+                f"{n}/{config.get('failed_retry_max', 2)} with the previous feedback.")
+
+
+# Fleet PRs merge into dev and are promoted to main later, and GitHub only
+# auto-closes an issue from a PR into the default branch, so a built feature's
+# issue stayed open after it shipped (cs#257, lm#1898). Each repo of a
+# multi-repo feature has its own issue and record, so each closes on its own.
+SHIPPED_CHECK_PER_CYCLE = 20
+_PR_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
+
+
+def _pr_on_deployed_branch(repo, pr, config):
+    """True when merged PR *pr* has reached the repo's deployed branch."""
+    if not pr.merged or not pr.merge_commit_sha:
+        return False
+    branch = config.get("post_deploy_branch") or repo.default_branch or "main"
+    if pr.base.ref == branch:
+        return True
+    return repo.compare(branch, pr.merge_commit_sha).status in ("behind", "identical")
+
+
+def close_shipped_features(gh_current, config, limit=SHIPPED_CHECK_PER_CYCLE, shared=None):
+    """Close the issue of every built feature whose PR is on the deployed
+    branch, with a comment linking the PR; the record becomes "resolved".
+    Checks up to ``limit`` records per cycle, least recently checked first."""
+    processed = load_processed()
+    built = [k for k, v in processed.items()
+             if v.get("status") == "feature_built" and _PR_URL_RE.search(str(v.get("pr_url") or ""))]
+    built.sort(key=lambda k: processed[k].get("shipped_checked_at") or "")
+    shipped, checked = {}, []
+    for issue_id in built[:limit]:
+        checked.append(issue_id)
+        try:
+            pr_repo_name, pr_num = _PR_URL_RE.search(processed[issue_id]["pr_url"]).groups()
+            pr_repo = gh_current.get_repo(pr_repo_name)
+            pr = pr_repo.get_pull(int(pr_num))
+            if not _pr_on_deployed_branch(pr_repo, pr, config):
+                continue
+            repo_name, _, number = issue_id.rpartition(":")
+            repo = pr_repo if repo_name == pr_repo_name else gh_current.get_repo(repo_name)
+            issue = repo.get_issue(int(number))
+            if issue.state != "closed":
+                issue.create_comment(
+                    f"✅ **AppBuilder** — shipped: {pr.html_url} is on "
+                    f"`{config.get('post_deploy_branch') or repo.default_branch}`. Closing.")
+                main._apply_closed_label(repo, issue, issue_id)
+                issue.edit(state="closed")
+            shipped[issue_id] = pr.html_url
+        except Exception as e:  # noqa: BLE001 - one bad record must not stop the sweep
+            logger.debug(f"Shipped-feature check skipped {issue_id}: {e}")
+
+    processed = load_processed()
+    now = datetime.now().isoformat()
+    for issue_id in checked:
+        rec = processed.get(issue_id)
+        if not rec or rec.get("status") != "feature_built":
+            continue
+        rec["shipped_checked_at"] = now
+        if issue_id in shipped:
+            rec.update(status="resolved", resolution="feature_shipped", closed_at=now)
+        if shared is not None:
+            shared[issue_id] = rec
+    save_processed(processed)
+    if shipped:
+        logger.info(f"Closed {len(shipped)} shipped feature issue(s): {', '.join(shipped)}")
+        recompute_issue_counters(processed)
+    return sorted(shipped)
+
+
 def scan_repo_issues(gh_current, config, processed):
     """Phase: Scan monitored repos for issues and attempt fixes concurrently."""
     global state
@@ -1120,6 +1269,11 @@ def scan_repo_issues(gh_current, config, processed):
                 labels = config.get("monitored_labels", ["automated-fix"])
                 if "NONE" in labels:
                     continue
+                # Performance findings filed as ops-alert belong to the fixer.
+                try:
+                    main.reclassify_ops_alerts(repo_obj)
+                except Exception as e:  # noqa: BLE001 - relabelling must not stop the scan
+                    logger.warning(f"ops-alert reclassification skipped for {repo_name}: {e}")
                 if "ANY" in labels:
                     issues = repo_obj.get_issues(state="open")
                 else:
@@ -1133,6 +1287,7 @@ def scan_repo_issues(gh_current, config, processed):
                 to_fix = []           # log-detected / generic automated-fix issues
                 critical_to_fix = []  # SCHEDULER_CRITICAL_LABEL — always run, first, uncapped
                 bug_to_fix = []       # bug-label (human-filed Bug) — run before log-detected
+                retrying = set()      # failed issues due an automatic retry
                                       # and bypass the scheduler window (processed now, not at
                                       # the next allowed slot). Subject to the per-cycle cap,
                                       # but takes cap slots ahead of log-detected.
@@ -1167,9 +1322,12 @@ def scan_repo_issues(gh_current, config, processed):
                         issue_id = f"{repo_name}:{issue.number}"
                         if issue_id in processed:
                             status = processed[issue_id].get("status")
-                            if status in ["fixed", "non-actionable", "failed", "awaiting_prod_verification"]:
-                                if status != "awaiting_review": # Allow resuming reviews
+                            if status in FAILED_RETRY_STATUSES:
+                                if not _retry_failed_issue(issue, issue_id, processed, config):
                                     continue
+                                retrying.add(issue_id)
+                            elif status in ["fixed", "awaiting_prod_verification"]:
+                                continue
                             if status == "awaiting_local":
                                 pass
                             # For awaiting_review, we let it proceed to check the 1-hour timer in process_single_issue
@@ -1246,6 +1404,9 @@ def scan_repo_issues(gh_current, config, processed):
                             logger.info(f"Found {len(all_to_fix)} issues to process in {repo_name} (max workers={max_workers}).")
                         # Fix the batch in parallel and wait for all of them.
                         batch = critical_to_fix + capped_bugs + capped_normal
+                        for r, n in batch:
+                            if f"{r}:{n}" in retrying:
+                                _count_retry(f"{r}:{n}", processed, config)
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(main.process_single_issue, r, n) for r, n in batch]
                             for future in futures:
@@ -1266,6 +1427,10 @@ def scan_repo_issues(gh_current, config, processed):
             sync_github_issue_state(gh_current, shared=processed)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"GitHub state sync failed: {e}")
+        try:
+            close_shipped_features(gh_current, config, shared=processed)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Shipped-feature sweep failed: {e}")
     except Exception as e:
         logger.exception(f"scan_repo_issues failed: {e}")
     # Always mark the scan task as finished.
