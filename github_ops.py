@@ -11,8 +11,10 @@ from main import (
     _in_update_cooldown,
     call_llm,
     load_config,
+    load_processed,
     logger,
     resolve_self_diagnosis_repo,
+    save_processed,
 )
 
 
@@ -495,6 +497,83 @@ _SECURITY_MONITOR_MARKERS = (" - security - ", " - threatmonitor - ", "security 
                              "threat block", "honeypot")
 
 
+# Identity data that must not reach a public issue (fleet rule): UUIDs, IPv4
+# addresses, and the short spoke-id fragment the hub appends to spoke names,
+# e.g. "lm-agent-netbox (0c647084)".
+_UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+_SPOKE_ID_RE = re.compile(r" ?\((?=[0-9a-f]*\d)[0-9a-f]{8}\)", re.I)
+_IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\.?\d)")  # not inside an SNMP OID
+
+
+def redact_identity(text):
+    """Text with UUIDs and IPv4 addresses replaced by <id>/<ip> and spoke-id
+    fragments like " (0c647084)" removed, so it can go in a public issue."""
+    text = _UUID_RE.sub("<id>", str(text or ""))
+    text = _SPOKE_ID_RE.sub("", text)
+    return _IPV4_RE.sub("<ip>", text)
+
+
+# Marks AppBuilder's one recurrence comment per issue; JSON counters follow it.
+_RECURRENCE_MARKER = "<!-- ab-recurrence "
+_LEGACY_RECURRENCE = "Additional instance of this error detected"
+
+
+def upsert_recurrence_comment(issue, repo_name, body_text, now=None):
+    """Record one more occurrence of an issue's error in a single AppBuilder
+    comment that is edited in place (count, first/last seen, latest excerpt).
+    A new comment per repeat buried issues (nw#211 reached 100 comments).
+    Older per-repeat comments are counted once, when the comment is created."""
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M UTC")
+    mine, legacy = None, 0
+    for comment in issue.get_comments():
+        text = comment.body or ""
+        if text.startswith(_RECURRENCE_MARKER):
+            mine = comment
+        elif _LEGACY_RECURRENCE in text:
+            legacy += 1
+    data = {"count": legacy, "first_seen": stamp}
+    if mine is not None:
+        try:
+            data = json.loads(mine.body[len(_RECURRENCE_MARKER):].split(" -->", 1)[0])
+        except ValueError:
+            pass
+    data["count"] = int(data.get("count") or 0) + 1
+    data.setdefault("first_seen", stamp)
+    data["last_seen"] = stamp
+    text = (f"{_RECURRENCE_MARKER}{json.dumps(data)} -->\n"
+            f"🔁 **AppBuilder — recurrences** (this comment is updated in place)\n\n"
+            f"Seen again **{data['count']}** time(s) since this issue was filed. "
+            f"First repeat: {data['first_seen']}. Last: {data['last_seen']}.\n\n"
+            f"Latest instance, from **{repo_name}**:\n\n````\n{body_text[:6000]}\n````")
+    if mine is not None:
+        mine.edit(text)
+    else:
+        issue.create_comment(text)
+    return data["count"]
+
+
+def note_recurrence(issue_id, now=None):
+    """Stamp last_recurrence_at on an issue's AB record (if it has one), so
+    RepoScan can retry a failed issue whose error keeps coming back."""
+    processed = load_processed()
+    rec = processed.get(issue_id)
+    if not isinstance(rec, dict):
+        return False
+    rec["last_recurrence_at"] = (now or datetime.now()).isoformat()
+    save_processed(processed)
+    return True
+
+
+def _redact_existing_issue(issue):
+    """Strip identity data from an older issue's title and body. Best effort."""
+    title, body = issue.title or "", issue.body or ""
+    if redact_identity(title) != title or redact_identity(body) != body:
+        try:
+            issue.edit(title=redact_identity(title), body=redact_identity(body))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not redact issue #{issue.number}: {e}")
+
+
 def _mentions_security_monitor(text):
     """True if ``text`` quotes hub security-monitor output (never filed publicly)."""
     low = str(text or "").lower()
@@ -559,9 +638,11 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                            f"output (public repo): {str(title_text)[:80]!r}")
             return None
 
-        # Normalise to strings (the LLM might return non-string types).
-        title_text = str(title_text)
-        body_text = str(body_text)
+        # Normalise to strings (the LLM might return non-string types) and
+        # keep identity data out of the public issue.
+        title_text = redact_identity(title_text)
+        body_text = redact_identity(body_text)
+        error_data = {**error_data, "title": title_text, "body": body_text}
 
         # Repo the error is for (defaults to the target repo).
         current_repo_name = error_data.get('repo') or gh_repo.full_name
@@ -679,16 +760,13 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
             # may have cleared it (weak match) to fall through to a fresh issue.
             if existing_issue:
                 logger.info(f"Global duplicate issue detected: #{existing_issue.number} in {duplicate_repo_display}. Adding info.")
-
-                # Add the new evidence as a comment unless it is already in the issue.
-                existing_body = existing_issue.body or ""
-                if body_text.lower() not in existing_body.lower():
-                    existing_issue.create_comment(
-                        f"🤖 **AppBuilder Update**\n\nAdditional instance of this error detected in repository **{current_repo_name}:**\n\n"
-                        f"```\n{body_text}\n```"
-                    )
-                    logger.info(f"Added additional evidence from {current_repo_name} to issue #{existing_issue.number}")
-
+                _redact_existing_issue(existing_issue)
+                count = upsert_recurrence_comment(existing_issue, current_repo_name, body_text)
+                logger.info(f"Recorded recurrence #{count} from {current_repo_name} on issue #{existing_issue.number}")
+                try:
+                    note_recurrence(f"{duplicate_repo_display}:{existing_issue.number}")
+                except Exception as e:  # noqa: BLE001 - the retry stamp is best effort
+                    logger.warning(f"Could not stamp recurrence on #{existing_issue.number}: {e}")
                 return existing_issue
 
         # No match: build the new issue's title and body.
@@ -813,6 +891,9 @@ __all__ = [
     'trigger_infrastructure_update',
     'find_global_duplicate_issue',
     'create_automated_issue',
+    'redact_identity',
+    'upsert_recurrence_comment',
+    'note_recurrence',
     'find_existing_pull_request',
     '_ensure_ab_closed_label',
     '_apply_closed_label',

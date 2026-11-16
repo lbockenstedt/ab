@@ -1120,6 +1120,11 @@ def scan_repo_issues(gh_current, config, processed):
                 labels = config.get("monitored_labels", ["automated-fix"])
                 if "NONE" in labels:
                     continue
+                # Performance findings filed as ops-alert belong to the fixer.
+                try:
+                    main.reclassify_ops_alerts(repo_obj)
+                except Exception as e:  # noqa: BLE001 - relabelling must not stop the scan
+                    logger.warning(f"ops-alert reclassification skipped for {repo_name}: {e}")
                 if "ANY" in labels:
                     issues = repo_obj.get_issues(state="open")
                 else:

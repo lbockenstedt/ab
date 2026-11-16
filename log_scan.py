@@ -13,6 +13,7 @@ from main import (
     is_llm_cooldown_error,
     load_config,
     logger,
+    redact_identity,
     resolve_module_repo,
     resolve_self_diagnosis_repo,
     save_processed,
@@ -1687,22 +1688,35 @@ def _slice_signature(log_slice):
 
 
 # Faults in the environment, not the code: a device that does not answer, a
-# rejected credential, a certificate, a slow or timed-out remote call. The code
-# fixer cannot fix these (it ends in "no edits", "non-actionable" or a rejected
-# guess), so they are filed once with the ops-alert label, which the fixer skips.
+# rejected credential, a certificate, a full disk. The code fixer cannot fix
+# these (it ends in "no edits", "non-actionable" or a rejected guess), so they
+# are filed once with the ops-alert label, which the fixer skips.
 _OPERATIONAL_FAULT = re.compile(
     r"time[sd]?[ -]?out|timing out|connection (?:refused|reset)|unreachable|no route to host"
     r"|name resolution|could not resolve|\b40[13]\b|forbidden|unauthori[sz]ed|oauth"
     r"|certificate|let'?s encrypt|renew(?:al)? failed|curl: \(28\)"
     r"|ssh connection|ssh: connect|\bssh\b.{0,60}\bfailed|authentication failed"
-    r"|slow command|disk is nearly full|memory is nearly full",
+    r"|disk is nearly full|memory is nearly full",
     re.I)
 OPS_ALERT_LABEL = "ops-alert"
 
+# Health-check performance findings: the hub measured a spoke handler or page
+# that is slow, keeps timing out or is called too often. Their analysis points
+# at the code (parallelise, cache, reuse rows), so they go to the fixer even
+# though the text says "timing out" (nw#211, netbox#258 sat in ops-alert).
+_PERFORMANCE_FINDING = re.compile(
+    r"Health check: (?:slow (?:command|page) |\S+ keeps timing out|\S+ is called very often)", re.I)
+
+
+def is_performance_finding(title):
+    """True when an escalation's title is a health-check performance finding."""
+    return bool(_PERFORMANCE_FINDING.search(title or ""))
+
 
 def is_operational_fault(title):
-    """True when an escalation's title names an environment fault (see _OPERATIONAL_FAULT)."""
-    return bool(_OPERATIONAL_FAULT.search(title or ""))
+    """True when an escalation's title names an environment fault (see
+    _OPERATIONAL_FAULT) and is not a performance finding."""
+    return not is_performance_finding(title) and bool(_OPERATIONAL_FAULT.search(title or ""))
 
 
 def escalation_is_operational(summary, log_slice, analysis, verdict):
@@ -1710,7 +1724,11 @@ def escalation_is_operational(summary, log_slice, analysis, verdict):
     health-check findings only) the analysis names an environment fault. The
     title alone misses most: its numbers are masked ("HTTP error #") and it is
     cut at 90 chars. Sentinel analysis is LLM prose that mentions timeouts
-    loosely, so it is not used; health-check analysis is fixed text."""
+    loosely, so it is not used; health-check analysis is fixed text.
+    A performance finding is never operational: its log lines quote the
+    timeouts it measured."""
+    if is_performance_finding(summary):
+        return False
     first_error = next((ln for ln in (log_slice or "").splitlines()
                         if re.search(r"\b(?:ERROR|CRITICAL)\b", ln)), "")
     texts = [summary, first_error]
@@ -1730,6 +1748,34 @@ def _mark_ops_alert(issue):
             issue.remove_from_labels("automated-fix")
     except Exception as e:  # noqa: BLE001 - labelling must not break filing
         logger.warning(f"Could not mark #{getattr(issue, 'number', '?')} {OPS_ALERT_LABEL}: {e}")
+
+
+def _unmark_ops_alert(issue):
+    """Send an issue back to the fixer: drop ops-alert, add automated-fix. Best effort."""
+    try:
+        names = [lbl.name for lbl in (issue.labels or [])]
+        if "automated-fix" not in names:
+            issue.add_to_labels("automated-fix")
+        if OPS_ALERT_LABEL in names:
+            issue.remove_from_labels(OPS_ALERT_LABEL)
+    except Exception as e:  # noqa: BLE001 - labelling must not break filing
+        logger.warning(f"Could not move #{getattr(issue, 'number', '?')} to the fixer: {e}")
+
+
+def reclassify_ops_alerts(repo_obj):
+    """Move open ops-alert issues that are performance findings to the fixer.
+    They were filed as ops-alert before performance findings went to the
+    fixer, and some never recur. Returns the moved issue numbers."""
+    moved = []
+    for issue in repo_obj.get_issues(labels=[OPS_ALERT_LABEL], state="open"):
+        # Only issues AB itself filed as ops-alert; a person's label stays.
+        if is_performance_finding(issue.title) and "### Operational fault" in (issue.body or ""):
+            _unmark_ops_alert(issue)
+            moved.append(issue.number)
+    if moved:
+        logger.info(f"{repo_obj.full_name}: performance findings moved from {OPS_ALERT_LABEL} "
+                    f"to the fixer: {moved}")
+    return moved
 
 
 def recent_deploy_changes(repo_obj, config=None, now=None):
@@ -1784,7 +1830,8 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
             # so title those on the stable log line instead (see _slice_signature).
             if not first_line.startswith("Health check:"):
                 first_line = _slice_signature(log_slice) or first_line
-        summary = " ".join(first_line.split())[:90] or f"{module} log problem"
+        # Redact before cutting, so a cut UUID cannot escape the pattern.
+        summary = " ".join(redact_identity(first_line).split())[:90] or f"{module} log problem"
         # Build the issue title and body.
         title = f"Hub log alert ({module}): {summary}"
         body = (
@@ -1796,8 +1843,8 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
         if operational:
             body += ("\n### Operational fault\nThis looks like an environment problem (a device or "
                      "service not answering, a rejected credential, a certificate), not a code bug, "
-                     f"so the code fixer skips it (`{OPS_ALERT_LABEL}` label). Repeats are added here "
-                     "as comments. Remove the label to send it to the fixer.\n")
+                     f"so the code fixer skips it (`{OPS_ALERT_LABEL}` label). Repeats update one "
+                     "recurrence comment. Remove the label to send it to the fixer.\n")
         # File it (or match an existing issue).
         repo_obj = gh.get_repo(repo_name)
         # Post-deploy watch: a fresh error right after a deploy points at what changed.
@@ -1816,9 +1863,12 @@ def file_escalated_issue(module, log_slice, analysis, verdict="escalate", config
         issue = create_automated_issue(gh, monitored_repos, repo_obj, error_data, labels=labels)
         if issue is None:
             return True, f"deduped/no-op in {repo_name}"
-        # A match on an older issue keeps its old labels; move it to ops-alert too.
-        if operational and getattr(issue, "_bf_was_duplicate", False):
-            _mark_ops_alert(issue)
+        # A match on an older issue keeps its old labels; move it to the right lane.
+        if getattr(issue, "_bf_was_duplicate", False):
+            if operational:
+                _mark_ops_alert(issue)
+            elif is_performance_finding(summary):
+                _unmark_ops_alert(issue)
         return True, f"{repo_name}#{getattr(issue, 'number', '?')}"
     # Any failure is reported back to the caller.
     except Exception as e:  # noqa: BLE001
@@ -2007,6 +2057,7 @@ __all__ = [
     'scan_heartbeats',
     'scan_bugs',
     'file_escalated_issue',
+    'reclassify_ops_alerts',
     '_safe_json_field',
     '_bug_report_fix_context',
     '_module_log_fix_context',
