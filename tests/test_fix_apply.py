@@ -321,6 +321,42 @@ def test_an_edit_stub_for_a_file_written_by_fixes_is_not_an_error():
     assert [e for e in errors if "malformed edit" in e]
 
 
+def test_empty_search_rejects_batch_before_any_writes(tmp_path):
+    """Empty anchors surface retry feedback without partially applying a batch."""
+    apply = _load_funcs()["parse_and_apply"]
+    source = tmp_path / "app.py"
+    source.write_text("x = 1\n")
+    valid = {"file": "app.py", "search": "x = 1", "replace": "x = 2"}
+
+    # Reject both existing-file edits and mistaken new-file creation requests.
+    for target in ("app.py", "tests/test_new.py"):
+        invalid = {"file": target, "search": "", "replace": "x = 3\n"}
+        for edits in ([invalid], [valid, invalid], [invalid, valid]):
+            result = apply(json.dumps({
+                "confidence": 0.97, "edits": edits,
+                "fixes": {"other.py": "y = 1\n"},
+            }), str(tmp_path))
+            assert result == (False, {}, 0.0)
+            assert apply.last_reason == "edit_anchor_miss"
+            assert len(apply.last_failures) == 1
+            assert target in apply.last_failures[0]
+            assert "search must be non-empty" in apply.last_failures[0]
+            assert "'fixes'" in apply.last_failures[0]
+            assert source.read_text() == "x = 1\n"
+            assert not (tmp_path / "tests").exists()
+            assert not (tmp_path / "other.py").exists()
+
+    # A corrected retry clears the rejection; empty replacement still deletes.
+    valid["replace"] = ""
+    ok, applied, confidence = apply(json.dumps({
+        "confidence": 0.97, "edits": [valid],
+    }), str(tmp_path))
+    assert ok and "app.py" in applied and confidence == 0.97
+    assert source.read_text() == "\n"
+    assert apply.last_reason is None
+    assert apply.last_failures == []
+
+
 def test_fix_apply():
     """pytest entry point. CI runs `pytest -q .`, which collects nothing from a
     script whose only entry point is main() under __main__ -- so every case in
