@@ -32,7 +32,7 @@ def test_repository_opt_in_does_not_fall_through(monkeypatch, opt_in, reply, exp
     repo = SimpleNamespace(full_name="owner/repo", visibility="private", private=True)
     pr = SimpleNamespace(title="Synthetic change", number=1, head=SimpleNamespace(sha="head"))
     files = [SimpleNamespace(filename="example.py", patch="+ value = 1")]
-    config = {"pr_review_lm_summary_repos": [repo.full_name]} if opt_in else {}
+    config = {"pr_review_lm_summary_repos": [repo.full_name.upper()]} if opt_in else {}
     assert scope["_summarize_changes"](pr, files, config, repo=repo) == expected
     if opt_in:
         legacy.assert_not_called()

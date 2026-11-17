@@ -2692,6 +2692,7 @@ async def settings_page(request: Request):
     config.setdefault("self_log_scan_enabled", True)
     # PR pre-review defaults OFF (opt-in); display-only default so the checkbox renders.
     config.setdefault("pr_review_enabled", False)
+    config.setdefault("pr_review_lm_summary_repos", [])
     # Skeptical reviewer panel on PR pre-review (advisory) — OFF (opt-in sub-option).
     config.setdefault("pr_review_llm_enabled", False)
     # Narrow state-logic/control-flow panel on PR pre-review (advisory) — a SECOND,
@@ -3181,6 +3182,11 @@ async def save_settings(request: Request):
         if r and r not in monitored_repos:
             monitored_repos.append(r)
     config_data["monitored_repos"] = list(dict.fromkeys(monitored_repos))
+    summary_repos = {clean_repo_name(repo).casefold()
+                     for repo in (data.get("pr_review_lm_summary_repos") or "").split(",")}
+    config_data["pr_review_lm_summary_repos"] = [
+        repo for repo in config_data["monitored_repos"] if repo.casefold() in summary_repos
+    ]
 
     # Trusted repos: same checkbox + free-text treatment as monitored.
     if hasattr(form_data, "getlist"):

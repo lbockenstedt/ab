@@ -301,6 +301,8 @@ def _summarize_changes(pr, files, config, repo=None):
     per-PR-update, not per-cycle. Best-effort: returns '' if disabled, the LLM is
     unavailable, or it yields nothing — the parity findings still post either way.
 
+    An opt-in repository waits for the hub's bounded CPU inference window
+    and never uses AB's provider chain for a failed summary. Otherwise:
     Routed via requirements=LlmRequirements(batch_ok=True) (LLM Selection
     Redesign, Phase 5 site #15): this is the one call site fire-and-forget
     batch processing is safe for (best-effort, discards failures, gated to
@@ -348,7 +350,9 @@ def _summarize_changes(pr, files, config, repo=None):
               "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest))
     # Explicit per-repository opt-in is not a change to the AB model picker.
     local_repos = config.get("pr_review_lm_summary_repos")
-    if isinstance(local_repos, list) and repo is not None and repo.full_name in local_repos:
+    if isinstance(local_repos, list) and repo is not None and any(
+            isinstance(name, str) and repo.full_name.casefold() == name.casefold()
+            for name in local_repos):
         from workers import _get_hub_agent_client
         client = _get_hub_agent_client()
         reply = client.request_sync("LLM_PR_SUMMARY", {
