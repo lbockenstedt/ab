@@ -49,6 +49,10 @@ sys.path.insert(0, _HERE)
 
 _REVIEWER_RE = re.compile(r"\*\*Reviewer \(([^)\s]+)\)\*\*")
 
+# Owner-approved migration: AB's old endpoint is disabled, but historical review
+# comments still name it. This is not an unavailable-model fallback.
+_REVIEWER_SEAT_UPGRADES = {"copilot/claude-opus-5": "copilot/claude-opus-5.5"}
+
 
 def _git(repo, *args):
     """Run git in ``repo`` and return its stdout."""
@@ -129,8 +133,15 @@ def _reviewer_seats(repo_slug):
 
 def _seats_in(text):
     """The distinct seats named in one panel's section; a seat label without
-    "/model" names no model and is skipped."""
-    return list(dict.fromkeys(m for m in _REVIEWER_RE.findall(text) if "/" in m))
+    "/model" names no model and is skipped.
+
+    Matches are mapped through _REVIEWER_SEAT_UPGRADES before deduplication,
+    so an old Opus 5 seat becomes Opus 5.5 (owner-approved migration)."""
+    return list(
+        dict.fromkeys(
+            _REVIEWER_SEAT_UPGRADES.get(m, m) for m in _REVIEWER_RE.findall(text) if "/" in m
+        )
+    )
 
 
 def _fresh_votes(folder):
