@@ -7,6 +7,20 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from jinja2 import Environment
+
+
+def test_settings_picker_retains_opt_in_with_different_repo_case():
+    """An existing opt-in must appear checked so saving Settings preserves it."""
+    template = Path(__file__).resolve().parents[1] / "templates" / "index.html"
+    text = template.read_text(encoding="utf-8")
+    marker = text.index('name="pr_review_lm_summary_repos"')
+    fieldset = text[text.rindex("<fieldset", 0, marker):text.index("</fieldset>", marker)]
+    html = Environment(autoescape=True).from_string(fieldset).render(
+        monitored_set={"OWNER/Repo", "owner/other"}, lm_summary_repos_set={"owner/repo"},
+    )
+    assert 'value="OWNER/Repo" checked' in html
+    assert 'value="owner/other" checked' not in html
 
 
 @pytest.mark.parametrize(("opt_in", "reply", "expected"), [

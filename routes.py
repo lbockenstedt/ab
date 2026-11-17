@@ -2840,7 +2840,8 @@ async def settings_page(request: Request):
     # Monitored repo options.
     monitored = list(config.get("monitored_repos") or [])
     monitored_set = set(monitored)
-    lm_summary_repos_set = set(config.get("pr_review_lm_summary_repos") or [])
+    lm_summary_repos_set = {repo.casefold() for repo in (config.get("pr_review_lm_summary_repos") or [])
+                            if isinstance(repo, str)}
     extra_monitored = [r for r in monitored if r not in set(github_repos)]
     repo_options = list(github_repos) + extra_monitored  # union, monitored last
     # Trusted repos use the same checkbox treatment: fetched GitHub list UNION

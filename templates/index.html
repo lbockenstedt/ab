@@ -1362,7 +1362,7 @@
                                     <legend class="text-xs text-slate-600" title="Opt-in only. LM places advisory summaries, not review verdicts.">LM pool for PR summaries</legend>
                                     {% for repo in monitored_set | sort %}
                                     <label class="inline-flex items-center gap-2 mr-3 text-xs">
-                                        <input type="checkbox" name="pr_review_lm_summary_repos" value="{{ repo }}" {% if repo in lm_summary_repos_set %}checked{% endif %}>
+                                        <input type="checkbox" name="pr_review_lm_summary_repos" value="{{ repo }}" {% if repo.casefold() in lm_summary_repos_set %}checked{% endif %}>
                                         {{ repo }}
                                     </label>
                                     {% else %}
