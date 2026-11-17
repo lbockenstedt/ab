@@ -346,6 +346,22 @@ def _summarize_changes(pr, files, config, repo=None):
               "speculate, do not just list file names, no preamble or sign-off.")
     prompt = ("Summarize what this pull request changes, for the reviewer.\n\n"
               "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest))
+    # Explicit per-repository opt-in is not a change to the AB model picker.
+    local_repos = config.get("pr_review_lm_summary_repos")
+    if isinstance(local_repos, list) and repo is not None and repo.full_name in local_repos:
+        from workers import _get_hub_agent_client
+        client = _get_hub_agent_client()
+        reply = client.request_sync("LLM_PR_SUMMARY", {
+            "repository": repo.full_name, "prompt": f"{system}\n\n{prompt}",
+            "public": getattr(repo, "visibility", None) == "public"
+            and getattr(repo, "private", None) is False,
+        }, timeout=945) if client else None
+        if isinstance(reply, dict) and reply.get("status") == "SUCCESS":
+            text = reply.get("text")
+            return text.strip() if isinstance(text, str) else ""
+        # A local opt-in never falls through to AB's independent provider chain.
+        logger.info("pr_review: LM summary unavailable; leaving summary out")
+        return ""
     # A cheap, batchable request sized to the prompt.
     reqs = LlmRequirements(complexity="trivial", batch_ok=True,
                            deprioritize_local=True,
