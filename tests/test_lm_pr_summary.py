@@ -8,6 +8,19 @@ from unittest.mock import Mock
 
 import pytest
 from jinja2 import Environment
+from test_feature_settings_roundtrip import _base_pairs, _FakeRequest, _load_ns, _run
+
+
+def test_save_settings_keeps_selected_monitored_repositories():
+    """Save active selections using monitored spelling, ignoring other repos."""
+    ns = _load_ns()
+    ns["_config_holder"]["config"] = {"pr_review_lm_summary_repos": ["OWNER/REPO"]}
+    pairs = _base_pairs(monitored_repos="Owner/Repo") + [
+        ("pr_review_lm_summary_repos", "OWNER/REPO"),
+        ("pr_review_lm_summary_repos", "owner/unmonitored"),
+    ]
+    _run(ns["save_settings"](_FakeRequest(pairs)))
+    assert ns["_config_holder"]["config"]["pr_review_lm_summary_repos"] == ["Owner/Repo"]
 
 
 def test_settings_picker_retains_opt_in_with_different_repo_case():
