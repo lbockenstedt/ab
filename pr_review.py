@@ -314,12 +314,6 @@ def _summarize_changes(pr, files, config, repo=None):
     # Off in settings: no summary.
     if not config.get("pr_review_summary_enabled", True):
         return ""
-    # The LLM helpers are optional.
-    try:
-        from llm_client import call_llm
-        from model_selection import LlmRequirements
-    except Exception:  # noqa: BLE001
-        return ""
     # Build a digest of each file's change (patches trimmed), capped in size.
     parts = []
     for f in list(files)[:_SUMMARY_MAX_FILES]:
@@ -365,6 +359,13 @@ def _summarize_changes(pr, files, config, repo=None):
             return text.strip() if isinstance(text, str) else ""
         # A local opt-in never falls through to AB's independent provider chain.
         logger.info("pr_review: LM summary unavailable; leaving summary out")
+        return ""
+    # The legacy provider helpers are not required to delegate to LM.
+    try:
+        from llm_client import call_llm
+        from model_selection import LlmRequirements
+    except ImportError:
+        logger.info("pr_review: summary provider helpers are unavailable")
         return ""
     # A cheap, batchable request sized to the prompt.
     reqs = LlmRequirements(complexity="trivial", batch_ok=True,

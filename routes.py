@@ -2840,6 +2840,7 @@ async def settings_page(request: Request):
     # Monitored repo options.
     monitored = list(config.get("monitored_repos") or [])
     monitored_set = set(monitored)
+    lm_summary_repos_set = set(config.get("pr_review_lm_summary_repos") or [])
     extra_monitored = [r for r in monitored if r not in set(github_repos)]
     repo_options = list(github_repos) + extra_monitored  # union, monitored last
     # Trusted repos use the same checkbox treatment: fetched GitHub list UNION
@@ -3049,6 +3050,7 @@ async def settings_page(request: Request):
         "available_labels": state.get("available_labels", []),
         "repo_options": repo_options,
         "monitored_set": monitored_set,
+        "lm_summary_repos_set": lm_summary_repos_set,
         "trusted_options": trusted_options,
         "trusted_set": trusted_set,
         "feature_drive_repo_options": feature_drive_repo_options,
@@ -3183,7 +3185,7 @@ async def save_settings(request: Request):
             monitored_repos.append(r)
     config_data["monitored_repos"] = list(dict.fromkeys(monitored_repos))
     summary_repos = {clean_repo_name(repo).casefold()
-                     for repo in (data.get("pr_review_lm_summary_repos") or "").split(",")}
+                     for repo in form_data.getlist("pr_review_lm_summary_repos")}
     config_data["pr_review_lm_summary_repos"] = [
         repo for repo in config_data["monitored_repos"] if repo.casefold() in summary_repos
     ]

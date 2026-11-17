@@ -1358,8 +1358,17 @@
                                 {% endif %}
                                 <label class="text-xs text-slate-500">Additional repos (comma-separated, e.g. <code class="bg-slate-100 px-1 rounded">org/repo</code>)</label>
                                 <input type="text" name="monitored_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="owner/repo, org/another">
-                                <label for="pr_review_lm_summary_repos" class="block text-xs text-slate-500" title="Opt-in only. LM places advisory summaries for these monitored repositories, not review verdicts.">LM pool for PR summaries (comma-separated monitored repositories)</label>
-                                <input type="text" id="pr_review_lm_summary_repos" name="pr_review_lm_summary_repos" value="{{ settings.pr_review_lm_summary_repos | join(', ') }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="owner/repo">
+                                <fieldset class="p-2 border rounded-lg">
+                                    <legend class="text-xs text-slate-600" title="Opt-in only. LM places advisory summaries, not review verdicts.">LM pool for PR summaries</legend>
+                                    {% for repo in monitored_set | sort %}
+                                    <label class="inline-flex items-center gap-2 mr-3 text-xs">
+                                        <input type="checkbox" name="pr_review_lm_summary_repos" value="{{ repo }}" {% if repo in lm_summary_repos_set %}checked{% endif %}>
+                                        {{ repo }}
+                                    </label>
+                                    {% else %}
+                                    <p class="text-xs text-slate-500">Save at least one monitored repository first.</p>
+                                    {% endfor %}
+                                </fieldset>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Trusted Repositories (Allow Direct Push)</label>
