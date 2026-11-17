@@ -22,6 +22,12 @@ logging and fallback behavior.
 
 ## Log-analysis guardrails
 
+An empty search anchor rejects the entire JSON edit batch before any files are
+written. The rejection is logged as a warning and returned as actionable retry
+feedback, rather than silently skipping the edit or reporting partial success.
+Existing-file edits require non-empty exact search text; new files belong under
+`fixes` with their full content. An empty replacement remains valid for deletion.
+
 A targeted edit rejected because it would break Python syntax is an expected
 fix-attempt outcome, not a new product defect. The original file stays untouched
 and the rejection remains logged and available as retry feedback. Log analysis
