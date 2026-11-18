@@ -313,3 +313,25 @@ def test_a_new_round_drops_the_last_rounds_votes(tmp_path):
     old.write_text('{"verdict": "Approve", "confidence": 0.99}')
     local_review._fresh_votes(str(tmp_path))
     assert (tmp_path / "votes").is_dir() and not old.exists()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("**Reviewer (copilot/claude-opus-5)**", ["copilot/claude-opus-5.5"]),
+        (
+            "**Reviewer (copilot/claude-opus-5)**\n"
+            "**Reviewer (copilot/claude-opus-5.5)**\n"
+            "**Reviewer (copilot/gpt-5.6-sol)**",
+            ["copilot/claude-opus-5.5", "copilot/gpt-5.6-sol"],
+        ),
+        (
+            "**Reviewer (anthropic/claude-opus-5)**\n**Reviewer (copilot/claude-opus-5.1)**",
+            ["anthropic/claude-opus-5", "copilot/claude-opus-5.1"],
+        ),
+    ],
+)
+def test_seats_in_upgrades_old_opus_5_to_5_5(text, expected):
+    """Historical copilot/claude-opus-5 seats are upgraded to opus-5.5;
+    other models remain unchanged."""
+    assert local_review._seats_in(text) == expected
