@@ -107,9 +107,19 @@ def _check_provider_online(n, config):
     return _probe_endpoint_online(provider, api_key, model, base_url, label=f"Provider {n}")
 
 
+def _status_probe(status):
+    """Probe result for an HTTP status: None for 429 (alive but rate-limited), else whether it is 2xx."""
+    return None if status == 429 else status < 300
+
+
 def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint"):
-    """Ping a single (provider, model, base_url) endpoint; return True if
-    reachable, else None/False.
+    """Ping a single (provider, model, base_url) endpoint.
+
+    Returns True when it answers, None when it answered 429 (alive but
+    rate-limited, so we cannot tell if it is usable), and False for anything
+    that stops a real call from working: a missing key or model, a rejected key
+    (401), an unpulled Ollama model, or an unreachable host. Callers that only
+    need online/offline can test the result for truth.
 
     Shared by the legacy per-slot _check_provider_online and the entry-aware
     _check_entries_online, so the header online/offline pills reflect the SAME
@@ -121,25 +131,23 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
     # claude_cli authenticates via Claude Code session — just check the binary exists.
     if p == "claude_cli":
         if not model:
-            return None
+            return False
         try:
             import subprocess
             r = subprocess.run(["claude", "--version"], capture_output=True, timeout=5)
             return r.returncode == 0
         except Exception:
-            return None
+            return False
     if _is_lmstudio(p):
         # LM Studio needs no API key — just confirm the local server is reachable.
         if not model:
-            return None
+            return False
         try:
             base = _normalize_lmstudio_url(base_url).rstrip("/")
             resp = requests.get(f"{base}/models", timeout=10)
-            if resp.status_code == 401:
-                return None
-            return resp.status_code < 300
+            return _status_probe(resp.status_code)
         except Exception:
-            return None
+            return False
     if _is_ollama(p):
         # Ollama needs no API key (self-hosted; Ollama Cloud sends a Bearer key) —
         # confirm the server is reachable (/api/tags) AND that the configured model
@@ -147,7 +155,7 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
         # /api/chat 404s if the model is missing, so a bare server ping would
         # falsely show the provider green while every real call fails.
         if not model:
-            return None
+            return False
         try:
             base = _ollama_base_url(p, base_url).rstrip("/")
             headers = {}
@@ -155,39 +163,40 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
                 clean = api_key.strip().replace("Bearer ", "").strip()
                 headers["Authorization"] = f"Bearer {clean}"
             resp = requests.get(f"{base}/api/tags", headers=headers, timeout=10)
-            if resp.status_code == 401:
-                return None
             if resp.status_code >= 300:
-                return None
+                return _status_probe(resp.status_code)
             if not _ollama_model_present(resp, model):
                 logger.warning(
                     f"{label} (ollama) server is up but model '{model}' is not pulled on "
                     f"{base} — pull it (Settings → Local LLM Setup, or `ollama pull {model}`)."
                 )
-                return None
+                return False
             return True
         except Exception:
-            return None
+            return False
     if p.startswith("copilot"):
         # Copilot: the stored api_key is a GitHub OAuth token; it must be exchanged
         # for a short-lived Copilot API token, and the models call needs editor headers.
-        # No token: cannot check.
+        # No token: every call fails.
         if not api_key:
-            return None
+            return False
+        from llm_client import _copilot_api_token, _copilot_headers, COPILOT_API_BASE, CopilotTokenRateLimited
         try:
-            from llm_client import _copilot_api_token, _copilot_headers, COPILOT_API_BASE
             tok = _copilot_api_token(api_key)
             resp = requests.get(f"{COPILOT_API_BASE}/models", headers=_copilot_headers(tok), timeout=15)
             if resp.status_code == 401:
                 logger.warning(f"{label} (copilot) connectivity check: 401 — token exchange rejected (re-authorize).")
-                return None
-            return resp.status_code < 300
+                return False
+            return _status_probe(resp.status_code)
+        except CopilotTokenRateLimited:
+            # The token exchange is throttled: alive, so (like any 429) not an outage.
+            return None
         except Exception as e:  # noqa: BLE001
             logger.debug(f"{label} (copilot) connectivity check error: {e}")
-            return None
+            return False
     # Every other provider needs both a key and a model.
     if not api_key or not model:
-        return None
+        return False
     # Call the provider's model-list endpoint with its own auth style.
     try:
         if p == "anthropic":
@@ -222,19 +231,19 @@ def _probe_endpoint_online(provider, api_key, model, base_url, label="endpoint")
             url = f"{base}/models"
             headers = {"Authorization": f"Bearer {api_key}"}
             resp = requests.get(url, headers=headers, timeout=10)
-        # 401 (bad key) and 429 (rate-limited) are logged and reported as unknown.
+        # 401 (bad key) means every call fails; 429 means it answered but is rate-limited.
         if resp.status_code == 401:
             logger.warning(f"{label} ({provider}) connectivity check: 401 — API key invalid or missing.")
-            return None
+            return False
         if resp.status_code == 429:
             logger.warning(f"{label} ({provider}) connectivity check: 429 — rate-limited (not tripping CB).")
             return None
         # Any 2xx means online.
-        return resp.status_code < 300
-    # Network errors: unknown.
+        return _status_probe(resp.status_code)
+    # Network errors: the endpoint is unreachable.
     except Exception as e:
         logger.debug(f"{label} ({provider}) connectivity check error: {e}")
-        return None
+        return False
 
 
 def _check_entries_online(config):
@@ -248,12 +257,10 @@ def _check_entries_online(config):
     real routable set instead. Each probe is wrapped so one unreachable endpoint
     can't abort the whole sweep. Deduplicated by (provider, base_url, model).
     """
-    # Load the endpoint helpers; without them there is nothing to list.
-    try:
-        from llm_client import _iter_configured_endpoints, _model_key, get_llm_perf_snapshot
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"_check_entries_online: cannot enumerate endpoints: {e}")
-        return []
+    # The endpoint helpers must import. A failure raises to the caller (the worker logs
+    # "Connectivity worker error"): returning [] here would read as "no endpoint
+    # configured" and raise a false "LLM outage" for a monitoring failure.
+    from llm_client import _iter_configured_endpoints, _model_key, get_llm_perf_snapshot
     # "Being used" signal: llm_perf records one sample per completed generation,
     # keyed by ModelKey. n > 0 means this endpoint has actually served a call —
     # the header pills show ONLY these (plus the one serving right now), not
@@ -278,7 +285,7 @@ def _check_entries_online(config):
             online = _probe_endpoint_online(provider, api_key, model, base_url, label=label)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"_check_entries_online probe failed for {label}: {e}")
-            online = None
+            online = False
         # How many calls this endpoint has served.
         try:
             runs = int((perf.get(_model_key(provider, base_url, model)) or {}).get("n") or 0)
@@ -288,9 +295,10 @@ def _check_entries_online(config):
         is_active = bool(active_model) and (model or "").strip() == active_model and (
             active_provider is None
             or (provider or "").lower().strip() == (active_provider or "").lower().strip())
-        # Add the endpoint's status to the list.
+        # Add the endpoint's status to the list. "throttled" marks an endpoint that
+        # answered 429: alive, so it must not count toward an all-endpoints-down outage.
         out.append({"id": entry_id, "provider": provider, "model": model,
-                    "base_url": base_url, "online": bool(online),
+                    "base_url": base_url, "online": bool(online), "throttled": online is None,
                     "used": bool(runs > 0 or is_active), "runs": runs})
     return out
 
@@ -324,6 +332,11 @@ def refresh_llm_endpoints_async():
 
 def connectivity_worker():
     """Periodic check to verify all configured LLM providers are reachable."""
+    # The last sweep's status: "up" (an endpoint is online), "degraded" (none online, but some
+    # answered 429) or "down" (nothing usable). Starts "up" so a first sweep that finds nothing alerts.
+    prev_status = "up"
+    # True from the "LLM outage" ERROR until an endpoint is online again.
+    outage_open = False
     # Every 15 minutes, probe the legacy slots and every endpoint and store the results.
     while True:
         try:
@@ -344,6 +357,31 @@ def connectivity_worker():
             online_n = sum(1 for e in endpoints if e["online"])
             logger.info(f"Connectivity Check: P1={p1_online}, P2={p2_online}, P3={p3_online}, "
                         f"P4={p4_online}; entries {online_n}/{len(endpoints)} online")
+            # With no endpoint online every AI function fails. This used to show
+            # only as the INFO line above (13 hours on 2026-11-17, "entries 0/0"),
+            # so say it at ERROR when the sweep turns "down", and note when an endpoint
+            # is back. "down" is none configured, or every endpoint unusable (no key,
+            # rejected key, unreachable, model missing). One that answered 429 is alive but
+            # rate-limited: not an outage, and not a recovery either.
+            throttled_n = sum(1 for e in endpoints if e.get("throttled"))
+            status = "up" if online_n else ("degraded" if throttled_n else "down")
+            # Each entry into "down" alerts, including down -> degraded -> down: the
+            # INFO in between told the operator the endpoints answered again, so going
+            # dark a second time is a new outage, not a repeat of the first. (Staying
+            # silent there was the "silent second outage" defect.) outage_open only
+            # decides whether "cleared" is logged: it needs an alert and an endpoint online.
+            if status == "down" and prev_status != "down":
+                logger.error(f"LLM outage: 0 of {len(endpoints)} LLM endpoints are online, so every "
+                             "AI function will fail until one is restored. Check Settings > LLM "
+                             "endpoints, and that /etc/ab/config.json is readable by the service user.")
+                outage_open = True
+            elif status == "degraded" and prev_status == "down":
+                logger.info(f"LLM endpoints answer again but are rate-limited (HTTP 429): 0 of "
+                            f"{len(endpoints)} are online yet")
+            elif status == "up" and outage_open:
+                logger.info(f"LLM outage cleared: {online_n} of {len(endpoints)} LLM endpoints are online")
+                outage_open = False
+            prev_status = status
         except Exception as e:
             logger.error(f"Connectivity worker error: {e}")
         time.sleep(900)

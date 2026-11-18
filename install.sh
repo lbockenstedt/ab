@@ -122,15 +122,25 @@ if [ -n "$HUB_WS_URL" ]; then
     echo ">> Configuring LM hub connection → $HUB_WS_URL"
     HUB_WS_URL="$HUB_WS_URL" HUB_QUERY_URL="$HUB_QUERY_URL" \
     CONFIG_FILE="$CONFIG_DIR/config.json" python3 - <<'PY'
-import json, os
+import json, os, stat, sys, tempfile
 from urllib.parse import urlsplit
 cf = os.environ["CONFIG_FILE"]
 ws = os.environ["HUB_WS_URL"].strip()
 query = os.environ.get("HUB_QUERY_URL", "").strip()
+# A missing or empty file has nothing to lose. A file that cannot be read or
+# parsed must not be replaced by just these two keys: that would wipe every LLM
+# endpoint and credential in it (see config_store.ConfigUnreadableError).
 try:
-    cfg = json.load(open(cf))
-except Exception:
+    with open(cf) as fh:
+        raw = fh.read()
+    cfg = json.loads(raw) if raw else {}
+    if not isinstance(cfg, dict):
+        raise ValueError("not a JSON object")
+except FileNotFoundError:
     cfg = {}
+except (OSError, ValueError) as e:
+    sys.exit(f"   ERROR: {cf} is unreadable ({e}); not overwriting it. "
+             "Fix or restore it, then re-run the installer.")
 cfg["HUB_WS_URL"] = ws
 if not query:
     u = ws if "://" in ws else "wss://" + ws
@@ -140,8 +150,22 @@ if not query:
         query = "https://" + host + ("" if port in (None, 443) else f":{port}")
 if query:
     cfg["HUB_QUERY_URL"] = query
-with open(cf, "w") as fh:
+# Write beside the file and rename, so a crash cannot leave a half-written config.
+# mkstemp makes a root-owned 0600 file when the installer runs as root, and the
+# chown -R further down may be minutes away (or never reached if the install
+# fails), so the replacement takes the old file's owner and mode before it goes
+# live: the service user must never lose read access to its config.
+try:
+    old = os.stat(cf)
+except FileNotFoundError:
+    old = None
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cf), prefix=".config.")
+with os.fdopen(fd, "w") as fh:
     json.dump(cfg, fh, indent=2)
+if old:
+    os.chown(tmp, old.st_uid, old.st_gid)
+    os.chmod(tmp, stat.S_IMODE(old.st_mode))
+os.replace(tmp, cf)
 print(f"   HUB_WS_URL={cfg.get('HUB_WS_URL')}")
 print(f"   HUB_QUERY_URL={cfg.get('HUB_QUERY_URL', '(none)')}")
 PY
