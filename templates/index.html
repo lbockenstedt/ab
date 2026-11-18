@@ -1358,6 +1358,17 @@
                                 {% endif %}
                                 <label class="text-xs text-slate-500">Additional repos (comma-separated, e.g. <code class="bg-slate-100 px-1 rounded">org/repo</code>)</label>
                                 <input type="text" name="monitored_repos_extra" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="owner/repo, org/another">
+                                <fieldset class="p-2 border rounded-lg">
+                                    <legend class="text-xs text-slate-600" title="Opt-in only. LM places advisory summaries, not review verdicts.">LM pool for PR summaries</legend>
+                                    {% for repo in monitored_set | sort %}
+                                    <label class="inline-flex items-center gap-2 mr-3 text-xs">
+                                        <input type="checkbox" name="pr_review_lm_summary_repos" value="{{ repo }}" {% if repo.casefold() in lm_summary_repos_set %}checked{% endif %}>
+                                        {{ repo }}
+                                    </label>
+                                    {% else %}
+                                    <p class="text-xs text-slate-500">Save at least one monitored repository first.</p>
+                                    {% endfor %}
+                                </fieldset>
                             </div>
                             <div class="space-y-2 col-span-1 md:col-span-3">
                                 <label class="text-sm font-medium text-slate-600">Trusted Repositories (Allow Direct Push)</label>

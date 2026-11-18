@@ -301,6 +301,8 @@ def _summarize_changes(pr, files, config, repo=None):
     per-PR-update, not per-cycle. Best-effort: returns '' if disabled, the LLM is
     unavailable, or it yields nothing — the parity findings still post either way.
 
+    An opt-in repository waits for the hub's bounded CPU inference window
+    and never uses AB's provider chain for a failed summary. Otherwise:
     Routed via requirements=LlmRequirements(batch_ok=True) (LLM Selection
     Redesign, Phase 5 site #15): this is the one call site fire-and-forget
     batch processing is safe for (best-effort, discards failures, gated to
@@ -311,12 +313,6 @@ def _summarize_changes(pr, files, config, repo=None):
     """
     # Off in settings: no summary.
     if not config.get("pr_review_summary_enabled", True):
-        return ""
-    # The LLM helpers are optional.
-    try:
-        from llm_client import call_llm
-        from model_selection import LlmRequirements
-    except Exception:  # noqa: BLE001
         return ""
     # Build a digest of each file's change (patches trimmed), capped in size.
     parts = []
@@ -346,6 +342,31 @@ def _summarize_changes(pr, files, config, repo=None):
               "speculate, do not just list file names, no preamble or sign-off.")
     prompt = ("Summarize what this pull request changes, for the reviewer.\n\n"
               "PR title: %s\n\nDiff:\n%s" % (pr.title or "", digest))
+    # Explicit per-repository opt-in is not a change to the AB model picker.
+    local_repos = config.get("pr_review_lm_summary_repos")
+    if isinstance(local_repos, list) and repo is not None and any(
+            isinstance(name, str) and repo.full_name.casefold() == name.casefold()
+            for name in local_repos):
+        from workers import _get_hub_agent_client
+        client = _get_hub_agent_client()
+        reply = client.request_sync("LLM_PR_SUMMARY", {
+            "repository": repo.full_name, "prompt": f"{system}\n\n{prompt}",
+            "public": getattr(repo, "visibility", None) == "public"
+            and getattr(repo, "private", None) is False,
+        }, timeout=945) if client else None
+        if isinstance(reply, dict) and reply.get("status") == "SUCCESS":
+            text = reply.get("text")
+            return text.strip() if isinstance(text, str) else ""
+        # A local opt-in never falls through to AB's independent provider chain.
+        logger.info("pr_review: LM summary unavailable; leaving summary out")
+        return ""
+    # The legacy provider helpers are not required to delegate to LM.
+    try:
+        from llm_client import call_llm
+        from model_selection import LlmRequirements
+    except ImportError:
+        logger.info("pr_review: summary provider helpers are unavailable")
+        return ""
     # A cheap, batchable request sized to the prompt.
     reqs = LlmRequirements(complexity="trivial", batch_ok=True,
                            deprioritize_local=True,
