@@ -20,6 +20,32 @@ temporary files; the last successful replacement wins. This does not merge
 concurrent read-modify-write updates. Write failures retain caller-specific
 logging and fallback behavior.
 
+`/etc/ab/config.json` is never replaced while it cannot be read. If it exists
+with content AB cannot open or parse (for example a maintenance script left it
+root-owned, or a hand-edit broke the JSON), `load_config` returns the last good
+config (the last one read from `config.json` or, once it is gone, the local
+`./config.json`; never the built-in defaults, which AB only runs on at a fresh
+start) and logs one ERROR, "Persistent config is
+unreadable"; `save_config` raises `ConfigUnreadableError` and writes nothing, so a
+settings save reports the failure (it also raises when neither the config file nor
+the local fallback can be written, e.g. a full disk, and when an existing config file
+cannot be replaced: the local fallback is only used while no config file exists,
+since `load_config` reads an existing file first and would ignore a copy saved
+beside it). A missing or zero-byte file is not unreadable
+and is created normally. `install.sh --hub ...` follows the same rule: it stops with
+an error instead of rewriting an unreadable or non-object config.json, and otherwise
+updates only `HUB_WS_URL` and `HUB_QUERY_URL` through a temp file and rename that keeps the
+old file's owner and mode. Before
+this, defaults were saved over the file and AB
+lost every LLM endpoint (2026-11-17). `connectivity_worker` also logs "LLM outage"
+at ERROR when no LLM endpoint is usable (none configured, or each one has no key, a
+rejected key, an unreachable host or a missing model). An endpoint that answers 429
+is alive but rate-limited: it is neither an outage nor a recovery, gets its own
+INFO line, and shows amber (not red) in the header's endpoint pill and hover list. "LLM outage cleared" is logged only once an endpoint is online. A sweep that
+cannot list the endpoints at all is a "Connectivity worker error", not an outage. Scripts
+that edit the config as root must keep it owned by the service user (`svc_bg`, mode
+0600) and take a backup first.
+
 ## Log-analysis guardrails
 
 An empty search anchor rejects the entire JSON edit batch before any files are

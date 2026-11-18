@@ -17,6 +17,7 @@ main module's file instead.
 # os builds paths and swaps files; json reads/writes the stores; git reads the running
 # commit for the startup stamp; datetime timestamps records.
 import os
+import copy
 import json
 import git
 from datetime import datetime
@@ -140,8 +141,72 @@ def _atomic_write_json(path, data, *, indent=2, chmod=None):
         raise
 
 
+class ConfigUnreadableError(RuntimeError):
+    """CONFIG_FILE exists with content AB cannot read or parse.
+
+    Saving defaults over such a file destroys settings and credentials an
+    operator could still recover (a file left root-owned by a maintenance
+    script, or a hand-edit with a syntax error). On 2026-11-17 exactly that
+    wiped all 14 LLM endpoints. So load_config keeps the last good config and
+    save_config refuses to write until the file is readable again.
+    """
+
+
+# Last config that loaded cleanly from CONFIG_FILE; served while the file is unreadable.
+_last_good_config = None
+# The unreadable-file error already logged, so the 5-second heartbeat poll logs it once.
+_unreadable_logged = None
+
+
+def _read_persistent_config():
+    """Return the parsed CONFIG_FILE, or None when it is missing or empty.
+
+    An empty file holds nothing to lose (the old non-atomic writer left them
+    after a crash), so it counts as missing. Anything else AB cannot read or
+    parse raises ConfigUnreadableError rather than looking like an empty config.
+    """
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            if not f.read(1):
+                return None
+            f.seek(0)
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+        return data
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise ConfigUnreadableError(f"{CONFIG_FILE}: {e}") from e
+
+
+def _remember_good_config(config):
+    """Keep a copy of a config that is on disk, with the defaults load_config adds.
+
+    Callers mutate the dict they get from load_config, so the cache holds its own copy.
+    """
+    global _last_good_config
+    good = copy.deepcopy(config)
+    good.setdefault("enabled_models", [])
+    # Apply chat-agent defaults for any keys the stored config does not set, so
+    # every caller (chat agent loop, index builder, settings form) sees a complete
+    # config regardless of how old the persisted config.json is.
+    for _k, _v in CHAT_CONFIG_DEFAULTS.items():
+        good.setdefault(_k, _v)
+    _last_good_config = good
+
+
 def save_config(config):
     """Saves configuration to persistent storage, falling back to local if needed.
+
+    Raises ConfigUnreadableError, writing nothing, while an existing CONFIG_FILE
+    cannot be read: `config` may then be the built-in defaults, and replacing the
+    stored file with them is unrecoverable. It also raises the underlying error
+    when neither CONFIG_FILE nor the local fallback could be written (full disk,
+    read-only mount). The local fallback is used only when no CONFIG_FILE exists:
+    load_config reads an existing CONFIG_FILE first, so a copy saved beside it would
+    be ignored, and its failure raises as well. All are raised rather than logged so
+    a settings save reports the failure instead of a false success.
 
     Written via a temp file + os.replace (same pattern as save_llm_tps): a
     process death mid-write with a direct open(...,"w") truncates the file
@@ -151,6 +216,7 @@ def save_config(config):
     stale/default config, losing whatever was persisted. os.replace is atomic
     on POSIX, so readers only ever see the fully-written old or new file.
     """
+    existing = _read_persistent_config()
     try:
         # No pre-flight existence/access check: os.access(CONFIG_DIR, W_OK) is
         # False for a directory that merely does not exist yet, so the old guard
@@ -159,29 +225,66 @@ def save_config(config):
         # write -- _atomic_write_json creates the directory, and a genuine
         # permission failure still raises and still lands in the fallback below.
         _atomic_write_json(CONFIG_FILE, config, chmod=0o600)
-        logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
     # Persistent location failed: fall back to ./config.json in the working directory.
     except Exception as e:
+        if existing is not None:
+            # load_config prefers a readable CONFIG_FILE, so a ./config.json written now
+            # would never be read: raise instead of reporting a save that has no effect.
+            logger.error(f"Could not save to {CONFIG_FILE} ({e}); the existing file stays in use")
+            raise
         logger.warning(f"Could not save to persistent storage ({e}), falling back to local config.json")
         try:
             _atomic_write_json("config.json", config)
         except Exception as fe:
             logger.error(f"Critical failure saving config: {fe}")
+            # Nothing was stored anywhere: raise so a caller never reports a false success
+            # (a settings save returns 500, the Copilot sign-in ends in an error status).
+            raise
+        # load_config reads ./config.json when there is no CONFIG_FILE and treats it as the
+        # last good config, so the one just written replaces an older load of it.
+        _remember_good_config(config)
+    else:
+        # The file now holds this config: it, not an older load, is the last good one
+        # to serve if the file becomes unreadable before the next load_config.
+        _remember_good_config(config)
+        logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
 
 def load_config():
-    """Load settings from /etc/ab/config.json, else ./config.json, else built-in defaults."""
+    """Load settings from /etc/ab/config.json, else ./config.json, else built-in defaults.
+
+    When /etc/ab/config.json exists but cannot be read, the last good config is
+    returned (logged once at ERROR); with none yet (a fresh start) the fallbacks
+    below apply, but save_config still refuses to overwrite the file.
+    """
+    global _unreadable_logged
     # Try persistent config first
     config = None
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                config = json.load(f)
-                # Ensure enabled_models exists
-                if "enabled_models" not in config:
-                    config["enabled_models"] = []
-        except Exception as e:
-            logger.error(f"Error reading persistent config {CONFIG_FILE}: {e}")
-            config = None
+    try:
+        config = _read_persistent_config()
+        if _unreadable_logged:
+            # Only a parsed object is a recovery; a file that was deleted or emptied
+            # is a different state (defaults load, as for any missing config).
+            if config is None:
+                logger.info(f"Persistent config {CONFIG_FILE} is no longer unreadable, but it is "
+                            "now missing or empty; the fallback config is in use")
+            else:
+                logger.info(f"Persistent config {CONFIG_FILE} is readable again")
+            _unreadable_logged = None
+        # Ensure enabled_models exists
+        if config is not None:
+            config.setdefault("enabled_models", [])
+    except ConfigUnreadableError as e:
+        if _unreadable_logged != str(e):
+            logger.error(f"Persistent config is unreadable; not using defaults and not "
+                         f"overwriting it until it is fixed: {e}")
+            _unreadable_logged = str(e)
+        if _last_good_config is not None:
+            return copy.deepcopy(_last_good_config)
+    # A config read from a file (CONFIG_FILE, else ./config.json) is what AB runs on, so it
+    # becomes the last good one. The built-in defaults never do: a file that is deleted or
+    # emptied and then turns unreadable (e.g. a root script rewriting it) keeps serving the
+    # last config read from a file, not the defaults.
+    from_file = config is not None
     # Built-in defaults used when no config file can be read at all.
     # Fallback to local config
     if config is None:
@@ -190,6 +293,7 @@ def load_config():
                 config = json.load(f)
                 if "enabled_models" not in config:
                     config["enabled_models"] = []
+            from_file = True
         except Exception:
             config = {
                 "monitored_repos": [],
@@ -209,6 +313,8 @@ def load_config():
     for _k, _v in CHAT_CONFIG_DEFAULTS.items():
         if _k not in config:
             config[_k] = _v
+    if from_file:
+        _remember_good_config(config)
     return config
 
 def load_processed():
