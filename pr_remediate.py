@@ -5,9 +5,10 @@ skeptical-review-driven model tiering & escalation.
 Deterministic pre-check guardrails, complexity assessment, model
 escalation, and PR remediation orchestration.
 """
-# Standard modules for logging, regex and type hints.
+# Standard modules for logging, regex, type hints and locks.
 import logging
 import re
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 # ab's own checks and helpers used by the guardrails and remediation flow.
@@ -18,6 +19,7 @@ import fleet_guardrails
 import fix_failures
 import perf_auditor
 import pr_concierge
+import review_progress
 import secrets_scan
 import twin_sync
 
@@ -681,20 +683,139 @@ def should_remediate(rec, config):
 
 
 def remediation_stalled(rec, config):
-    """The soft stop: True once ``pr_remediate_stall_limit`` reviewed heads in a
-    row have not beaten the PR's best pass ([panels approved, lowest confidence],
-    kept by app_state.record_pr_review). A backtest of 766 AB-reviewed PRs found
-    nothing that first fully approved after pass 5, and PRs past that point
-    swung back and forth rather than converging, so two passes without a gain
-    hand the PR to a human. 0 turns the soft stop off."""
-    try:
-        limit = int(config.get("pr_remediate_stall_limit", 2))
-    except (TypeError, ValueError):
-        limit = 2
+    """The soft stop (review thrash): True once ``pr_remediate_stall_limit``
+    reviewed heads in a row made no progress over the PR's best pass, by the
+    shared rule in review_progress (scored by app_state.record_pr_review). A
+    backtest of 766 AB-reviewed PRs found nothing that first fully approved
+    after pass 5, and PRs past that point swung back and forth rather than
+    converging, so two passes without progress are thrash: one consolidated
+    rework (rework_available), then a human. 0 turns the soft stop off."""
+    limit = review_progress.stall_limit(config)
     return limit > 0 and int(rec.get("remediation_stalls") or 0) >= limit
 
 
-def remediation_pending(rec, config):
+def rework_available(rec, config, head_sha):
+    """True while a PR may still get a consolidated rework: fewer than
+    ``pr_remediate_rework_limit`` have run, and none ran at this head, so a
+    restart or a re-scan never repeats one on unchanged code (rule 10.3)."""
+    return (int(rec.get("remediation_reworks") or 0) < review_progress.rework_limit(config)
+            and not (head_sha and rec.get("remediation_rework_head") == head_sha))
+
+
+class ReworkDeferred(Exception):
+    """A consolidated rework cannot start yet but may on a later scan; the
+    message says why. Not a hand-off: the scan retries it, uncounted."""
+
+
+def _rework_requirements(config, rec):
+    """The model requirements a consolidated rework runs with, or None when
+    no model can ever run it; raises ReworkDeferred when none can run it yet.
+
+    A rework has its own budget (pr_remediate_rework_limit) and must never
+    spend the owner-set premium one (pr_remediate_premium_attempts), so every
+    premium model is excluded, along with the models that already failed on
+    this PR and the models the fix floor (pr_fix_model_allowlist) bars from
+    writing code, which fix_one_pr would drop anyway. It runs on the top tier
+    with must_escalate_to_human, so the picker never falls back to its safety
+    floor (the first configured model, premium or not).
+
+    The pool is judged as the picker judges it at call time
+    (llm_client._call_llm_with_requirements): past the capability floor and
+    model_selection's hard filters, availability included. A model barred
+    there, or removed until restart (dead_model), is no pool. One that is only
+    cooling down (llm_client.TIMED_UNAVAILABLE) will be back, so the rework is
+    deferred for it, as it is when the models cannot be listed: "couldn't
+    ask" is not "nothing there". The Opus-class models are preferred, as on
+    the last ordinary turn (_last_turn_fix_exclusions): while one can run the
+    rework, now or after its cooldown, the rework waits for it rather than
+    taking a weaker model.
+    """
+    import fix_engine
+    import llm_client
+    import model_selection
+    # Every configured model; models that cannot be listed defer the rework.
+    try:
+        candidates = llm_client._enumerate_candidates(config)
+    except Exception as e:  # noqa: BLE001 -- unknown pool: retry next scan, never hand off
+        raise ReworkDeferred("the configured models could not be listed") from e
+    # Exclude the models that already failed (stored by name), every premium
+    # model and every model the fix floor bars; then narrow to Opus-class.
+    exclude = set(rec.get("excluded_models") or [])
+    exclude.update(c["key"] for c in candidates
+                   if fix_engine.is_premium_fix_model(c.get("model"), config))
+    exclude = fix_engine._fix_model_exclusions(config, tuple(sorted(exclude, key=str)))
+    opus_only = fix_engine._last_turn_fix_exclusions(config, existing=exclude)
+    # Judge the Opus-class pool (when it is narrower), then the whole one, as
+    # the picker will: a model that can run it now is used; one that is only
+    # cooling is waited for.
+    pool = llm_client._apply_capability_floor(candidates, config)
+    cooling = [dict(c, available=True) for c in pool
+               if c.get("unavailable_reason") in llm_client.TIMED_UNAVAILABLE]
+    tiers = [(exclude, "every model that can run it is")]
+    if set(opus_only) != set(exclude):
+        tiers.insert(0, (opus_only, "the Opus-class models it prefers are"))
+    for excl, who in tiers:
+        reqs = model_selection.LlmRequirements(
+            complexity=_COMPLEXITY_RANK_ORDER[-1], needs_structured_output=True,
+            exclude_models=tuple(excl), must_escalate_to_human=True)
+        if model_selection.select_model(reqs, pool) is not None:
+            return reqs
+        if model_selection.select_model(reqs, cooling) is not None:
+            raise ReworkDeferred("%s in a timed cooldown" % who)
+    return None
+
+
+def rework_pending(rec, config, head_sha):
+    """True while a consolidated rework is still to run at ``head_sha``: one
+    is available (rework_available) and a model can run it, now or once a
+    timed cooldown ends (_rework_requirements). The merge gate holds for it,
+    because _remediate runs it rather than stopping."""
+    if not rework_available(rec, config, head_sha):
+        return False
+    try:
+        return _rework_requirements(config, rec) is not None
+    except ReworkDeferred:
+        return True
+
+
+def _rework_note(rec):
+    """' after N consolidated rework(s)' once any ran, else '': the hand-off
+    reasons say a rework was already tried."""
+    n = int(rec.get("remediation_reworks") or 0)
+    return " after %d consolidated rework(s)" % n if n else ""
+
+
+def _rework_comment(rec, config, head_sha):
+    """The PR comment that announces a consolidated rework and what started it."""
+    rounds = review_progress.rework_rounds(rec, head_sha)
+    why = ("Review thrash detected: the last %d reviewed heads made no progress over the best score"
+           % int(rec.get("remediation_stalls") or 0) if remediation_stalled(rec, config)
+           else "The remediation attempts are used up without reaching the approval target")
+    return ("🤖 **AppBuilder — Consolidated Rework**\n\n"
+            "%s (scores as [panels approved, lowest panel confidence]: %s). AppBuilder is reworking "
+            "the change end to end from %d round(s) of panel findings (rework %d of %d)."
+            % (why, " → ".join(str(r.get("score")) for r in rounds) or "none recorded", len(rounds),
+               int(rec.get("remediation_reworks") or 0) + 1, review_progress.rework_limit(config)))
+
+
+DOCS_ONLY_SKIP = "documentation-only PR — reviewed but not accuracy-gated"
+
+
+def skips_docs_only(pr_files, config):
+    """True when remediation leaves a PR alone because its diff is proven
+    documentation-only (pr_auto_remediate_skip_docs_only, default on): docs
+    are reviewed but not accuracy-gated, the policy pr_review's docs bypass
+    applies to the merge. A diff not provably docs-only returns False, so it
+    is remediated, and waited for, as before."""
+    if not config.get("pr_auto_remediate_skip_docs_only", True):
+        return False
+    verdict = feature_allowlist.classify(feature_allowlist.files_from_pr_files(pr_files),
+                                         config.get("feature_automerge_allowlist"))
+    return (verdict.get("category") == feature_allowlist.DOCS_ONLY
+            and verdict.get("auto_approvable") is True)
+
+
+def remediation_pending(rec, config, pr_files=None):
     """The "improve before merging" gate.
 
     AppBuilder's objective is to get a PR as close to 100% panel approval as it
@@ -711,9 +832,17 @@ def remediation_pending(rec, config):
     practice and not just on paper.
 
     Every "stop trying" condition — guardrail block, exhausted attempts, kill
-    switch, target already met, already merge-eligible — returns False, so this
-    can only ever delay a merge by a bounded number of remediation attempts and
-    can never deadlock a PR.
+    switch, target already met, already merge-eligible, a docs-only PR that
+    remediation skips — returns False, so this can only ever delay a merge by
+    a bounded number of remediation attempts and can never deadlock a PR. A
+    stalled PR, or one out of attempts, still holds while its consolidated
+    rework is to run (rework_pending): _remediate runs it, or defers it only
+    while every model that can run it is cooling down or the models cannot
+    be listed, rather than stopping.
+
+    pr_files is the PR's changed files (pr.get_files()), for the docs-only
+    skip; maybe_auto_remediate never remediates such a PR, so waiting for it
+    would hold the merge forever.
     """
     # Every "stop trying" condition returns False.
     if not rec:
@@ -724,7 +853,10 @@ def remediation_pending(rec, config):
         return False, "remediation is blocked by a guardrail"
     if rec.get("auto_remediate_status") == "exhausted_human_review":
         return False, "remediation attempts exhausted"
-    if remediation_stalled(rec, config):
+    if pr_files is not None and skips_docs_only(pr_files, config):
+        return False, DOCS_ONLY_SKIP
+    head = rec.get("head")
+    if remediation_stalled(rec, config) and not rework_pending(rec, config, head):
         return False, "remediation stalled: no gain over the best review"
 
     # Read the attempts so far and the maximum allowed.
@@ -737,9 +869,10 @@ def remediation_pending(rec, config):
     except (TypeError, ValueError):
         max_attempts = 3
 
-    # Out of attempts: only the premium turn, if still unused, keeps going.
+    # Out of attempts: only the premium turn or a consolidated rework, if
+    # still to run, keeps going.
     if attempts >= max_attempts:
-        if not premium_turn_available(rec, config):
+        if not premium_turn_available(rec, config) and not rework_pending(rec, config, head):
             return False, "remediation attempts exhausted (%d/%d)" % (attempts, max_attempts)
 
     # Otherwise the remediation objective decides.
@@ -869,6 +1002,13 @@ def next_remediation_requirements(
     )
 
 
+# The PRs auto_remediate_pr is running for. Not fix_engine._claim_issue: this
+# module imports fix_engine only lazily and carries on without it, and this
+# claim must never be skipped.
+_remediating = set()
+_remediating_lock = threading.Lock()
+
+
 def auto_remediate_pr(
     gh: Any,
     repo: Any,
@@ -876,13 +1016,39 @@ def auto_remediate_pr(
     config: Optional[Dict[str, Any]] = None,
     fix_fn: Optional[Any] = None,
     deficit: float = 0.0,
+    rework: bool = False,
 ) -> Tuple[bool, str]:
     """Execute automated closed-loop remediation for an open PR with review findings.
 
     `deficit` is how far below the approval target should_remediate judged this
     PR to be; it floors the complexity tier so a flat-out DENY is not handed to
     a "small" model just because the diff happens to be one file.
+
+    `rework` (maybe_auto_remediate, on review thrash) runs this attempt as one
+    consolidated rework from every round's panel findings. The attempt cap
+    starts one too, instead of handing off, while rework_available allows. A
+    rework is not charged as an attempt: pr_remediate_rework_limit bounds it.
+
+    One remediation runs per PR at a time. The claim is taken before the
+    record is read, so a second worker (two scans, or a scan and a manual
+    trigger) can neither take a second rework nor give back the first
+    worker's reservation: it returns as contended, uncharged, and the next
+    scan looks again.
     """
+    key = f"{getattr(repo, 'full_name', str(repo))}#{pr.number}"
+    with _remediating_lock:
+        if key in _remediating:
+            return False, fix_failures.CONTENDED_LOCK
+        _remediating.add(key)
+    try:
+        return _remediate(gh, repo, pr, config, fix_fn, deficit, rework)
+    finally:
+        with _remediating_lock:
+            _remediating.discard(key)
+
+
+def _remediate(gh, repo, pr, config, fix_fn, deficit, rework):
+    """auto_remediate_pr's work, run while it holds the PR's claim."""
     # Identify the PR and get (or create) its review record.
     config = config or {}
     repo_full_name = getattr(repo, "full_name", str(repo))
@@ -898,6 +1064,11 @@ def auto_remediate_pr(
     files = list(pr.get_files())
     changed_paths = [getattr(f, "filename", "") for f in files if getattr(f, "filename", "")]
     head_sha = getattr(getattr(pr, "head", None), "sha", None)
+
+    # The caller judged the rework before this run held the claim, so another
+    # worker may have taken it since. Never take it twice (rule 10.3).
+    if rework and not rework_available(rec, config, head_sha):
+        return False, "consolidated rework already taken"
 
     def _post_once(marker: str, body: str, **fields) -> None:
         """Post a notice at most ONCE per (marker, head) pair.
@@ -996,12 +1167,45 @@ def auto_remediate_pr(
     # The premium tier buys ONE more turn past the ordinary ceiling, once per
     # PR -- see premium_turn_available. Everything below (the exhausted
     # comment, the human hand-off) still fires when that turn is also spent.
-    premium_turn = attempts >= max_attempts and premium_turn_available(rec, config)
+    # A consolidated rework is never that turn; it has its own budget.
+    premium_turn = not rework and attempts >= max_attempts and premium_turn_available(rec, config)
     if premium_turn:
         logger.info("auto_remediate_pr: %s — ordinary budget spent (%d/%d); taking the single "
                     "premium escalation attempt", key, attempts, max_attempts)
-    # Out of attempts with no premium turn left: post guidance once and hand to a human.
-    if attempts >= max_attempts and not premium_turn:
+    # Out of attempts with no premium turn left: one consolidated rework while
+    # its budget lasts (it is not charged as an attempt, so the cap cannot
+    # strand it), then post guidance once and hand to a human. Asks whether the
+    # turn is left, not whether this run takes it: a stalled run reworks
+    # instead, and with no rework pool it must wait for a new head rather than
+    # hand off a PR whose premium turn was never used.
+    exhausted = attempts >= max_attempts and not premium_turn_available(rec, config)
+    if exhausted:
+        rework = rework or rework_available(rec, config, head_sha)
+    # A rework runs only on models outside the premium tier
+    # (_rework_requirements). One that cannot start yet -- the models cannot
+    # be listed, or every model that can run it is cooling down -- is
+    # deferred, uncounted, to the next scan rather than handing the PR to a
+    # human ("couldn't ask" is not "nothing there"). With no model that can
+    # ever run it, it does not run: a stalled PR waits for a new head, as when
+    # its rework is spent, and a PR out of attempts goes to a human.
+    rework_reqs, no_pool = None, ""
+    if rework:
+        try:
+            rework_reqs = _rework_requirements(config, rec)
+        except ReworkDeferred as e:
+            reason = "consolidated rework deferred: %s" % e
+            logger.warning("auto_remediate_pr: %s — %s%s", key, reason,
+                           ": %s" % e.__cause__ if e.__cause__ else "")
+            update_pr_review(repo_full_name, pr.number, auto_remediate_reason=reason)
+            return False, reason
+    if rework and rework_reqs is None:
+        rework, no_pool = False, " (no model outside the premium tier can run a consolidated rework)"
+        if not exhausted:
+            update_pr_review(repo_full_name, pr.number,
+                             auto_remediate_reason="remediation stalled" + no_pool)
+            return False, "remediation stalled" + no_pool
+    if exhausted and not rework:
+        note = _rework_note(rec) + no_pool
         guidance = pr_concierge.generate_user_guidance(
             repo_name=repo_full_name,
             pr_number=pr.number,
@@ -1012,19 +1216,34 @@ def auto_remediate_pr(
         )
         exhausted_comment = (
             "🤖 **AppBuilder — Automated Remediation Limit Reached**\n\n"
-            f"AppBuilder attempted to remediate review findings {attempts} times but was unable to resolve all critiques. Leaving for human review.\n\n"
+            f"AppBuilder attempted to remediate review findings {attempts} times but was unable to resolve all critiques{note}. Leaving for human review.\n\n"
             f"{guidance}"
         )
         _post_once("exhausted", exhausted_comment,
                    auto_remediate_status="exhausted_human_review",
-                   auto_remediate_reason="Remediation attempt limit reached")
-        return False, "Remediation attempt limit reached"
+                   auto_remediate_reason="Remediation attempt limit reached" + note)
+        return False, "Remediation attempt limit reached" + note
+
+    # A consolidated rework: count it BEFORE the fix runs, so a restart or a
+    # re-scan of this head never repeats it, and announce it once. undo_rework
+    # restores the count when the run turns out not to count (see below); the
+    # snapshot is current because only the run holding the PR's claim
+    # (auto_remediate_pr) writes these fields.
+    undo_rework = {}
+    if rework:
+        undo_rework = {"remediation_reworks": int(rec.get("remediation_reworks") or 0),
+                       "remediation_rework_head": rec.get("remediation_rework_head")}
+        _post_once("rework", _rework_comment(rec, config, head_sha),
+                   remediation_reworks=undo_rework["remediation_reworks"] + 1,
+                   remediation_rework_head=head_sha)
 
     # From here on AppBuilder is improving the PR: show it on the Working on now card.
     try:
         from app_state import set_task_step
-        set_task_step("PRReview", "improving: attempt %d/%d on the panel findings" % (attempts + 1, max_attempts),
-                      stage="fix")
+        step = ("reworking: one end-to-end pass on %d round(s) of panel findings"
+                % len(review_progress.rework_rounds(rec, head_sha)) if rework
+                else "improving: attempt %d/%d on the panel findings" % (attempts + 1, max_attempts))
+        set_task_step("PRReview", step, stage="fix")
     except Exception:  # noqa: BLE001 - progress lines are cosmetic
         pass
 
@@ -1116,6 +1335,18 @@ def auto_remediate_pr(
             needs_structured_output=True,
             exclude_models=getattr(reqs, "exclude_models", ()),
         )
+    # A rework must resolve every round's objections in one pass, the hardest
+    # job remediation does, so whatever the attempt count it runs with
+    # _rework_requirements: the top tier, the Opus-class models
+    # (pr_remediate_last_turn_model_allowlist) while one can run it, and never
+    # a premium model. It excludes the models that could not produce a fix,
+    # but not the last model tried, whose fix the panels judged: a rework is
+    # a new job, not a retry of the last point fix. must_escalate_to_human
+    # stops the picker falling back to its safety floor (the first configured
+    # model, premium or not) if the pool empties before the call; fix_one_pr
+    # then reports fix_failures.NO_MODEL and the rework is given back below.
+    if rework:
+        reqs = rework_reqs
 
     # Invoke fix_one_pr
     # Use fix_one_pr unless a fix function was passed in (e.g. by tests).
@@ -1126,12 +1357,14 @@ def auto_remediate_pr(
     # Run the fix, catching any failure as an unsuccessful attempt.
     used_model_out: Dict[str, Any] = {}
     try:
+        # rework is passed only when set, so every ordinary call keeps its old shape.
         success, msg = fix_fn(
             repo_full_name,
             pr.number,
             config=config,
             requirements=reqs,
             used_model_out=used_model_out,
+            **({"rework": True} if rework else {}),
         )
     except Exception as e:
         success = False
@@ -1153,14 +1386,15 @@ def auto_remediate_pr(
             remediation_attempts=attempts,
             auto_remediate_status="contended",
             auto_remediate_failure=msg,
+            **undo_rework,
         )
         logger.info(
             "auto_remediate_pr: %s — another fix is already in flight for this PR; "
             "not charged to the remediation budget, retrying next scan", key)
         return False, msg
 
-    # This run counts as one more attempt.
-    new_attempts = attempts + 1
+    # This run counts as one more attempt; a rework has its own budget instead.
+    new_attempts = attempts if rework else attempts + 1
 
     # Charge the premium budget when the premium TURN IS TAKEN, whatever model
     # ended up answering. "turn granted" and "premium call made" used to be
@@ -1170,11 +1404,12 @@ def auto_remediate_pr(
     # fix), and a fix_fn that fails before a model is recorded leaves
     # used_model None. In both of those states the model-based charge never
     # fired, premium_turn_available() stayed True forever, and the
-    # `attempts >= max_attempts and not premium_turn` exhausted/human-review
-    # hand-off became unreachable -- an unbounded remediation loop. Charging the
-    # turn makes the escalation budget bind in every state. The model-based
-    # charge is kept as an additional accounting path, for the case where a
-    # premium model answers on an ordinary (non-escalation) turn.
+    # `attempts >= max_attempts and not premium_turn_available(...)`
+    # exhausted/human-review hand-off became unreachable -- an unbounded
+    # remediation loop. Charging the turn makes the escalation budget bind in
+    # every state. The model-based charge is kept as an additional accounting
+    # path, for the case where a premium model answers on an ordinary
+    # (non-escalation) turn.
     try:
         import fix_engine as _fe
         _premium_used = int(rec.get("premium_attempts") or 0)
@@ -1213,8 +1448,13 @@ def auto_remediate_pr(
         # having made zero real fix attempts, and excluding the model on top of
         # that permanently shrank the pool over a fault that was never the
         # model's competence. fix_one_pr already grants these a separate barren
-        # allowance; this path never got the same lesson.
-        if fix_failures.is_barren_failure(msg):
+        # allowance; this path never got the same lesson. No model able to run
+        # the fix (fix_failures.NO_MODEL, a rework whose pool emptied after it
+        # was judged) generated nothing either, so it is given back within the
+        # same allowance; past it the attempt counts, so a pool that stays
+        # empty cannot hold the PR forever.
+        no_model = fix_failures.is_no_model_failure(msg)
+        if no_model or fix_failures.is_barren_failure(msg):
             barren_done = int(rec.get("remediation_barren") or 0)
             max_barren = max(0, min(
                 int(config.get("pr_remediate_max_barren_retries", 2) or 0), 3))
@@ -1225,14 +1465,16 @@ def auto_remediate_pr(
                     remediation_attempts=attempts,
                     remediation_barren=barren_done + 1,
                     premium_attempts=_premium_used,
-                    auto_remediate_status="barren",
+                    auto_remediate_status="no_model" if no_model else "barren",
                     auto_remediate_failure=msg,
                     last_remediation_complexity=reqs.complexity,
                     last_remediation_model=used_model,
+                    **undo_rework,
                 )
                 logger.warning(
-                    "auto_remediate_pr: %s barren attempt (%s/%s) not charged to the "
-                    "remediation budget: %s", key, barren_done + 1, max_barren, msg)
+                    "auto_remediate_pr: %s %s attempt (%s/%s) not charged to the "
+                    "remediation budget: %s", key, "no-model" if no_model else "barren",
+                    barren_done + 1, max_barren, msg)
                 return False, msg
 
         # A real failure: record it and exclude the model that failed from the next try.
@@ -1335,11 +1577,15 @@ def maybe_auto_remediate(
     # Out of attempts: a human has to take over.
     if rec.get("auto_remediate_status") == "exhausted_human_review":
         return _skip("PR remediation attempt limit reached")
-    # Fixes have stopped helping: a human takes over. Not latched, so a new
-    # head that beats the best review resumes remediation.
-    if remediation_stalled(rec, config):
-        return _skip("remediation stalled: %d reviewed heads in a row did not beat the best "
-                     "review (pr_remediate_stall_limit)" % int(rec.get("remediation_stalls") or 0))
+    # Fixes have stopped helping (review thrash): while the rework budget lasts,
+    # rework the change once from every round's panel data instead of another
+    # point fix; after that a human takes over. Not latched, so a new head that
+    # makes progress resumes remediation.
+    rework = remediation_stalled(rec, config)
+    if rework and not rework_available(rec, config, head_sha):
+        return _skip("remediation stalled%s: %d reviewed heads in a row made no progress over the "
+                     "best review (pr_remediate_stall_limit)"
+                     % (_rework_note(rec), int(rec.get("remediation_stalls") or 0)))
 
     # Documentation PRs are reviewed but not accuracy-gated (same operator
     # policy as pr_review._automerge_decision's docs bypass). Remediation
@@ -1348,15 +1594,13 @@ def maybe_auto_remediate(
     # the author's prose to satisfy a judgement nothing is waiting on — churn
     # that moves the head SHA, re-triggers the panel and burns tokens.
     # Fails closed: a diff not provably docs-only remediates as before.
-    if config.get("pr_auto_remediate_skip_docs_only", True):
-        try:
-            files = feature_allowlist.files_from_pr_files(pr.get_files())
-            verdict = feature_allowlist.classify(files, config.get("feature_automerge_allowlist"))
-            if (verdict.get("category") == feature_allowlist.DOCS_ONLY
-                    and verdict.get("auto_approvable") is True):
-                return _skip("documentation-only PR — reviewed but not accuracy-gated")
-        except Exception as e:  # noqa: BLE001
-            logger.debug("maybe_auto_remediate: docs-only check skipped for %s: %s", key, e)
+    try:
+        docs_only = skips_docs_only(pr.get_files(), config)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("maybe_auto_remediate: docs-only check skipped for %s: %s", key, e)
+        docs_only = False
+    if docs_only:
+        return _skip(DOCS_ONLY_SKIP)
 
     # THE OBJECTIVE. Everything above is containment; this is the actual "is
     # this PR good enough yet?" question, and it is what makes a panel
@@ -1369,5 +1613,5 @@ def maybe_auto_remediate(
                      auto_remediate_deficit=deficit)
 
     # Go ahead and remediate.
-    return auto_remediate_pr(gh, repo, pr, config, deficit=deficit)
+    return auto_remediate_pr(gh, repo, pr, config, deficit=deficit, rework=rework)
 

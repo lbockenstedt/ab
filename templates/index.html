@@ -2824,8 +2824,18 @@
 
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
                             <label for="pr_remediate_stall_limit" class="text-sm font-semibold text-slate-700">Stop when fixes stop helping</label>
-                            <p class="text-xs text-slate-500">AppBuilder stops remediating a PR after this many reviewed heads in a row fail to beat its best review (more panels approving, or a higher lowest confidence), and leaves it for a human. The attempt ceiling still applies. 0 turns this off. Default 2.</p>
+                            <p class="text-xs text-slate-500">A reviewed head makes progress when more panels approve than in the PR's best review, or as many approve and the lowest confidence rises by at least the minimum gain. After this many heads in a row without progress (review thrash), or once the attempts run out, AppBuilder reworks the change once, end to end, from every round's panel findings. If the rework does not make progress either, it leaves the PR for a human. 0 turns off the thrash check; the attempt limit still applies. Default 2.</p>
                             <input type="number" name="pr_remediate_stall_limit" id="pr_remediate_stall_limit" min="0" step="1" value="{{ settings.get('pr_remediate_stall_limit', 2) }}" class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                                <div class="space-y-2">
+                                    <label for="pr_remediate_min_gain" class="text-sm font-medium text-slate-600">Minimum gain that counts as progress</label>
+                                    <input type="number" name="pr_remediate_min_gain" id="pr_remediate_min_gain" min="0" max="0.5" step="0.01" value="{{ settings.get('pr_remediate_min_gain', 0.03) }}" title="How much the lowest panel confidence must rise over the best review, with as many panels approving, to count as progress. A smaller gain counts as a stall, so a +0.005 creep cannot reset the count. 0 to 0.5. Default 0.03." class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                </div>
+                                <div class="space-y-2">
+                                    <label for="pr_remediate_rework_limit" class="text-sm font-medium text-slate-600">Consolidated reworks before a human</label>
+                                    <input type="number" name="pr_remediate_rework_limit" id="pr_remediate_rework_limit" min="0" max="3" step="1" value="{{ settings.get('pr_remediate_rework_limit', 1) }}" title="How many times AppBuilder reworks a thrashing PR end to end from every round's panel findings, on the Opus-class models (never a premium one), before leaving it for a human. A rework does not use a remediation attempt. 0 hands the PR to a human straight away. Default 1, at most 3." class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                </div>
+                            </div>
                         </div>
 
                         <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">

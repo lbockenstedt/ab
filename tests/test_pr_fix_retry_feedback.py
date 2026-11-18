@@ -164,11 +164,24 @@ class Harness:
         self.desc_fix_calls.append((a, kw))
         return self.desc_fix
 
-    def run(self):
-        ns = self._namespace()
-        return ns["fix_one_pr"]("o/r", 7, config={"qa_enabled": self.qa,
-                                                  "pr_fix_max_attempts": self.max_attempts,
-                                                  "GITHUB_TOKEN": "tok"})
+    def run(self, extra_config=None, **kw):
+        """Run fix_one_pr once with the fakes, then put the real git, github
+        and fix_engine modules back. All test files share one pytest process,
+        so a fake left in sys.modules would be imported by later tests.
+        Subclasses call this rather than _namespace(), so they restore too:
+        extra_config is added to fix_one_pr's config, kw is passed to it."""
+        saved = {name: sys.modules.get(name) for name in ("fix_engine", "git", "github")}
+        try:
+            ns = self._namespace()
+            config = {"qa_enabled": self.qa, "pr_fix_max_attempts": self.max_attempts,
+                      "GITHUB_TOKEN": "tok", **(extra_config or {})}
+            return ns["fix_one_pr"]("o/r", 7, config=config, **kw)
+        finally:
+            for name, mod in saved.items():
+                if mod is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = mod
 
     def _namespace(self):
         import contextlib

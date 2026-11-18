@@ -938,19 +938,22 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z(\"'`])")
 
 def _norm_conf_pct(value):
     """Confidence as a "58%" string, or None when it isn't a usable number."""
+    # Missing or non-numeric is None here: fix_engine's normaliser reads it as
+    # 0.0, which the comment would show as a confident "0%".
+    try:
+        c = float(value)
+    except (TypeError, ValueError):
+        return None
+    if c != c or c in (float("inf"), float("-inf")):
+        return None
     # Use fix_engine's normaliser, or a local copy if it cannot be imported.
     try:
         from fix_engine import _norm_confidence
     except Exception:  # noqa: BLE001 — never let comment rendering fail on this
         def _norm_confidence(v):
             """Scale a confidence to 0-1 (percent values are divided by 100)."""
-            c = float(v)
-            return max(0.0, min(1.0, c / 100.0 if c > 1.0 else c))
-    # Format as a whole percent; bad values give None.
-    try:
-        return "%.0f%%" % (_norm_confidence(value) * 100)
-    except (TypeError, ValueError):
-        return None
+            return max(0.0, min(1.0, v / 100.0 if v > 1.0 else v))
+    return "%.0f%%" % (_norm_confidence(c) * 100)
 
 
 def _reviewer_blocks(review):
@@ -1885,7 +1888,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
         if should_merge:
             try:
                 import pr_remediate
-                pending, why = pr_remediate.remediation_pending(rec, config)
+                pending, why = pr_remediate.remediation_pending(rec, config, pr_files)
             except Exception as e:  # noqa: BLE001 — never let this break a merge
                 logger.warning("pr_review: remediation_pending check skipped for %s: %s", key, e)
                 pending, why = False, ""
@@ -2152,7 +2155,7 @@ def _review_one(gh, repo, pr, config, force=False):
     record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha,
                      summary=summary, review=review, review2=state_review,
                      base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
-                     head_ref=_head_ref)
+                     head_ref=_head_ref, config=config)
     # Log the outcome unless it was a cache hit.
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
@@ -2307,7 +2310,35 @@ def fix_pr_description(repo_full_name, number, config=None):
         _release_issue(lock_id)
 
 
-def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_model_out=None):
+def _rework_brief(rounds):
+    """The fix-prompt section for a consolidated rework (pr_remediate, once
+    review thrash is detected): what to do differently, the score trend, then
+    every round's panel critiques, oldest first (review_progress.rework_rounds).
+    Point fixes to the latest critique stopped converging, so the model gets
+    every round's findings and one pass to resolve them together. With it, fix_one_pr
+    (rework=True) replaces the last pass's critiques with this brief and
+    skips its description shortcut: the rework is of the code."""
+    # The instructions, then the trend, then each round's critiques.
+    out = ["\nCONSOLIDATED REWORK: point fixes stopped converging. The panel scores below went "
+           "up and down without progress, so do not patch only the latest critique. Instead:",
+           "1. Re-read the whole change end to end.",
+           "2. Group every finding below, from all rounds, by root cause.",
+           "3. Choose one coherent design that resolves every root cause at once. You may "
+           "restructure, narrow or simplify the change, but do not widen it, and keep the "
+           "PR's stated intent.",
+           "4. Make all the edits in this single pass.",
+           "5. An objection resolved in an earlier round must stay resolved.",
+           "\nScore per round as [panels approved, lowest panel confidence], oldest first: "
+           + " -> ".join(str(r.get("score")) for r in rounds)]
+    for i, r in enumerate(rounds, 1):
+        out.append("\n--- Round %d of %d: head %s, score %s ---" % (
+            i, len(rounds), r.get("head") or "?", r.get("score")))
+        out.append("Skeptical reviewer critique:\n" + (r.get("panel_critique") or "(none)"))
+        out.append("State-logic / control-flow reviewer critique:\n" + (r.get("panel2_critique") or "(none)"))
+    return "\n".join(out)
+
+
+def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_model_out=None, rework=False):
     """Entry point for the UI's per-PR "Fix" button (routes.py
     /api/pr-review/fix) — the ONLY way this ever runs; AppBuilder never applies a
     PR fix on its own. A human clicks Fix, and this:
@@ -2330,6 +2361,8 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
          commit onto the PR's EXISTING branch — never a new branch/PR — then
          triggers an immediate reprocess so the review comment/panel reflect
          the fix right away.
+
+    ``rework``: one consolidated rework of the code (see _rework_brief).
 
     Returns (True, message) on a pushed fix, (False, message) on any refusal/
     rejection (surfaced to the UI, not an error). Raises only on setup failure
@@ -2358,7 +2391,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
     # the loop below spends its whole budget producing code edits that cannot
     # possibly address the finding, and the PR stalls with attempts exhausted.
     _rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}
-    if _panel_objects_to_description(_rec.get("panel_critique") or ""):
+    if not rework and _panel_objects_to_description(_rec.get("panel_critique") or ""):
         try:
             _ok, _msg = fix_pr_description(repo_full_name, number, config=config)
         except Exception as e:  # noqa: BLE001
@@ -2449,6 +2482,10 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         # named the exact conflated states and the exact over-broad branch),
         # so the fixer was asked to satisfy a review it had only half of.
         panel2_critique = (rec.get("panel2_critique") or "").strip()
+        # A consolidated rework gets every round, not just the last pass,
+        # including this head's live critiques in full (see rework_rounds).
+        import review_progress
+        rounds = review_progress.rework_rounds(rec, head_sha) if rework else []
 
         # Self-improvement: also read the pre-review AB actually POSTED on this PR
         # and fold every below-target panel's dissent into the fix prompt. This
@@ -2474,7 +2511,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
         # Nothing to fix: stop.
         if (not findings and not panel_critique and not panel2_critique and not score_feedback
-                and _ci_state != "failure"):
+                and not rounds and _ci_state != "failure"):
             return False, "No findings to fix — this PR has a clean pre-review."
 
         # Build the fix prompt: PR text, objective, findings, critiques and score feedback.
@@ -2491,14 +2528,17 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             "argue with it, do not merely add a comment acknowledging it, and do not widen the "
             "change beyond what the critiques require. If two critiques conflict, satisfy the "
             "one that concerns correctness or security.")
+        # A rework's rounds include this head's critiques, so they replace the two below.
+        if rounds:
+            lines.append(_rework_brief(rounds))
         if findings:
             lines.append("\nAppBuilder pre-review findings to fix:")
             for f in findings:
                 lines.append("- [%s] %s: %s" % (
                     (f.get("level") or "advisory").upper(), f.get("title") or "", f.get("detail") or ""))
-        if panel_critique:
+        if panel_critique and not rounds:
             lines.append("\nSkeptical reviewer critique (from the last panel pass):\n" + panel_critique)
-        if panel2_critique:
+        if panel2_critique and not rounds:
             lines.append("\nState-logic / control-flow reviewer critique (from the last panel pass):\n"
                          + panel2_critique)
         if score_feedback:
@@ -2609,6 +2649,13 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                                             task_id=lock_id, requirements=requirements,
                                             used_model_out=used_model_out)
                 except Exception as e:
+                    # No model may run it: the caller forbade the picker's safety
+                    # floor (must_escalate_to_human) and the picker found none, so
+                    # a retry would find none either. Nothing was generated; the
+                    # caller decides (pr_remediate gives a rework back for it).
+                    import llm_client   # lazy, like this function's other imports
+                    if isinstance(e, llm_client.LlmHumanEscalationNeeded):
+                        return False, "%s %s" % (fix_failures.NO_MODEL, e)
                     last_failure = "Fix generation failed: %s" % e
                     error_context = last_failure
                     # Generation raised before producing anything — barren.

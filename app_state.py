@@ -235,7 +235,7 @@ def _panel_dissent_stats(review):
 
 
 def record_pr_review(repo, number, title, url, findings, head_sha, summary="", review=None, review2=None,
-                     base_ref="", head_ref=""):
+                     base_ref="", head_ref="", config=None):
     """Persist a PR pre-review result so the UI can list/filter 'PRs Reviewed'.
     Bounded to the most recent _PR_REVIEWS_MAX. findings = list of {level,...} dicts.
 
@@ -244,7 +244,12 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
     into the GitHub PR comment and then thrown away, so the advisory verdict was
     visible on github.com but nowhere in AppBuilder's own UI. Stored flat as
     panel_verdict / panel_confidence / panel_status so the PR list can show it
-    without re-reading the comment."""
+    without re-reading the comment.
+
+    ``config`` supplies the pr_remediate_min_gain progress margin (default when
+    None); see review_progress."""
+    # The shared progress rule; imported here so this function stays loadable on its own.
+    import review_progress
     # state is the module-level dict; we mutate it in place.
     global state
     # Count findings per severity level for the UI badges.
@@ -372,17 +377,38 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                     retry_counts = [int(c or 0) for c in (prev.get("queue_retry_counts") or [0, 0])]
                 retry_counts = [retry_counts[0] + (panel_status == "queue_for_retry"),
                                 retry_counts[1] + (panel2_status == "queue_for_retry")]
-            # Score each head once: the first head sets the best, and every later
-            # head that does not beat it is a stall; beating it resets the count.
+            # Score each head once by the shared progress rule: progress makes this
+            # head the best and resets the stall count; anything else is a stall.
+            # Panel 2 waiting (skipped) is not a finished review, so a head first
+            # scored that way is scored once more when panel 2 runs at it, from the
+            # state before that partial score.
             best = prev.get("remediation_best")
             stalls = int(prev.get("remediation_stalls") or 0)
             scored_head = prev.get("remediation_scored_head")
-            if pass_score is not None and scored_head != head_sha:
-                if best is None or pass_score > list(best):
+            score_base = prev.get("remediation_score_base")
+            score_partial = bool(prev.get("remediation_score_partial"))
+            partial = panel2_status == "skipped"
+            rescore = (scored_head == head_sha and score_partial and not partial
+                       and isinstance(score_base, list) and len(score_base) == 2)
+            if pass_score is not None and (scored_head != head_sha or rescore):
+                if rescore:
+                    best, stalls = score_base[0], int(score_base[1] or 0)
+                score_base = [best, stalls]
+                if review_progress.made_progress(pass_score, best, review_progress.min_gain(config)):
                     best, stalls = pass_score, 0
                 else:
                     stalls += 1
-                scored_head = head_sha
+                scored_head, score_partial = head_sha, partial
+            # Keep each scored head's critiques for a consolidated rework, which
+            # needs every round, not just the last; a re-scan updates its entry,
+            # except that a partial pass never replaces a finished one.
+            history = prev.get("review_history") or []
+            if pass_score is not None and not (scored_head == head_sha and partial and not score_partial):
+                cap = review_progress.CRITIQUE_CAP
+                history = review_progress.upsert(history, "head", {
+                    "head": (head_sha or "")[:12], "score": pass_score,
+                    "panel_critique": panel_critique[:cap], "panel2_critique": panel2_critique[:cap],
+                    "at": datetime.now().isoformat(timespec="seconds")}, review_progress.HISTORY_KEEP)
             # Rebuild the record from this scan plus the carried-over sticky fields.
             state["pr_reviews"][key] = {
                 "repo": repo,
@@ -507,9 +533,23 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "remediation_best": best,
                 "remediation_stalls": stalls,
                 "remediation_scored_head": scored_head,
+                # The best/stalls before scored_head was scored, and whether panel 2
+                # was still waiting then, for the one re-score above.
+                "remediation_score_base": score_base,
+                "remediation_score_partial": score_partial,
                 "remediation_barren": (
                     int(prev.get("remediation_barren") or 0)
                     if prev.get("head") == head_sha else 0),
+                # Consolidated reworks run and the head the latest one ran at, so a
+                # restart or re-scan never repeats one (pr_remediate.rework_available).
+                "remediation_reworks": int(prev.get("remediation_reworks") or 0),
+                "remediation_rework_head": prev.get("remediation_rework_head"),
+                # The last notice pr_remediate posted, stamped "marker@head" by
+                # _post_once. Dropping it let a rework given back (it did no
+                # work, so nothing latched) be announced again on the same head
+                # after every re-scan. Safe across heads: the head is in the stamp.
+                "auto_remediate_notice": prev.get("auto_remediate_notice"),
+                "review_history": history,
                 # Description-rewrite budget (pr_review.fix_pr_description), keyed
                 # by head SHA. Same rebuild hazard as the remediation bookkeeping
                 # above: dropping it reset the count to 0 on every re-review, so
