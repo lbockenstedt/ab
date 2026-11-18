@@ -27,6 +27,7 @@ same: the on-disk file only ever reflects a fully-written old or new
 version, never a half-written one.
 """
 import ast
+import copy
 import json
 import os
 import shutil
@@ -39,7 +40,7 @@ def _load_ns():
     tree = ast.parse(src)
 
     want_funcs = {
-        "_atomic_write_json",
+        "_atomic_write_json", "_read_persistent_config", "_remember_good_config",
         "save_config", "load_config",
         "save_processed", "load_processed",
         "save_pr_reviews", "load_pr_reviews",
@@ -47,24 +48,30 @@ def _load_ns():
     }
     segs = []
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in want_funcs:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and (
+                node.name in want_funcs or node.name == "ConfigUnreadableError"):
             segs.append(ast.get_source_segment(src, node))
         if isinstance(node, ast.Assign):
             for t in node.targets:
                 name = getattr(t, "id", "")
                 if name in ("CONFIG_DIR", "CONFIG_FILE", "STATE_FILE",
                             "PR_REVIEWS_FILE", "UPDATE_STATE_FILE",
-                            "CHAT_CONFIG_DEFAULTS"):
+                            "CHAT_CONFIG_DEFAULTS",
+                            "_last_good_config", "_unreadable_logged"):
                     segs.append(ast.get_source_segment(src, node))
 
     module_src = "\n\n".join(segs)
 
     class _FakeLogger:
-        def info(self, *a, **k): pass
+        """Records info() and error() lines so tests can check what was logged."""
+        def __init__(self):
+            self.errors = []
+            self.infos = []
+        def info(self, msg, *a, **k): self.infos.append(msg)
         def warning(self, *a, **k): pass
-        def error(self, *a, **k): pass
+        def error(self, msg, *a, **k): self.errors.append(msg)
 
-    ns = {"os": os, "json": json, "logger": _FakeLogger()}
+    ns = {"os": os, "json": json, "copy": copy, "logger": _FakeLogger()}
     exec(compile(module_src, "config_store_extract", "exec"), ns)
     return ns
 
@@ -282,6 +289,234 @@ def test_failed_atomic_write_preserves_target(tmp_path):
         raise AssertionError("Serialization failure must reach the caller")
     assert json.loads(target.read_text()) == {"old": True}
     assert list(tmp_path.iterdir()) == [target]
+
+
+def _ns_for(tmp_path, monkeypatch):
+    """Extracted config_store functions pointed at a temp CONFIG_FILE, cwd isolated."""
+    monkeypatch.chdir(tmp_path)
+    ns = _load_ns()
+    ns["CONFIG_DIR"] = str(tmp_path / "etc_ab")
+    ns["CONFIG_FILE"] = str(tmp_path / "etc_ab" / "config.json")
+    os.makedirs(ns["CONFIG_DIR"])
+    return ns
+
+
+def test_unreadable_config_keeps_last_good_and_is_never_overwritten(tmp_path, monkeypatch):
+    """EACCES on config.json (root-owned after a maintenance script) must not
+    turn into 'defaults' that the next save writes over the stored LLM endpoints."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    good = {"llm_entries": [{"id": "e1"}, {"id": "e2"}], "monitored_repos": ["a/b"]}
+    ns["save_config"](good)
+    assert len(ns["load_config"]()["llm_entries"]) == 2
+    stored = open(ns["CONFIG_FILE"], "rb").read()
+
+    real_open = open
+
+    def denied_open(path, *a, **k):
+        """Simulate EACCES for the config file only (also holds when tests run as root)."""
+        if path == ns["CONFIG_FILE"]:
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, *a, **k)
+
+    ns["open"] = denied_open
+    for _ in range(3):  # the heartbeat worker polls every 5 seconds
+        assert len(ns["load_config"]()["llm_entries"]) == 2
+    assert len(ns["logger"].errors) == 1, "the outage is logged once, not per poll"
+
+    try:
+        ns["save_config"]({"llm_entries": []})
+    except ns["ConfigUnreadableError"]:
+        pass
+    else:
+        raise AssertionError("save_config must refuse while the config is unreadable")
+    assert real_open(ns["CONFIG_FILE"], "rb").read() == stored
+    assert not os.path.exists("config.json"), "no throwaway local fallback copy either"
+
+    del ns["open"]
+    assert len(ns["load_config"]()["llm_entries"]) == 2
+
+
+def test_unreadable_config_on_fresh_start_is_not_saved_over(tmp_path, monkeypatch):
+    """With no last-good config (a restart) a corrupt file yields defaults to
+    run on, but the startup migration's save_config must not replace the file."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    for bad in ('{"llm_entries": [', "[]"):
+        with open(ns["CONFIG_FILE"], "w") as f:
+            f.write(bad)
+        assert isinstance(ns["load_config"](), dict)
+        try:
+            ns["save_config"]({"llm_entries": []})
+        except ns["ConfigUnreadableError"]:
+            pass
+        else:
+            raise AssertionError(f"save_config overwrote unreadable config {bad!r}")
+        assert open(ns["CONFIG_FILE"]).read() == bad
+
+
+def test_save_refreshes_the_last_good_config(tmp_path, monkeypatch):
+    """Load A, save B, then the file becomes unreadable before the next load: the config
+    served is B (what is on disk), not the stale A."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    ns["save_config"]({"llm_entries": [{"id": "a"}]})
+    assert ns["load_config"]()["llm_entries"] == [{"id": "a"}]
+    ns["save_config"]({"llm_entries": [{"id": "b"}], "monitored_repos": ["x/y"]})
+
+    real_open = open
+
+    def denied_open(path, *a, **k):
+        """Simulate EACCES for the config file only."""
+        if path == ns["CONFIG_FILE"]:
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, *a, **k)
+
+    ns["open"] = denied_open
+    served = ns["load_config"]()
+    assert served["llm_entries"] == [{"id": "b"}] and served["monitored_repos"] == ["x/y"]
+    assert "enabled_models" in served, "the served copy carries the same defaults as a normal load"
+
+
+def test_unwritable_everywhere_raises_instead_of_a_false_success(tmp_path, monkeypatch):
+    """Persistent write and local fallback both fail (full disk, read-only mount): nothing
+    was stored, so save_config raises and its caller does not report success."""
+    ns = _ns_for(tmp_path, monkeypatch)
+
+    def no_space(*a, **k):
+        """Stand in for _atomic_write_json failing on every target."""
+        raise OSError(28, "No space left on device")
+
+    ns["_atomic_write_json"] = no_space
+    try:
+        ns["save_config"]({"monitored_repos": ["x/y"]})
+    except OSError:
+        pass
+    else:
+        raise AssertionError("save_config returned normally though nothing was stored")
+    assert any("Critical failure saving config" in m for m in ns["logger"].errors)
+
+
+def _fail_persistent_write_only(ns):
+    """Make _atomic_write_json fail for CONFIG_FILE (e.g. its directory is not writable)."""
+    real = ns["_atomic_write_json"]
+
+    def write(path, *a, **k):
+        """Fail the persistent target, write any other."""
+        if path == ns["CONFIG_FILE"]:
+            raise PermissionError(13, "Permission denied", path)
+        return real(path, *a, **k)
+
+    ns["_atomic_write_json"] = write
+
+
+def test_unwritable_persistent_dir_raises_when_a_config_exists(tmp_path, monkeypatch):
+    """A readable CONFIG_FILE that cannot be replaced: a ./config.json saved instead would
+    never be read back (load_config prefers CONFIG_FILE), so the save must raise, not succeed."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    ns["save_config"]({"monitored_repos": ["old"]})
+    _fail_persistent_write_only(ns)
+    try:
+        ns["save_config"]({"monitored_repos": ["new"]})
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("save_config reported success for a config that load_config ignores")
+    assert not os.path.exists("config.json")
+    assert ns["load_config"]()["monitored_repos"] == ["old"]
+
+
+def test_unwritable_persistent_dir_still_falls_back_on_first_boot(tmp_path, monkeypatch):
+    """With no CONFIG_FILE yet, the local fallback is the one load_config reads: keep it."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    _fail_persistent_write_only(ns)
+    ns["save_config"]({"monitored_repos": ["new"]})
+    assert ns["load_config"]()["monitored_repos"] == ["new"]
+
+
+def test_unreadable_after_a_deleted_file_serves_the_config_actually_in_use(tmp_path, monkeypatch):
+    """Readable A -> file deleted or emptied -> unreadable. If ./config.json B took over, B is
+    what AB runs on and is served. With no fallback file only the defaults are in use, which
+    never replace A: a truncate-then-rewrite by a root script passes through exactly that state."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    real_open = open
+
+    def denied_open(path, *a, **k):
+        """Simulate EACCES for the config file only."""
+        if path == ns["CONFIG_FILE"]:
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, *a, **k)
+
+    ns["save_config"]({"monitored_repos": ["A"]})
+    open(ns["CONFIG_FILE"], "w").close()
+    assert ns["load_config"]()["monitored_repos"] == []
+    monkeypatch.setitem(ns, "open", denied_open)
+    assert ns["load_config"]()["monitored_repos"] == ["A"]
+
+    monkeypatch.undo()
+    monkeypatch.chdir(tmp_path)
+    ns["save_config"]({"monitored_repos": ["A"]})
+    os.remove(ns["CONFIG_FILE"])
+    with open("config.json", "w") as f:
+        f.write('{"monitored_repos": ["B"]}')
+    assert ns["load_config"]()["monitored_repos"] == ["B"]
+    monkeypatch.setitem(ns, "open", denied_open)
+    assert ns["load_config"]()["monitored_repos"] == ["B"]
+
+
+def test_save_to_the_local_fallback_refreshes_the_last_good_config(tmp_path, monkeypatch):
+    """No CONFIG_FILE yet: local config A is loaded, B is saved to ./config.json, then
+    CONFIG_FILE appears corrupt. The config served is B (what was just saved), not A."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    with open("config.json", "w") as f:
+        f.write('{"monitored_repos": ["A"]}')
+    assert ns["load_config"]()["monitored_repos"] == ["A"]
+    _fail_persistent_write_only(ns)
+    ns["save_config"]({"monitored_repos": ["B"]})
+    with open(ns["CONFIG_FILE"], "w") as f:
+        f.write("{")
+    assert ns["load_config"]()["monitored_repos"] == ["B"]
+
+
+def test_recovery_is_reported_only_for_a_parsed_config(tmp_path, monkeypatch):
+    """An unreadable file that is later fixed is "readable again". One that was deleted or
+    emptied is not a recovery: it is reported as missing/empty, and the next unreadable
+    file is reported again (the one-ERROR latch is reset in both cases)."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    ns["save_config"]({"llm_entries": [{"id": "a"}]})
+    real_open = open
+
+    def denied_open(path, *a, **k):
+        """Simulate EACCES for the config file only."""
+        if path == ns["CONFIG_FILE"]:
+            raise PermissionError(13, "Permission denied", path)
+        return real_open(path, *a, **k)
+
+    def readable_again(infos):
+        return [m for m in infos if "readable again" in m]
+
+    ns["open"] = denied_open
+    ns["load_config"]()
+    del ns["open"]
+    os.remove(ns["CONFIG_FILE"])
+    ns["load_config"]()
+    assert readable_again(ns["logger"].infos) == []
+    assert any("missing or empty" in m for m in ns["logger"].infos)
+
+    ns["save_config"]({"llm_entries": [{"id": "b"}]})
+    ns["open"] = denied_open
+    ns["load_config"]()
+    assert len(ns["logger"].errors) == 2, "the latch was reset, so the second outage is logged"
+    del ns["open"]
+    ns["load_config"]()
+    assert len(readable_again(ns["logger"].infos)) == 1
+
+
+def test_empty_or_missing_config_can_still_be_saved(tmp_path, monkeypatch):
+    """First boot (no file) and the zero-byte leftover of a crash hold nothing to lose."""
+    ns = _ns_for(tmp_path, monkeypatch)
+    ns["save_config"]({"monitored_repos": ["x/y"]})
+    os.remove(ns["CONFIG_FILE"])
+    open(ns["CONFIG_FILE"], "w").close()
+    ns["save_config"]({"monitored_repos": ["x/y"]})
+    assert ns["load_config"]()["monitored_repos"] == ["x/y"]
 
 
 if __name__ == "__main__":

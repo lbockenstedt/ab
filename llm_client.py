@@ -283,6 +283,10 @@ def _copilot_headers(bearer):
     }
 
 
+class CopilotTokenRateLimited(Exception):
+    """The Copilot token exchange answered 429: the account is alive but throttled."""
+
+
 def _copilot_api_token(gh_token):
     """Exchange the stored GitHub OAuth token for a short-lived Copilot API token,
     cached until ~1 min before expiry. Raises on failure (e.g. no Copilot subscription)."""
@@ -300,6 +304,8 @@ def _copilot_api_token(gh_token):
         "Editor-Version": COPILOT_EDITOR_VERSION,
         "User-Agent": "GitHubCopilotChat/0.22.0",
     }, timeout=20)
+    if resp.status_code == 429:
+        raise CopilotTokenRateLimited(f"Copilot token exchange rate-limited (429): {resp.text[:200]}")
     if resp.status_code != 200:
         raise Exception(f"Copilot token exchange failed ({resp.status_code}): {resp.text[:200]} "
                         "— is a GitHub Copilot subscription active for this account?")

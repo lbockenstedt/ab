@@ -444,18 +444,20 @@
                    idle, so adding a provider gives immediate visible feedback. #}
                 {% set all_eps = state.llm_endpoints_online %}
                 {% set online_eps = all_eps | selectattr('online') | list %}
+                {# A 429 endpoint is alive but throttled: amber, never red (red = nothing usable). #}
+                {% set throttled_eps = all_eps | selectattr('throttled') | list %}
                 {% set sorted_eps = (all_eps | selectattr('used') | list) + (all_eps | rejectattr('used') | list) %}
                 {% if all_eps %}
                 <span class="inline-flex items-center gap-1.5">
-                    <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if online_eps|length == all_eps|length else ('bg-amber-400' if online_eps|length else 'bg-red-400') }}"></span>
+                    <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if online_eps|length == all_eps|length else ('bg-amber-400' if (online_eps|length or throttled_eps|length) else 'bg-red-400') }}"></span>
                     <span class="text-xs font-semibold text-slate-700 tabular-nums">{{ online_eps|length }}/{{ all_eps|length }}</span>
                 </span>
                 <!-- Hover detail: one line per configured endpoint. -->
                 <div class="absolute right-full top-0 mr-2 hidden group-hover:block bg-slate-800 text-white text-xs p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[220px] text-left normal-case tracking-normal">
                     <div class="opacity-50 mb-1">Configured LLM endpoints</div>
                     {% for ep in sorted_eps %}
-                    <div class="flex items-center gap-2 py-0.5">
-                        <span class="w-1.5 h-1.5 rounded-full shrink-0 {{ 'bg-emerald-400' if ep.online else 'bg-red-400' }}"></span>
+                    <div class="flex items-center gap-2 py-0.5"{% if ep.throttled %} title="Rate-limited (HTTP 429): reachable, but throttled right now"{% endif %}>
+                        <span class="w-1.5 h-1.5 rounded-full shrink-0 {{ 'bg-emerald-400' if ep.online else ('bg-amber-400' if ep.throttled else 'bg-red-400') }}"></span>
                         <span class="font-mono truncate">{{ ep.provider }} · {{ ep.model }}</span>
                         <span class="opacity-50 ml-auto shrink-0">{{ (ep.runs ~ ' runs') if ep.runs else ('serving' if ep.used else 'idle') }}</span>
                     </div>

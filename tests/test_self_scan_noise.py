@@ -126,10 +126,7 @@ def main():
         {"module": "ab-core",
          "log": "[ERROR] No verified fix found after 3 attempt(s) — AI generated invalid JSON format"},
         # config/state I/O operational errors (ab#806) — environment
-        # conditions load_config/save_config already handle, not code defects.
-        {"module": "ab-core",
-         "log": "2026-08-13 02:05:49 [ERROR] Error reading persistent config "
-                "/etc/ab/config.json: Expecting value: line 1 column 1 (char 0)"},
+        # conditions save_config already handles, not code defects.
         {"module": "ab-core",
          "log": "[ERROR] Critical failure saving config: [Errno 28] No space left on device"},
         # (3) reviewer-panel verdict chatter — RECOVERED in the same call: the
@@ -195,6 +192,13 @@ def main():
         # handled rate-limit outcome, and must still be reported.
         {"module": "spoke",
          "log": "[ERROR] NetBox API returned 429 while pushing prefixes; sync incomplete"},
+        # An unreadable config.json cost AB all its LLM endpoints for 13 hours
+        # (2026-11-17) while this class of line was filtered as noise. It is an
+        # outage, so it must reach the operator.
+        {"module": "ab-core",
+         "log": "2026-11-17 18:01:50 - AppBuilder - ERROR - Persistent config is unreadable; "
+                "not using defaults and not overwriting it until it is fixed: "
+                "/etc/ab/config.json: [Errno 13] Permission denied: '/etc/ab/config.json'"},
     ]
 
     kept = fel(noise + real)
@@ -211,8 +215,8 @@ def main():
           not any(n["log"] in kept_texts for n in noise))
     check("exact #834 anchor-miss line dropped",
           not any("search snippet not found" in t for t in kept_texts))
-    check("exact #806 config-read error dropped",
-          not any("Error reading persistent config" in t for t in kept_texts))
+    check("unreadable-config outage line kept",
+          any("Persistent config is unreadable" in t for t in kept_texts))
     check("genuine KeyError preserved",
           any("KeyError" in t for t in kept_texts))
     check("genuine traceback preserved",
@@ -242,7 +246,7 @@ def main():
           not any("LLM HTTPError 429" in t for t in kept_texts))
     check("product 429 error preserved",
           any("sync incomplete" in t for t in kept_texts))
-    check("only the 6 real errors survive", len(kept) == 6)
+    check("only the 7 real errors survive", len(kept) == len(real))
 
     print("RESULT:", "PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)

@@ -3894,7 +3894,18 @@ def _copilot_poll_loop(device_code, interval, provider):
             cfg = load_config()
             cfg.setdefault("llm_credentials", {})[provider] = {"api_key": d["access_token"], "base_url": ""}
             cfg.pop("copilot_device", None)
-            save_config(cfg)
+            # An unsaveable config.json (unreadable, or no space / read-only) makes
+            # save_config raise. This thread has no caller to report that to, so the
+            # UI would sit on "pending" for a token GitHub already issued, or show
+            # "authorized" for one that was never stored; end the flow with an error.
+            try:
+                save_config(cfg)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Copilot device flow: authorized, but the credential could not be stored: {e}")
+                state["copilot_auth"] = {"status": "error",
+                                         "message": "Authorized in GitHub, but the credential could not be "
+                                                    "saved. Check the AB log and config.json, then sign in again."}
+                return
             state["copilot_auth"] = {"status": "authorized", "message": "Copilot connected."}
             logger.info(f"Copilot device flow: authorized + stored credential for '{provider}'.")
             return

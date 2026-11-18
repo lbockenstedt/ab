@@ -327,14 +327,14 @@ def get_hub_state():
 #     to fix, so the issue burns its retry budget and fails "AI generated
 #     invalid JSON format", then recurs the next edit anchor miss.
 #
-#  2. Config/state file I/O errors (e.g. "Error reading persistent config ...
-#     Expecting value: line 1 column 1 (char 0)"). These are environment/ops
-#     conditions — a transiently empty or hand-edited config.json — that
-#     load_config already recovers from via its local/defaults fallback, and
-#     save_config already writes atomically to prevent. The scanner filed them
-#     as issues too, but their own triage can only ever conclude "non-actionable
-#     — ensure the file is valid JSON" (e.g. ab#806); a code edit cannot
-#     fix a corrupt file on disk.
+#  2. Config/state file write errors ("Could not save to persistent storage",
+#     "Critical failure saving config"). These are environment/ops
+#     conditions — a full disk, a read-only mount — that save_config already
+#     falls back from. The scanner filed them as issues too, but their own
+#     triage can only ever conclude "non-actionable" (e.g. ab#806); a code
+#     edit cannot fix a full disk. An UNREADABLE config.json is deliberately
+#     not in this family: it empties AB's LLM endpoints, an outage the operator
+#     must see, so "Persistent config is unreadable" is not filtered.
 #
 #  3. Reviewer-panel verdict-parsing chatter. A reviewer reply that isn't
 #     parseable JSON is logged at ERROR/WARNING and then RECOVERED from in the
@@ -366,7 +366,6 @@ _SELF_SCAN_NOISE = re.compile(
     # candidate, not a deployed syntax error or a new AppBuilder defect.
     r'|REJECTING edit to [^\n]+: the file parsed before the edit and does not parse after it'
     r'|No verified fix found after'
-    r'|Error reading persistent config'
     r'|Could not save to persistent storage'
     r'|Critical failure saving config'
     # (3) reviewer-panel chatter — retried and/or escalated in the same call.
