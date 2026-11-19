@@ -629,8 +629,11 @@ def mark_pr_approved(repo, number, approved=True, *, expected_head=_UNSPECIFIED_
                 _stamp_pr_state(rec, before)
                 save_pr_reviews(state["pr_reviews"])
             except Exception:
-                rec.clear()
-                rec.update(before)
+                # A failed grant cannot authorize a merge. A failed revoke must
+                # remain revoked in memory even though its on-disk copy is stale.
+                if approved:
+                    rec.clear()
+                    rec.update(before)
                 raise
             return True
     except Exception as e:
@@ -694,10 +697,12 @@ def update_pr_review(repo, number, **fields):
             before = dict(rec)
             rec.update(fields)
             _stamp_pr_state(rec, before)
-            save_pr_reviews(state["pr_reviews"])
-            # After the record is safely persisted: the ledger is a derived
-            # tally, so losing it is recoverable, but losing the review is not.
-            _record_merge_milestone(key, fields)
+            try:
+                save_pr_reviews(state["pr_reviews"])
+            finally:
+                # Preserve the lifetime milestone even if the review-file
+                # write failed; the earlier best-effort writer did so too.
+                _record_merge_milestone(key, fields)
             return True
     # Persistence problems are logged and reported as "not updated".
     except Exception as e:

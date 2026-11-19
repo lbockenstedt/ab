@@ -388,12 +388,14 @@ def save_pr_reviews(pr_reviews):
 
     Written via a temp file + os.replace (see save_config) so a crash mid-write
     can't leave a truncated/empty PR_REVIEWS_FILE for the next load to choke on.
+    Errors propagate: callers must not treat a failed approval write as success.
     """
-    # Atomic write; failures are logged, not raised.
+    # Log and propagate failure to the review-state caller.
     try:
         _atomic_write_json(PR_REVIEWS_FILE, pr_reviews)
     except Exception as e:
         logger.error(f"Error saving PR reviews to {PR_REVIEWS_FILE}: {e}")
+        raise
 
 
 def load_pr_merge_ledger():

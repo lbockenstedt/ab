@@ -1,8 +1,10 @@
 """Reviewed-head approval and merge tests, using extracted production functions."""
 import ast
 import asyncio
+import json
 import os
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -182,6 +184,114 @@ def test_failed_approval_persistence_does_not_leave_memory_approved():
     env.ns["save_pr_reviews"] = fail
     assert not env.ns["mark_pr_approved"]("o/r", 1, True, expected_head="X")
     assert not env.rec["approved"]
+
+
+def real_review_store(env, path):
+    """Bind the real config-store writer to an isolated on-disk path."""
+    ns = {"os": os, "json": json, "logger": Logger(), "PR_REVIEWS_FILE": str(path)}
+    extract("config_store.py", {"_atomic_write_json", "save_pr_reviews"}, ns)
+    env.ns["save_pr_reviews"] = ns["save_pr_reviews"]
+    return ns
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_real_store_write_failure_fails_closed(tmp_path, approved):
+    """A real caught file I/O failure must not grant or restore approval."""
+    env = Env("X", not approved)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    store = real_review_store(env, blocker / "reviews.json")
+    assert not env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
+    assert not env.rec["approved"]
+    assert not list(tmp_path.glob("*.tmp"))
+    assert store["PR_REVIEWS_FILE"].endswith("reviews.json")
+    pr = PR()
+    status, _ = env.run(pr)
+    assert status == 409 and not pr.calls
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_real_store_success_persists_grant_and_revoke(tmp_path, approved):
+    """A successful real writer persists the requested approval state."""
+    env = Env("X", not approved)
+    path = tmp_path / "reviews.json"
+    real_review_store(env, path)
+    assert env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
+    assert env.rec["approved"] is approved
+    assert json.loads(path.read_text(encoding="utf-8"))["o/r#1"]["approved"] is approved
+
+
+def test_failed_reapproval_restores_previous_approved_state(tmp_path):
+    """A redundant failed grant preserves the previously approved snapshot."""
+    env = Env("X", True)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    real_review_store(env, blocker / "reviews.json")
+    assert not env.ns["mark_pr_approved"]("o/r", 1, True, expected_head="X")
+    assert env.rec == {"head": "X", "approved": True}
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_failed_old_head_write_cannot_overwrite_concurrent_new_review(tmp_path, approved):
+    """Rollback or failed revocation cannot clobber a later review under the same lock."""
+    env = Env("X", not approved)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    real_review_store(env, blocker / "reviews.json")
+    in_lock, waiting = threading.Event(), threading.Event()
+    def stamp(*args):
+        """Pause the failing write while a new review waits for the state lock."""
+        in_lock.set()
+        assert waiting.wait(5)
+    def replace_review():
+        """Publish the new review only after the older mutation releases its lock."""
+        assert in_lock.wait(5)
+        waiting.set()
+        with env.ns["_task_state_lock"]:
+            env.state["pr_reviews"]["o/r#1"] = {"head": "Y", "approved": True}
+    env.ns["_stamp_pr_state"] = stamp
+    thread = threading.Thread(target=replace_review)
+    thread.start()
+    assert not env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert env.rec == {"head": "Y", "approved": True}
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_old_head_cas_does_not_write_or_change_newer_approval(tmp_path, approved):
+    """A stale grant or revoke is rejected without touching disk or newer approval."""
+    env = Env("Y", True)
+    path = tmp_path / "reviews.json"
+    real_review_store(env, path)
+    assert not env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
+    assert env.rec == {"head": "Y", "approved": True} and not path.exists()
+
+
+def test_failed_review_update_reports_failure_and_keeps_merge_milestone(tmp_path):
+    """An already-completed merge keeps its independent lifetime milestone."""
+    env = Env("X", True)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    real_review_store(env, blocker / "reviews.json")
+    milestones = []
+    env.ns.update({"datetime": datetime, "_record_merge_milestone": lambda *a: milestones.append(a)})
+    extract("app_state.py", {"update_pr_review"}, env.ns)
+    assert not env.ns["update_pr_review"]("o/r", 1, merged=True)
+    assert env.rec["merged"] is True
+    assert len(milestones) == 1 and milestones[0][1]["merged"] is True
+
+
+def test_failed_review_record_write_keeps_moved_head_unapproved(tmp_path):
+    """Failed persistence of a new head must not revive the old head's approval."""
+    env = Env("X", True)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    real_review_store(env, blocker / "reviews.json")
+    env.ns.update({"datetime": datetime, "_PR_REVIEWS_MAX": 100})
+    extract("app_state.py", {"record_pr_review", "_panel_dissent_stats"}, env.ns)
+    env.ns["record_pr_review"]("o/r", 1, "title", "url", [], "Y")
+    assert env.rec["head"] == "Y" and not env.rec["approved"]
 
 
 @pytest.mark.parametrize("old", ["X", None])
