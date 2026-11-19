@@ -694,9 +694,25 @@ def _wait_for_spokes_online(config, min_count=1, timeout=90):
 
 
 
+_UPDATE_CHECK_LOCK = threading.Lock()
+
+
 def check_for_updates():
     """Checks GitHub for new versions, performs pre-flight syntax checks, and signals a restart if safe."""
+    if not _UPDATE_CHECK_LOCK.acquire(blocking=False):
+        logger.info("Update check already in progress.")
+        return None, "Update check already in progress."
     try:
+        # The restart flag clears before restart; only watchdog verification
+        # retires this durable marker and makes the current HEAD a safe baseline.
+        try:
+            os.stat(os.path.join(CONFIG_DIR, "update_pending"))
+        except FileNotFoundError:
+            pass
+        else:
+            logger.info("Update deferred: previous update awaiting watchdog verification.")
+            return None, "Update deferred: previous update awaiting watchdog verification."
+
         # Remember the current commit as the last known good one.
         self_repo = git.Repo(os.getcwd())
         old_commit = self_repo.head.commit.hexsha
@@ -815,6 +831,8 @@ def check_for_updates():
     except Exception as e:
         logger.warning(f"Self-update check failed: {e}")
         return None, f"Update check failed: {e}"
+    finally:
+        _UPDATE_CHECK_LOCK.release()
 
 def _requirements_changed(self_repo, old_commit, new_commit):
     """True if requirements.txt differs between the two commits (best-effort:

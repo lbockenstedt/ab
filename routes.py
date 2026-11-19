@@ -4774,7 +4774,7 @@ async def resolve_issue(request: Request):
 @router.post("/update_now")
 async def update_now():
     """Check for an AppBuilder update now."""
-    updated, msg = check_for_updates()
+    updated, msg = await asyncio.to_thread(check_for_updates)
     logger.info(f"Manual update check: {msg}")
     return {"status": "success", "message": msg}
 
