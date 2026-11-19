@@ -2620,7 +2620,14 @@ def ensure_config_defaults(config):
     # because cost -- not capability -- is the binding constraint here.
     # 0 disables the extra turn entirely. See pr_remediate.premium_turn_available.
     config.setdefault("pr_remediate_premium_attempts", 1)
+    # Review thrash (pr_remediate.remediation_stalled, review_progress): this
+    # many heads in a row without a gain of pr_remediate_min_gain is thrash,
+    # answered by pr_remediate_rework_limit consolidated reworks, then a human.
     config.setdefault("pr_remediate_stall_limit", 2)
+    config.setdefault("pr_remediate_min_gain", 0.03)
+    config.setdefault("pr_remediate_rework_limit", 1)
+    # A rework that no model can run yet waits this many hours, at most, for one.
+    config.setdefault("pr_remediate_rework_defer_hours", 24)
     # AppBuilder's remediation OBJECTIVE, in one number: keep repairing a PR
     # until BOTH panels Approve at or above this confidence. See
     # pr_remediate.should_remediate — the single choke point that reads it.
@@ -2705,6 +2712,9 @@ async def settings_page(request: Request):
     config.setdefault("pr_auto_remediate_max_attempts", 3)
     config.setdefault("pr_remediate_premium_attempts", 1)
     config.setdefault("pr_remediate_stall_limit", 2)
+    config.setdefault("pr_remediate_min_gain", 0.03)
+    config.setdefault("pr_remediate_rework_limit", 1)
+    config.setdefault("pr_remediate_rework_defer_hours", 24)
     config.setdefault("pr_remediate_target_score", PR_REMEDIATE_DEFAULT_TARGET)
     config.setdefault("pr_remediate_address_all_concerns", True)
     config.setdefault("feature_automerge_docs_bypass_panel", True)
@@ -3205,7 +3215,10 @@ async def save_settings(request: Request):
             trusted_repos.append(r)
     config_data["trusted_repos"] = list(dict.fromkeys(trusted_repos))
 
-    # Settings copied from the form, each with a clean-up function.
+    # Settings copied from the form, each with a clean-up function. The thrash
+    # knobs reuse review_progress's clamps (imported here, as the settings tests
+    # run this function on its own) so the form and the readers cannot disagree.
+    import review_progress as _rp
     updates = {
         "default_branch": lambda v: v,
         "dev_branch": lambda v: v,
@@ -3300,6 +3313,10 @@ async def save_settings(request: Request):
         "pr_review_fast_interval_s": lambda v: max(0, int(v)) if str(v).strip().isdigit() else 300,
         # Remediation soft stop (pr_remediate.remediation_stalled); 0 = off.
         "pr_remediate_stall_limit": lambda v: max(0, int(v)) if str(v).strip().isdigit() else 2,
+        # Review-thrash knobs, clamped by the same helpers that read them.
+        "pr_remediate_min_gain": lambda v: _rp.min_gain({"pr_remediate_min_gain": v}),
+        "pr_remediate_rework_limit": lambda v: _rp.rework_limit({"pr_remediate_rework_limit": v}),
+        "pr_remediate_rework_defer_hours": lambda v: _rp.rework_defer_hours({"pr_remediate_rework_defer_hours": v}),
     }
 
 

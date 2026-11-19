@@ -368,6 +368,8 @@ def test_auto_remediate_exhausted_attempts_posts_concierge_guidance():
             # Exhausted now means the ordinary budget AND the single premium
             # escalation attempt are both spent (pr_remediate.premium_turn_available).
             "premium_attempts": 1,
+            # So is the consolidated rework (pr_remediate.rework_available).
+            "remediation_reworks": 1,
             "panel_critique": "Persistent state-logic defect",
         }
     }

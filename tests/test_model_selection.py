@@ -294,6 +294,34 @@ def main():
     ok &= _check("safety_floor handles an empty/None entries list without crashing",
                 sel.safety_floor([]) is None and sel.safety_floor(None) is None)
 
+    # --- exclude_models: a ModelKey or a model name ---------------------------
+    # PR remediation records the models that failed on a PR by name
+    # (excluded_models), not by ModelKey. A name skips that model on every
+    # endpoint that serves it, even one that would rank first, and
+    # Diagnostics says why. A ModelKey still skips only its own endpoint.
+
+    opus = _cand(("copilot", "", "claude-opus-5.5"), provider="copilot", model="claude-opus-5.5",
+                 cost_tier="cheap")
+    opus_direct = _cand(("anthropic", "", "claude-opus-5.5"), provider="anthropic",
+                        model="claude-opus-5.5", cost_tier="cheap")
+    gpt = _cand(("copilot", "", "gpt-5.6-sol"), provider="copilot", model="gpt-5.6-sol",
+                cost_tier="frontier")
+    pool = [opus, opus_direct, gpt]
+    result = sel.select_model(R(), pool)
+    ok &= _check("with nothing excluded the cheaper model ranks first",
+                result is not None and result.model == "claude-opus-5.5")
+    named = R(exclude_models=("claude-opus-5.5",))
+    result = sel.select_model(named, pool)
+    ok &= _check("a model name excludes that model on every endpoint that serves it",
+                result is not None and result.key == ("copilot", "", "gpt-5.6-sol"))
+    rows = {r["key"]: r for r in sel.explain_selection(named, pool)["rows"]}
+    ok &= _check("explain_selection reports a model excluded by name as excluded this run",
+                rows[("anthropic", "", "claude-opus-5.5")]["status"] == "excluded"
+                and "excluded this run" in rows[("copilot", "", "claude-opus-5.5")]["reason"])
+    result = sel.select_model(R(exclude_models=("copilot||claude-opus-5.5",)), pool)
+    ok &= _check("a ModelKey (string form) excludes only its own endpoint",
+                result is not None and result.key == ("anthropic", "", "claude-opus-5.5"))
+
     print()
     if ok:
         print("ALL CASES PASSED")

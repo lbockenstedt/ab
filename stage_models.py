@@ -69,13 +69,15 @@ def exclusions(config: Dict[str, Any], stage: str, existing: Iterable[Any] = (),
     fallback = existing if fallback is None else tuple(fallback)
     try:
         import llm_client
+        import model_selection
         cands = llm_client._enumerate_candidates(config)
     except Exception as e:  # noqa: BLE001 - never block fixing on a policy lookup
         logger.debug("stage_models: could not enumerate candidates: %s", e)
         return fallback
     pats = patterns(config, stage)
-    skip = set(existing)
-    ok = [c for c in cands if _allowed(c.get("model"), pats) and c["key"] not in skip]
+    # A model already tried (by key or by name) is used up.
+    ok = [c for c in cands
+          if _allowed(c.get("model"), pats) and not model_selection.is_excluded(c, existing)]
     if not ok:
         logger.warning("stage_models: no untried model matches %s for %s; using the normal pool",
                        list(pats), stage)

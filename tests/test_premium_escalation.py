@@ -231,10 +231,12 @@ def test_record_pr_review_source_carries_the_counter():
 # --------------------------------------------------------------------------
 
 def _auto_remediate_source():
+    """Source of the work auto_remediate_pr runs: _remediate, which it calls
+    while holding the PR's claim."""
     src = open("pr_remediate.py").read()
     tree = ast.parse(src)
     fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "auto_remediate_pr")
+              if isinstance(n, ast.FunctionDef) and n.name == "_remediate")
     return ast.get_source_segment(src, fn)
 
 
@@ -252,7 +254,10 @@ def test_charge_is_keyed_on_the_model_actually_used():
 def test_premium_turn_is_gated_on_the_ordinary_budget_being_spent():
     body = _auto_remediate_source()
     assert "attempts >= max_attempts and premium_turn_available(rec, config)" in body
-    assert "if attempts >= max_attempts and not premium_turn:" in body
+    # Whether the turn is left, not whether this run takes it (a stalled run
+    # reworks instead): test_a_stall_at_the_cap_never_hands_off_an_unused_premium_turn.
+    assert "exhausted = attempts >= max_attempts and not premium_turn_available(rec, config)" in body
+    assert "if exhausted and not rework:" in body
 
 
 def test_premium_flag_reaches_the_requirements_builder():
@@ -261,8 +266,11 @@ def test_premium_flag_reaches_the_requirements_builder():
 
 
 def test_can_remediate_gate_honours_the_premium_turn():
+    # The cap gate holds for the premium turn, and for a consolidated rework
+    # still to run: test_a_rework_still_to_run_holds_the_merge.
     src = open("pr_remediate.py").read()
-    assert "if not premium_turn_available(rec, config):" in src
+    assert ("if not premium_turn_available(rec, config) and not rework_pending(rec, config, head):"
+            in src)
 
 
 # --------------------------------------------------------------------------
