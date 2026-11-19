@@ -3712,6 +3712,14 @@ def _diag_reqs(kwargs, overrides=None):
             continue
         if k in ("complexity", "restrict"):
             merged[k] = v or None if k == "restrict" else (v or "small")
+        elif k == "pin_key":
+            if v is not None and not isinstance(v, str):
+                raise ValueError("pin_key must be a string or null")
+            merged[k] = v or None
+        elif k in ("exclude_models", "explicit_local_keys"):
+            if not isinstance(v, (list, tuple)):
+                raise ValueError(f"{k} must be a list or tuple")
+            merged[k] = tuple(v)
         elif k in ("min_context_tokens",):
             try:
                 merged[k] = int(v)

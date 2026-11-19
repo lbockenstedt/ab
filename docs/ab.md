@@ -97,6 +97,8 @@ not add local replacements.
 Claude CLI uses cloud session authentication; hosted `ollama_cloud` is also
 cloud, not a local GPU. The safety floor relaxes capability requirements, not
 availability, pins, routing restrictions or exclusions.
+Dry-run diagnostics preserve endpoint pins and sequence-valued routing overrides;
+invalid types are reported as diagnostic errors, not coerced into boolean flags.
 
 Model-generated fix preferences, including legacy chat proposals, cannot change
 routing: proxy dispatch and generic Confirm use automatic routing and retain

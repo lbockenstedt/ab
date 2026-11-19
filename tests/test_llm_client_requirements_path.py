@@ -119,6 +119,38 @@ def _entry(id_, provider, model, api_key="k", base_url="", rpm=0, enabled=True):
            "base_url": base_url, "rpm": rpm, "enabled": enabled}
 
 
+@pytest.mark.parametrize("field,value,provider,expected", [
+    ("explicit_local_keys", [["ollama", "", "qwen"]], "ollama", "qwen"),
+    ("explicit_local_keys", ["ollama||qwen"], "ollama", "qwen"),
+    ("explicit_local_keys", [], "ollama", None),
+    ("pin_key", "ollama||qwen", "ollama", "qwen"),
+    ("pin_key", None, "anthropic", "claude-sonnet-5"),
+    ("exclude_models", ["claude-sonnet-5"], "anthropic", None),
+    ("exclude_models", [["anthropic", "", "claude-sonnet-5"]], "anthropic", None),
+])
+def test_diagnostics_preserve_nonboolean_routing_overrides(field, value, provider, expected):
+    """Dry-run diagnostics apply the same pins, exclusions and local opt-ins as routing."""
+    ns = _load_ns()
+    model = "qwen" if provider == "ollama" else "claude-sonnet-5"
+    config = {"llm_entries": [_entry("endpoint", provider, model)]}
+    report = ns["llm_diag"]("triage", {field: value}, config)
+    result = report["presets"][0]
+    assert "error" not in result, result
+    assert (result["selected"]["model"] if result["selected"] else None) == expected
+    assert not ns["_test_calls"]["provider_calls"]
+
+
+@pytest.mark.parametrize("field", ["explicit_local_keys", "exclude_models", "pin_key"])
+@pytest.mark.parametrize("value", [True, 123, {"unexpected": "mapping"}])
+def test_diagnostics_report_malformed_routing_override(field, value):
+    """Invalid override types produce a named diagnostic error, not a coerced routing flag."""
+    ns = _load_ns()
+    config = {"llm_entries": [_entry("endpoint", "ollama", "qwen")]}
+    report = ns["llm_diag"]("triage", {field: value}, config)
+    assert field in report["presets"][0]["error"]
+    assert not ns["_test_calls"]["provider_calls"]
+
+
 def test_safety_floor_does_not_route_local_when_cloud_unavailable():
     """Unavailable cloud capacity never causes automatic GPU fallback."""
     ns = _load_ns()
