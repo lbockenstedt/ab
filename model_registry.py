@@ -52,13 +52,18 @@ def _is_lmstudio(provider):
     return (provider or "").lower().strip().startswith("lmstudio")
 
 
+def is_local_provider(provider):
+    """True for self-hosted Ollama or LM Studio, not hosted inference."""
+    return _is_lmstudio(provider) or (_is_ollama(provider) and not _is_ollama_cloud(provider))
+
+
 def is_nokey_provider(provider):
     """Mirrors llm_client._provider_is_nokey exactly: true for a provider that
     authenticates without an API key (claude_cli session auth, LM Studio,
     self-hosted Ollama — NOT Ollama Cloud, which does take a key)."""
     # Normalise the name, then check the no-key provider kinds.
     p = (provider or "").lower().strip()
-    return p == "claude_cli" or _is_lmstudio(p) or (_is_ollama(p) and not _is_ollama_cloud(p))
+    return p == "claude_cli" or is_local_provider(p)
 
 
 # Orderings used for comparing complexity levels and cost tiers (lower first).

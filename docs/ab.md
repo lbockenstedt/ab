@@ -86,6 +86,23 @@ FastAPI dashboard on **443** (HTTPS, `AB_PORT`/`AB_SSL_CERT`; falls back to HTTP
 
 `install.sh`: none (curl|bash; stdin to `/dev/null`). `install_github.sh`: `--spoke-url`, `--id`, `--secret`, `--hub-secret`, `--clone-only` (legacy).
 
+## Automatic model routing
+
+Automatic selection and fallback never choose self-hosted Ollama or LM Studio,
+even when cloud models are unavailable. Explicit local routing or an endpoint
+pin still works. A local reviewer needs a literal configured model allowlist
+entry; wildcard patterns do not opt local models in, and reviewer retries do
+not add local replacements.
+
+Claude CLI uses cloud session authentication; hosted `ollama_cloud` is also
+cloud, not a local GPU. The safety floor relaxes capability requirements, not
+availability, pins, routing restrictions or exclusions.
+
+Model-generated fix preferences, including legacy chat proposals, cannot change
+routing: proxy dispatch and generic Confirm use automatic routing and retain
+confidence escalation. Independent manual routing remains supported. Configured
+Ollama startup warmup is separate and is not disabled by this policy.
+
 ## Key commands / handlers
 
 - **Inbound from hub** (`hub_agent.py::_handle_message`): `APPROVAL_REQUIRED`, `APPROVED`, `SPOKE_UPDATE_SESSION_KEY` (provisions session secret), `SPOKE_SET_HUB_SECRET`, `HUB_RESPONSE` (correlated reply to a `HUB_REQUEST`), `DENIED`, `get_version`/`GET_VERSION` (signed `COMMAND_RESULT` with `data.version`), `SET_LOG_LEVEL`/`SPOKE_SET_LOG_LEVEL` (WebUI "Enable Debug" broadcast).

@@ -28,7 +28,7 @@ def _caps(cost_tier="free", complexity="small", context_window=32768, **override
     return caps
 
 
-def _cand(key, provider="ollama", model="m", base_url="http://x", available=True, **caps_overrides):
+def _cand(key, provider="openrouter", model="m", base_url="http://x", available=True, **caps_overrides):
     return {
         "key": key, "provider": provider, "model": model, "base_url": base_url,
         "api_key": "", "rpm": 0, "available": available, "caps": _caps(**caps_overrides),

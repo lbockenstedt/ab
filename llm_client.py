@@ -3187,11 +3187,7 @@ def _enumerate_candidates(config):
 
 
 def _configured_entries(config):
-    """Every configured endpoint, NOT gated by cooldown/capability — feeds
-    model_selection.safety_floor(), the deliberate last resort that's tried
-    even when everything select_model considered has been ruled out (a rule,
-    never a hardcoded model ID — see model_registry.py's module docstring
-    for the incident that makes a pinned ID the wrong answer here)."""
+    """Endpoint configuration status, before cooldown or capability filtering."""
     return [
         {"id": entry_id, "provider": provider, "model": model, "api_key": api_key,
          "base_url": base_url, "rpm": rpm, "_configured": _provider_configured(provider, api_key, model)}
@@ -3296,8 +3292,8 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
                                 batch_kind=None, batch_context=None, used_model_out=None):
     """call_llm's requirements= branch. select_model() ranks every candidate;
     on failure the caller walks the Selection's `alternatives` (the rest of
-    that ranked list — no re-invoking the picker mid-failover), then falls
-    to the rule-based safety floor, before giving up. Fully independent of
+    that ranked list — no re-invoking the picker mid-failover). The safety
+    floor is used only when there was no initial selection. Fully independent of
     the slot/task_kind machinery in call_llm proper.
 
     batch_kind/batch_context: consumed here (not by model_selection —
@@ -3366,10 +3362,16 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
             raise LlmHumanEscalationNeeded(
                 f"No candidate satisfies requirements (reqs={reqs!r}) — the caller opted "
                 "into must_escalate_to_human instead of the rule-based safety floor.")
-        # Pick the safety-floor entry, failing if there is none.
-        floor_entry = model_selection.safety_floor(_configured_entries(config))
+        # Relax capability, not availability, explicit routing or run exclusions.
+        floor_entry = model_selection.safety_floor(candidates, reqs)
         if floor_entry is None:
-            raise Exception("No LLM providers configured")
+            if not candidates:
+                raise Exception("No LLM providers configured")
+            cooling = [dict(c, available=True) for c in candidates
+                       if c.get("unavailable_reason") in TIMED_UNAVAILABLE]
+            if model_selection.safety_floor(cooling, reqs) is not None:
+                raise Exception("No matching LLM model available (providers cooling down)")
+            raise Exception("No matching LLM model available")
         # Log why we fell to the floor.
         if floor_excluded_a_selection:
             logger.warning(
@@ -3380,13 +3382,8 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
         else:
             logger.warning("select_model resolved nothing for this call (reqs=%r) — falling to the safety "
                            "floor: %s / %s", reqs, floor_entry["provider"], floor_entry["model"])
-        # The floor entry becomes the only candidate.
-        chain = [{
-            "key": _model_key(floor_entry["provider"], floor_entry.get("base_url", ""), floor_entry["model"]),
-            "provider": floor_entry["provider"], "model": floor_entry["model"],
-            "api_key": floor_entry.get("api_key", ""), "base_url": floor_entry.get("base_url", ""),
-            "rpm": floor_entry.get("rpm", 0),
-        }]
+        # Preserve the old fallback's plain-call behavior (no inferred tools).
+        chain = [{k: floor_entry[k] for k in ("key", "provider", "model", "api_key", "base_url", "rpm")}]
 
     # No candidates at all.
     if not chain:

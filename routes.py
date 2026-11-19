@@ -5235,7 +5235,6 @@ async def chat_confirm_fix(request: Request):
     # The proposal must name a repo and issue.
     repo_name = prop.get("repo")
     issue_num = prop.get("number")
-    pref = prop.get("llm_preference")
     if not repo_name or issue_num is None:
         return JSONResponse(status_code=400, content={"message": "Invalid proposal"})
 
@@ -5246,7 +5245,8 @@ async def chat_confirm_fix(request: Request):
     def _run():
         """Run the fix and log the result."""
         try:
-            ok, msg = process_single_issue(repo_name, issue_num, llm_preference=pref)
+            # Generic confirmation approves the fix, not routing metadata in a legacy proposal.
+            ok, msg = process_single_issue(repo_name, issue_num)
             logger.info(f"Chat-triggered fix {repo_name}:{issue_num} -> ok={ok} msg={msg}")
         except Exception as e:
             logger.error(f"Chat-triggered fix {repo_name}:{issue_num} failed: {e}\n{traceback.format_exc()}")

@@ -66,7 +66,7 @@ def _load_ns(want_funcs, extra_ns=None):
         "_PLAIN_FILE_HEADER_RE",
         "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN", "DEFAULT_PANEL_ALLOWLIST",
     }
-    want_funcs = set(want_funcs) | {"_panel_allowlist", "_model_allowed"}
+    want_funcs = set(want_funcs) | {"_panel_allowlist", "_model_allowed", "_is_local_provider"}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want_funcs:
             segs.append(ast.get_source_segment(src, node))
@@ -132,12 +132,12 @@ def main():
     panel = ns_panel["_select_review_panel"](_LEGACY_CFG, builder_n=1)
     ok &= _check("_select_review_panel: excludes the builder's model (groq/llama-70b)",
                 all(c["provider"] != "groq" for c in panel))
-    ok &= _check("_select_review_panel: returns the other 3 distinct configured models",
-                len(panel) == 3 and {c["provider"] for c in panel} == {"anthropic", "ollama", "claude_cli"})
+    ok &= _check("_select_review_panel: returns the other distinct cloud models",
+                len(panel) == 2 and {c["provider"] for c in panel} == {"anthropic", "claude_cli"})
 
     panel_no_builder = ns_panel["_select_review_panel"](_LEGACY_CFG, builder_n=0)
-    ok &= _check("_select_review_panel: builder_n=0 excludes nothing -> all 4 configured models",
-                len(panel_no_builder) == 4)
+    ok &= _check("_select_review_panel: builder_n=0 -> all 3 configured cloud models",
+                len(panel_no_builder) == 3)
 
     class _EmptyLlmClient:
         def _enumerate_candidates(self, config):
@@ -169,7 +169,7 @@ def main():
         _cap_of("groq", "llama-70b", "large"),     # builder (slot 1) — excluded
         _cap_of("anthropic", "claude-sonnet", "large"),  # the ONE strong reviewer
         _cap_of("ollama", "qwen-7b", "medium"),    # weaker distinct model
-        _cap_of("local", "phi", "small"),          # weaker distinct model
+        _cap_of("ollama_cloud", "phi", "small"),   # weaker distinct cloud model
     ]
 
     class _MixedLlmClient:

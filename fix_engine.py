@@ -3136,15 +3136,11 @@ def _last_turn_fix_exclusions(config, existing=()):
     return tuple(sorted(exclude, key=str))
 
 
-#: Self-hosted Ollama registry providers (model_registry.py's "ollama-local"/"ollama2-local"
-#: entries) -- NOT "ollama_cloud", which is a hosted service, not local.
-_LOCAL_PROVIDERS = frozenset({"ollama", "ollama2"})
-
-
 def _is_local_provider(provider):
-    """True if the provider is a self-hosted Ollama instance."""
-    # Case-insensitive match against the local provider names.
-    return (provider or "").lower().strip() in _LOCAL_PROVIDERS
+    """Use the same self-hosted provider classification as the model picker."""
+    from model_registry import is_local_provider
+
+    return is_local_provider(provider)
 
 
 def _reviewer_name(candidate):
@@ -3229,6 +3225,13 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
                                  # own model can also be picked as a reviewer.
             logger.debug(f"_select_review_panel: could not resolve builder slot {builder_n}: {e}")
 
+    # A model-name glob (including the built-in frontier patterns) isn't an
+    # explicit local seat. Only a literal model name in the allowlist opts in.
+    local_keys = tuple(c["key"] for c in candidates if _is_local_provider(c.get("provider"))
+                       and (c.get("model") or "").lower().split("/")[-1] in patterns)
+    candidates = [c for c in candidates
+                  if not _is_local_provider(c.get("provider")) or c["key"] in local_keys]
+
     # Keywords that identify each model vendor family.
     _FAMILY_KEYWORDS = (
         ("anthropic", ("claude", "opus", "sonnet", "haiku")),
@@ -3292,7 +3295,8 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
         # (Allowlist mode: the allowlist already guarantees capability, so the floor
         # is relaxed to seat every allowlisted model the registry doesn't tag large.)
         reqs = LlmRequirements(complexity="small" if patterns else "large",
-                               needs_structured_output=True, exclude_models=tuple(excluded))
+                               needs_structured_output=True, exclude_models=tuple(excluded),
+                               explicit_local_keys=local_keys)
         # Start from every candidate.
         pool = candidates
         if panel:
@@ -3402,7 +3406,7 @@ def _cloud_frontier_fallback(exclude_keys, config):
         return None
     # First cloud (non-local), allowlisted candidate that is not excluded.
     for c in llm_client._enumerate_candidates(config):
-        if c.get("key") in exclude_keys:
+        if c.get("key") in exclude_keys or not c.get("available", True):
             continue
         if _is_local_provider(c.get("provider")):
             continue
@@ -3426,8 +3430,8 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
     is for a different failure mode (the call itself raised).
 
     A call that raises (cooldown excepted) is retried once too — escalated to a
-    cloud frontier candidate when the failed reviewer was local (self-hosted
-    Ollama), otherwise against the same candidate. Either way the vote/failure is
+    cloud candidate if one qualifies, otherwise against the same candidate.
+    A retry never adds a new self-hosted reviewer. The vote/failure is
     reported under the ORIGINAL reviewer's name, so the panel seat's identity is
     stable regardless of which model actually answered it. When escalated to cloud,
     `escalated_to` records the fallback model's name in the vote dictionary."""
@@ -3518,30 +3522,23 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
         if _is_local_provider(orig_candidate.get("provider")):
             fallback_candidate = _cloud_frontier_fallback(exclude_keys, config)
         else:
-            # Otherwise: another panel candidate not already seated.
+            # Otherwise: another cloud panel candidate not already seated.
             if panel_candidates:
                 for c in panel_candidates:
-                    if c.get("key") not in exclude_keys:
+                    if (c.get("available", True) and c.get("key") not in exclude_keys
+                            and not _is_local_provider(c.get("provider"))):
                         fallback_candidate = c
                         break
             # Then any cloud allowlisted model.
             if fallback_candidate is None:
                 fallback_candidate = _cloud_frontier_fallback(exclude_keys, config)
             # Then (only with no allowlist) any cloud model.
-            if fallback_candidate is None:
-                if not _panel_allowlist(config):
-                    for c in llm_client._enumerate_candidates(config):
-                        if c.get("key") not in exclude_keys and not _is_local_provider(c.get("provider")):
-                            fallback_candidate = c
-                            break
-            # Last resort: a local model.
-            if fallback_candidate is None:
-                local_candidates = [
-                    c for c in llm_client._enumerate_candidates(config)
-                    if _is_local_provider(c.get("provider")) and c.get("key") not in exclude_keys
-                ]
-                if local_candidates:
-                    fallback_candidate = local_candidates[0]
+            if fallback_candidate is None and not _panel_allowlist(config):
+                for c in llm_client._enumerate_candidates(config):
+                    if (c.get("available", True) and c.get("key") not in exclude_keys
+                            and not _is_local_provider(c.get("provider"))):
+                        fallback_candidate = c
+                        break
 
         # Log which kind of fallback is used for the retry.
         if fallback_candidate is not None:
@@ -3550,9 +3547,6 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
                               "seated_panel_keys": panel_keys}
             if _is_local_provider(orig_candidate.get("provider")):
                 logger.info("%s failed (%s); retrying via cloud frontier escalation: %s",
-                            r["name"], e, fallback_name)
-            elif _is_local_provider(fallback_candidate.get("provider")):
-                logger.info("%s failed (%s); retrying via local Ollama backfill: %s",
                             r["name"], e, fallback_name)
             else:
                 logger.info("%s failed (%s); retrying via cloud fallback: %s",

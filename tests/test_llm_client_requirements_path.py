@@ -17,6 +17,8 @@ import sys
 import threading
 import time
 
+import pytest
+
 import model_registry
 import model_selection
 
@@ -41,7 +43,7 @@ def _load_ns():
     want_assign = {
         "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_TOOL_400_MARKERS",
         "_UNSUPPORTED_MODEL_MARKERS", "_ENTRY_UNSUPPORTED_RETRY_SECONDS",
-        "_MIN_CAPABILITY_RANK_DEFAULT", "_DIAG_PRESETS",
+        "_MIN_CAPABILITY_RANK_DEFAULT", "_DIAG_PRESETS", "TIMED_UNAVAILABLE",
         "_ENDPOINT_CB_LOCK", "_ENDPOINT_CREDIT_CB", "_MODEL_RATE_CB",
         "_MODEL_LOCKS_LOCK", "_MODEL_LOCKS",
         "_LLM_PERF_STORE", "_LLM_PERF_LOCK",
@@ -115,6 +117,65 @@ def _check(label, cond):
 def _entry(id_, provider, model, api_key="k", base_url="", rpm=0, enabled=True):
     return {"id": id_, "provider": provider, "model": model, "api_key": api_key,
            "base_url": base_url, "rpm": rpm, "enabled": enabled}
+
+
+def test_safety_floor_does_not_route_local_when_cloud_unavailable():
+    """Unavailable cloud capacity never causes automatic GPU fallback."""
+    ns = _load_ns()
+    cfg = {"llm_entries": [_entry("gpu", "ollama", "qwen", api_key=""),
+                           _entry("cloud", "anthropic", "claude-sonnet-5")]}
+    candidates = ns["_enumerate_candidates"](cfg)
+    candidates[1].update(available=False, unavailable_reason="rate_limited")
+    ns["_enumerate_candidates"] = lambda _config: candidates
+    with pytest.raises(Exception, match="No matching LLM model.*cooling down"):
+        ns["_call_llm_with_requirements"](model_selection.LlmRequirements(),
+                                         "hi", "sys", None, None, None, None, cfg)
+    assert ns["_test_calls"]["provider_calls"] == []
+
+
+@pytest.mark.parametrize("provider", ["claude_cli", "ollama_cloud"])
+def test_safety_floor_uses_available_cloud_only(provider):
+    """Fallback keeps cloud session and hosted Ollama providers eligible."""
+    ns = _load_ns()
+    cfg = {"llm_entries": [_entry("gpu", "lmstudio", "local-model", api_key=""),
+                           _entry("cloud", provider, "cloud-model")]}
+    reqs = model_selection.LlmRequirements(min_context_tokens=10_000_000)
+    result = ns["_call_llm_with_requirements"](reqs, "hi", "sys", None, None, None, None, cfg)
+    assert result == f"ok from {provider}/cloud-model"
+    assert [c[0] for c in ns["_test_calls"]["provider_calls"]] == [provider]
+
+
+def test_call_fails_without_local_opt_in_and_respects_unavailable_pin():
+    """Local inference requires opt-in and an unavailable pin cannot be bypassed."""
+    ns = _load_ns()
+    cfg = {"llm_entries": [_entry("gpu", "ollama", "qwen", api_key="")]}
+    call = ns["_call_llm_with_requirements"]
+    reqs = model_selection.LlmRequirements
+    with pytest.raises(Exception, match="No matching LLM model"):
+        call(reqs(), "hi", "sys", None, None, None, None, cfg)
+    assert not ns["_test_calls"]["provider_calls"]
+    local = ns["_enumerate_candidates"](cfg)[0]
+    pin = reqs(pin_key=local["key"])
+    assert call(pin, "hi", "sys", None, None, None, None, cfg) == "ok from ollama/qwen"
+    local["available"] = False
+    cloud_cfg = {"llm_entries": [_entry("cloud", "anthropic", "claude-sonnet-5")]}
+    cloud = ns["_enumerate_candidates"](cloud_cfg)[0]
+    ns["_enumerate_candidates"] = lambda _config: [local, cloud]
+    with pytest.raises(Exception, match="No matching LLM model"):
+        call(pin, "hi", "sys", None, None, None, None, cfg)
+    assert [c[0] for c in ns["_test_calls"]["provider_calls"]] == ["ollama"]
+
+
+def test_failed_cloud_attempt_does_not_retry_on_local():
+    """A failed cloud call cannot add a local retry candidate."""
+    ns = _load_ns()
+    cfg = {"llm_entries": [_entry("cloud", "anthropic", "claude-haiku-4.5"),
+                           _entry("gpu", "ollama", "qwen2.5-coder:14b", api_key="")]}
+    ns["_test_calls"]["raise_exc"] = lambda p, _m: ConnectionError("cloud unavailable") if p == "anthropic" else None
+    with pytest.raises(Exception, match="All LLM candidates failed.*cloud unavailable"):
+        ns["_call_llm_with_requirements"](model_selection.LlmRequirements(complexity="trivial"),
+                                         "hi", "sys", None, None, None, None, cfg)
+    assert [c[0] for c in ns["_test_calls"]["provider_calls"]] == ["anthropic"]
 
 
 def main():
@@ -258,14 +319,13 @@ def main():
     ok &= _check("a broken model does not drag down an unrelated model on the same provider",
                 unrelated_candidates == {"gpt-5.5": False, "gpt-4o-2024-08-06": True})
 
-    # --- _configured_entries feeds safety_floor ---------------------------------
+    # --- _configured_entries remains unfiltered for status ---------------------
 
     floor_cfg = {"llm_entries": [_entry("e1", "anthropic", "claude-sonnet-5"),
                                  _entry("e2", "ollama", "qwen", api_key="")]}
     entries = ns["_configured_entries"](floor_cfg)
-    floor = model_selection.safety_floor(entries)
-    ok &= _check("safety_floor (fed by _configured_entries) prefers the no-key local entry",
-                floor is not None and floor["id"] == "e2")
+    ok &= _check("configured entries include local and cloud endpoints",
+                [e["id"] for e in entries if e["_configured"]] == ["e1", "e2"])
 
     # --- _try_candidate: success records nothing extra, returns the result -----
 
@@ -355,7 +415,7 @@ def main():
     ns["_MODEL_RATE_CB"].clear()
     ns["_test_calls"]["raise_exc"] = None
     ns["_test_calls"]["provider_calls"].clear()
-    reqs = model_selection.LlmRequirements(complexity="trivial")
+    reqs = model_selection.LlmRequirements(complexity="trivial", restrict="local")
     e2e_cfg = {"min_capability_rank": 0,
                "llm_entries": [_entry("e1", "ollama", "llama3.1:8b", api_key="")]}
     result = ns["_call_llm_with_requirements"](reqs, "hi", "sys", None, None, None, None, e2e_cfg)
@@ -383,10 +443,11 @@ def main():
 
     ns["_test_calls"]["raise_exc"] = None
     strict_reqs = model_selection.LlmRequirements(complexity="large", min_context_tokens=10_000_000)
-    floor_only_cfg = {"llm_entries": [_entry("e1", "ollama", "tiny-model", api_key="")]}
+    floor_only_cfg = {"llm_entries": [_entry("e1", "ollama", "tiny-model", api_key=""),
+                                    _entry("e2", "anthropic", "claude-sonnet-5")]}
     result = ns["_call_llm_with_requirements"](strict_reqs, "hi", "sys", None, None, None, None, floor_only_cfg)
     ok &= _check("when no candidate satisfies the requirements, the safety floor still resolves something",
-                result == "ok from ollama/tiny-model")
+                result == "ok from anthropic/claude-sonnet-5")
 
     # --- _call_llm_with_requirements: nothing configured at all -> raises ------
 
@@ -417,7 +478,7 @@ def main():
     # normally -- the flag only changes behavior on the "nothing satisfies" path.
     ns["_test_calls"]["raise_exc"] = None
     result = ns["_call_llm_with_requirements"](
-        model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=True),
+        model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=True, restrict="local"),
         "hi", "sys", None, None, None, None, e2e_cfg)
     ok &= _check("must_escalate_to_human=True with a satisfiable requirement resolves normally",
                 result == "ok from ollama/llama3.1:8b")
@@ -428,7 +489,8 @@ def main():
     ns["_test_calls"]["raise_exc"] = None
     floor_policy_cfg = {"min_capability_rank": 85,
                         "llm_entries": [_entry("e1", "ollama", "qwen2.5-coder:14b", api_key="")]}
-    policy_human_reqs = model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=True)
+    policy_human_reqs = model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=True,
+                                                        restrict="local")
     threw_floor_human = False
     exc_floor_human_msg = ""
     try:
@@ -447,7 +509,7 @@ def main():
 
     # When must_escalate_to_human=False, a floor exclusion falls through to the safety floor as expected:
     result_fallback = ns["_call_llm_with_requirements"](
-        model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=False),
+        model_selection.LlmRequirements(complexity="trivial", must_escalate_to_human=False, restrict="local"),
         "hi", "sys", None, None, None, None, floor_policy_cfg)
     ok &= _check("when must_escalate_to_human=False, capability-floor exclusion falls to safety floor",
                 result_fallback == "ok from ollama/qwen2.5-coder:14b")
