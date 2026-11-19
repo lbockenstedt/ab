@@ -585,6 +585,10 @@ def _mentions_security_monitor(text):
     return any(m in low for m in _SECURITY_MONITOR_MARKERS)
 
 
+class IssueReopenError(RuntimeError):
+    """Raised when a closed duplicate issue cannot be reopened."""
+
+
 def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, labels=None, raw=False):
     """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos.
 
@@ -594,6 +598,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
 
     Additionally validates that error_data is a dict and that both 'title' and
     'body' are present and non-empty strings before any GitHub API call is made.
+    A failed reopen raises IssueReopenError, distinct from a deliberate None/no-op.
     """
     try:
         # Shortly after an update, suppress new issues (restart noise).
@@ -748,7 +753,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                     existing_issue.edit(state='open')
                 except Exception as reopen_err:
                     logger.warning(f"Could not reopen issue #{existing_issue.number}: {reopen_err}")
-                    return None
+                    raise IssueReopenError(f"Could not reopen issue #{getattr(existing_issue, 'number', '?')}") from reopen_err
                 logger.info(f"Reopened issue #{existing_issue.number} for {current_repo_name}")
                 try:
                     existing_issue.create_comment(
@@ -821,7 +826,9 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
         except Exception:
             pass
         return issue
-    # Any error: log it and return None.
+    # Keep a failed reopen distinct from benign suppression and legacy failures.
+    except IssueReopenError:
+        raise
     except Exception as e:
         logger.error(f"Failed to handle automated issue creation: {e}")
         logger.debug(f"create_automated_issue error_data was: {error_data!r}")
@@ -897,6 +904,7 @@ __all__ = [
     'trigger_infrastructure_update',
     'find_global_duplicate_issue',
     'create_automated_issue',
+    'IssueReopenError',
     'redact_identity',
     'upsert_recurrence_comment',
     'note_recurrence',

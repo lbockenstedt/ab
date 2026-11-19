@@ -4,6 +4,8 @@ reaches the public issue."""
 from datetime import datetime, timezone
 from types import SimpleNamespace as N
 
+import pytest
+
 import main  # noqa: F401 - loads github_ops in import order
 import github_ops
 
@@ -131,10 +133,10 @@ def test_closed_duplicate_edit_succeeds_retry_restores(monkeypatch, caplog):
     monkeypatch.setattr(github_ops, "load_processed", lambda: {})
     monkeypatch.setattr(github_ops, "save_processed", lambda p: None)
 
-    got1 = github_ops.create_automated_issue(
-        None, ["o/nw"], N(full_name="o/nw"),
-        {"title": "slow command", "body": "seen", "repo": "o/nw"})
-    assert got1 is None
+    with pytest.raises(github_ops.IssueReopenError):
+        github_ops.create_automated_issue(
+            None, ["o/nw"], N(full_name="o/nw"),
+            {"title": "slow command", "body": "seen", "repo": "o/nw"})
     assert issue.state == "closed"
     assert not issue.comments
     assert "Could not reopen issue #211" in caplog.text

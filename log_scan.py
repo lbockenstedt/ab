@@ -1099,7 +1099,6 @@ def scan_heartbeats(gh_current, config, hub_logs):
                     f"installer, e.g. `/opt/lm/cs/install_cs.sh`) to recreate the venv / repair the unit, "
                     f"then restart the spoke. The Hub watchdog will clear its recovery state and resume "
                     f"monitoring once the spoke reconnects.")
-            scan_heartbeats._gave_up_filed[sid] = True
             logger.info(f"scan_heartbeats: {sid} hub recovery GAVE_UP ({last_err}); escalating once.")
         elif missing:
             title = f"Missing heartbeat — {sid}"
@@ -1116,7 +1115,11 @@ def scan_heartbeats(gh_current, config, hub_logs):
         error_data = {"module": sid, "title": title, "body": body, "repo": repo_name}
         try:
             repo_obj = gh_current.get_repo(repo_name)
-            create_automated_issue(gh_current, monitored_repos, repo_obj, error_data)
+            issue = create_automated_issue(gh_current, monitored_repos, repo_obj, error_data)
+            if rec_gave_up:
+                scan_heartbeats._gave_up_filed[sid] = True
+            if issue is None:
+                continue
             triaged += 1
             logger.info(f"scan_heartbeats: triaged {sid} (missing={missing}, age_s={age_s}) -> {repo_name}")
         # Log failures and move on.
