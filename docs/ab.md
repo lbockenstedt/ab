@@ -103,6 +103,11 @@ FastAPI dashboard on **443** (HTTPS, `AB_PORT`/`AB_SSL_CERT`; falls back to HTTP
 
 ## Authentication & multi-user
 
+Login redirects accept only local paths, both for existing sessions and submitted forms.
+LLM endpoint create/update responses, config output and Settings expose key presence
+(`has_key`) rather than the stored API key. Omitting `api_key` preserves it;
+an explicitly empty value still clears it.
+
 - **Local accounts** (`auth.py`, stdlib-only) — every account is a full admin. `users.json` (0600) in `/etc/ab`; scrypt/pbkdf2 hashes; signed `ab_session` cookie. First run funnels to `/setup-admin` to create the initial account, which then closes.
 - **Azure Entra ID (OIDC) SSO** (`oidc.py`, routes in `routes.py`) — Authorization Code + PKCE against Entra. Configure it in the WebUI at **Settings → Sign-in (SSO)**, which reads/writes the same values via `GET`/`POST /setup/oidc-config` (both require a login session); the stored form is `config.json` under `oidc`. Needs `tenant_id`, `client_id`, `redirect_uri`, and **one** credential: a `client_secret` OR a certificate (`cert_path`/`key_path`, sent as an RS256 `client_assertion` — mirrors the LM hub). `AB_OIDC_*` env vars override stored config.
   - **`allowed_group` is the only access control AppBuilder has.** It takes comma/space-separated Entra group **object IDs** (a group *name* silently matches nothing). Leaving it blank lets **every** user in the tenant sign in — and since AppBuilder has no roles, each of them is a full admin. Setting it also requires the Entra app to emit a `groups` claim, or every sign-in fails with a "read 0 groups" error.

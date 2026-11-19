@@ -21,6 +21,7 @@ existing stored key.
 import ast
 import asyncio
 import sys
+import uuid
 
 
 def _extract_redaction_source(src):
@@ -61,8 +62,9 @@ def _load_ns():
 
     segs = []
     for node in tree.body:
-        if isinstance(node, ast.AsyncFunctionDef) and node.name in (
-                "save_llm_credential", "get_llm_config", "update_llm_entry"):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in (
+                "_public_llm_entry", "save_llm_credential", "get_llm_config",
+                "create_llm_entry", "update_llm_entry"):
             segs.append(ast.get_source_segment(src, node))
 
     class _NoLog:
@@ -90,7 +92,7 @@ def _load_ns():
 
     ns = {
         "logger": _NoLog(), "load_config": load_config, "save_config": save_config,
-        "JSONResponse": _JSONResponse, "Request": _FakeRequest,
+        "JSONResponse": _JSONResponse, "Request": _FakeRequest, "uuid": uuid,
         # Side-effect collaborator: the entry routes kick an endpoint re-probe so
         # a newly added LLM shows in the header immediately. Stubbed out here —
         # this test is about credential redaction, not connectivity probing.
@@ -140,7 +142,8 @@ def main():
         def get_llm_entry_health(provider, base_url, model):
             return {"unhealthy": False, "consecutive_failures": 0, "last_error": None, "last_error_at": None}
 
-    exec_ns = {"config": config, "_llm_client": _StubLlmClient()}
+    exec_ns = {"config": config, "_llm_client": _StubLlmClient(),
+               "_public_llm_entry": ns.get("_public_llm_entry")}
     exec(ns["_redaction_source"], exec_ns)
 
     ok &= _check("settings_page redaction: credential api_key is never the real secret",
@@ -164,7 +167,7 @@ def main():
                                                                "last_error": None, "last_error_at": None})
 
     # ── empty credentials/entries don't crash the redaction ─────────────────
-    exec_ns2 = {"config": {}}
+    exec_ns2 = {"config": {}, "_public_llm_entry": ns.get("_public_llm_entry")}
     exec(ns["_redaction_source"], exec_ns2)
     ok &= _check("settings_page redaction: empty config -> empty redacted structures, no crash",
                 exec_ns2["_safe_llm_credentials"] == {} and exec_ns2["_safe_llm_entries"] == [])
@@ -213,7 +216,9 @@ def main():
     ns["_config_holder"]["config"] = {"llm_entries": [
         {"id": "e1", "label": "x", "provider": "ollama", "model": "qwen", "rpm": 0,
          "base_url": "", "api_key": SECRET, "escalation_models": ""}]}
-    _run(ns["update_llm_entry"]("e1", ns["_FakeRequest"]({"label": "renamed"})))
+    result = _run(ns["update_llm_entry"]("e1", ns["_FakeRequest"]({"label": "renamed"})))
+    ok &= _check("update_llm_entry: retained key never reaches the save response",
+                SECRET not in str(result) and result["entry"].get("has_key") is True)
     ok &= _check("update_llm_entry: api_key omitted from payload -> existing key PRESERVED",
                 ns["_config_holder"]["config"]["llm_entries"][0]["api_key"] == SECRET)
     ok &= _check("update_llm_entry: fields present in the payload (label) still update",
@@ -222,9 +227,18 @@ def main():
     ns["_config_holder"]["config"] = {"llm_entries": [
         {"id": "e1", "label": "x", "provider": "ollama", "model": "qwen", "rpm": 0,
          "base_url": "", "api_key": SECRET, "escalation_models": ""}]}
-    _run(ns["update_llm_entry"]("e1", ns["_FakeRequest"]({"api_key": "new-key"})))
+    result = _run(ns["update_llm_entry"]("e1", ns["_FakeRequest"]({"api_key": "new-key"})))
     ok &= _check("update_llm_entry: an explicit new api_key in the payload DOES replace the old one",
                 ns["_config_holder"]["config"]["llm_entries"][0]["api_key"] == "new-key")
+    ok &= _check("update_llm_entry: rotated key never reaches the save response",
+                "new-key" not in str(result) and result["entry"].get("has_key") is True)
+
+    ns["_config_holder"]["config"] = {}
+    result = _run(ns["create_llm_entry"](ns["_FakeRequest"]({
+        "provider": "openai", "model": "fixture-model", "api_key": SECRET})))
+    ok &= _check("create_llm_entry: save persists the key but returns only its presence",
+                SECRET not in str(result) and result["entry"].get("has_key") is True
+                and ns["_config_holder"]["config"]["llm_entries"][0]["api_key"] == SECRET)
 
     print()
     if ok:

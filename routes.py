@@ -143,6 +143,15 @@ async def hub_agent_reregister():
 # session. Note /api/health is exempt too — the watchdog polls it to verify a
 # restart, and gating it would make every restart look like a failure.
 
+def _login_redirect_path(value: str) -> str:
+    """Keep redirects local, rejecting browser-normalized separators and controls."""
+    target = value.strip() if isinstance(value, str) else ""
+    if (not target.startswith("/") or target.startswith("//") or "\\" in target
+            or any(ord(char) < 32 or ord(char) == 127 for char in target)):
+        return "/"
+    return target
+
+
 @router.get("/login")
 async def login_page(request: Request, next: str = "", error: str = ""):
     """Show the login page (or setup, or go straight in if already signed in)."""
@@ -153,10 +162,10 @@ async def login_page(request: Request, next: str = "", error: str = ""):
         return RedirectResponse("/setup-admin", status_code=303)
     # Already signed in: go on.
     if _a.verify_session(request.cookies.get(_a.SESSION_COOKIE) or ""):
-        return RedirectResponse(next or "/", status_code=303)
+        return RedirectResponse(_login_redirect_path(next), status_code=303)
     # Show the login form.
     return templates.TemplateResponse(request=request, name="login.html", context={
-        "setup_mode": False, "error": error, "next_url": next,
+        "setup_mode": False, "error": error, "next_url": _login_redirect_path(next),
         "min_len": _a.MIN_PASSWORD_LEN})
 
 
@@ -169,11 +178,7 @@ async def login_submit(request: Request):
     form = await request.form()
     username = (form.get("username") or "").strip()
     password = form.get("password") or ""
-    nxt = (form.get("next") or "/").strip() or "/"
-    # Only ever redirect to a path on THIS host — a user-supplied absolute URL
-    # would turn the login form into an open redirect.
-    if not nxt.startswith("/") or nxt.startswith("//"):
-        nxt = "/"
+    nxt = _login_redirect_path(form.get("next"))
     # Where the request came from, for the logs.
     src = (request.client.host if request.client else "?")
     # Wrong user or password: log it, report it, and show the form again.
@@ -2972,7 +2977,7 @@ async def settings_page(request: Request):
     # Shared credentials, used to find each entry's URL.
     _llm_creds = config.get("llm_credentials") or {}
     _safe_llm_entries = [
-        {**e, "api_key": "", "has_key": bool(e.get("api_key")),
+        {**_public_llm_entry(e),
          "health": _llm_client.get_llm_entry_health(
              e.get("provider") or "openai", e.get("base_url") or (_llm_creds.get((e.get("provider") or "openai").lower().strip()) or {}).get("base_url", ""),
              e.get("model") or "")}
@@ -4036,6 +4041,11 @@ async def copilot_models(provider: str = "copilot"):
         return {"models": [], "error": str(e)}
 
 
+def _public_llm_entry(entry: dict) -> dict:
+    """Expose endpoint metadata and key presence without returning the stored key."""
+    return {**entry, "api_key": "", "has_key": bool(entry.get("api_key"))}
+
+
 def _refresh_llm_endpoints():
     """Kick an immediate re-probe of the configured LLM endpoints.
 
@@ -4083,7 +4093,7 @@ async def create_llm_entry(request: Request):
     config.setdefault("llm_entries", []).append(entry)
     save_config(config)
     _refresh_llm_endpoints()
-    return {"status": "ok", "entry": entry}
+    return {"status": "ok", "entry": _public_llm_entry(entry)}
 
 
 @router.put("/api/llm/entries/{entry_id}")
@@ -4118,7 +4128,7 @@ async def update_llm_entry(entry_id: str, request: Request):
                 e["enabled"] = bool(data.get("enabled"))
             save_config(config)
             _refresh_llm_endpoints()
-            return {"status": "ok", "entry": e}
+            return {"status": "ok", "entry": _public_llm_entry(e)}
     # No such entry.
     return JSONResponse(status_code=404, content={"error": "entry not found"})
 
@@ -4201,7 +4211,7 @@ async def get_llm_config():
                   for p, v in creds.items()}
     # SECURITY: entries carry a per-entry plaintext api_key override — never
     # return it. Mirrors safe_creds' configured-flag treatment above.
-    safe_entries = [{**e, "api_key": "", "has_key": bool(e.get("api_key"))}
+    safe_entries = [_public_llm_entry(e)
                     for e in (config.get("llm_entries") or [])]
     # Return both.
     return {
