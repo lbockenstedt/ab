@@ -10,6 +10,7 @@ import os
 import re
 import time
 from datetime import datetime
+from _history import bind_history
 
 FUNCS = {"_tail_lines", "_count_lines", "_prune_stale_hub_logs", "_mirror_contains",
          "_module_log_path", "_persist_hub_logs", "verify_production_fixes"}
@@ -75,9 +76,11 @@ class _Gh:
 
 def _verify(tmp_path, mirror_text):
     (tmp_path / "mipbe-lmagent-dhcp__1a2b3c4d_.log").write_text(mirror_text)
-    ns = _ns(tmp_path, load_config=lambda: {}, save_processed=lambda p: None,
+    ns = _ns(tmp_path, load_config=lambda: {},
              state={}, _apply_closed_label=lambda *a: None)
+    bind_history(ns)
     processed = {"lbockenstedt/dhcp:7": {"status": "awaiting_prod_verification"}}
+    ns["save_processed"](processed)
     body = "### Log Evidence:\n```\nKea lease4-add Timed out\n```\n"
     ns["verify_production_fixes"](_Gh(body), processed)
     return processed["lbockenstedt/dhcp:7"]

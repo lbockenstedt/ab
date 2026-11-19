@@ -19,9 +19,28 @@ replacing the JSON file. Concurrent saves cannot rename or clean up each other's
 temporary files. Configuration edits serialize a fresh read, mutation and write
 through `update_config`; unchanged edits do not write. The complete Settings
 form rejects a concurrent change with HTTP 409 and a reload-and-retry message,
-before `.env` or post-save side effects. Other full state snapshots still use
-last-replacement-wins, not merging. Write failures retain caller-specific logging
-and fallback behavior.
+before `.env` or post-save side effects. Other non-history snapshot stores retain
+their existing replacement, logging and fallback behavior.
+
+Production processed-history edits use `app_state.update_processed`. One
+in-process lock covers the fresh authoritative read, explicit mutation, atomic
+JSON replacement and detached Activity Feed/counter publication in commit order.
+Unrelated records and retained identity/retry fields come from current authority,
+not a stale global snapshot. Maintenance observations skip removed or inapplicable
+rows; record replacement, removal and clear are explicit intents, not a generic
+snapshot merge. Unchanged edits do not replace the file.
+
+An unreadable, corrupt or invalid existing primary blocks every mutation,
+including clear. Records are objects; legacy lists of issue IDs remain supported.
+Only an absent primary permits current-directory authority/fallback, and failure
+to replace an existing primary never becomes an ignored local-fallback success.
+Persistence errors leave the prior disk/feed/counters intact and are reported
+instead of charging another model attempt or rewriting the outcome as a failed fix.
+Mutation routes return HTTP 500 and do not dispatch background work after a failed
+required local commit. Completed GitHub actions are reported as partial outcomes;
+known final PR URLs and fix commits/publication types remain in failure messages.
+This is single-interpreter coordination, not cross-process locking, an fsync
+guarantee or arbitration between competing business actions on the same issue.
 
 `/etc/ab/config.json` is never replaced while it cannot be read. If it exists
 with content AB cannot open or parse (for example a maintenance script left it

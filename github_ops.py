@@ -11,10 +11,9 @@ from main import (
     _in_update_cooldown,
     call_llm,
     load_config,
-    load_processed,
     logger,
     resolve_self_diagnosis_repo,
-    save_processed,
+    update_processed,
 )
 
 
@@ -560,13 +559,17 @@ def upsert_recurrence_comment(issue, repo_name, body_text, now=None):
 def note_recurrence(issue_id, now=None):
     """Stamp last_recurrence_at on an issue's AB record (if it has one), so
     RepoScan can retry a failed issue whose error keeps coming back."""
-    processed = load_processed()
-    rec = processed.get(issue_id)
-    if not isinstance(rec, dict):
-        return False
-    rec["last_recurrence_at"] = (now or datetime.now()).isoformat()
-    save_processed(processed)
-    return True
+    stamp = (now or datetime.now()).isoformat()
+
+    def stamp_record(processed):
+        """Only stamp a record that still exists at commit time."""
+        rec = processed.get(issue_id)
+        if not isinstance(rec, dict):
+            return False
+        rec["last_recurrence_at"] = stamp
+        return True
+
+    return update_processed(stamp_record)
 
 
 def _redact_existing_issue(issue):

@@ -17,6 +17,7 @@ for real here rather than stubbed — more faithful than reimplementing its
 matching logic a second time in this test.
 """
 import ast
+from _history import bind_history, patch_history
 import sys
 
 import feature_boundary
@@ -100,15 +101,6 @@ def _load_ns():
         def get_issues(self, labels=None, state=None):
             return list(self.issues)
 
-    _store = {}  # in-memory stand-in for processed.json
-
-    def load_processed():
-        return dict(_store)
-
-    def save_processed(d):
-        _store.clear()
-        _store.update(d)
-
     _config_holder = {"config": {}}
 
     def load_config():
@@ -116,9 +108,6 @@ def _load_ns():
 
     def get_monitored_repos(config):
         return config.get("monitored_repos", ["owner/repo"])
-
-    def recompute_issue_counters(processed):
-        pass
 
     def _schedule_check(config):
         return {"allowed": True, "reason": ""}
@@ -136,8 +125,7 @@ def _load_ns():
 
     ns = {
         "logger": _NoLog(), "state": state,
-        "load_config": load_config, "load_processed": load_processed,
-        "save_processed": save_processed, "recompute_issue_counters": recompute_issue_counters,
+        "load_config": load_config,
         "get_monitored_repos": get_monitored_repos, "call_llm": call_llm,
         "feature_boundary": feature_boundary, "skills_loader": _FakeSkillsLoader(),
         "_ensure_label": _ensure_label, "_schedule_check": _schedule_check,
@@ -147,7 +135,7 @@ def _load_ns():
         "_fix_context_block": lambda body: "",  # stubbed — see module docstring
     }
     exec("\n\n".join(segs), ns)
-    ns["_store"] = _store
+    bind_history(ns)
     ns["_config_holder"] = _config_holder
     ns["_llm_holder"] = _llm_holder
     ns["_FakeIssue"] = _FakeIssue
@@ -402,9 +390,8 @@ if __name__ == "__main__":
 def test_mark_built_and_failed_keep_title(monkeypatch):
     import feature_build as fb
     store = {"o/r:1": {"status": "feature_flagged", "title": "Add X", "issue_url": "u"}}
-    monkeypatch.setattr(fb, "load_processed", lambda: store)
-    monkeypatch.setattr(fb, "save_processed", lambda p: None)
-    monkeypatch.setattr(fb, "recompute_issue_counters", lambda p: None)
+    ns = patch_history(monkeypatch, fb, store)
+    store = ns["_store"]
     fb._mark_built("o/r:1", "http://pr")
     assert store["o/r:1"]["title"] == "Add X" and store["o/r:1"]["status"] == "feature_built"
     fb._mark_failed("o/r:1", "boom")

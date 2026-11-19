@@ -74,8 +74,8 @@ def test_open_duplicate_updates_the_comment_redacts_and_stamps_the_record(monkey
     store = {"o/nw:211": {"status": "failed", "timestamp": "2026-11-13T10:00:00"}}
     monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
     monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", False))
-    monkeypatch.setattr(github_ops, "load_processed", lambda: store)
-    monkeypatch.setattr(github_ops, "save_processed", lambda p: None)
+    from _history import patch_history
+    store = patch_history(monkeypatch, github_ops, store)["_store"]
     for _ in range(3):
         got = github_ops.create_automated_issue(
             None, ["o/nw"], N(full_name="o/nw"),

@@ -31,9 +31,8 @@ from github import GithubException
 # Shared logger, the processed-issue store and counters, and the LLM entry point from main.
 from main import (
     logger,
-    load_processed,
-    save_processed,
-    recompute_issue_counters,
+    update_processed,
+    ProcessedStoreError,
     call_llm,
 )
 # Fix-pipeline helpers reused for pushing, PR lookup, review, tests and cleanup.
@@ -322,11 +321,13 @@ def _identity(prior) -> dict:
 def _mark_failed(issue_id, reason):
     """Record the issue as a failed feature build, with the reason, and refresh the counters."""
     # Overwrite the issue's record with the failure status and save.
-    processed = load_processed()
-    processed[issue_id] = {**_identity(processed.get(issue_id)), "status": "feature_failed", "reason": reason,
-                           "timestamp": datetime.now().isoformat()}
-    save_processed(processed)
-    recompute_issue_counters(processed)
+    record = {"status": "feature_failed", "reason": reason, "timestamp": datetime.now().isoformat()}
+
+    def replace(processed):
+        """Carry identity from the current record, deliberately replace other fields."""
+        processed[issue_id] = {**_identity(processed.get(issue_id)), **record}
+
+    update_processed(replace)
 
 
 def _mark_built(issue_id, pr_url, extra=None):
@@ -334,11 +335,14 @@ def _mark_built(issue_id, pr_url, extra=None):
     refresh the counters.
     """
     # Overwrite the issue's record with the built status and save.
-    processed = load_processed()
-    processed[issue_id] = {**_identity(processed.get(issue_id)), **(extra or {}), "status": "feature_built", "pr_url": pr_url,
-                           "timestamp": datetime.now().isoformat()}
-    save_processed(processed)
-    recompute_issue_counters(processed)
+    record = {**(extra or {}), "status": "feature_built", "pr_url": pr_url,
+              "timestamp": datetime.now().isoformat()}
+
+    def replace(processed):
+        """Replace the outcome but take retained identity from fresh authority."""
+        processed[issue_id] = {**_identity(processed.get(issue_id)), **record}
+
+    update_processed(replace)
 
 
 def _flag_incomplete(gh_repo, issue, reason, flag_kind="build_incomplete", extra=None):
@@ -366,14 +370,16 @@ def _flag_incomplete(gh_repo, issue, reason, flag_kind="build_incomplete", extra
     except Exception as e:
         logger.warning(f"feature_build: could not comment on {issue.number}: {e}")
     # Record the issue as flagged for a human and refresh the counters.
-    processed = load_processed()
     issue_id = f"{gh_repo.full_name}:{issue.number}"
-    processed[issue_id] = {**_identity(processed.get(issue_id)),
-                           "title": (issue.title or "")[:200], "issue_url": getattr(issue, "html_url", "") or "",
-                           **(extra or {}), "status": "feature_flagged", "flag_kind": flag_kind,
-                           "reason": reason, "timestamp": datetime.now().isoformat()}
-    save_processed(processed)
-    recompute_issue_counters(processed)
+    record = {"title": (issue.title or "")[:200], "issue_url": getattr(issue, "html_url", "") or "",
+              **(extra or {}), "status": "feature_flagged", "flag_kind": flag_kind,
+              "reason": reason, "timestamp": datetime.now().isoformat()}
+
+    def replace(processed):
+        """Intentionally replace the flagged outcome, not the global store."""
+        processed[issue_id] = {**_identity(processed.get(issue_id)), **record}
+
+    update_processed(replace)
 
 
 def _handoff_to_fix_pipeline(repo_obj, issue, classify_result, why):
@@ -387,9 +393,7 @@ def _handoff_to_fix_pipeline(repo_obj, issue, classify_result, why):
     until it writes its own terminal status."""
     # Stamp the classifier's verdict on the issue's record so the Status page shows it.
     issue_id = f"{repo_obj.full_name}:{issue.number}"
-    processed = load_processed()
-    processed[issue_id] = {
-        **(processed.get(issue_id) or {}),
+    fields = {
         "status": "processing",
         "pipeline": "fix_engine",
         "handoff_reason": why,
@@ -397,12 +401,18 @@ def _handoff_to_fix_pipeline(repo_obj, issue, classify_result, why):
         "classifier_reason": classify_result.get("reason", ""),
         "timestamp": datetime.now().isoformat(),
     }
-    save_processed(processed)
-    recompute_issue_counters(processed)
+    def handoff(processed):
+        """Patch handoff markers without replaying a prior record."""
+        processed[issue_id] = {**(processed.get(issue_id) or {}), **fields}
+
+    update_processed(handoff)
     logger.info(f"feature_build: {issue_id} — {why}; handing off to the standard fix pipeline")
     # Run the normal fix pipeline; any error marks the issue failed instead of raising.
     try:
         return process_single_issue(repo_obj.full_name, issue.number)
+    except ProcessedStoreError as e:
+        logger.error(f"feature_build: hand-off history unavailable for {issue_id}: {e}")
+        return False, f"History persistence failed: {e}"
     except Exception as e:
         logger.exception(f"feature_build: fix-pipeline hand-off raised for {issue_id}: {e}")
         _mark_failed(issue_id, f"Fix-pipeline hand-off failed: {e}")
@@ -410,11 +420,20 @@ def _handoff_to_fix_pipeline(repo_obj, issue, classify_result, why):
 
 
 def build_feature(gh, repo_obj, issue, classify_result, config):
-    """The Phase 2 orchestrator. Returns (ok: bool, message: str). Never
-    raises — the caller (feature_drive.scan_feature_requests) treats a build
-    as best-effort per issue, same as the rest of the intake loop, so any
-    unexpected error here is caught and turned into a feature_failed record
-    rather than crashing the whole scan cycle."""
+    """Keep persistence failures on every build exit within the tuple-return contract."""
+    try:
+        return _build_feature(gh, repo_obj, issue, classify_result, config)
+    except ProcessedStoreError as e:
+        logger.error(f"feature_build: history persistence failed: {e}")
+        return False, f"History persistence failed (external build actions may have completed): {e}"
+
+
+def _build_feature(gh, repo_obj, issue, classify_result, config):
+    """Run Phase 2; let the public wrapper translate typed storage failures.
+
+    Ordinary build errors are recorded below. A storage error must not be
+    rewritten as a build failure or cause another attempt after external success.
+    """
     # Issue identifiers and the skill chosen by the classifier.
     repo_name = repo_obj.full_name
     issue_id = f"{repo_name}:{issue.number}"
@@ -704,17 +723,28 @@ def build_feature(gh, repo_obj, issue, classify_result, config):
                 logger.warning(f"feature_build: could not label PR #{pr.number}: {e}")
 
             # Record success with build details and return the PR URL.
-            _mark_built(issue_id, pr.html_url, extra={
-                "build_mode": mode, "build_model": used_model.get("model"),
-                "guardrail_rounds": guard_history, "review_confidence": review_conf,
-                "feature_skill": skill_name})
-            logger.info(f"feature_build: {issue_id} built -> {pr.html_url}")
-            return True, pr.html_url
+            pr_url = pr.html_url
+            try:
+                _mark_built(issue_id, pr_url, extra={
+                    "build_mode": mode, "build_model": used_model.get("model"),
+                    "guardrail_rounds": guard_history, "review_confidence": review_conf,
+                    "feature_skill": skill_name})
+            except ProcessedStoreError as e:
+                message = f"Built feature PR {pr_url}; History persistence failed: {e}"
+                logger.error(f"feature_build: {issue_id}: {message}")
+                return False, message
+            logger.info(f"feature_build: {issue_id} built -> {pr_url}")
+            return True, pr_url
     # Any unexpected error is logged and recorded instead of raised.
+    except ProcessedStoreError:
+        raise
     except Exception as e:
         logger.exception(f"feature_build: unexpected error building {issue_id}: {e}")
         try:
             _mark_failed(issue_id, f"Unexpected error: {e}")
+        except ProcessedStoreError as store_error:
+            logger.error(f"feature_build: could not persist build failure for {issue_id}: {store_error}")
+            return False, f"unexpected error: {e}; History persistence failed: {store_error}"
         except Exception:
             pass
         return False, f"unexpected error: {e}"

@@ -5,6 +5,7 @@ from types import SimpleNamespace as N
 
 import main  # noqa: F401 - loads workers in import order
 import workers
+from _history import patch_history
 
 
 class _Issue:
@@ -41,14 +42,12 @@ class _Repo:
 
 
 def _run(monkeypatch, compare_status):
-    store = {"data": {"o/cs:7": {"status": "feature_built", "pr_url": "https://github.com/o/cs/pull/9"}}}
-    monkeypatch.setattr(workers, "load_processed", lambda: copy.deepcopy(store["data"]))
-    monkeypatch.setattr(workers, "save_processed", lambda p: store.update(data=copy.deepcopy(p)))
-    monkeypatch.setattr(workers, "recompute_issue_counters", lambda p=None: None)
+    ns = patch_history(monkeypatch, workers, {
+        "o/cs:7": {"status": "feature_built", "pr_url": "https://github.com/o/cs/pull/9"}})
     monkeypatch.setattr(main, "_apply_closed_label", lambda r, i, k: i.add_to_labels("ab-closed"))
     repo = _Repo(compare_status)
     gh = N(get_repo=lambda name: repo)
-    return workers.close_shipped_features(gh, {}), store["data"]["o/cs:7"], repo.issues[7]
+    return workers.close_shipped_features(gh, {}), ns["load_processed"]()["o/cs:7"], repo.issues[7]
 
 
 def test_feature_on_main_is_closed_with_a_pr_link(monkeypatch):

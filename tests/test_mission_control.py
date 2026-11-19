@@ -173,9 +173,8 @@ def test_re_evaluate_accepts_a_feature_waiting_on_its_requester(monkeypatch):
     store = {"o/lm:3": {"status": "feature_needs_info", "timestamp": _ago(1)}}
     monkeypatch.setattr(auth, "any_users", lambda: True)
     monkeypatch.setattr(auth, "verify_session", lambda token: "admin")
-    monkeypatch.setattr(routes, "load_processed", lambda: store)
-    monkeypatch.setattr(routes, "save_processed", lambda p: None)
-    monkeypatch.setattr(routes, "recompute_issue_counters", lambda p: None)
+    from _history import patch_history
+    store = patch_history(monkeypatch, routes, store)["_store"]
     monkeypatch.setitem(state, "processed", store)
     r = TestClient(main.app).post("/reevaluate_feature", json={"issue_id": "o/lm:3"})
     assert r.status_code == 200, r.text

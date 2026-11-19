@@ -16,7 +16,9 @@ from main. main re-exports config_store and llm_client names into its namespace
 # datetime timestamps task starts and PR reviews.
 import os
 import threading
+import copy
 from datetime import datetime
+from config_store import _processed_lock, _update_processed, _read_processed_authority
 
 # Persistence helpers, version lookup and circuit-breaker snapshots, all re-exported by
 # main (see the module docstring for why importing from main is safe here).
@@ -934,15 +936,28 @@ state = {
 state["pr_merge_totals"] = pr_merge_totals()
 
 
+def update_processed(mutator):
+    """Commit history and publish its detached feed/counters in transaction order."""
+    with _processed_lock:
+        committed, result = _update_processed(mutator)
+        recompute_issue_counters(committed)
+        return result
+
+
 def recompute_issue_counters(processed=None):
     """Re-derive the issue counters from the processed store and write them into
     `state`. Call after ANY change to a processed entry's status/reopened flag
     (close, reopen, dismiss, delete) so the dashboard totals always match reality
     instead of drifting from running +=/-= increments. Reopened issues fold into the
     base buckets — recurrence is tracked via the pending-verification workflow."""
-    # Load a fresh snapshot from disk when the caller did not pass one.
-    if processed is None:
-        processed = load_processed()
+    with _processed_lock:
+        if processed is None:
+            processed, _ = _read_processed_authority()
+        return _publish_issue_counters(copy.deepcopy(processed))
+
+
+def _publish_issue_counters(processed):
+    """Publish an already detached, committed view while holding the store lock."""
     # The Activity Feed renders state["processed"]; refresh it from the same
     # snapshot so the sidebar counts and the feed rows can never disagree
     # (background writers like feature_drive only call this, not the routes'
@@ -977,6 +992,7 @@ __all__ = [
     "feature_needs_info_count",
     "feature_built_count",
     "recompute_issue_counters",
+    "update_processed",
     "activity_feed_items",
     "feed_counts",
     "update_task_state",

@@ -63,8 +63,7 @@ from main import (
     load_config,
     load_processed,
     load_update_state,
-    recompute_issue_counters,
-    save_processed,
+    update_processed,
     logger,
     update_config,
     save_update_state,
@@ -1173,30 +1172,30 @@ def sync_github_issue_state(gh_current, limit=GITHUB_SYNC_PER_CYCLE, shared=None
         except Exception as e:  # noqa: BLE001 - one bad record must not stop the sync
             logger.debug(f"GitHub state sync skipped {issue_id}: {e}")
 
-    # Reload: other workers may have saved while we were asking GitHub.
-    processed = load_processed()
     now = datetime.now().isoformat()
-    changed = []
-    for issue_id, gh_status in found.items():
-        rec = processed.get(issue_id)
-        if not rec or rec.get("status") not in _GITHUB_SYNC_STATUSES:
-            continue
-        rec["github_checked_at"] = now
-        if gh_status == "closed":
-            rec["status_before_close"] = rec["status"]
-            rec["status"] = "closed"
-            rec["closed_at"] = now
-            changed.append(issue_id)
-        elif gh_status == "ops-alert" and rec["status"] != "ops-alert":
-            rec["status_before_ops_alert"] = rec["status"]
-            rec["status"] = "ops-alert"
-            changed.append(issue_id)
-        if shared is not None:
-            shared[issue_id] = rec
-    save_processed(processed)
+
+    def apply_observations(current):
+        """Apply observations only to still-waiting records, never old snapshots."""
+        changed, applied = [], {}
+        for issue_id, gh_status in found.items():
+            rec = current.get(issue_id)
+            if not rec or rec.get("status") not in _GITHUB_SYNC_STATUSES:
+                continue
+            rec["github_checked_at"] = now
+            if gh_status == "closed":
+                rec.update(status_before_close=rec["status"], status="closed", closed_at=now)
+                changed.append(issue_id)
+            elif gh_status == "ops-alert" and rec["status"] != "ops-alert":
+                rec.update(status_before_ops_alert=rec["status"], status="ops-alert")
+                changed.append(issue_id)
+            applied[issue_id] = dict(rec)
+        return changed, applied
+
+    changed, applied = update_processed(apply_observations)
+    if shared is not None:
+        shared.update(applied)
     if changed:
         logger.info(f"GitHub state sync: updated {len(changed)} record(s): {', '.join(changed)}")
-        recompute_issue_counters(processed)
     return changed
 
 
@@ -1256,17 +1255,27 @@ def _hand_to_human(issue, rec):
 
 def _update_record(issue_id, processed, **fields):
     """Set fields on an issue's record in both the saved and the cycle's store."""
-    fresh = load_processed()
-    rec = {**(processed.get(issue_id) or {}), **(fresh.get(issue_id) or {}), **fields}
-    fresh[issue_id] = processed[issue_id] = rec
-    save_processed(fresh)
+    def patch(current):
+        """A missing record is not an invitation to restore the cycle's old copy."""
+        rec = current.get(issue_id)
+        if rec is None or rec.get("status") not in FAILED_RETRY_STATUSES:
+            return None
+        rec.update(fields)
+        return dict(rec)
+
+    rec = update_processed(patch)
+    if rec is None:
+        processed.pop(issue_id, None)
+    else:
+        processed[issue_id] = rec
+    return rec
 
 
 def _retry_failed_issue(issue, issue_id, processed, config):
     """True when a failed/non-actionable issue is due a re-run this cycle (see
     failed_retry_decision). The retry is only counted when it is dispatched
     (_count_retry), so a gate that drops it this cycle costs nothing."""
-    rec = load_processed().get(issue_id) or processed.get(issue_id) or {}
+    rec = load_processed().get(issue_id) or {}
     decision = failed_retry_decision(rec, config)
     if decision == "needs_human" and _hand_to_human(issue, rec):
         _update_record(issue_id, processed, needs_human_at=datetime.now().isoformat())
@@ -1275,11 +1284,23 @@ def _retry_failed_issue(issue, issue_id, processed, config):
 
 def _count_retry(issue_id, processed, config):
     """Charge one automatic retry to an issue that is being dispatched."""
-    rec = load_processed().get(issue_id) or processed.get(issue_id) or {}
-    n = int(rec.get("auto_retries") or 0) + 1
-    _update_record(issue_id, processed, auto_retries=n)
+    def charge(current):
+        """Increment from fresh authority, and skip removed or completed records."""
+        rec = current.get(issue_id)
+        if not rec or rec.get("status") not in FAILED_RETRY_STATUSES:
+            return None
+        rec["auto_retries"] = int(rec.get("auto_retries") or 0) + 1
+        return dict(rec)
+
+    rec = update_processed(charge)
+    if rec is None:
+        processed.pop(issue_id, None)
+        return False
+    processed[issue_id] = rec
+    n = rec["auto_retries"]
     logger.info(f"{issue_id}: error still recurring — automatic retry "
                 f"{n}/{config.get('failed_retry_max', 2)} with the previous feedback.")
+    return True
 
 
 # Fleet PRs merge into dev and are promoted to main later, and GitHub only
@@ -1330,22 +1351,29 @@ def close_shipped_features(gh_current, config, limit=SHIPPED_CHECK_PER_CYCLE, sh
         except Exception as e:  # noqa: BLE001 - one bad record must not stop the sweep
             logger.debug(f"Shipped-feature check skipped {issue_id}: {e}")
 
-    processed = load_processed()
     now = datetime.now().isoformat()
-    for issue_id in checked:
-        rec = processed.get(issue_id)
-        if not rec or rec.get("status") != "feature_built":
-            continue
-        rec["shipped_checked_at"] = now
-        if issue_id in shipped:
-            rec.update(status="resolved", resolution="feature_shipped", closed_at=now)
-        if shared is not None:
-            shared[issue_id] = rec
-    save_processed(processed)
-    if shipped:
-        logger.info(f"Closed {len(shipped)} shipped feature issue(s): {', '.join(shipped)}")
-        recompute_issue_counters(processed)
-    return sorted(shipped)
+
+    def apply_shipped(current):
+        """Do not resolve a deleted/replaced record or a different newly built PR."""
+        changed, applied = [], {}
+        for issue_id in checked:
+            rec = current.get(issue_id)
+            if (not rec or rec.get("status") != "feature_built"
+                    or rec.get("pr_url") != processed[issue_id].get("pr_url")):
+                continue
+            rec["shipped_checked_at"] = now
+            if issue_id in shipped:
+                rec.update(status="resolved", resolution="feature_shipped", closed_at=now)
+                changed.append(issue_id)
+            applied[issue_id] = dict(rec)
+        return changed, applied
+
+    changed, applied = update_processed(apply_shipped)
+    if shared is not None:
+        shared.update(applied)
+    if changed:
+        logger.info(f"Closed {len(changed)} shipped feature issue(s): {', '.join(changed)}")
+    return sorted(changed)
 
 
 def scan_repo_issues(gh_current, config, processed):
@@ -1504,9 +1532,9 @@ def scan_repo_issues(gh_current, config, processed):
                             logger.info(f"Found {len(all_to_fix)} issues to process in {repo_name} (max workers={max_workers}).")
                         # Fix the batch in parallel and wait for all of them.
                         batch = critical_to_fix + capped_bugs + capped_normal
-                        for r, n in batch:
-                            if f"{r}:{n}" in retrying:
-                                _count_retry(f"{r}:{n}", processed, config)
+                        batch = [(r, n) for r, n in batch
+                                 if f"{r}:{n}" not in retrying
+                                 or _count_retry(f"{r}:{n}", processed, config)]
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(main.process_single_issue, r, n) for r, n in batch]
                             for future in futures:

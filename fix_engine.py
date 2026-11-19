@@ -32,7 +32,8 @@ from main import (
     recompute_issue_counters,
     logger,
     resolve_self_diagnosis_repo,
-    save_processed,
+    update_processed,
+    ProcessedStoreError,
     state,
     update_task_state,
 )
@@ -4227,8 +4228,7 @@ def _resolve_as_already_fixed(issue, issue_id, repo_name, issue_num, verdict,
     # so it can `return` instead of falling through into fix attempts on an
     # issue it just closed.
     try:
-        processed = load_processed()
-        processed[f"{repo_name}:{issue_num}"] = {
+        record = {
             "status": "resolved",
             "timestamp": datetime.now().isoformat(),
             "resolution": "already_fixed",
@@ -4237,13 +4237,20 @@ def _resolve_as_already_fixed(issue, issue_id, repo_name, issue_num, verdict,
             "attempts": attempts,
             "original_body": issue.body,
         }
-        save_processed(processed)
-        state["processed"] = processed
+        def resolved(current):
+            """Record this intentional already-fixed replacement in fresh history."""
+            current[f"{repo_name}:{issue_num}"] = record
+
+        update_processed(resolved)
+    except ProcessedStoreError as ce:
+        logger.error(f"GitHub resolution attempted but history was not persisted for {issue_id}: {ce}")
+        update_task_state(task_id=issue_id, action="end")
+        return False, f"Resolution attempted on GitHub; history persistence failed: {ce}"
     except Exception as ce:  # noqa: BLE001
         logger.warning(f"could not persist already-resolved state for {issue_id}: {ce}")
     # Refresh the issue counters, then end the task.
     try:
-        recompute_issue_counters(processed)
+        recompute_issue_counters()
     except Exception:  # noqa: BLE001
         pass
     update_task_state(task_id=issue_id, action="end")
@@ -5405,11 +5412,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         except GithubException as ge:
             if ge.status == 410 or ge.status == 404:
                 logger.warning(f"Issue {repo_name}:{issue_num} was deleted or not found. Removing from history.")
-                processed = load_processed()
-                if issue_id in processed:
-                    del processed[issue_id]
-                    save_processed(processed)
-                    state["processed"] = processed
+                update_processed(lambda current: current.pop(issue_id, None))
                 return False, "Issue deleted"
             raise ge
 
@@ -5436,18 +5439,21 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         # Surface the issue in the Status table AS SOON AS work starts, so a long CPU
         # fix isn't invisible there (it's otherwise only an Active Task until it reaches
         # a terminal status). Terminal handlers + the exception path overwrite this.
-        try:
-            processed[issue_id] = {
-                **issue_info,
-                "status": "processing",
-                "title": getattr(issue, "title", "") or issue_info.get("title", ""),
-                "original_body": issue_info.get("original_body") or (getattr(issue, "body", "") or "")[:2000],
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        title = getattr(issue, "title", "")
+        body = (getattr(issue, "body", "") or "")[:2000]
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        def mark_processing(current):
+            """Preserve the current record, rather than a pre-GitHub snapshot."""
+            prior = current.get(issue_id) or {}
+            current[issue_id] = {
+                **prior, "status": "processing",
+                "title": title or prior.get("title", ""),
+                "original_body": prior.get("original_body") or body,
+                "timestamp": stamp,
             }
-            save_processed(processed)
-            state["processed"] = processed
-        except Exception:  # noqa: BLE001
-            pass
+
+        update_processed(mark_processing)
 
         # Show the task as active and check whether the issue is actionable.
         update_task_state(task_id=issue_id, task_name=f"Triaging {issue_id}", action="start", stage="triage")
@@ -5461,21 +5467,24 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             except Exception as ce:
                 logger.warning(f"Could not post non-actionable comment to {issue_id}: {ce}")
             # Record the non-actionable status, keeping feature hand-off markers.
-            processed = load_processed()
-            _prior = processed.get(f"{repo_name}:{issue_num}") or {}
-            processed[f"{repo_name}:{issue_num}"] = {
-                # Keep a feature hand-off's markers so the UI/route can send
-                # it back to the feature drive (Re-evaluate).
-                **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
-                                          "classifier_reason") if k in _prior},
-                **_retry_budget(_prior),
-                "status": "non-actionable",
-                "timestamp": datetime.now().isoformat(),
-                "reason": request_msg,
-                "original_body": issue.body.strip() if issue.body else ""
-            }
-            save_processed(processed)
-            state["processed"] = processed
+            original_body = issue.body.strip() if issue.body else ""
+            stamp = datetime.now().isoformat()
+
+            def non_actionable(current):
+                """Replace the outcome, retaining only current handoff and retry fields."""
+                _prior = current.get(issue_id) or {}
+                current[issue_id] = {
+                    # Preserve hand-off context for the Re-evaluate action.
+                    **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
+                                             "classifier_reason") if k in _prior},
+                    **_retry_budget(_prior),
+                    "status": "non-actionable",
+                    "timestamp": stamp,
+                    "reason": request_msg,
+                    "original_body": original_body,
+                }
+
+            update_processed(non_actionable)
             update_task_state(task_id=issue_id, action="end")
             return False, f"Non-actionable: {request_msg}"
 
@@ -5683,10 +5692,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         logger.info(f"Resuming from queued review for {issue_id} using saved fix.")
                         success_applied, fixes, confidence = parse_and_apply(json.dumps(pending_fix), path)
                         # Clear the pending status now that we're processing it
-                        processed = load_processed()
-                        if issue_id in processed:
-                            processed[issue_id]["status"] = "processing"
-                            save_processed(processed)
+                        def resume_review(current):
+                            """A deleted record must not be restored by a stale resume."""
+                            if issue_id in current:
+                                current[issue_id]["status"] = "processing"
+
+                        update_processed(resume_review)
                     # Otherwise generate a new fix (re-targeting after a review rejection) and apply
                     # it.
                     elif not pending_fix:
@@ -5811,16 +5822,21 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
                                 _q_reason = review.get("reason") or "reviewers unavailable"
                                 logger.info(f"Review queued for {issue_id}: {_q_reason}. Saving fix for retry in 1 hour.")
-                                processed = load_processed()
-                                processed[issue_id] = {
-                                    **_retry_budget(issue_info),
-                                    "status": "awaiting_review",
-                                    "timestamp": datetime.now().isoformat(),
-                                    "pending_fix": {"confidence": confidence, "fixes": fixes},
-                                    "original_body": issue.body.strip() if issue.body else ""
-                                }
-                                save_processed(processed)
-                                state["processed"] = processed
+                                original_body = issue.body.strip() if issue.body else ""
+                                stamp = datetime.now().isoformat()
+
+                                def queue_review(current, stamp=stamp, confidence=confidence,
+                                                 fixes=fixes, original_body=original_body):
+                                    """Replace pending review, retaining the fresh retry budget."""
+                                    current[issue_id] = {
+                                        **_retry_budget(current.get(issue_id)),
+                                        "status": "awaiting_review",
+                                        "timestamp": stamp,
+                                        "pending_fix": {"confidence": confidence, "fixes": fixes},
+                                        "original_body": original_body,
+                                    }
+
+                                update_processed(queue_review)
                                 update_task_state(task_id=issue_id, action="end")
                                 return False, f"Review queued for retry in 1 hour ({_q_reason})."
 
@@ -5923,7 +5939,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             # Accept the fix.
                             success = True
                             _progress(issue_id, "fix accepted — committing and pushing")
-                            state["success_count"] += 1
                             final_verdict = review_verdict
                             break
                         else:
@@ -5965,20 +5980,26 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     except Exception as ce:  # noqa: BLE001
                         logger.warning(f"human-review note failed for {issue_id}: {ce}")
                     # Record the issue as awaiting a human.
-                    processed = load_processed()
-                    processed[issue_id] = {
-                        **_retry_budget(issue_info),
-                        "status": "awaiting_human",
-                        "timestamp": datetime.now().isoformat(),
-                        "reason": "no configured model meets this fix's requirements",
-                        "original_body": issue.body or "",
-                    }
-                    save_processed(processed)
-                    state["processed"] = processed
-                    recompute_issue_counters(processed)
+                    original_body = issue.body or ""
+                    stamp = datetime.now().isoformat()
+
+                    def await_human(current, stamp=stamp, original_body=original_body):
+                        """Retain the fresh retry budget while replacing the outcome."""
+                        current[issue_id] = {
+                            **_retry_budget(current.get(issue_id)),
+                            "status": "awaiting_human",
+                            "timestamp": stamp,
+                            "reason": "no configured model meets this fix's requirements",
+                            "original_body": original_body,
+                        }
+
+                    update_processed(await_human)
                     update_task_state(task_id=issue_id, action="end")
                     return False, "Held for human review (no model meets this fix's requirements)"
                 # Other errors: stop if no LLM providers exist at all.
+                except ProcessedStoreError:
+                    # A storage failure cannot be repaired by another LLM attempt.
+                    raise
                 except Exception as inner_e:
                     if "No LLM providers" in str(inner_e):
                         logger.error(f"No LLM providers configured for issue {issue_id}: {inner_e}")
@@ -6014,7 +6035,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             max_attempts, state, how="after %d attempt(s)" % max_attempts)
 
                 # Count the failure and build a cause-first reason.
-                state["failure_count"] += 1
                 # Lead with the CAUSE. This string is shown truncated in the
                 # status table, and the old form spent its first 72 characters on
                 # "AI failed to find a verified fix after max attempts. Last
@@ -6034,30 +6054,32 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     logger.warning(f"Could not post failure comment to {issue_id}: {ce}")
 
                 # Record the failure with structured details, keeping feature hand-off markers.
-                processed = load_processed()
-                _prior = processed.get(f"{repo_name}:{issue_num}") or {}
-                processed[f"{repo_name}:{issue_num}"] = {
-                    # Keep a feature request's hand-off context (feature_build ->
-                    # this pipeline) so the failed row still says how it got here.
-                    **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
-                                              "classifier_reason") if k in _prior},
-                    **_retry_budget(_prior),
-                    "status": "failed",
-                    "timestamp": datetime.now().isoformat(),
-                    "error": failure_reason,
-                    # Structured so the UI can render the cause as a label plus
-                    # numbers rather than parsing it back out of a sentence.
-                    "failure_kind": last_failure.get("kind") or "unknown",
-                    "failure_detail": (last_failure.get("detail") or "")[:1000],
-                    "failure_confidence": last_failure.get("confidence"),
-                    "failure_threshold": last_failure.get("threshold"),
-                    "failure_model": last_failure.get("model"),
-                    "failure_raw_excerpt": last_failure.get("raw_excerpt"),
-                    "attempts": max_attempts,
-                    "original_body": issue.body
-                }
-                save_processed(processed)
-                state["processed"] = processed
+                original_body = issue.body
+                stamp = datetime.now().isoformat()
+
+                def failed(current):
+                    """Replace failed outcome with retained fields from fresh authority."""
+                    _prior = current.get(issue_id) or {}
+                    current[issue_id] = {
+                        # Keep a hand-off's context so the row says how it got here.
+                        **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
+                                                 "classifier_reason") if k in _prior},
+                        **_retry_budget(_prior),
+                        "status": "failed",
+                        "timestamp": stamp,
+                        "error": failure_reason,
+                        # Structured cause fields are rendered directly by the UI.
+                        "failure_kind": last_failure.get("kind") or "unknown",
+                        "failure_detail": (last_failure.get("detail") or "")[:1000],
+                        "failure_confidence": last_failure.get("confidence"),
+                        "failure_threshold": last_failure.get("threshold"),
+                        "failure_model": last_failure.get("model"),
+                        "failure_raw_excerpt": last_failure.get("raw_excerpt"),
+                        "attempts": max_attempts,
+                        "original_body": original_body,
+                    }
+
+                update_processed(failed)
                 update_task_state(task_id=issue_id, action="end")
                 return False, failure_reason
 
@@ -6081,16 +6103,20 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 except Exception as ce:
                     logger.warning(f"Could not post triage comment to {issue_id}: {ce}")
                 # Record the issue as triaged.
-                processed = load_processed()
-                processed[f"{repo_name}:{issue_num}"] = {
-                    **_retry_budget(issue_info),
-                    "status": "triaged",
-                    "timestamp": datetime.now().isoformat(),
-                    "reason": "Fix identified; commit deferred (triage-only mode)",
-                    "original_body": issue.body or "",
-                }
-                save_processed(processed)
-                state["processed"] = processed
+                original_body = issue.body or ""
+                stamp = datetime.now().isoformat()
+
+                def triaged(current):
+                    """Replace triage outcome while retaining the current retry budget."""
+                    current[issue_id] = {
+                        **_retry_budget(current.get(issue_id)),
+                        "status": "triaged",
+                        "timestamp": stamp,
+                        "reason": "Fix identified; commit deferred (triage-only mode)",
+                        "original_body": original_body,
+                    }
+
+                update_processed(triaged)
                 update_task_state(task_id=issue_id, action="end")
                 return True, "Triaged — fix identified, commit deferred"
 
@@ -6205,6 +6231,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         can_actually_direct_push = False
 
             # Pushed: report it and get spokes to update.
+            pr_url = None
             if can_actually_direct_push:
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: {decision_reason}")
                 commit_type = "Direct Commit"
@@ -6297,9 +6324,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                   f"(confidence below the direct-merge threshold, so it is promoted "
                                   f"{base_branch} -> qa -> main rather than via a PR).")
                 else:
+                    pr_url = pr.html_url
                     commit_type = "Pull Request"
                     _progress(issue_id, "opened PR #%s" % pr.number, stage="pr")
-                    detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
+                    detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr_url}"
 
 
             # Summarise the change for the success comment.
@@ -6330,8 +6358,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             new_status = "pending_verification"
 
             # Record the fix (commit, files, how it landed) and update counters.
-            processed = load_processed()
-            processed[issue_id] = {
+            record = {
                 "status": new_status,
                 "timestamp": datetime.now().isoformat(),
                 "commit": commit_hash,
@@ -6346,16 +6373,34 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 "opened_at": _opened_at(issue),
                 "fixed_at": datetime.now().isoformat(timespec="seconds"),
             }
+            if pr_url:
+                record["pr_url"] = pr_url
 
-            save_processed(processed)
-            state["processed"] = processed
-            recompute_issue_counters(processed)
+            def fixed(current):
+                """Intentionally replace the outcome; retain a fresh reopened flag."""
+                prior = current.get(issue_id) or {}
+                current[issue_id] = {**record, "reopened": prior.get("reopened", was_reopened)}
+
+            try:
+                update_processed(fixed)
+            except ProcessedStoreError as e:
+                outcome = f"{record['commit_type']} {record['commit']}"
+                if record.get("pr_url"):
+                    outcome += f" ({record['pr_url']})"
+                message = f"Published {outcome}; History persistence failed: {e}"
+                logger.error(f"{issue_id}: {message}")
+                update_task_state(task_id=issue_id, action="end")
+                return False, message
             state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
 
             # End the task.
             update_task_state(task_id=issue_id, action="end")
             return True, f"Fixed via {commit_type}"
 
+    except ProcessedStoreError as e:
+        logger.error(f"History persistence failed for {issue_id}; external actions may have completed: {e}")
+        update_task_state(task_id=issue_id, action="end")
+        return False, f"History persistence failed (external actions may have completed): {e}"
     except Exception as e:
         # Flatten embedded newlines into the single ERROR line — the self-log
         # scanner captures single ERROR-level lines verbatim with no
@@ -6386,16 +6431,17 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         # timeout mid-fix) otherwise never lands in the processed store, so the issue
         # silently vanishes from the UI — which is exactly what happened to #103.
         try:
-            processed = load_processed()
-            prev = processed.get(issue_id, {})
-            processed[issue_id] = {
-                **prev,
-                "status": "failed",
-                "error": str(e)[:500],
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            save_processed(processed)
-            state["processed"] = processed
+            error = str(e)[:500]
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            def record_error(current):
+                """Patch current fields, not the snapshot held by the failed attempt."""
+                current[issue_id] = {
+                    **current.get(issue_id, {}), "status": "failed",
+                    "error": error, "timestamp": stamp,
+                }
+
+            update_processed(record_error)
         except Exception as rec_err:  # noqa: BLE001
             logger.error(f"Failed to record failed status for {issue_id}: {rec_err}")
         return False, str(e)

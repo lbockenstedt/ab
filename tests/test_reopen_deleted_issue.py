@@ -96,11 +96,11 @@ def main():
     check("the deleted check runs BEFORE the generic error log",
           body.index("_issue_is_deleted(e)") < body.index('logger.error(f"Reopen failed for'))
     check("the local record is dropped so the row cannot be clicked again",
-          "processed.pop(issue_id, None)" in body)
+          "current.pop(issue_id, None)" in body)
     check("counters are recomputed after dropping the record",
-          "recompute_issue_counters(processed)" in body)
-    check("dropping the record cannot itself break the response",
-          "could not drop record for deleted" in body)
+          "asyncio.to_thread(update_processed" in body)
+    check("failed local removal is not falsely reported as successful",
+          "Local removal failed." in body and "_history_failure(e2" in body)
     check("the response is 410, not 500", "status_code=410" in body)
     check("the response is flagged so the UI can distinguish it",
           '"deleted": True' in body)

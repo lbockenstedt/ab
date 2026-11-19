@@ -74,7 +74,6 @@ from main import (
     load_chats,
     load_config,
     load_processed,
-    recompute_issue_counters,
     load_update_state,
     logger,
     parse_module_repo_map,
@@ -88,7 +87,8 @@ from main import (
     OLLAMA_BASE_URL,
     run_scan_cycle,
     save_chats,
-    save_processed,
+    update_processed,
+    ProcessedStoreError,
     set_active_chat,
     state,
     templates,
@@ -4430,11 +4430,19 @@ async def clear_history():
     logger.info("Clearing all issue history and resetting counters.")
 
     # Empty the history and reset the counters.
-    state["processed"] = {}
-    save_processed({})
-    recompute_issue_counters({})
+    try:
+        await asyncio.to_thread(update_processed, lambda current: current.clear())
+    except ProcessedStoreError as e:
+        return _history_failure(e)
 
     return {"status": "success", "message": "All history and tasks have been cleared."}
+
+
+def _history_failure(error, external=""):
+    """Report failed local persistence without concealing completed external actions."""
+    logger.error(f"Processed history persistence failed: {error}")
+    return JSONResponse(status_code=500, content={
+        "status": "error", "message": f"{external}History persistence failed: {error}"})
 
 
 def _close_issue_on_github(issue_id: str):
@@ -4541,13 +4549,16 @@ async def delete_issue(request: Request):
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue number"})
 
     # Remove from local processed history.
-    processed = load_processed()
-    was_in_history = issue_id in processed
-    if was_in_history:
-        processed.pop(issue_id)
-        state["processed"] = processed
-        save_processed(processed)
-        recompute_issue_counters(processed)
+    def remove(current):
+        """Return whether the committed-current history contained the dismissed row."""
+        was_present = issue_id in current
+        current.pop(issue_id, None)
+        return was_present
+
+    try:
+        was_in_history = await asyncio.to_thread(update_processed, remove)
+    except ProcessedStoreError as e:
+        return _history_failure(e)
 
     # Close it on GitHub in the background.
     state["dismiss_jobs"][issue_id] = {"status": "pending", "message": ""}
@@ -4583,32 +4594,33 @@ async def reevaluate_feature(request: Request):
     issue_id = (data.get("issue_id") or "").strip()
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
-    # Find its record.
-    processed = load_processed()
-    rec = processed.get(issue_id)
-    # A feature request handed off to the fix pipeline (feature_build's
-    # no-build-agent fallback) can also come back to the feature drive once
-    # that pipeline is done with it.
-    handed_off = bool(rec) and rec.get("pipeline") == "fix_engine" and rec.get("status") not in (
-        "processing", "awaiting_review")
-    # Only parked or handed-off feature requests.
-    if not rec or (rec.get("status") not in _REEVALUATE_FEATURE_STATUSES and not handed_off):
+    stamp = datetime.now().isoformat()
+
+    def requeue(current):
+        """Check eligibility and intentionally replace the parked record together."""
+        rec = current.get(issue_id)
+        handed_off = bool(rec) and rec.get("pipeline") == "fix_engine" and rec.get("status") not in (
+            "processing", "awaiting_review")
+        if not rec or (rec.get("status") not in _REEVALUATE_FEATURE_STATUSES and not handed_off):
+            return False, (rec or {}).get("status") or "none"
+        current[issue_id] = {
+            "status": "feature_classify_retry",
+            "reason": "Re-evaluation requested from the AppBuilder UI.",
+            "previous_status": rec.get("status"),
+            "previous_reason": str(rec.get("reason") or "")[:1000],
+            "attempts": 0, "timestamp": stamp,
+        }
+        return True, rec.get("status")
+
+    try:
+        queued, previous = await asyncio.to_thread(update_processed, requeue)
+    except ProcessedStoreError as e:
+        return _history_failure(e)
+    if not queued:
         return JSONResponse(status_code=409, content={
             "status": "error",
-            "message": f"{issue_id} is not a parked feature request (status: {(rec or {}).get('status') or 'none'})."})
-    # Mark it for re-classification and save.
-    processed[issue_id] = {
-        "status": "feature_classify_retry",
-        "reason": "Re-evaluation requested from the AppBuilder UI.",
-        "previous_status": rec.get("status"),
-        "previous_reason": str(rec.get("reason") or "")[:1000],
-        "attempts": 0,
-        "timestamp": datetime.now().isoformat(),
-    }
-    state["processed"] = processed
-    save_processed(processed)
-    recompute_issue_counters(processed)
-    logger.info(f"Feature request {issue_id} re-queued for classification (was {rec.get('status')})")
+            "message": f"{issue_id} is not a parked feature request (status: {previous})."})
+    logger.info(f"Feature request {issue_id} re-queued for classification (was {previous})")
     return {"status": "success", "issue_id": issue_id,
             "message": "Re-queued — it will be re-classified on the next feature-drive cycle."}
 
@@ -4637,17 +4649,21 @@ async def delete_all_issues(request: Request):
     # Changes the shared state.
     global state
     # Snapshot the ids to close.
-    processed = load_processed()
-    to_close = list(processed.keys())
+    def clear(current):
+        """Capture exactly the IDs removed by this clear, not a pre-lock snapshot."""
+        removed = list(current)
+        current.clear()
+        return removed
+
+    try:
+        to_close = await asyncio.to_thread(update_processed, clear)
+    except ProcessedStoreError as e:
+        return _history_failure(e)
     if not to_close:
         return {"status": "no_issues", "message": "No issues in history to delete."}
 
     # Clear local history + counters now; close on GitHub in the background
     # against the snapshot so the clear doesn't race the sweep.
-    state["processed"] = {}
-    save_processed({})
-    recompute_issue_counters({})
-
     def _bulk_close():
         """Close each issue on GitHub, counting successes and failures."""
         closed = failed = 0
@@ -4752,17 +4768,24 @@ async def resolve_issue(request: Request):
     # GitHub close succeeded — clicking Resolved is a HUMAN sign-off, so the issue
     # moves into the RESOLVED bucket (status "resolved"), NOT Closed. Counters are
     # re-derived from the store so it lands in exactly one bucket.
-    processed = load_processed()
     local_msg = "No local history entry to update, but "
-    if issue_id in processed:
-        entry = processed[issue_id]
+    stamp = datetime.now().isoformat()
+
+    def resolve(current):
+        """Human sign-off patches only a row that still exists."""
+        entry = current.get(issue_id)
+        if entry is None:
+            return False
         entry["status"] = "resolved"
-        entry["timestamp"] = datetime.now().isoformat()
+        entry["timestamp"] = stamp
         entry["decision_reason"] = "Human-confirmed resolved."
-        processed[issue_id] = entry
-        save_processed(processed)
-        recompute_issue_counters(processed)
-        state["processed"] = processed
+        return True
+
+    try:
+        resolved = await asyncio.to_thread(update_processed, resolve)
+    except ProcessedStoreError as e:
+        return _history_failure(e, f"{github_msg} Local update failed. ")
+    if resolved:
         local_msg = "Marked resolved (human-confirmed). "
 
     return {
@@ -4939,13 +4962,9 @@ async def reopen_issue(request: Request):
             logger.warning(f"Reopen skipped for {issue_id}: the issue was deleted on GitHub — "
                            f"removing it from AppBuilder's records")
             try:
-                processed = load_processed()
-                if processed.pop(issue_id, None) is not None:
-                    save_processed(processed)
-                    recompute_issue_counters(processed)
-                    state["processed"] = processed
-            except Exception as e2:  # noqa: BLE001
-                logger.warning(f"Reopen: could not drop record for deleted {issue_id}: {e2}")
+                await asyncio.to_thread(update_processed, lambda current: current.pop(issue_id, None))
+            except ProcessedStoreError as e2:
+                return _history_failure(e2, f"{issue_id} was deleted on GitHub. Local removal failed. ")
             return JSONResponse(status_code=410, content={
                 "deleted": True,
                 "message": f"{issue_id} was deleted on GitHub and cannot be reopened. "
@@ -4959,23 +4978,22 @@ async def reopen_issue(request: Request):
     # double-counted in the base "Issues Closed" total. Status "reopened" is not a
     # terminal status the scanner skips, and the direct re-queue below drives the fix.
     try:
-        processed = load_processed()
-        prior = processed.get(issue_id, {})
-        processed[issue_id] = {
-            "status": "reopened",
-            "reopened": True,
-            "original_body": prior.get("original_body", ""),
-            # Preserve the prior fix so the re-fix can diff "what changed since" and
-            # triage the regression (falls back to parsing the issue's Commit: comment).
-            "prior_fix_commit": prior.get("commit"),
-            "prior_fix_files": prior.get("files"),
-            "timestamp": datetime.now().isoformat(),
-        }
-        save_processed(processed)
-        recompute_issue_counters(processed)
-        state["processed"] = processed
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Reopen: could not update processed state for {issue_id}: {e}")
+        stamp = datetime.now().isoformat()
+
+        def reopen(current):
+            """Replace the record, retaining regression context from current authority."""
+            prior = current.get(issue_id, {})
+            current[issue_id] = {
+                "status": "reopened", "reopened": True,
+                "original_body": prior.get("original_body", ""),
+                "prior_fix_commit": prior.get("commit"),
+                "prior_fix_files": prior.get("files"),
+                "timestamp": stamp,
+            }
+
+        await asyncio.to_thread(update_processed, reopen)
+    except ProcessedStoreError as e:
+        return _history_failure(e, "GitHub issue reopened, but it was not re-queued. ")
     # Log the reopen.
     logger.info(f"Manual reopen: {issue_id}")
 

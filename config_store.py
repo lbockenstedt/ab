@@ -342,50 +342,110 @@ def _config_view(config):
             }
     return _apply_config_defaults(config), from_file
 
+class ProcessedStoreError(RuntimeError):
+    """History persistence failed; never retry a fix or report success for this."""
+
+
+class ProcessedUnreadableError(ProcessedStoreError):
+    """The authoritative history exists but cannot safely be read."""
+
+
+# Single-interpreter coordination, not a process-shared/file lock. The application
+# layer holds this same RLock through committed feed/counter publication.
+_processed_lock = threading.RLock()
+
+
+def _read_processed_file(path):
+    """Read one history, preserving the legacy list-of-issue-ids conversion."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            data = {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()}
+                    for issue_id in data}
+        _validate_processed(data)
+        return data
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError, TypeError) as e:
+        raise ProcessedUnreadableError(f"{path}: {e}") from e
+
+
+def _validate_processed(data):
+    """Require records, not mandatory fields/statuses; older records remain valid."""
+    if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
+        raise ValueError("expected an issue-history object containing record objects")
+
+
+def _read_processed_authority():
+    """Return (fresh history, primary exists); only absence permits cwd authority."""
+    try:
+        return _read_processed_file(STATE_FILE), True
+    except FileNotFoundError:
+        try:
+            return _read_processed_file("processed_issues.json"), False
+        except FileNotFoundError:
+            return {}, False
+
+
 def load_processed():
-    # Persistent location first.
-    # Try persistent state first
-    if os.path.exists(STATE_FILE):
+    """Return a detached advisory snapshot; degraded reads never authorize writes."""
+    with _processed_lock:
+        for path in (STATE_FILE, "processed_issues.json"):
+            try:
+                return _read_processed_file(path)
+            except FileNotFoundError:
+                continue
+            except ProcessedStoreError as e:
+                logger.error(f"Could not read processed history (snapshot only): {e}")
+        return {}
+
+
+def _write_processed(processed, primary_exists):
+    """Publish validated history, never falling back behind an existing primary."""
+    try:
+        _validate_processed(processed)
+        # Validate before attempting either destination, including for no-op/raw saves.
+        json.dumps(processed)
         try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-                # Old format was a plain list of issue ids; convert to the dict format, marking them
-                # fixed.
-                if isinstance(data, list):
-                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
-                return data
-        # Unreadable file: try the fallback location.
-        except: pass
-    # Fallback to local state
-    if os.path.exists("processed_issues.json"):
+            _atomic_write_json(STATE_FILE, processed)
+        except OSError:
+            if primary_exists:
+                raise
+            _atomic_write_json("processed_issues.json", processed)
+    except Exception as e:
+        raise ProcessedStoreError(f"Could not publish processed history: {e}") from e
+
+
+def _update_processed(mutator):
+    """Mutate fresh authority once; return its committed snapshot and callback result.
+
+    Callbacks do local dictionary work only: no network, application-state changes
+    or nested transactions. RLock reentrancy is for the application/storage layers.
+    """
+    with _processed_lock:
+        current, primary_exists = _read_processed_authority()
+        before = copy.deepcopy(current)
+        result = mutator(current)
         try:
-            with open("processed_issues.json", "r") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
-                return data
-        except: pass
-    # No history anywhere.
-    return {}
+            _validate_processed(current)
+            json.dumps(current)
+        except (ValueError, TypeError) as e:
+            raise ProcessedStoreError(f"Invalid processed history mutation: {e}") from e
+        if current != before:
+            _write_processed(current, primary_exists)
+        return current, result
+
 
 def save_processed(processed):
-    """Saves processed issues to persistent storage, with fallback to local file.
+    """Legacy explicit replacement, not a safe stale-snapshot update API.
 
-    Written via a temp file + os.replace (see save_config) so a crash mid-write
-    can't leave a truncated/empty STATE_FILE for the next load_processed() to
-    choke on.
+    Production writers use app_state.update_processed. Even this compatibility
+    writer refuses to overwrite an unreadable primary OR cwd-only authority.
     """
-    try:
-        # Primary: Persistent storage
-        _atomic_write_json(STATE_FILE, processed)
-    except Exception as e:
-        logger.error(f"Error saving to persistent state file {STATE_FILE}: {e}")
-        # Persistent location failed: fall back to the working directory.
-        try:
-            # Fallback: Local directory
-            _atomic_write_json("processed_issues.json", processed)
-        except Exception as fe:
-            logger.error(f"Critical failure saving processed history to both locations: {fe}")
+    with _processed_lock:
+        _, primary_exists = _read_processed_authority()
+        _write_processed(processed, primary_exists)
 
 def load_pr_reviews():
     """Load the persisted PR pre-review store (keyed 'repo#number').
@@ -599,6 +659,8 @@ __all__ = [
     "load_config",
     "load_processed",
     "save_processed",
+    "ProcessedStoreError",
+    "ProcessedUnreadableError",
     "load_pr_reviews",
     "save_pr_reviews",
     "load_pr_merge_ledger",

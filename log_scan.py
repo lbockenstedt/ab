@@ -16,7 +16,8 @@ from main import (
     redact_identity,
     resolve_module_repo,
     resolve_self_diagnosis_repo,
-    save_processed,
+    update_processed,
+    ProcessedStoreError,
     state,
     update_task_state,
     CONFIG_DIR,
@@ -740,10 +741,11 @@ def verify_production_fixes(gh_current, processed):
     # sync_hub_logs). This is one cycle behind the live pull by design — the
     # 7-day PROD_VERIFICATION_DAYS gate bounds that staleness so a one-cycle
     # lag can't flip a not-yet-clean issue to closed.
-    for issue_id, info in awaiting:
+    for issue_id, _info in awaiting:
         # Check each one.
         repo_name, issue_num = issue_id.split(":")
         logger.info(f"Verifying production fix for {issue_id} (Required clean period: {days_required} days)...")
+        closed_on_github = False
         try:
             # Load the issue.
             repo_obj = gh_current.get_repo(repo_name)
@@ -753,48 +755,59 @@ def verify_production_fixes(gh_current, processed):
             match = re.search(r"### Log Evidence:\n```\n(.*?)\n```", issue.body or "", re.DOTALL)
             if match:
                 found = _mirror_contains(match.group(1).strip())
-                if found is not None:
-                    if not found:
-                        # Snippet is gone. Check if we've been clean long enough.
-                        clean_since = info.get("clean_since")
-                        now = datetime.now()
+                if found is None:
+                    continue
+                now = datetime.now()
 
-                        if not clean_since:
-                            logger.info(f"Issue {issue_id} is clean. Starting {days_required}-day cooling period.")
-                            info["clean_since"] = now.isoformat()
-                            processed[issue_id] = info
-                            save_processed(processed)
-                        else:
-                            # Already clean: close once the period has passed.
-                            first_clean_ts = datetime.fromisoformat(clean_since)
-                            days_clean = (now - first_clean_ts).days
-                            if days_clean >= days_required:
-                                logger.info(f"Verified: Issue {issue_id} has been clean for {days_clean} days. Closing issue.")
-                                # Comment, close, label and update the counters.
-                                try:
-                                    issue.create_comment(f"🤖 **AppBuilder AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
-                                except Exception as ce:
-                                    logger.warning(f"Could not post verification comment to {issue_id}: {ce}")
-                                issue.edit(state='closed')
-                                _apply_closed_label(repo_obj, issue, issue_id)
-                                processed[issue_id]["status"] = "closed"
-                                # Leaves Resolved (was counted via the QA-pass increment when
-                                # first fixed) and enters Closed. This also avoids the old
-                                # double-count where awaiting_prod_verification issues got a
-                                # second success_count += 1 on verification.
-                                state["success_count"] = max(0, state["success_count"] - 1)
-                                state["closed_count"] = state.get("closed_count", 0) + 1
-                                save_processed(processed)
-                            else:
-                                logger.info(f"Issue {issue_id} is clean, but only for {days_clean}/{days_required} days. Waiting...")
-                    else:
-                        # Error reappeared. Reset the clean timer.
-                        if info.get("clean_since"):
-                            logger.warning(f"Issue {issue_id} error reappeared in logs. Resetting cooling period.")
-                            info["clean_since"] = None
-                            processed[issue_id] = info
-                            save_processed(processed)
-                        logger.info(f"Issue {issue_id} still failing in production logs.")
+                def check_timer(current, issue_id=issue_id, found=found, now=now):
+                    """Use the current cooling timer; stale verification cannot restore rows."""
+                    rec = current.get(issue_id)
+                    if not rec or rec.get("status") != "awaiting_prod_verification":
+                        return dict(rec) if rec is not None else None, None
+                    if found:
+                        if rec.get("clean_since"):
+                            rec["clean_since"] = None
+                        return dict(rec), None
+                    clean_since = rec.get("clean_since")
+                    if not clean_since:
+                        rec["clean_since"] = now.isoformat()
+                        return dict(rec), None
+                    if (now - datetime.fromisoformat(clean_since)).days >= days_required:
+                        return dict(rec), clean_since
+                    return dict(rec), None
+
+                rec, timer = update_processed(check_timer)
+                if rec is None:
+                    processed.pop(issue_id, None)
+                else:
+                    processed[issue_id] = rec
+                if timer is None:
+                    continue
+                # External work is deliberately outside the transaction. A successful
+                # GitHub close and failed local publication are logged as a partial outcome.
+                try:
+                    issue.create_comment(f"🤖 **AppBuilder AI Verification**\n\nProduction logs have been scanned and the error is no longer detected. The issue has remained clean for {days_required} days. Closing issue.")
+                except Exception as ce:
+                    logger.warning(f"Could not post verification comment to {issue_id}: {ce}")
+                issue.edit(state='closed')
+                closed_on_github = True
+                _apply_closed_label(repo_obj, issue, issue_id)
+
+                def close_verified(current, issue_id=issue_id, timer=timer):
+                    """Only finalize the still-applicable timer, never a new/deleted row."""
+                    rec = current.get(issue_id)
+                    if (rec and rec.get("status") == "awaiting_prod_verification"
+                            and rec.get("clean_since") == timer):
+                        rec["status"] = "closed"
+                        return dict(rec)
+                    return None
+
+                rec = update_processed(close_verified)
+                if rec is not None:
+                    processed[issue_id] = rec
+        except ProcessedStoreError as e:
+            logger.error(f"History persistence failed verifying {issue_id}"
+                         f"{' after GitHub closure' if closed_on_github else ''}: {e}")
         except Exception as e:
             logger.error(f"Error verifying {issue_id}: {e}")
 
