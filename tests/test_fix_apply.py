@@ -321,6 +321,17 @@ def test_an_edit_stub_for_a_file_written_by_fixes_is_not_an_error():
     assert [e for e in errors if "malformed edit" in e]
 
 
+def test_unsafe_repo_targets_remain_rejected(tmp_path):
+    """Log filtering must never turn an absolute or escaping path into a write."""
+    target = _load_funcs()["_safe_repo_target"]
+    root = str(tmp_path)
+    for path in ("/.github/workflows/promote-reusable.yml", "/etc/passwd",
+                 "../escape.txt", ".github/../escape.txt", r"..\escape.txt", None):
+        assert target(root, path) is None
+    assert target(root, ".github/workflows/promote-reusable.yml") == str(
+        tmp_path / ".github/workflows/promote-reusable.yml")
+
+
 def test_empty_search_rejects_batch_before_any_writes(tmp_path):
     """Empty anchors surface retry feedback without partially applying a batch."""
     apply = _load_funcs()["parse_and_apply"]

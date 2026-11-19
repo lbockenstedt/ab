@@ -96,6 +96,17 @@ def test_rejected_syntax_edit_is_not_a_product_error():
     assert [row["log"] for row in kept] == [row["log"] for row in real]
 
 
+def test_unsafe_fix_path_is_not_an_appbuilder_fault():
+    """A refused model path must not create an issue about the safety guard."""
+    fel = _load_filter()
+    rejected = {"module": "ab-core", "log":
+                "2026-11-19 11:10:01 - AppBuilder - ERROR - Refusing to apply fix "
+                "with unsafe path: '/.github/workflows/promote-reusable.yml'"}
+    real = {"module": "ab-core", "log":
+            "[ERROR] Failed to read .github/workflows/promote-reusable.yml"}
+    assert [row["log"] for row in fel([rejected, real])] == [real["log"]]
+
+
 def test_fleet_qa_test_failure_is_not_an_ab_fault():
     """A fleet repo's tests failing a candidate fix were filed in ab (ab#555)."""
     fel = _load_filter()

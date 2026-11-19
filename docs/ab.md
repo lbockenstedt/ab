@@ -59,7 +59,11 @@ fix-attempt outcome, not a new product defect. The original file stays untouched
 and the rejection remains logged and available as retry feedback. Log analysis
 filters this specific rejection message, like rejected full-file rewrites, so
 it does not create recursive automated-fix issues. Actual runtime syntax errors
-remain eligible for detection.
+remain eligible for detection. An absolute model-supplied fix path (including
+`/.github/workflows/promote-reusable.yml`) is likewise refused, not converted
+into a repository-relative write; log analysis does not file a new issue for
+this expected refusal. Fix paths must be repo-relative. Fleet-owned reusable
+workflow logic may be edited only in `lm`, not in a synced copy in another repo.
 
 ## Entrypoints
 
