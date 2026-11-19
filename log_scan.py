@@ -1452,9 +1452,21 @@ def scan_bugs(gh_current, config, hub_logs):
             mark_msg = "MARK_BUG_DUPLICATE" if was_dup else "MARK_BUG_FILED"
             # Tell the hub it's filed (or a duplicate).
             try:
-                client.request_sync(mark_msg, {"id": rid, "issue_url": issue_url}, timeout=10)
+                ack_resp = client.request_sync(mark_msg, {"id": rid, "issue_url": issue_url},
+                                              timeout=10)
             except Exception as me:
                 logger.warning(f"scan_bugs: {mark_msg} {rid} failed: {me}")
+                ack_resp = None
+            if not isinstance(ack_resp, dict) or ack_resp.get("status") != "ok":
+                ack_status = (ack_resp.get("status") if isinstance(ack_resp, dict)
+                              else type(ack_resp).__name__)
+                _warn = (f"scan_bugs: {mark_msg} {rid} not confirmed "
+                         f"(status={ack_status!r})")
+                logger.warning(_warn)
+                _bi["error"] = _warn
+                if is_feature:
+                    _fi["error"] = _warn
+                continue
             # Record it and update the counts.
             scan_bugs._filed.add(rid)
             filed_this_cycle += 1
