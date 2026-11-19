@@ -4826,13 +4826,9 @@ async def trigger_fix(request: Request):
 @router.post("/scan_now")
 async def scan_now():
     """Start a scan cycle in the background."""
-    def trigger():
-        """Mark the status and run a scan."""
-        state["status"] = "Manual Scan"
-        run_scan_cycle()
     # Run it in the background.
-    threading.Thread(target=trigger, daemon=True).start()
-    return {"status": "triggered", "message": "Manual scan cycle started in background."}
+    threading.Thread(target=run_scan_cycle, daemon=True).start()
+    return {"status": "triggered", "message": "Manual scan requested; an active cycle continues without duplication."}
 
 
 @router.post("/retry_issue")

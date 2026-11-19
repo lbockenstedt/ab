@@ -1838,10 +1838,16 @@ def _schedule_check(config):
     }
 
 
+_SCAN_CYCLE_LOCK = threading.Lock()
+
+
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
     global state
     # Reload .env and config, mark the cycle as started and load processed issues.
+    if not _SCAN_CYCLE_LOCK.acquire(blocking=False):
+        logger.info("Scan cycle already running; skipping duplicate request.")
+        return
     try:
         load_dotenv(override=True)
         config = load_config()
@@ -1942,6 +1948,8 @@ def run_scan_cycle():
                 update_task_state(task_id=cleanup_id, action="end")
             except Exception as cleanup_err:
                 logger.debug(f"Cleanup for {cleanup_id} failed: {cleanup_err}")
+    finally:
+        _SCAN_CYCLE_LOCK.release()
 
 # Captured at import (≈ process boot / post-restart). Used for the startup grace so
 # AppBuilder doesn't hammer a not-yet-ready ollama (404 /api/chat) right after a reboot.
