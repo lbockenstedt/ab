@@ -361,11 +361,11 @@ def _record_provider_result(n, status, reason=""):
 
 
 def _find_claude_cli_slot(config):
-    """Return the provider slot number (1-4) configured as claude_cli, or None."""
+    """Return the first usable claude_cli slot (1-4), or None."""
     # Check slots 1-4.
     for n in (1, 2, 3, 4):
-        provider, _, _, _ = _get_provider_config(n, config)
-        if provider == "claude_cli":
+        provider, key, model, _ = _get_provider_config(n, config)
+        if provider == "claude_cli" and _provider_configured(provider, key, model):
             return n
     return None
 
