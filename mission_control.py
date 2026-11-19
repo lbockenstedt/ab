@@ -712,6 +712,7 @@ def build(processed, pr_reviews, active_tasks=None, now=None, ci_seen=None, next
         since = _when(pr.get("state_since") or pr.get("reviewed_at"))
         item = {**base, "kind": "pr", "label": label, "why": _short(why), "panels": panel_chips(pr),
                 "approved": bool(pr.get("approved")), "findings": pr.get("findings") or 0,
+                "head": pr.get("head") or "",
                 "ci": chip[0], "ci_tone": chip[1],
                 "held_for": _duration((now - since).total_seconds()) if since and label == "Auto-merge held" else ""}
         panel_hold = label == "Auto-merge held" and "panel" in why.lower()

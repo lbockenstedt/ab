@@ -192,7 +192,7 @@ class _Env:
                    "update_pr_review": update_pr_review, "feature_allowlist": _FA,
                    "_automerge_decision": lambda *a, **k: (True, "panel approved"),
                    "approve_pr": lambda *a, **k: None,
-                   "mark_pr_approved": lambda *a, **k: None,
+                   "mark_pr_approved": lambda *a, **k: True,
                    "merge_pr": merge_pr}
         exec(_extract(_WANT_FUNCS, _WANT_ASSIGNS), self.ns)
 

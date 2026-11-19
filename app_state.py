@@ -600,11 +600,42 @@ def _stamp_pr_state(rec, prev):
         logger.debug(f"state_since stamp failed: {e}")
 
 
-def mark_pr_approved(repo, number, approved=True):
-    """Flag a reviewed PR as human-approved (set by the Approve button). Returns
-    True if the record existed and was updated."""
-    # Approval is just one field on the record, so reuse the generic updater.
-    return update_pr_review(repo, number, approved=bool(approved))
+_UNSPECIFIED_HEAD = object()
+
+
+def pr_approval_snapshot(repo, number):
+    """Read the reviewed head and approval together under the review lock."""
+    with _task_state_lock:
+        rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo, number)) or {}
+        return {"head": rec.get("head"), "approved": bool(rec.get("approved"))}
+
+
+def mark_pr_approved(repo, number, approved=True, *, expected_head=_UNSPECIFIED_HEAD):
+    """Compare-and-set approval for a reviewed head; unconditional revoke remains supported."""
+    try:
+        with _task_state_lock:
+            rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo, number))
+            if not rec:
+                return False
+            # Approval must identify an actual reviewed commit. Conditional revokes
+            # also compare None, so an old missing-head snapshot cannot clear a new review.
+            if approved and (expected_head is _UNSPECIFIED_HEAD or not expected_head):
+                return False
+            if expected_head is not _UNSPECIFIED_HEAD and rec.get("head") != expected_head:
+                return False
+            before = dict(rec)
+            try:
+                rec["approved"] = bool(approved)
+                _stamp_pr_state(rec, before)
+                save_pr_reviews(state["pr_reviews"])
+            except Exception:
+                rec.clear()
+                rec.update(before)
+                raise
+            return True
+    except Exception as e:
+        logger.error(f"mark_pr_approved failed for {repo}#{number}: {e}")
+        return False
 
 
 def _record_merge_milestone(key, fields):

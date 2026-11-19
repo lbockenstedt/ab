@@ -607,7 +607,7 @@
                         </div>
                         <div class="flex-none flex flex-row flex-wrap sm:flex-col items-stretch gap-1.5 w-full sm:w-36">
                             {% if it.kind == 'pr' and it.split %}
-                                <button type="button" data-mc="approve-merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Side with the approving panel: approve on GitHub, then merge">Approve &amp; merge</button>
+                                <button type="button" data-mc="approve-merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" data-head="{{ it.head }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Side with the approving panel: approve on GitHub, then merge">Approve &amp; merge</button>
                                 <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Run both review panels again">Retry review</button>
                                 {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
                                 <button type="button" data-mc="deny" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="text-xs text-red-600 hover:underline py-1" title="Deny this PR (closes it on GitHub)">Deny</button>
@@ -618,7 +618,7 @@
                                     <summary class="cursor-pointer text-slate-500 hover:text-navy py-1 list-none" title="More actions for this PR">More ▾</summary>
                                     <div class="absolute right-0 z-20 mt-1 w-40 bg-white border border-slate-200 rounded-md shadow-lg py-1">
                                         {% if it.approved %}<button type="button" data-mc="merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Merge this approved PR">Merge</button>
-                                        {% else %}<button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>{% endif %}
+                                        {% else %}<button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" data-head="{{ it.head }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>{% endif %}
                                         {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
                                         <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Re-run the full review now instead of waiting for the next poll">Re-review</button>
                                         <button type="button" data-mc="deny" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50" title="Deny this PR (closes it on GitHub)">Deny</button>
@@ -628,7 +628,7 @@
                                 {% if it.approved %}
                                 <button type="button" data-mc="merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Merge this approved PR">Merge</button>
                                 {% else %}
-                                <button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>
+                                <button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" data-head="{{ it.head }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>
                                 {% endif %}
                                 {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
                                 <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Re-run the full review now instead of waiting for the next poll">Re-review</button>
@@ -4329,7 +4329,7 @@
             try {
                 const resp = await fetch('/api/pr-review/approve', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ repo: repo, number: number })
+                    body: JSON.stringify({ repo: repo, number: number, head: btn && btn.dataset.head })
                 });
                 const d = await resp.json();
                 if (resp.ok && d.status === 'success') {
@@ -4523,7 +4523,7 @@
             try {
                 const resp = await fetch('/api/pr-review/approve', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ repo: repo, number: number })
+                    body: JSON.stringify({ repo: repo, number: number, head: btn.dataset.head })
                 });
                 const d = await resp.json();
                 if (!resp.ok || d.status !== 'success') {

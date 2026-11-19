@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from github import Github
-from app_state import activity_feed_items, mark_pr_approved, update_pr_review
+from app_state import activity_feed_items, mark_pr_approved, pr_approval_snapshot, update_pr_review
 from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
 import mission_control
@@ -610,8 +610,16 @@ async def pr_review_approve(request: Request):
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
         number = int(data.get("number"))
+        rendered_head = data.get("head")
     except Exception:
         return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    # The click authorizes exactly the head displayed, not a later review.
+    expected_head = (await asyncio.to_thread(pr_approval_snapshot, repo_name, number))["head"]
+    if (not isinstance(rendered_head, str) or not rendered_head.strip() or
+            rendered_head != expected_head):
+        return JSONResponse(status_code=409, content={"status": "error", "needs_approval": True,
+                            "head_moved": True,
+                            "message": "The displayed review is stale or missing; refresh and review again."})
     # Need a GitHub token.
     config = load_config()
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
@@ -623,7 +631,8 @@ async def pr_review_approve(request: Request):
         # see pr_actions.py's module docstring for why there is exactly one
         # approve implementation, not two.
         """Approve the PR on GitHub."""
-        approve_pr(Github(token), repo_name, number, actor="human")
+        _, pr = approve_pr(Github(token), repo_name, number, actor="human")
+        return getattr(getattr(pr, "head", None), "sha", None)
 
     # Approve off the event loop, then record and log it.
     try:
@@ -634,8 +643,18 @@ async def pr_review_approve(request: Request):
         # class of bug as hub_logs_raw's request_sync. A slow GitHub response
         # (or a client-side timeout mid-stall) surfaced as a network failure
         # ("TypeError: Load failed" in Safari) rather than a slow success.
-        await asyncio.get_event_loop().run_in_executor(None, _do_approve)
-        mark_pr_approved(repo_name, number, True)
+        github_head = await asyncio.get_event_loop().run_in_executor(None, _do_approve)
+        if github_head != expected_head:
+            await asyncio.to_thread(mark_pr_approved, repo_name, number, False,
+                                    expected_head=expected_head)
+            return JSONResponse(status_code=409, content={"status": "error", "needs_approval": True,
+                                "head_moved": True,
+                                "message": "The PR head changed; review and approve again."})
+        if not await asyncio.to_thread(mark_pr_approved, repo_name, number, True,
+                                       expected_head=expected_head):
+            return JSONResponse(status_code=409, content={"status": "error", "needs_approval": True,
+                                "head_moved": True,
+                                "message": "The review or PR head changed; review and approve again."})
         logger.info("pr_review: %s #%s APPROVED via UI", repo_name, number)
         return {"status": "success", "repo": repo_name, "number": number}
     # Report any failure.

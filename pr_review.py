@@ -1997,24 +1997,28 @@ def _maybe_auto_merge(gh, repo, pr, config):
         # Cleared: approve the PR, record it, and note it on the comment.
         logger.info("pr_review: auto-merging %s — %s", key, reason)
         approve_pr(gh, repo.full_name, pr.number, actor="ab-auto")
-        mark_pr_approved(repo.full_name, pr.number, True)
+        if not mark_pr_approved(repo.full_name, pr.number, True,
+                                expected_head=pr_meta.get("head_sha")):
+            logger.info("pr_review: auto-merge deferred for %s — review head changed", key)
+            return
         update_pr_review(repo.full_name, pr.number, auto_merge_score=min(
             rec.get("panel_confidence") or 0.0, rec.get("panel2_confidence") or 0.0),
             auto_merge_reason=reason, auto_merge_blocked_reason=None)
         _update_automerge_comment(pr, key, _automerge_note(reason, True))
         # Merge, then record the result.
-        status_code, result = merge_pr(gh, repo.full_name, pr.number)
+        status_code, result = merge_pr(gh, repo.full_name, pr.number,
+                                       expected_head=pr_meta.get("head_sha"))
         if status_code == 200 and result.get("status") == "success":
             update_pr_review(repo.full_name, pr.number, auto_merged=True,
                              auto_merge_refusal=None)
             logger.info("pr_review: auto-merge succeeded for %s", key)
-        elif result.get("released_checks") or result.get("infra") or result.get("deferred"):
+        elif result.get("head_moved") or result.get("released_checks") or result.get("infra") or result.get("deferred"):
             # Not a refusal to record: the PR was blocked on a check that had
             # never reported because its workflow run was parked, and merge_pr
             # just released it. Stay quiet and let the next poll merge it --
             # recording this as auto_merge_refusal would suppress that retry.
-            # Same for "infra": GitHub Actions never started the checks, and
-            # "deferred": a check still running or a merge already in flight.
+            # "infra" and "deferred" likewise retry, while "head_moved" waits
+            # for the scanner to review the new commit instead.
             logger.info("pr_review: auto-merge deferred for %s — %s",
                         key, result.get("message"))
         elif result.get("retryable") is False:
