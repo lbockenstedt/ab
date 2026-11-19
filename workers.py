@@ -733,7 +733,7 @@ def check_for_updates():
                 restore_checkout(_UPDATE_RECOVERY_COMMIT)
             except Exception as e:
                 logger.error("Unverified checkout recovery failed: %s", e)
-                return False, f"Update deferred: unverified checkout awaiting recovery ({e})."
+                return None, f"Update failed: unverified checkout recovery failed ({e})."
         old_commit = self_repo.head.commit.hexsha
 
         update_state = load_update_state()

@@ -249,7 +249,7 @@ def test_failed_rollbacks_cannot_promote_unverified_head_and_recover(updater, ki
     updater.events.clear()
 
     result = updater.check()
-    assert result[0] is False and "awaiting recovery" in result[1]
+    assert result[0] is None and "recovery failed" in result[1]
     assert updater.events == ["repo", ("reset", "old")]
     assert updater.stored["last_known_good_commit"] == "old"
     updater.scenario.update(kind="no_change", remote="old", rollback_fail=False)
@@ -262,7 +262,7 @@ def test_recovery_requires_confirmed_head_and_respects_marker_precedence(updater
     updater.ns["_UPDATE_RECOVERY_COMMIT"] = "old"
     updater.repo.head.commit.hexsha = "new"
     updater.scenario["rollback_noop"] = True
-    assert updater.check()[0] is False
+    assert updater.check()[0] is None
     assert updater.ns["_UPDATE_RECOVERY_COMMIT"] == "old"
     updater.marker.write_text("new")
     updater.events.clear()
@@ -293,9 +293,8 @@ def test_atomic_marker_failure_cleanup_is_explicit(updater, caplog):
     assert len(list(updater.marker.parent.glob("update_pending.*.tmp"))) == 1
 
 
-@pytest.mark.parametrize("updated, expected", [(False, []), (None, ["failed"]), (True, ["ok"])])
-def test_worker_intentional_skip_is_not_a_failed_restart(updater, updated, expected):
-    """Keep normal skips distinct while preserving existing success/failure logging and liveness."""
+def _run_worker_once(updater, check):
+    """Execute one real worker iteration through its liveness stamp and diagnostics."""
     class StopLoop(Exception):
         """End one real worker iteration after its finally timestamp."""
 
@@ -308,10 +307,30 @@ def test_worker_intentional_skip_is_not_a_failed_restart(updater, updated, expec
              if isinstance(node, ast.FunctionDef)
              and node.name in ("updater_worker", "_log_restart_event")]
     ns = updater.ns
-    ns.update(check_for_updates=lambda: (updated, "test outcome"),
+    ns.update(check_for_updates=check,
               datetime=datetime, time=N(sleep=stop), UPDATER_INTERVAL_SECONDS=1)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), ns)
     with pytest.raises(StopLoop):
         ns["updater_worker"]()
-    assert [row["result"] for row in updater.state.get("restart_log", [])] == expected
     assert updater.stored["last_update_check_ts"]
+
+
+@pytest.mark.parametrize("updated, expected", [(False, []), (None, ["failed"]), (True, ["ok"])])
+def test_worker_intentional_skip_is_not_a_failed_restart(updater, updated, expected):
+    """Keep normal skips distinct while preserving existing success/failure logging and liveness."""
+    _run_worker_once(updater, lambda: (updated, "test outcome"))
+    assert [row["result"] for row in updater.state.get("restart_log", [])] == expected
+
+
+def test_real_failed_recovery_is_retained_in_worker_diagnostics(updater):
+    """A reset that ran and failed must not disappear as an intentional no-work skip."""
+    updater.ns["_UPDATE_RECOVERY_COMMIT"] = "old"
+    updater.repo.head.commit.hexsha = "new"
+    updater.stored["last_known_good_commit"] = "old"
+    updater.scenario["rollback_fail"] = True
+    _run_worker_once(updater, updater.check)
+    log = updater.state.get("restart_log", [])
+    assert len(log) == 1
+    assert log[0]["result"] == "failed"
+    assert "recovery failed" in log[0]["message"]
+    assert updater.stored["last_known_good_commit"] == "old"
