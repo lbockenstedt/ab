@@ -2767,13 +2767,15 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     continue
 
                 # Apply the edits to the checkout.
-                success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                parse_feedback = {}
+                success_applied, fixes, confidence = parse_and_apply(
+                    fix_code, path, feedback_out=parse_feedback)
                 if not success_applied:
                     # Classify WHY, exactly as the issue loop does. Telling a
                     # model to "fix its JSON" when the JSON was valid but the
                     # search anchors missed is what stops retries converging.
-                    _reason = getattr(parse_and_apply, "last_reason", None) or "invalid_json"
-                    _misses = getattr(parse_and_apply, "last_failures", None) or []
+                    _reason = parse_feedback.get("last_reason") or "invalid_json"
+                    _misses = parse_feedback.get("last_failures") or []
                     if _reason == "edit_anchor_miss":
                         last_failure = (
                             "The JSON was valid, but the edits' \"search\" text was not found in the "
@@ -2803,7 +2805,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                             "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
                             "budget: %s | model said: %r", repo_full_name, number, barren,
                             max_barren, last_failure,
-                            getattr(parse_and_apply, "last_raw_prefix", "") or "<nothing>")
+                            parse_feedback.get("last_raw_prefix") or "<nothing>")
                         continue
                     if is_last:
                         return False, last_failure

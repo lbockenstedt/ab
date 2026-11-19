@@ -4800,19 +4800,20 @@ def _syntax_regressed(rel_path, old_text, new_text):
         return False
 
 
-def parse_and_apply(content, repo_path):
+def parse_and_apply(content, repo_path, *, feedback_out=None):
     """Parse a model's fix JSON (targeted edits or whole files) and apply it under repo_path.
-    Returns (ok, fixes, confidence); sets last_reason/last_failures for the retry loop.
+    Return (ok, fixes, confidence); write diagnostics to optional caller-owned feedback_out.
     """
     import re as _re, ast as _ast
-    parse_and_apply.last_failures = []   # reset per call; read by the retry loop
+    feedback = {} if feedback_out is None else feedback_out
+    feedback["last_failures"] = []   # reset per call; read by the retry loop
     # Coarse reason for the LAST return, read by the retry loop so it can give
     # the model accurate feedback. "invalid_json" is NOT a catch-all: a valid
     # JSON object whose edit anchors simply didn't match the file is a
     # different failure ("edit_anchor_miss") that needs different feedback —
     # conflating them made the model keep repeating a well-formed but
     # non-matching edit while being told its JSON was malformed.
-    parse_and_apply.last_reason = "unknown"
+    feedback["last_reason"] = "unknown"
     # What the model ACTUALLY said, for the caller's barren log line. A barren
     # reply (empty / no_json / invalid_json) is the one failure mode that
     # carries no structured signal, so the raw prefix is the only evidence of
@@ -4822,11 +4823,11 @@ def parse_and_apply(content, repo_path):
     # a model that was replying in prose indistinguishable from one that was not
     # being called at all. Bounded hard: this is untrusted model output on its
     # way into the log.
-    parse_and_apply.last_raw_prefix = (content or "")[:240]
+    feedback["last_raw_prefix"] = (content or "")[:240]
     # --- Locate a JSON / Python-dict object in the LLM response ---
     if not content or not content.strip():
         logger.debug("parse_and_apply: empty content — expected retry case.")
-        parse_and_apply.last_reason = "empty"
+        feedback["last_reason"] = "empty"
         return False, {}, 0.0
 
     # Take the outermost {...} block from the reply.
@@ -4849,7 +4850,7 @@ def parse_and_apply(content, repo_path):
                 # LLM returned prose / "None" / refusal — no JSON object present.
                 # This is a non-error transient failure; caller will retry.
                 logger.debug(f"parse_and_apply: no JSON object in response (first 120 chars: {content[:120]!r})")
-                parse_and_apply.last_reason = "no_json"
+                feedback["last_reason"] = "no_json"
                 return False, {}, 0.0
             raw = content[brace:]
 
@@ -4949,7 +4950,7 @@ def parse_and_apply(content, repo_path):
                                     f"{'response truncated mid-object' if truncated else ast_err} — "
                                     f"raw content ({len(content)} chars): {content[:1500]!r}"
                                 )
-                                parse_and_apply.last_reason = (
+                                feedback["last_reason"] = (
                                     "truncated_json" if truncated else "invalid_json")
                                 return False, {}, 0.0
 
@@ -4966,13 +4967,13 @@ def parse_and_apply(content, repo_path):
             for ed in edits:
                 if isinstance(ed, dict) and ed.get("search") == "":
                     filepath = ed.get("file") or ed.get("filepath") or ed.get("path")
-                    parse_and_apply.last_failures.append(
+                    feedback["last_failures"].append(
                         f"{filepath}: search must be non-empty exact text from the file; "
                         "to create a new file, provide its full content under 'fixes'")
-            if parse_and_apply.last_failures:
-                parse_and_apply.last_reason = "edit_anchor_miss"
+            if feedback["last_failures"]:
+                feedback["last_reason"] = "edit_anchor_miss"
                 logger.warning("Rejected edit batch before writing: %s",
-                               "; ".join(parse_and_apply.last_failures))
+                               "; ".join(feedback["last_failures"]))
                 return False, {}, 0.0
 
         # --- 1) Targeted search/replace edits (preferred) -------------------
@@ -4982,11 +4983,11 @@ def parse_and_apply(content, repo_path):
         # applied) files whose content actually changed.
         if isinstance(edits, list) and edits:
             orig_contents, file_contents = {}, {}
-            # Reasons an edit could not be applied, published on the function
-            # attribute below so the retry loop can tell the model exactly which
+            # Reasons an edit could not be applied, captured in caller-owned
+            # feedback so the retry loop can tell the model exactly which
             # anchor missed. Kept off the return value to preserve the existing
             # (ok, fixes, confidence) contract used by three call sites.
-            _miss = parse_and_apply.last_failures = []
+            _miss = feedback["last_failures"] = []
             # Apply each edit in turn.
             for ed in edits:
                 # Skip edits that are not objects.
@@ -5119,7 +5120,7 @@ def parse_and_apply(content, repo_path):
                         f"marker — the model did not reproduce the whole file; applying it would delete "
                         f"real code."
                     )
-                    parse_and_apply.last_reason = "unsafe_rewrite"
+                    feedback["last_reason"] = "unsafe_rewrite"
                     return False, {}, 0.0
                 # Reject rewrites that shrink a sizeable file by more than 60%.
                 old_lines = existing.count("\n") + 1
@@ -5130,7 +5131,7 @@ def parse_and_apply(content, repo_path):
                         f"{new_lines} lines (>60% deleted) — almost certainly a truncated rewrite, "
                         f"not a targeted fix."
                     )
-                    parse_and_apply.last_reason = "unsafe_rewrite"
+                    feedback["last_reason"] = "unsafe_rewrite"
                     return False, {}, 0.0
                 # Reject rewrites that break Python syntax.
                 if _syntax_regressed(filepath, existing, new_code):
@@ -5138,7 +5139,7 @@ def parse_and_apply(content, repo_path):
                         f"ABORTING fix: the rewritten {filepath} does not parse, but the file it "
                         f"replaces did — the model's output was truncated or malformed."
                     )
-                    parse_and_apply.last_reason = "unsafe_rewrite"
+                    feedback["last_reason"] = "unsafe_rewrite"
                     return False, {}, 0.0
             # Write the new file contents.
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -5148,18 +5149,18 @@ def parse_and_apply(content, repo_path):
             logger.info(f"Applied fix to file: {filepath}")
         # Nothing applied: log why and fail.
         if not applied:
-            _detail = "; ".join(parse_and_apply.last_failures or []) or \
+            _detail = "; ".join(feedback["last_failures"] or []) or \
                       "all edits rejected as unsafe or out-of-repo"
             logger.error(f"No fixes could be applied ({_detail}).")
             # Valid JSON that produced no change. Distinguish the two shapes so
             # the retry can give targeted feedback: edits present but every
             # anchor missed the file (requote the exact text) vs no edits/fixes
             # at all (return a non-empty edits array).
-            parse_and_apply.last_reason = (
-                "edit_anchor_miss" if parse_and_apply.last_failures else "no_edits")
+            feedback["last_reason"] = (
+                "edit_anchor_miss" if feedback["last_failures"] else "no_edits")
             return False, {}, 0.0
         # Success: clear the failure reason.
-        parse_and_apply.last_reason = None
+        feedback["last_reason"] = None
         return True, applied, confidence
     # Any unexpected error: log the raw reply and fail.
     except Exception as e:
@@ -5167,7 +5168,7 @@ def parse_and_apply(content, repo_path):
             f"Error parsing or applying JSON fix: {e} — "
             f"raw content ({len(content)} chars): {content[:1500]!r}"
         )
-        parse_and_apply.last_reason = "exception"
+        feedback["last_reason"] = "exception"
         return False, {}, 0.0
 
 
@@ -5688,9 +5689,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
                     # --- Resume from awaiting_review ---
                     pending_fix = issue_info.get("pending_fix") if attempt == 1 and issue_info.get("status") == "awaiting_review" else None
+                    parse_feedback = {}
                     if pending_fix:
                         logger.info(f"Resuming from queued review for {issue_id} using saved fix.")
-                        success_applied, fixes, confidence = parse_and_apply(json.dumps(pending_fix), path)
+                        success_applied, fixes, confidence = parse_and_apply(
+                            json.dumps(pending_fix), path, feedback_out=parse_feedback)
                         # Clear the pending status now that we're processing it
                         def resume_review(current):
                             """A deleted record must not be restored by a stale resume."""
@@ -5704,7 +5707,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out,
                                                 retarget=(last_failure.get("kind") == "review_rejected"),
                                                 avoid_paths=sorted(modified_paths))
-                        success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                        success_applied, fixes, confidence = parse_and_apply(
+                            fix_code, path, feedback_out=parse_feedback)
                     # Remember which model built this fix.
                     built_key = used_model_out.get("key")
                     if isinstance(built_key, tuple) and built_key:
@@ -5720,8 +5724,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         # #834 fail 3× : the JSON was valid, but the edits' search
                         # anchors didn't match the file, and the model was told to
                         # fix its JSON instead of to requote the file text.
-                        _reason = getattr(parse_and_apply, "last_reason", None) or "invalid_json"
-                        _misses = getattr(parse_and_apply, "last_failures", None) or []
+                        _reason = parse_feedback.get("last_reason") or "invalid_json"
+                        _misses = parse_feedback.get("last_failures") or []
                         if _reason == "edit_anchor_miss":
                             _detail = "; ".join(_misses)[:800]
                             failure_msg = (
@@ -5768,7 +5772,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             failure_msg = "AI generated invalid JSON format"
                             _kind = "invalid_json"
                         # Log the start of the raw reply and which model produced it.
-                        _raw_prefix = getattr(parse_and_apply, "last_raw_prefix", "") or ""
+                        _raw_prefix = parse_feedback.get("last_raw_prefix") or ""
                         _model = "/".join(str(p) for p in built_key if p) if built_key else "unknown"
                         # The only evidence of WHY an unusable reply happened —
                         # it was captured but never logged, leaving "invalid JSON"
