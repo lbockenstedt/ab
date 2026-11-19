@@ -15,6 +15,7 @@ a cycle."""
 STALL_LIMIT = 2      # pr_remediate_stall_limit: heads in a row without progress = thrash (0 = off)
 MIN_GAIN = 0.03      # pr_remediate_min_gain: confidence gain that counts as progress
 REWORK_LIMIT = 1     # pr_remediate_rework_limit: consolidated reworks before hand-off (0 = none, at most 3)
+REWORK_DEFER_HOURS = 24  # pr_remediate_rework_defer_hours: how long a deferred rework waits for a model (0 = no wait, at most 168)
 HISTORY_KEEP = 6     # scored heads kept in a PR record's review_history
 CRITIQUE_CAP = 3000  # characters kept of each panel critique in review_history
 
@@ -43,6 +44,17 @@ def rework_limit(cfg=None):
     0..3. A rework is not charged as an attempt, so this cap is what bounds
     them (fleet rule 10.3), like the premium and barren budgets' 3."""
     return _knob(cfg, "pr_remediate_rework_limit", REWORK_LIMIT, int, 0, 3)
+
+
+def rework_defer_hours(cfg=None):
+    """Hours a consolidated rework may wait for a model that is cooling down,
+    or for a model list that cannot be read, before it is treated as having
+    no model, 0..168 (0: it never waits). A cooldown can re-arm on every
+    retry (credits that do not come back, an endpoint that keeps failing), so
+    the wait needs an end, or the merge stays held and the PR is never handed
+    to a human. The default, 24 hours, is many times the usual cooldown (an
+    hour for credits), so a model that is coming back has time to."""
+    return _knob(cfg, "pr_remediate_rework_defer_hours", REWORK_DEFER_HOURS, float, 0.0, 168.0)
 
 
 def made_progress(score, best, gain_needed=MIN_GAIN):

@@ -12,6 +12,7 @@ skip and at the attempt cap (pr_remediate), and the rework fix prompt
 (pr_review.fix_one_pr, via the AST harness of test_pr_fix_retry_feedback).
 """
 import threading
+import time
 import types
 
 import pytest
@@ -60,6 +61,9 @@ def test_the_knobs_default_and_clamp():
     assert rp.rework_limit({"pr_remediate_rework_limit": -2}) == 0
     assert rp.rework_limit({"pr_remediate_rework_limit": None}) == 1
     assert rp.stall_limit({"pr_remediate_stall_limit": 0}) == 0
+    assert rp.rework_defer_hours() == 24
+    assert rp.rework_defer_hours({"pr_remediate_rework_defer_hours": 999}) == 168
+    assert rp.rework_defer_hours({"pr_remediate_rework_defer_hours": ""}) == 24
 
 
 def test_upsert_replaces_by_key_and_keeps_the_newest():
@@ -422,6 +426,46 @@ def test_a_rework_whose_models_are_cooling_down_is_deferred(pr_state, monkeypatc
     assert fix.calls == [] and pr.comments == []
 
 
+def test_a_deferred_rework_waits_a_bounded_time(pr_state, monkeypatch):
+    """A cooldown can re-arm on every retry, so a deferred rework waits at
+    most pr_remediate_rework_defer_hours from its first deferral at a head.
+    The wait is stamped once per head; once it is over the rework has no
+    model: a stalled PR waits for a new head, which starts a new wait, and a
+    PR out of attempts goes to a human. A wait of 0 never waits. It used to
+    defer for good, so a PR out of attempts was never handed on."""
+    _configure(monkeypatch, _cand("gpt-5.6-sol", available=False,
+                                  unavailable_reason="credit_cooldown"), _cand("claude-fable-5"))
+    deferred = (False, "consolidated rework deferred: every model that can run it is in a "
+                       "timed cooldown")
+    why = (" (no model could run a consolidated rework within 24 hour(s): every model that "
+           "can run it is in a timed cooldown)")
+    fix, pr, day_ago = _Fix(), _PR(), time.time() - 25 * 3600
+    stalled = pr_state(remediation_attempts=0, remediation_stalls=2)
+    assert pr_remediate.auto_remediate_pr(None, _Repo(), pr, CAP, fix_fn=fix, rework=True) == deferred
+    stamp = dict(stalled["remediation_rework_deferred"])
+    assert stamp["head"] == "h1" and time.time() - stamp["at"] < 60
+    assert pr_remediate.auto_remediate_pr(None, _Repo(), pr, CAP, fix_fn=fix, rework=True) == deferred
+    assert stalled["remediation_rework_deferred"] == stamp
+    stalled["remediation_rework_deferred"] = {"head": "h1", "at": day_ago}
+    assert pr_remediate.auto_remediate_pr(None, _Repo(), pr, CAP, fix_fn=fix, rework=True) == (
+        False, "remediation stalled" + why)
+    assert stalled.get("auto_remediate_status") is None
+    assert pr_remediate.auto_remediate_pr(None, _Repo(), _PR("h2"), CAP, fix_fn=fix,
+                                          rework=True) == deferred
+    assert stalled["remediation_rework_deferred"]["head"] == "h2"
+    capped = pr_state(remediation_attempts=3, premium_attempts=1,
+                      remediation_rework_deferred={"head": "h1", "at": day_ago})
+    assert pr_remediate.auto_remediate_pr(None, _Repo(), pr, CAP, fix_fn=fix) == (
+        False, "Remediation attempt limit reached" + why)
+    assert capped["auto_remediate_status"] == "exhausted_human_review"
+    assert len(pr.comments) == 1 and why.strip() in pr.comments[0]
+    pr_state(remediation_attempts=0, remediation_stalls=2)
+    no_wait = dict(CAP, pr_remediate_rework_defer_hours=0)
+    assert pr_remediate.auto_remediate_pr(None, _Repo(), pr, no_wait, fix_fn=fix, rework=True) == (
+        False, "remediation stalled" + why.replace(" 24 ", " 0 "))
+    assert fix.calls == []
+
+
 def test_a_rework_waits_for_a_cooling_opus_model(pr_state, monkeypatch):
     """A rework prefers the Opus-class models, as the last ordinary turn
     does: while Opus is only cooling down it waits rather than taking gpt,
@@ -607,8 +651,9 @@ def test_a_rework_still_respects_every_containment_gate(pr_state, remediate_call
 def test_a_rework_still_to_run_holds_the_merge(pr_state, monkeypatch):
     """remediation_pending holds auto-merge while a consolidated rework is
     still to run (rework_pending): at a stall, at the attempt cap, and while
-    it is deferred. It stops holding once the rework ran at this head, or
-    when no model can run it."""
+    it is deferred, for at most pr_remediate_rework_defer_hours from the
+    first deferral at this head. It stops holding once the rework ran at
+    this head, when no model can run it, or once that wait is over."""
     import llm_client
     stalled = pr_state(head="h1", remediation_stalls=2)
     capped = pr_state(head="h1", remediation_attempts=3, premium_attempts=1)
@@ -626,6 +671,17 @@ def test_a_rework_still_to_run_holds_the_merge(pr_state, monkeypatch):
     monkeypatch.setattr(llm_client, "_enumerate_candidates", _down)
     assert pr_remediate.remediation_pending(stalled, CAP)[0] is True
     assert pr_remediate.remediation_pending(capped, CAP)[0] is True
+    # A stamp for another head starts no wait; 0 hours never waits.
+    day_ago = time.time() - 25 * 3600
+    for rec in (stalled, capped):
+        rec["remediation_rework_deferred"] = {"head": "h0", "at": day_ago}
+        assert pr_remediate.remediation_pending(rec, CAP)[0] is True
+        assert pr_remediate.remediation_pending(
+            rec, dict(CAP, pr_remediate_rework_defer_hours=0))[0] is False
+        rec["remediation_rework_deferred"] = {"head": "h1", "at": day_ago}
+        assert pr_remediate.remediation_pending(rec, CAP)[0] is False
+        assert pr_remediate.remediation_pending(
+            rec, dict(CAP, pr_remediate_rework_defer_hours=48))[0] is True
 
 
 def _files(*paths):

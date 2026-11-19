@@ -409,6 +409,13 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                     "head": (head_sha or "")[:12], "score": pass_score,
                     "panel_critique": panel_critique[:cap], "panel2_critique": panel2_critique[:cap],
                     "at": datetime.now().isoformat(timespec="seconds")}, review_progress.HISTORY_KEEP)
+            # When a consolidated rework at this head was first deferred for want
+            # of a model (pr_remediate._rework_wait_over). Kept across a re-review,
+            # which would otherwise restart the wait so it never ends; dropped at
+            # a new head, which starts it afresh.
+            rework_deferred = prev.get("remediation_rework_deferred")
+            if not (isinstance(rework_deferred, dict) and rework_deferred.get("head") == head_sha):
+                rework_deferred = None
             # Rebuild the record from this scan plus the carried-over sticky fields.
             state["pr_reviews"][key] = {
                 "repo": repo,
@@ -544,6 +551,7 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 # restart or re-scan never repeats one (pr_remediate.rework_available).
                 "remediation_reworks": int(prev.get("remediation_reworks") or 0),
                 "remediation_rework_head": prev.get("remediation_rework_head"),
+                "remediation_rework_deferred": rework_deferred,
                 # The last notice pr_remediate posted, stamped "marker@head" by
                 # _post_once. Dropping it let a rework given back (it did no
                 # work, so nothing latched) be announced again on the same head

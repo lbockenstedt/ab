@@ -99,6 +99,21 @@ def test_guardrail_block_survives_head_change(pr_env):
     assert state["pr_reviews"]["o/r#1"]["auto_remediate_blocked"] is True
 
 
+def test_a_rework_deferral_survives_a_rescan_but_not_a_new_head(pr_env):
+    """A deferred rework waits a bounded time from its first deferral at a
+    head (pr_remediate._rework_wait_over). Dropping the stamp on a re-review
+    of that head would restart the wait on every scan, so it never ends; a
+    new head starts a new wait."""
+    record, update, state = pr_env
+    record("o/r", 1, "t", "u", [], "sha1")
+    stamp = {"head": "sha1", "at": 1000.0}
+    update("o/r", 1, remediation_rework_deferred=stamp)
+    record("o/r", 1, "t", "u", [], "sha1")
+    assert state["pr_reviews"]["o/r#1"]["remediation_rework_deferred"] == stamp
+    record("o/r", 1, "t", "u", [], "sha2")
+    assert state["pr_reviews"]["o/r#1"]["remediation_rework_deferred"] is None
+
+
 def test_fresh_pr_starts_with_a_full_budget(pr_env):
     record, _update, state = pr_env
     record("o/r", 2, "t", "u", [], "sha1")

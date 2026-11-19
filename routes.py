@@ -2626,6 +2626,8 @@ def ensure_config_defaults(config):
     config.setdefault("pr_remediate_stall_limit", 2)
     config.setdefault("pr_remediate_min_gain", 0.03)
     config.setdefault("pr_remediate_rework_limit", 1)
+    # A rework that no model can run yet waits this many hours, at most, for one.
+    config.setdefault("pr_remediate_rework_defer_hours", 24)
     # AppBuilder's remediation OBJECTIVE, in one number: keep repairing a PR
     # until BOTH panels Approve at or above this confidence. See
     # pr_remediate.should_remediate — the single choke point that reads it.
@@ -2712,6 +2714,7 @@ async def settings_page(request: Request):
     config.setdefault("pr_remediate_stall_limit", 2)
     config.setdefault("pr_remediate_min_gain", 0.03)
     config.setdefault("pr_remediate_rework_limit", 1)
+    config.setdefault("pr_remediate_rework_defer_hours", 24)
     config.setdefault("pr_remediate_target_score", PR_REMEDIATE_DEFAULT_TARGET)
     config.setdefault("pr_remediate_address_all_concerns", True)
     config.setdefault("feature_automerge_docs_bypass_panel", True)
@@ -3313,6 +3316,7 @@ async def save_settings(request: Request):
         # Review-thrash knobs, clamped by the same helpers that read them.
         "pr_remediate_min_gain": lambda v: _rp.min_gain({"pr_remediate_min_gain": v}),
         "pr_remediate_rework_limit": lambda v: _rp.rework_limit({"pr_remediate_rework_limit": v}),
+        "pr_remediate_rework_defer_hours": lambda v: _rp.rework_defer_hours({"pr_remediate_rework_defer_hours": v}),
     }
 
 

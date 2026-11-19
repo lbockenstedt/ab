@@ -9,6 +9,7 @@ escalation, and PR remediation orchestration.
 import logging
 import re
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 # ab's own checks and helpers used by the guardrails and remediation flow.
@@ -704,7 +705,32 @@ def rework_available(rec, config, head_sha):
 
 class ReworkDeferred(Exception):
     """A consolidated rework cannot start yet but may on a later scan; the
-    message says why. Not a hand-off: the scan retries it, uncounted."""
+    message says why. Not a hand-off: the scan retries it, uncounted, for at
+    most pr_remediate_rework_defer_hours (_rework_wait_over)."""
+
+
+def _rework_deferred_at(rec, head_sha):
+    """When the consolidated rework at ``head_sha`` was first deferred, in
+    epoch seconds; None when it was not, or the stamp is for another head or
+    unreadable (the next deferral then stamps it afresh)."""
+    stamp = rec.get("remediation_rework_deferred")
+    if not (head_sha and isinstance(stamp, dict) and stamp.get("head") == head_sha):
+        return None
+    try:
+        return float(stamp.get("at"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _rework_wait_over(rec, config, head_sha):
+    """True once a deferred consolidated rework at ``head_sha`` has waited
+    pr_remediate_rework_defer_hours for a model since its first deferral, or
+    at once when that is 0. The rework is then treated as having no model,
+    so the PR is handed on rather than held for good: a cooldown can re-arm
+    on every retry, and remediation_pending must never deadlock a PR."""
+    hours = review_progress.rework_defer_hours(config)
+    since = _rework_deferred_at(rec, head_sha)
+    return hours <= 0 or (since is not None and time.time() - since >= hours * 3600)
 
 
 def _rework_requirements(config, rec):
@@ -725,10 +751,11 @@ def _rework_requirements(config, rec):
     there, or removed until restart (dead_model), is no pool. One that is only
     cooling down (llm_client.TIMED_UNAVAILABLE) will be back, so the rework is
     deferred for it, as it is when the models cannot be listed: "couldn't
-    ask" is not "nothing there". The Opus-class models are preferred, as on
-    the last ordinary turn (_last_turn_fix_exclusions): while one can run the
-    rework, now or after its cooldown, the rework waits for it rather than
-    taking a weaker model.
+    ask" is not "nothing there". The callers bound that wait
+    (_rework_wait_over), because a cooldown can re-arm on every retry. The
+    Opus-class models are preferred, as on the last ordinary turn
+    (_last_turn_fix_exclusions): while one can run the rework, now or after
+    its cooldown, the rework waits for it rather than taking a weaker model.
     """
     import fix_engine
     import llm_client
@@ -768,14 +795,15 @@ def _rework_requirements(config, rec):
 def rework_pending(rec, config, head_sha):
     """True while a consolidated rework is still to run at ``head_sha``: one
     is available (rework_available) and a model can run it, now or once a
-    timed cooldown ends (_rework_requirements). The merge gate holds for it,
-    because _remediate runs it rather than stopping."""
+    timed cooldown ends (_rework_requirements), within the deferral wait
+    (_rework_wait_over). The merge gate holds for it, because _remediate runs
+    it rather than stopping."""
     if not rework_available(rec, config, head_sha):
         return False
     try:
         return _rework_requirements(config, rec) is not None
     except ReworkDeferred:
-        return True
+        return not _rework_wait_over(rec, config, head_sha)
 
 
 def _rework_note(rec):
@@ -838,7 +866,8 @@ def remediation_pending(rec, config, pr_files=None):
     stalled PR, or one out of attempts, still holds while its consolidated
     rework is to run (rework_pending): _remediate runs it, or defers it only
     while every model that can run it is cooling down or the models cannot
-    be listed, rather than stopping.
+    be listed, for at most pr_remediate_rework_defer_hours, rather than
+    stopping.
 
     pr_files is the PR's changed files (pr.get_files()), for the docs-only
     skip; maybe_auto_remediate never remediates such a PR, so waiting for it
@@ -1185,21 +1214,31 @@ def _remediate(gh, repo, pr, config, fix_fn, deficit, rework):
     # (_rework_requirements). One that cannot start yet -- the models cannot
     # be listed, or every model that can run it is cooling down -- is
     # deferred, uncounted, to the next scan rather than handing the PR to a
-    # human ("couldn't ask" is not "nothing there"). With no model that can
-    # ever run it, it does not run: a stalled PR waits for a new head, as when
-    # its rework is spent, and a PR out of attempts goes to a human.
+    # human ("couldn't ask" is not "nothing there"), but for at most
+    # pr_remediate_rework_defer_hours from its first deferral at this head:
+    # a cooldown can re-arm for good. Past that, or with no model that can
+    # ever run it, it does not run: a stalled PR waits for a new head, as
+    # when its rework is spent, and a PR out of attempts goes to a human.
     rework_reqs, no_pool = None, ""
     if rework:
         try:
             rework_reqs = _rework_requirements(config, rec)
         except ReworkDeferred as e:
-            reason = "consolidated rework deferred: %s" % e
-            logger.warning("auto_remediate_pr: %s — %s%s", key, reason,
-                           ": %s" % e.__cause__ if e.__cause__ else "")
-            update_pr_review(repo_full_name, pr.number, auto_remediate_reason=reason)
-            return False, reason
+            if not _rework_wait_over(rec, config, head_sha):
+                reason = "consolidated rework deferred: %s" % e
+                logger.warning("auto_remediate_pr: %s — %s%s", key, reason,
+                               ": %s" % e.__cause__ if e.__cause__ else "")
+                # The first deferral at this head starts the wait.
+                fields = {"auto_remediate_reason": reason}
+                if _rework_deferred_at(rec, head_sha) is None:
+                    fields["remediation_rework_deferred"] = {"head": head_sha, "at": time.time()}
+                update_pr_review(repo_full_name, pr.number, **fields)
+                return False, reason
+            no_pool = (" (no model could run a consolidated rework within %g hour(s): %s)"
+                       % (review_progress.rework_defer_hours(config), e))
     if rework and rework_reqs is None:
-        rework, no_pool = False, " (no model outside the premium tier can run a consolidated rework)"
+        rework = False
+        no_pool = no_pool or " (no model outside the premium tier can run a consolidated rework)"
         if not exhausted:
             update_pr_review(repo_full_name, pr.number,
                              auto_remediate_reason="remediation stalled" + no_pool)
