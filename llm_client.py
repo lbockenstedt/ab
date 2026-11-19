@@ -3135,6 +3135,12 @@ def _apply_capability_floor(candidates, config):
             if model_registry.capability_rank(c.get("caps") or {}) >= min_rank]
 
 
+#: The unavailable_reason values _enumerate_candidates sets that end on their
+#: own: the model is back in the pool once the cooldown or back-off elapses.
+#: "dead_model" is not one: a routed 404 is kept until AppBuilder restarts.
+TIMED_UNAVAILABLE = frozenset({"credit_cooldown", "rate_limited", "hard_failing"})
+
+
 def _enumerate_candidates(config):
     """Every USABLE endpoint as plain dicts for model_selection.select_model
     — the impure boundary the redesign plan calls for: config reads, live
@@ -3165,12 +3171,11 @@ def _enumerate_candidates(config):
             available, unavailable_reason = False, "dead_model"
         elif _entry_is_unhealthy(key):
             # A hard error every call (e.g. a model/endpoint pairing the
-            # provider's API rejects outright) has no timed recovery like a
-            # rate/credit cooldown does — it stays excluded from the picker's
-            # pool until a call succeeds again (an operator fixes the entry,
-            # or the provider starts serving that model). See
-            # _entry_is_unhealthy's docstring for why this must share state
-            # with the Settings badge rather than compute its own check.
+            # provider's API rejects outright). Timed, like a rate or credit
+            # cooldown: it stays out of the picker's pool until its
+            # retry_after elapses, then one real call is let through (see
+            # _entry_is_unhealthy's docstring, also for why this must share
+            # state with the Settings badge rather than compute its own check).
             available, unavailable_reason = False, "hard_failing"
         # Add it either way, with availability and reason.
         candidates.append({

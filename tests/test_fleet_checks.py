@@ -308,3 +308,81 @@ def test_cli_allows_version_brought_forward_from_main(tmp_path):
     (tmp_path / "VERSION").write_text("9.9.9\n")
     run("commit", "-qam", "hand edit")
     assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x", "--head-ref", ""]) == 1
+
+
+# --- scope budget -------------------------------------------------------------
+def test_scope_budget_notes_too_many_files_or_lines():
+    """The NAC change grew from 6 files to 52 in review: more than 15 source
+    files, or more than 1,500 code lines, is over budget, and only a note."""
+    wide = [_file("core/src/routes/m%d.py" % n, "x = %d" % n) for n in range(16)]
+    out = fc.check_change_scope(wide)
+    assert [f["level"] for f in out] == ["advisory"] and "in 16 files" in out[0]["detail"]
+    assert fc.blocking(out) == []
+    code = ["x%d = 1" % n for n in range(1501)]
+    assert "1,501 source lines in 1 files" in fc.check_change_scope([_file("core/src/main.py", *code)])[0]["detail"]
+    assert fc.check_change_scope(wide[:15]) == []
+    assert fc.check_change_scope([_file("core/src/main.py", *code[:1500])]) == []
+
+
+def test_scope_budget_counts_only_code():
+    """Tests, docs, comments, blank lines, removed files and deletion-only
+    edits don't count, and promotions carry units already reviewed on dev."""
+    big = ["x%d = 1" % n for n in range(1600)]
+    rest = [_file("tests/test_m%d.py" % n, *big) for n in range(20)]
+    rest += [_file("docs/m%d.md" % n, *big) for n in range(20)]
+    rest += [_file("core/src/a.py", *(["# step"] * 800 + ["", "   "] * 400), "x = 1")]
+    rest += [_file("WebUI/js/a.js", *(["// why", " * doc", "/* note */"] * 300), "go();")]
+    rest += [_file("core/src/gone%d.py" % n, "x = 1", status="removed") for n in range(20)]
+    rest += [_diff("core/src/trim%d.py" % n, removed=["x = 1"]) for n in range(20)]
+    assert fc.check_change_scope(rest) == []
+    wide = [_file("core/src/m%d.py" % n, "x = 1") for n in range(16)]
+    assert fc.check_change_scope(wide, "promote/dev-to-qa") == []
+    assert fc.check_change_scope(wide, "backmerge/main-to-qa") == []
+
+
+def test_scope_budget_skips_docstrings_but_counts_strings():
+    """Docstring and comment commits (pxmx 983ca9d9, cs 03194c7d) add no code,
+    even in a hunk that starts inside a long docstring, so docstrings come from
+    the whole new file. Data strings, Python '*args' and shell '*)' lines
+    count; with no file to read, docstrings count as code."""
+    new = ['"""Module summary.', "", "More.", "Added detail.", '"""', "# Step comment.", "import os",
+           'Q = """', "SELECT 1", '"""', "def f(*args):", '    r"""One line."""', "    return g(",
+           "        *args)"]
+    added = {4, 6, 8, 9, 10, 11, 12, 13, 14}
+    patch = "\n".join(["@@ -3,3 +3,12 @@"] + [("+" if n in added else " ") + new[n - 1]
+                                             for n in range(3, 15)])
+    assert fc._code_lines("core/src/a.py", patch, "\n".join(new)) == 6
+    assert fc._code_lines("core/src/a.py", patch) == 8
+    assert fc._code_lines("scripts/a.sh", _p("case $1 in", "  *) exit 1 ;;", "esac", "# note")) == 3
+
+
+def test_scope_note_reaches_ci_but_not_the_pr_fix(tmp_path, capsys):
+    """CI and smoke.sh print the note and still pass; check_fleet_rules, whose
+    findings AB's PR fix hands to the model as work, leaves it out. The new
+    files are read for docstrings, so 16 files that only gain a docstring line,
+    in hunks that start inside the docstring, are not over budget."""
+    import subprocess
+    run = lambda *a: subprocess.run(["git", "-C", str(tmp_path), *a], check=True,
+                                    capture_output=True, text=True).stdout.strip()
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    doc = ['"""Summary.'] + ["Line %d." % n for n in range(8)] + ['"""', "x = 1"]
+    for n in range(16):
+        (tmp_path / ("m%d.py" % n)).write_text("\n".join(doc) + "\n")
+    run("add", "-A")
+    run("commit", "-qm", "init")
+    base = run("rev-parse", "HEAD")
+    for n in range(16):
+        (tmp_path / ("m%d.py" % n)).write_text("\n".join(doc[:8] + ["Added."] + doc[8:]) + "\n")
+    run("commit", "-qam", "docstrings")
+    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x", "--head-ref", ""]) == 0
+    assert "scope budget" not in capsys.readouterr().out
+    for n in range(16):
+        (tmp_path / ("m%d.json" % n)).write_text('{"n": %d}\n' % n)
+    run("add", "-A")
+    run("commit", "-qm", "wide")
+    assert fc.main(["--base", base, "--path", str(tmp_path), "--repo", "o/x", "--head-ref", ""]) == 0
+    out = capsys.readouterr().out
+    assert "::notice title=Change is over the review scope budget::" in out and "1 note(s)" in out
+    assert fc.check_fleet_rules(fc.local_diff_files(str(tmp_path), base), "o/x") == []

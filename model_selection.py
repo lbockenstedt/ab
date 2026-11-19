@@ -55,7 +55,7 @@ class LlmRequirements:
     must_escalate_to_human: bool = False       # consumed by the caller when select_model returns None
     restrict: str | None = None                # "local"|"cloud"|"claude" — HARD filter
     pin_key: str | None = None                 # exact ModelKey "provider|base_url|model" — HARD pin (chat_pin)
-    exclude_models: tuple = ()                 # ModelKeys already burned this run
+    exclude_models: tuple = ()                 # ModelKeys or model names already burned (is_excluded)
     prefer_capable: bool = False               # invert tier preference: pick the SMARTEST tier
                                                # first (frontier>cheap>free) instead of cheapest —
                                                # for the planner/router turn ("fast AND smart")
@@ -105,6 +105,17 @@ def _canon_key(k):
         b, _, m = rest.partition("|")
     # Lower-case the provider and strip whitespace and trailing "/" so equal keys compare equal.
     return ((p or "").lower().strip(), (b or "").strip().rstrip("/"), (m or "").strip())
+
+
+def is_excluded(c, exclude_models):
+    """Is candidate ``c`` in ``exclude_models``? An entry is either a ModelKey,
+    in any form _canon_key accepts, or a bare model name. PR remediation stores
+    the models that failed on a PR by name (``excluded_models``), so a name
+    excludes that model on every endpoint that serves it. Comparing keys only
+    let a retry, or a consolidated rework, pick a model that had already
+    failed."""
+    key = _canon_key(c.get("key"))
+    return any(e == c.get("model") or _canon_key(e) == key for e in exclude_models or ())
 
 
 def _passes_restriction(candidate, restrict):
@@ -307,7 +318,7 @@ def _select_pass(reqs, candidates, perf, slow_factor, min_samples, allow_unknown
         if not c.get("available", True):
             continue
         # Already tried and failed during this run.
-        if c.get("key") in (reqs.exclude_models or ()):
+        if is_excluded(c, reqs.exclude_models):
             continue
         # A pin is set and this is not the pinned endpoint.
         if reqs.pin_key and _canon_key(c.get("key")) != _canon_key(reqs.pin_key):
@@ -427,7 +438,7 @@ def _exclusion_reason(c, reqs, allow_unknown):
     # Same checks, in the same order, as _select_pass, each returning a readable reason.
     if not c.get("available", True):
         return "unavailable: " + str(c.get("unavailable_reason") or "cooldown")
-    if c.get("key") in (reqs.exclude_models or ()):
+    if is_excluded(c, reqs.exclude_models):
         return "excluded this run (already tried/burned)"
     if reqs.pin_key and _canon_key(c.get("key")) != _canon_key(reqs.pin_key):
         return "not the pinned endpoint (chat_pin)"

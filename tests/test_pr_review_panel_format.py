@@ -14,6 +14,8 @@ pr_review self-tests.
 import ast
 import re
 import sys
+import types
+from unittest import mock
 
 FAILURES = []
 
@@ -56,6 +58,17 @@ def _load_ns():
 
 
 NS = _load_ns()
+
+
+def _real_fix_engine():
+    """A fix_engine module holding only the real _norm_confidence, ast-extracted
+    like the renderers (fix_engine can't be imported here either)."""
+    src = open("fix_engine.py").read()
+    node = next(n for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef) and n.name == "_norm_confidence")
+    module = types.ModuleType("fix_engine")
+    exec(ast.get_source_segment(src, node), module.__dict__)
+    return module
 
 
 def render(review):
@@ -145,6 +158,14 @@ def main():
     check("unparseable confidence degrades to n/a", "confidence **n/a**" in bad)
     check("missing reviewer confidence is omitted, not zeroed",
           "confidence 0%" not in bad)
+    # In AB fix_engine is always loaded, and its normaliser reads a missing
+    # confidence as 0.0. Render with it, so this can't pass on the fallback.
+    with mock.patch.dict(sys.modules, {"fix_engine": _real_fix_engine()}):
+        prod = render({"verdict": "Reject", "confidence": "n/a",
+                       "reviews": [{"reviewer": "x", "verdict": "Reject", "critique": "y."}]})
+        check("AB's own normaliser still gives a percentage", NS["_norm_conf_pct"](58) == "58%")
+    check("with AB's normaliser, a missing confidence is n/a, not 0%",
+          "confidence **n/a**" in prod and "0%" not in prod, prod)
 
     long_crit = "Sentence one is here. " * 12
     lng = render({"verdict": "Reject", "confidence": 0.5,

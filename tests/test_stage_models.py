@@ -51,3 +51,11 @@ def test_used_up_stage_falls_back_to_the_given_floor(monkeypatch):
     floor = tried + (("p", "", "gemini-3.8-flash"),)
     assert sm.exclusions({}, "diag_fix", tried, fallback=floor) == floor
     assert sm.exclusions({}, "diag_fix", tried) == tried
+
+
+def test_a_model_tried_by_name_is_used_up(monkeypatch):
+    # PR remediation records the models that failed by name, not by key. The
+    # only stage model, tried by name, is used up: the fix keeps the floor.
+    monkeypatch.setattr(llm_client, "_enumerate_candidates",
+                        lambda cfg: _cands("claude-haiku-4-5", "claude-sonnet-5.5", "claude-opus-5.1"))
+    assert sm.exclusions({}, "diag_fix", ("claude-opus-5.1",)) == ("claude-opus-5.1",)

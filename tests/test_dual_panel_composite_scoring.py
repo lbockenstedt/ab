@@ -333,3 +333,80 @@ def test_a_verdict_without_a_confidence_is_not_a_stall(pr_env):
     record_pr_review("o/r", 10, "PR 10", "u", [], "b", review={"verdict": "Deny"}, review2={"status": "skipped"})
     rec = state["pr_reviews"]["o/r#10"]
     assert rec["remediation_best"] is None and rec["remediation_stalls"] == 0
+
+
+def test_a_small_gain_over_the_best_is_still_a_stall(pr_env):
+    """The thrash that kept a change going 10 rounds: +0.005 over the best
+    reset the stall count. Progress now needs pr_remediate_min_gain (0.03)
+    over the best, or one more panel approving."""
+    record_pr_review, state = pr_env
+    deny = lambda c: {"verdict": "Deny", "confidence": c}
+    skip = {"status": "skipped"}
+    rec = lambda: state["pr_reviews"]["o/r#9"]
+    record_pr_review("o/r", 9, "PR 9", "u", [], "a", review=deny(0.80), review2=skip)
+    record_pr_review("o/r", 9, "PR 9", "u", [], "b", review=deny(0.805), review2=skip)
+    assert (rec()["remediation_best"], rec()["remediation_stalls"]) == ([0, 0.8], 1)
+    record_pr_review("o/r", 9, "PR 9", "u", [], "c", review=deny(0.83), review2=skip)
+    assert (rec()["remediation_best"], rec()["remediation_stalls"]) == ([0, 0.83], 0)
+    record_pr_review("o/r", 9, "PR 9", "u", [], "d", review={"verdict": "Approve", "confidence": 0.95},
+                     review2=deny(0.5))
+    assert (rec()["remediation_best"], rec()["remediation_stalls"]) == ([1, 0.5], 0)
+
+
+def test_the_progress_margin_is_a_setting(pr_env):
+    """pr_remediate_min_gain 0 is the old strict "beat the best" rule."""
+    record_pr_review, state = pr_env
+    skip, cfg = {"status": "skipped"}, {"pr_remediate_min_gain": 0}
+    for head, conf in (("a", 0.80), ("b", 0.805)):
+        record_pr_review("o/r", 9, "PR 9", "u", [], head, review={"verdict": "Deny", "confidence": conf},
+                         review2=skip, config=cfg)
+    assert state["pr_reviews"]["o/r#9"]["remediation_stalls"] == 0
+
+
+def test_a_head_scored_while_panel_2_waited_is_rescored_once_panel_2_runs(pr_env):
+    """Panel 1 rejected head b, so panel 2 waited and b scored [0, c]: a stall
+    against a best where panel 1 approved. When a re-scan of b has panel 1
+    approve and panel 2 run, b is scored again from the state before, so the
+    false stall and the stale best go. Only that once: a later pass at the
+    head, finished or not, changes nothing."""
+    record_pr_review, state = pr_env
+    vote = lambda v, c: {"verdict": v, "confidence": c}
+    skip = {"status": "skipped"}
+    score = lambda: (state["pr_reviews"]["o/r#9"]["remediation_best"],
+                     state["pr_reviews"]["o/r#9"]["remediation_stalls"])
+    record_pr_review("o/r", 9, "PR 9", "u", [], "a", review=vote("Approve", 0.9), review2=vote("Deny", 0.8))
+    record_pr_review("o/r", 9, "PR 9", "u", [], "b", review=vote("Deny", 0.85), review2=skip)
+    assert score() == ([1, 0.8], 1)
+    record_pr_review("o/r", 9, "PR 9", "u", [], "b", review=vote("Approve", 0.9), review2=vote("Approve", 0.9))
+    assert score() == ([2, 0.9], 0)
+    for r1, r2 in ((vote("Approve", 0.9), vote("Deny", 0.5)), (vote("Deny", 0.5), skip)):
+        record_pr_review("o/r", 9, "PR 9", "u", [], "b", review=r1, review2=r2)
+        assert score() == ([2, 0.9], 0)
+    # A finished head is not re-scored by a later pass where panel 2 waits.
+    record_pr_review("o/r", 9, "PR 9", "u", [], "c", review=vote("Approve", 0.9), review2=vote("Deny", 0.7))
+    record_pr_review("o/r", 9, "PR 9", "u", [], "c", review=vote("Deny", 0.95), review2=skip)
+    assert score() == ([2, 0.9], 1)
+
+
+def test_each_scored_head_keeps_its_critiques_for_a_rework(pr_env):
+    """review_history: one entry per head (a re-scan updates it), the last 6
+    heads, each critique capped, carried across scans like remediation_best."""
+    record_pr_review, state = pr_env
+    hist = lambda: state["pr_reviews"]["o/r#9"]["review_history"]
+    p1 = lambda c, text: {"verdict": "Deny", "confidence": c, "critique": text}
+    skip = {"status": "skipped"}
+    record_pr_review("o/r", 9, "PR 9", "u", [], "head-a", review=p1(0.6, "first look"), review2=skip)
+    record_pr_review("o/r", 9, "PR 9", "u", [], "head-a", review={"verdict": "Approve", "confidence": 0.9,
+                     "critique": "p1 ok"}, review2=p1(0.7, "p2 objects"))
+    assert [(h["head"], h["score"], h["panel_critique"], h["panel2_critique"]) for h in hist()] == [
+        ("head-a", [1, 0.7], "p1 ok", "p2 objects")]
+    # A pass where panel 2 waits never replaces a finished one.
+    record_pr_review("o/r", 9, "PR 9", "u", [], "head-a", review=p1(0.95, "second look"), review2=skip)
+    assert [(h["score"], h["panel_critique"]) for h in hist()] == [([1, 0.7], "p1 ok")]
+    # A pass that cannot be scored adds nothing.
+    record_pr_review("o/r", 9, "PR 9", "u", [], "head-b", review={"status": "queue_for_retry"}, review2=skip)
+    assert len(hist()) == 1
+    for i in range(7):
+        record_pr_review("o/r", 9, "PR 9", "u", [], "h%d" % i, review=p1(0.5, "x" * 5000), review2=skip)
+    assert [h["head"] for h in hist()] == ["h%d" % i for i in range(1, 7)]
+    assert len(hist()[-1]["panel_critique"]) == 3000

@@ -19,6 +19,8 @@ loop against a provider that is down.
 Reuses the AST-extraction harness from test_pr_fix_retry_feedback (pr_review.py
 cannot be imported standalone).
 """
+import sys
+
 import pytest
 
 from test_pr_fix_retry_feedback import APPROVE, Harness, _reject
@@ -32,13 +34,9 @@ class BarrenHarness(Harness):
         self.max_barren = max_barren
 
     def run(self):
-        ns = self._namespace()
-        return ns["fix_one_pr"]("o/r", 7, config={
-            "qa_enabled": self.qa,
-            "pr_fix_max_attempts": self.max_attempts,
-            "pr_fix_max_barren_retries": self.max_barren,
-            "GITHUB_TOKEN": "tok",
-        })
+        """Run fix_one_pr with pr_fix_max_barren_retries set as well. It goes
+        through Harness.run, which puts the real modules back afterwards."""
+        return super().run({"pr_fix_max_barren_retries": self.max_barren})
 
 
 EMPTY = (False, "empty", [])
@@ -138,3 +136,11 @@ def test_mixed_barren_and_real_attempts():
     ok, _ = h.run()
     assert ok is True
     assert len(h.error_contexts) == 3
+
+
+def test_a_run_puts_the_real_modules_back():
+    """BarrenHarness.run used to call _namespace() itself and skip the restore,
+    so its fake fix_engine stayed in sys.modules for every later test file."""
+    before = {n: sys.modules.get(n) for n in ("fix_engine", "git", "github")}
+    BarrenHarness([OK], [APPROVE], verify=[(True, "")]).run()
+    assert {n: sys.modules.get(n) for n in before} == before
