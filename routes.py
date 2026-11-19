@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from github import Github
-from app_state import activity_feed_items, mark_pr_approved, pr_approval_snapshot, update_pr_review
+from app_state import (ReviewPersistenceError, activity_feed_items, mark_pr_approved,
+                       pr_approval_snapshot, update_pr_review)
 from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
 import mission_control
@@ -657,6 +658,10 @@ async def pr_review_approve(request: Request):
                                 "message": "The review or PR head changed; review and approve again."})
         logger.info("pr_review: %s #%s APPROVED via UI", repo_name, number)
         return {"status": "success", "repo": repo_name, "number": number}
+    except ReviewPersistenceError:
+        logger.warning("pr_review approve deferred for %s#%s: review storage unavailable", repo_name, number)
+        return JSONResponse(status_code=503, content={"status": "error",
+                            "message": "Approval could not be saved: review storage unavailable. Try again."})
     # Report any failure.
     except Exception as e:  # noqa: BLE001
         logger.error("pr_review approve failed for %s#%s: %s", repo_name, number, e)

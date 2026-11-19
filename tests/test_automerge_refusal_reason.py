@@ -208,6 +208,7 @@ def test_auto_approval_cas_failure_never_calls_merge():
     e.ns["merge_pr"] = lambda *a, **k: (_ for _ in ()).throw(AssertionError("merged"))
     e.run()
     assert not e.rec.get("auto_merged") and not e.rec.get("auto_merge_refusal")
+    assert any("review head changed" in msg for msg in e.logger.at("info"))
 
 
 def test_unmerged_response_does_not_record_auto_merged():

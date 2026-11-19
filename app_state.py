@@ -603,6 +603,10 @@ def _stamp_pr_state(rec, prev):
 _UNSPECIFIED_HEAD = object()
 
 
+class ReviewPersistenceError(RuntimeError):
+    """A reviewed-head approval could not be persisted."""
+
+
 def pr_approval_snapshot(repo, number):
     """Read the reviewed head and approval together under the review lock."""
     with _task_state_lock:
@@ -627,7 +631,12 @@ def mark_pr_approved(repo, number, approved=True, *, expected_head=_UNSPECIFIED_
             try:
                 rec["approved"] = bool(approved)
                 _stamp_pr_state(rec, before)
-                save_pr_reviews(state["pr_reviews"])
+                try:
+                    save_pr_reviews(state["pr_reviews"])
+                except Exception as e:
+                    if approved:
+                        raise ReviewPersistenceError("Could not save PR approval") from e
+                    raise
             except Exception:
                 # A failed grant cannot authorize a merge. A failed revoke must
                 # remain revoked in memory even though its on-disk copy is stale.
@@ -636,6 +645,9 @@ def mark_pr_approved(repo, number, approved=True, *, expected_head=_UNSPECIFIED_
                     rec.update(before)
                 raise
             return True
+    except ReviewPersistenceError as e:
+        logger.error(f"mark_pr_approved failed for {repo}#{number}: {e}")
+        raise
     except Exception as e:
         logger.error(f"mark_pr_approved failed for {repo}#{number}: {e}")
         return False

@@ -74,7 +74,8 @@ from datetime import timedelta
 
 # AppBuilder helpers: repos, shared state, guardrails, PR actions and the deterministic checks.
 from github_ops import get_monitored_repos
-from app_state import update_task_state, set_task_step, record_pr_review, update_pr_review, mark_pr_approved, state
+from app_state import (ReviewPersistenceError, update_task_state, set_task_step, record_pr_review,
+                       update_pr_review, mark_pr_approved, state)
 import feature_boundary
 import feature_allowlist
 import fix_failures
@@ -1997,8 +1998,13 @@ def _maybe_auto_merge(gh, repo, pr, config):
         # Cleared: approve the PR, record it, and note it on the comment.
         logger.info("pr_review: auto-merging %s — %s", key, reason)
         approve_pr(gh, repo.full_name, pr.number, actor="ab-auto")
-        if not mark_pr_approved(repo.full_name, pr.number, True,
-                                expected_head=pr_meta.get("head_sha")):
+        try:
+            approved = mark_pr_approved(repo.full_name, pr.number, True,
+                                        expected_head=pr_meta.get("head_sha"))
+        except ReviewPersistenceError:
+            logger.warning("pr_review: auto-merge deferred for %s — review storage unavailable", key)
+            return
+        if not approved:
             logger.info("pr_review: auto-merge deferred for %s — review head changed", key)
             return
         update_pr_review(repo.full_name, pr.number, auto_merge_score=min(

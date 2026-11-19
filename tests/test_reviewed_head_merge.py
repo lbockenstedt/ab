@@ -3,6 +3,8 @@ import ast
 import asyncio
 import json
 import os
+import re
+import sys
 import threading
 from datetime import datetime
 from types import SimpleNamespace
@@ -25,10 +27,10 @@ class Logger:
 
 
 def extract(path, names, ns):
-    """Compile selected real functions, without importing the live app."""
+    """Compile selected real definitions, without importing the live app."""
     tree = ast.parse(open(path, encoding="utf-8").read())
     nodes = [node for node in tree.body
-             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in names]
     for node in nodes:
         node.decorator_list = []
     exec(compile(ast.Module(body=nodes, type_ignores=[]), path, "exec"), ns)
@@ -66,7 +68,7 @@ class Env:
                    "_UNSPECIFIED_HEAD": object(), "logger": Logger(),
                    "_stamp_pr_state": lambda *a: None,
                    "save_pr_reviews": lambda state: self.saved.append(dict(state["o/r#1"]))}
-        extract("app_state.py", {"pr_approval_snapshot", "mark_pr_approved"}, self.ns)
+        extract("app_state.py", {"ReviewPersistenceError", "pr_approval_snapshot", "mark_pr_approved"}, self.ns)
         self.ns.update({"GithubException": GithubException,
                         "update_pr_review": lambda *a, **k: self.updates.append(k),
                         "_delete_pr_branch": lambda *a: self.deleted.append(True),
@@ -182,7 +184,8 @@ def test_failed_approval_persistence_does_not_leave_memory_approved():
     def fail(_):
         raise OSError("disk failure")
     env.ns["save_pr_reviews"] = fail
-    assert not env.ns["mark_pr_approved"]("o/r", 1, True, expected_head="X")
+    with pytest.raises(env.ns["ReviewPersistenceError"]):
+        env.ns["mark_pr_approved"]("o/r", 1, True, expected_head="X")
     assert not env.rec["approved"]
 
 
@@ -201,8 +204,15 @@ def test_real_store_write_failure_fails_closed(tmp_path, approved):
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("blocker", encoding="utf-8")
     store = real_review_store(env, blocker / "reviews.json")
-    assert not env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
+    errors = []
+    env.ns["logger"] = SimpleNamespace(error=lambda message: errors.append(message))
+    if approved:
+        with pytest.raises(env.ns["ReviewPersistenceError"]):
+            env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
+    else:
+        assert not env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
     assert not env.rec["approved"]
+    assert any("mark_pr_approved failed" in message for message in errors)
     assert not list(tmp_path.glob("*.tmp"))
     assert store["PR_REVIEWS_FILE"].endswith("reviews.json")
     pr = PR()
@@ -227,7 +237,8 @@ def test_failed_reapproval_restores_previous_approved_state(tmp_path):
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("blocker", encoding="utf-8")
     real_review_store(env, blocker / "reviews.json")
-    assert not env.ns["mark_pr_approved"]("o/r", 1, True, expected_head="X")
+    with pytest.raises(env.ns["ReviewPersistenceError"]):
+        env.ns["mark_pr_approved"]("o/r", 1, True, expected_head="X")
     assert env.rec == {"head": "X", "approved": True}
 
 
@@ -252,7 +263,11 @@ def test_failed_old_head_write_cannot_overwrite_concurrent_new_review(tmp_path, 
     env.ns["_stamp_pr_state"] = stamp
     thread = threading.Thread(target=replace_review)
     thread.start()
-    assert not env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
+    if approved:
+        with pytest.raises(env.ns["ReviewPersistenceError"]):
+            env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
+    else:
+        assert not env.ns["mark_pr_approved"]("o/r", 1, approved, expected_head="X")
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert env.rec == {"head": "Y", "approved": True}
@@ -292,6 +307,64 @@ def test_failed_review_record_write_keeps_moved_head_unapproved(tmp_path):
     extract("app_state.py", {"record_pr_review", "_panel_dissent_stats"}, env.ns)
     env.ns["record_pr_review"]("o/r", 1, "title", "url", [], "Y")
     assert env.rec["head"] == "Y" and not env.rec["approved"]
+
+
+def test_human_approval_real_write_failure_reports_storage_unavailable(tmp_path):
+    """The human path must not misreport a failed disk write as a moved head."""
+    env = Env("X", False)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    real_review_store(env, blocker / "reviews.json")
+    class Response:
+        """Capture the human route's explicit HTTP status and JSON content."""
+        def __init__(self, status_code, content):
+            """Record the response without importing the live dashboard."""
+            self.status_code, self.content = status_code, content
+    async def data():
+        """Submit approval for the unchanged reviewed head."""
+        return {"repo": "o/r", "number": 1, "head": "X"}
+    env.ns.update({"Request": object, "JSONResponse": Response, "asyncio": asyncio, "os": os,
+                   "load_config": lambda: {"GITHUB_TOKEN": "fake"},
+                   "Github": lambda token: object(), "approve_pr": lambda *a, **k: (None, PR("X"))})
+    extract("routes.py", {"pr_review_approve"}, env.ns)
+    result = asyncio.run(env.ns["pr_review_approve"](SimpleNamespace(json=data)))
+    assert result.status_code == 503 and "storage" in result.content["message"].lower()
+    assert "head_moved" not in result.content and not env.rec["approved"]
+    pr = PR()
+    assert env.run(pr)[0] == 409 and not pr.calls
+
+
+def test_auto_approval_real_write_failure_logs_storage_and_never_merges(tmp_path, monkeypatch):
+    """The auto path defers specifically for storage, never for a head mismatch."""
+    env = Env("X", False)
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    real_review_store(env, blocker / "reviews.json")
+    messages, merges = [], []
+    env.ns["logger"] = SimpleNamespace(
+        info=lambda msg, *args: messages.append(("info", msg % args)),
+        warning=lambda msg, *args: messages.append(("warning", msg % args)),
+        exception=lambda msg, *args: messages.append(("exception", msg % args)),
+        error=lambda msg, *args: messages.append(("error", msg % args if args else msg)))
+    env.ns.update({"os": os, "feature_allowlist": SimpleNamespace(files_from_pr_files=lambda files: []),
+                   "_FEATURE_DRIVE_MARKER_RE": re.compile("feature"),
+                   "_automerge_decision": lambda *a: (True, "cleared"),
+                   "approve_pr": lambda *a, **k: None,
+                   "merge_pr": lambda *a, **k: merges.append(True)})
+    monkeypatch.setitem(sys.modules, "pr_actions", SimpleNamespace(
+        head_ci_conclusion=lambda *a: ("unknown", "")))
+    monkeypatch.setitem(sys.modules, "pr_remediate", SimpleNamespace(
+        remediation_pending=lambda *a: (False, "")))
+    pr = PR()
+    pr.number, pr.body, pr.mergeable = 1, "", True
+    pr.base = SimpleNamespace(ref="dev")
+    pr.get_files = lambda: []
+    extract("pr_review.py", {"_maybe_auto_merge"}, env.ns)
+    env.ns["_maybe_auto_merge"](None, SimpleNamespace(full_name="o/r"), pr, {})
+    assert any(level == "warning" and "storage" in msg.lower() for level, msg in messages)
+    assert not any("review head changed" in msg for _, msg in messages)
+    assert not merges and not env.rec["approved"] and not env.rec.get("auto_merged")
+    assert not env.rec.get("auto_merge_refusal")
 
 
 @pytest.mark.parametrize("old", ["X", None])
