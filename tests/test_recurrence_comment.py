@@ -6,6 +6,7 @@ from types import SimpleNamespace as N
 
 import pytest
 
+from _history import patch_history
 import main  # noqa: F401 - loads github_ops in import order
 import github_ops
 
@@ -74,7 +75,6 @@ def test_open_duplicate_updates_the_comment_redacts_and_stamps_the_record(monkey
     store = {"o/nw:211": {"status": "failed", "timestamp": "2026-11-13T10:00:00"}}
     monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
     monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", False))
-    from _history import patch_history
     store = patch_history(monkeypatch, github_ops, store)["_store"]
     for _ in range(3):
         got = github_ops.create_automated_issue(
@@ -94,8 +94,7 @@ def test_closed_duplicate_comment_failure_keeps_successful_reopen(monkeypatch, c
     caplog.set_level("INFO")
     monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
     monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", True))
-    monkeypatch.setattr(github_ops, "load_processed", lambda: {})
-    monkeypatch.setattr(github_ops, "save_processed", lambda p: None)
+    patch_history(monkeypatch, github_ops, {})
 
     def raise_comment(body):
         """Simulate failure of the optional recurrence comment."""
@@ -130,8 +129,7 @@ def test_closed_duplicate_edit_succeeds_retry_restores(monkeypatch, caplog):
 
     monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
     monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", True))
-    monkeypatch.setattr(github_ops, "load_processed", lambda: {})
-    monkeypatch.setattr(github_ops, "save_processed", lambda p: None)
+    patch_history(monkeypatch, github_ops, {})
 
     with pytest.raises(github_ops.IssueReopenError):
         github_ops.create_automated_issue(
@@ -156,8 +154,7 @@ def test_happy_closed_duplicate_opens_issue_and_posts_comment(monkeypatch):
     issue.state = "closed"
     monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
     monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", True))
-    monkeypatch.setattr(github_ops, "load_processed", lambda: {})
-    monkeypatch.setattr(github_ops, "save_processed", lambda p: None)
+    patch_history(monkeypatch, github_ops, {})
 
     got = github_ops.create_automated_issue(
         None, ["o/nw"], N(full_name="o/nw"),

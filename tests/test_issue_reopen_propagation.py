@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from _history import patch_history
 from test_recurrence_comment import Issue
 import github_ops
 import log_scan
@@ -21,8 +22,7 @@ def recurrence(monkeypatch):
     create = Mock(wraps=github_ops.create_automated_issue)
     monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
     monkeypatch.setattr(github_ops, "find_global_duplicate_issue", duplicate)
-    monkeypatch.setattr(github_ops, "load_processed", lambda: {})
-    monkeypatch.setattr(github_ops, "save_processed", lambda processed: None)
+    patch_history(monkeypatch, github_ops, {})
     monkeypatch.setattr(log_scan, "Github", lambda token: gh)
     monkeypatch.setattr(log_scan, "MODULE_TYPE_REPO", {"nw": "o/nw"})
     monkeypatch.setattr(log_scan, "get_monitored_repos", lambda config: ["o/nw"])
