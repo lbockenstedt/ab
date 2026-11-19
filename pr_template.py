@@ -45,6 +45,34 @@ SECTIONS = (INTENT, SOLUTION, GUARDRAILS, VERIFICATION)
 # Text written into a section nobody filled in, so "empty" is explicit to the reviewer.
 _PLACEHOLDER = "_Not stated._"
 
+# What GitHub hides as an HTML comment, read by _visible(), in three branches.
+_COMMENT = re.compile(r"""
+    # 1. A fenced code block, which _visible() keeps whole: a comment marker
+    #    inside one is code, and GitHub shows it as typed. As in CommonMark,
+    #    it opens with 3 or more backticks or tildes, up to 3 spaces in (the
+    #    rest of a backtick fence's line has no backtick), and closes at a
+    #    line of the same character, at least as long and followed only by
+    #    spaces or tabs, or at the end of the body.
+    (?P<code>
+        ^\ {0,3}(?P<ticks>`{3,})[^`\n]*$ .*? (?:^\ {0,3}(?P=ticks)`*[ \t]*$|\Z)
+      | ^\ {0,3}(?P<tildes>~{3,})[^\n]*$ .*? (?:^\ {0,3}(?P=tildes)~*[ \t]*$|\Z) )
+    # 2. A closed comment, hidden wherever it is.
+  | <!--.*?-->
+    # 3. An opener that starts a line (up to 3 spaces in) and is never
+    #    closed. CommonMark makes it an HTML block that hides the rest of the
+    #    body, headings included. The no-closer check is needed because
+    #    re.sub tries this branch at the start of the line, before an
+    #    indented opener, where branch 2 cannot match yet. An unclosed opener
+    #    in mid-line, for example in backticks, is plain text and is kept.
+  | ^\ {0,3}<!--(?:(?!-->).)*\Z
+""", re.DOTALL | re.MULTILINE | re.VERBOSE)
+
+
+def _visible(text):
+    """``text`` as a reader sees it on GitHub, without its HTML comments."""
+    # Keep each fenced code block as it is; drop each comment.
+    return _COMMENT.sub(lambda m: m.group("code") or "", text or "")
+
 
 def heading(name):
     """The exact heading line the template uses for ``name``."""
@@ -95,6 +123,9 @@ def extract(body, name):
     # Nothing to search in an empty body.
     if not body:
         return ""
+    # Read the body as GitHub shows it. Comments go first, so a heading
+    # inside one cannot open or close a section.
+    body = _visible(body)
     # Find the section's heading line.
     m = _section_pattern(name).search(body)
     # The section heading is not present at all.
@@ -105,8 +136,7 @@ def extract(body, name):
     # ... up to the next markdown heading of any level (or the end of the body).
     nxt = re.search(r"^#{1,6}[ \t]*\S", rest, re.MULTILINE)
     text = rest[:nxt.start()] if nxt else rest
-    # Drop HTML guidance comments and our own placeholder so neither counts as content.
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    # Drop our own placeholder so it does not count as content.
     text = text.replace(_PLACEHOLDER, "")
     # Return the cleaned section text.
     return text.strip()
@@ -114,8 +144,9 @@ def extract(body, name):
 
 def has_template(body):
     """True when the body carries at least the intent and solution headings."""
-    # Both the intent and solution headings must be present for the body to count as templated.
-    return bool(body) and all(_section_pattern(n).search(body)
+    # Both headings must be visible; one hidden in a comment does not count.
+    text = _visible(body)
+    return bool(text) and all(_section_pattern(n).search(text)
                               for n in (INTENT, SOLUTION))
 
 
@@ -131,7 +162,7 @@ def stated_intent(body):
     if intent:
         return intent
     # Otherwise strip HTML comments and look at the body paragraph by paragraph.
-    text = re.sub(r"<!--.*?-->", "", body or "", flags=re.DOTALL)
+    text = _visible(body)
     # Paragraphs are separated by blank lines.
     for para in re.split(r"\n\s*\n", text):
         para = para.strip()
