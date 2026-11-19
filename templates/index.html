@@ -712,12 +712,12 @@
              status chip, age, a primary action and a ⋯ menu for the rest); the long
              detail sits in a collapsed "Details" expander under each row. Buttons
              carry data-mc="<action>" for the one delegated listener (MC_ACTIONS). -->
-        {% macro act_button(action, label, title, primary=False, id='', repo='', num='', href='') -%}
+        {% macro act_button(action, label, title, primary=False, id='', repo='', num='', href='', head='') -%}
         {%- set _cls = 'bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold whitespace-nowrap' if primary else 'block w-full text-left px-3 py-1.5 text-xs whitespace-nowrap hover:bg-slate-100 ' ~ ('text-red-600' if action in ('dismiss', 'deny') else 'text-slate-700') -%}
         {%- if href -%}
         <a href="{{ href }}" target="_blank" class="{{ _cls }}" title="{{ title }}">{{ label }}</a>
         {%- else -%}
-        <button type="button" data-mc="{{ action }}"{% if id %} data-id="{{ id }}"{% endif %}{% if repo %} data-repo="{{ repo }}" data-num="{{ num }}"{% endif %} class="{{ _cls }}" title="{{ title }}">{{ label }}</button>
+        <button type="button" data-mc="{{ action }}"{% if id %} data-id="{{ id }}"{% endif %}{% if repo %} data-repo="{{ repo }}" data-num="{{ num }}"{% endif %}{% if action in ('approve', 'approve-merge') %} data-head="{{ head or '' }}"{% endif %} class="{{ _cls }}" title="{{ title }}">{{ label }}</button>
         {%- endif -%}
         {%- endmacro %}
         {% macro act_menu(title='More actions') -%}
@@ -940,7 +940,7 @@
                             {% else %}
                             {# Approved: Merge is unlocked. Not approved: only Approve (or Deny). #}
                             {% if pr.approved %}{{ act_button('merge', 'Merge', 'Merge this approved PR', True, repo=pr.repo, num=pr.number) }}
-                            {% else %}{{ act_button('approve', 'Approve', 'Approve this PR on GitHub; Merge unlocks after', True, repo=pr.repo, num=pr.number) }}{% endif %}
+                            {% else %}{{ act_button('approve', 'Approve', 'Approve this PR on GitHub; Merge unlocks after', True, repo=pr.repo, num=pr.number, head=pr.head) }}{% endif %}
                             {% call act_menu() %}
                             {# Fix is human-triggered only: generate a fix for the findings, gate it
                                through the skeptical panel, push it onto THIS PR's branch. #}
