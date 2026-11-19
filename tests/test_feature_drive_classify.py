@@ -33,6 +33,7 @@ def _load_ns():
         "classify", "_flag_issue", "_clarify_issue", "_clarify_marker",
         "_already_commented", "_is_feature_request", "scan_feature_requests",
         "_model_label", "_is_classifier_error_record", "_flag_classifier_exhausted",
+        "_meta",
     }
     want_assigns = {
         "_TERMINAL_STATUSES", "_FEATURE_MARKER_RE", "_BOUNDARY_FLAG_MARKER",
