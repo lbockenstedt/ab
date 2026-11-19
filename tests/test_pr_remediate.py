@@ -187,6 +187,8 @@ def test_auto_remediate_respects_max_attempt_ceiling():
             # The ordinary ceiling alone no longer means exhausted: a PR still
             # gets one premium escalation turn past it. Both must be spent.
             "premium_attempts": 1,
+            # ...and its consolidated rework (pr_remediate_rework_limit, default 1).
+            "remediation_reworks": 1,
             "panel_critique": "Issue persists",
         }
     }

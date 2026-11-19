@@ -4350,7 +4350,8 @@ def _safe_repo_target(repo_root, filepath, what="apply fix"):
             or ".." in filepath.replace("\\", "/").split("/")):
         logger.error(f"Refusing to {what} with unsafe path: {filepath!r}")
         return None
-    # Resolve the path and make sure it stays inside the repo.
+    # Resolve the path lexically and make sure it stays inside the repo.
+    repo_root = os.path.abspath(repo_root)
     full_path = os.path.abspath(os.path.join(repo_root, filepath))
     try:
         if os.path.commonpath([repo_root, full_path]) != repo_root:
@@ -4359,16 +4360,21 @@ def _safe_repo_target(repo_root, filepath, what="apply fix"):
     except ValueError:
         logger.error(f"Refusing to {what} with unresolvable path: {filepath!r}")
         return None
-    # A symlink must not point outside the repo either.
-    if os.path.islink(full_path):
-        try:
-            link_target = os.path.abspath(os.readlink(full_path))
-            if os.path.commonpath([repo_root, link_target]) != repo_root:
-                logger.error(f"Refusing to write through symlink escaping repo: {filepath!r}")
-                return None
-        except Exception:  # noqa: BLE001
-            logger.error(f"Refusing to write through unresolvable symlink: {filepath!r}")
+    # No symlink anywhere on the path may lead outside the repo: realpath
+    # follows every link, in parent directories as well as the final component
+    # (a relative link target is resolved against its own directory, not the
+    # process cwd). A leaf that does not exist yet is fine: realpath still
+    # resolves the directories above it. Compared against the resolved root,
+    # so a repo checkout that itself sits behind a symlink is not rejected.
+    try:
+        real_root = os.path.realpath(repo_root)
+        real_path = os.path.realpath(full_path)
+        if os.path.commonpath([real_root, real_path]) != real_root:
+            logger.error(f"Refusing to write through symlink escaping repo: {filepath!r}")
             return None
+    except Exception:  # noqa: BLE001
+        logger.error(f"Refusing to write through unresolvable symlink: {filepath!r}")
+        return None
     return full_path
 
 

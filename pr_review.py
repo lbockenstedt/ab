@@ -691,6 +691,74 @@ def _merge_only_context(pr):
         % len(commits))
 
 
+# How much of a PR's description, and of its stated intent, the review briefs
+# carry. lm's promote-reusable.yml (which every repo's promote.yml calls at lm
+# main) quotes the intent of every unit a promotion PR carries, up to 16,000
+# characters, so a promotion's briefs carry its whole description: GitHub
+# refuses a PR body over 65,536 characters, so nothing is cut. At the ordinary
+# 2,000 characters, a four-unit promotion such as ab#586 would show its
+# reviewers about one unit's intent.
+_BRIEF_BODY_CHARS = 4000
+_BRIEF_INTENT_CHARS = 2000
+_PROMOTION_BRIEF_CHARS = 65536
+
+# The promotion PRs promote.yml opens: head branch -> (source, target). These
+# are the promote/* names branch-flow.yml's check-direction admits into qa and
+# main, exact names and never a glob (docs/ab.md), including the dev -> main
+# override.
+_PROMOTION_ROUTES = {
+    "promote/dev-to-qa": ("dev", "qa"),
+    "promote/qa-to-main": ("qa", "main"),
+    "promote/dev-to-main": ("dev", "main"),
+}
+
+
+def _promotion_route(pr):
+    """``(source, target)`` when ``pr`` is a promotion PR as promote.yml opens
+    it: a _PROMOTION_ROUTES head branch in the PR's own repo, merging into
+    that route's target. None for any other PR.
+
+    Stricter than _PROMOTION_PR_HEAD_RE, which only decides when the fast lane
+    reviews a PR: the briefs tell the reviewers where the PR came from, so a
+    look-alike (a suffixed branch, a fork, another base) keeps the ordinary
+    brief."""
+    head = getattr(pr, "head", None)
+    base = getattr(pr, "base", None)
+    route = _PROMOTION_ROUTES.get(getattr(head, "ref", None))
+    # A fork's PR has a head repo of its own, and a deleted fork's has none;
+    # only the repo's own promote branch is the one promote.yml builds.
+    head_repo = getattr(getattr(head, "repo", None), "full_name", None)
+    base_repo = getattr(getattr(base, "repo", None), "full_name", None)
+    if (route is None or getattr(base, "ref", None) != route[1]
+            or not head_repo or head_repo != base_repo):
+        return None
+    return route
+
+
+def _promotion_note(route):
+    """The opening of panel 1's brief for a promotion PR, in place of the
+    human-authored note. ab#586's reviewer, told a promotion was a
+    HUMAN-authored PR, read it as a hand-made PR into qa (fleet rule 2.1) and
+    its VERSION advance as a breach of rule 2.2."""
+    source, target = route
+    # Step 1: what the PR is, and why the VERSION change is expected.
+    note = (
+        "NOTE: This is a PROMOTION pull request from `%s` into `%s`. Its head "
+        "branch is the one the fleet's promote.yml workflow builds, and "
+        "promote.yml is the only way changes reach `%s` (fleet rule 2.1). It "
+        "carries one or more units of work already on `%s`; where the "
+        "description quotes several units' intents, judge each unit's changes "
+        "against its own intent, and the diff as the sum of the units. A "
+        "VERSION change that advances `%s`'s own value by one step is "
+        "promote.yml's pin-and-advance (fleet rule 2.2), expected rather than "
+        "a defect. " % (source, target, target, source, target))
+    # Step 2: the dev -> main override skips qa, which rule 2.1 alone does not say.
+    if route == ("dev", "main"):
+        note += ("This is the dev -> main override, which skips qa; "
+                 "promote.yml permits it for an urgent fix. ")
+    return note
+
+
 def skeptical_issue_body(pr):
     """The review brief panel 1 (the skeptical panel) judges a PR against: title,
     description, stated intent, merge-only note and the merge-safety checklist.
@@ -707,12 +775,18 @@ def skeptical_issue_body(pr):
     # Specification Rule") requires every fleet PR to carry one -- so whether the
     # section is present is a merge-relevant fact, not a formatting detail. It is
     # stated plainly here so the verdict turns on what the PR actually says.
+    #
+    # A promotion PR is framed as one and its description is carried whole; see
+    # _promotion_route.
+    route = _promotion_route(pr)
+    body_cap, intent_cap = ((_PROMOTION_BRIEF_CHARS,) * 2 if route
+                            else (_BRIEF_BODY_CHARS, _BRIEF_INTENT_CHARS))
     try:
         import pr_template
         _intent = pr_template.stated_intent(pr.body or "")
         _intent_block = (
             "STATED INTENT (from the PR's '%s' section):\n%s\n\n"
-            % (pr_template.INTENT, _intent[:2000])
+            % (pr_template.INTENT, _intent[:intent_cap])
             if _intent else
             "STATED INTENT: none. The PR description does not carry an "
             "'%s' section, which AGENTS.md requires of every fleet PR.\n\n"
@@ -721,12 +795,14 @@ def skeptical_issue_body(pr):
         logger.info("pr_review: intent extraction skipped (%s)", e)
         _intent_block = ""
     # Review input: title, description, intent, merge note and the merge-safety checklist.
+    opening = (_promotion_note(route) if route else
+               "NOTE: This is a HUMAN-authored pull request under pre-review — not a "
+               "bot fix. ")
     return (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
-        % (pr.title or "", (pr.body or "").strip()[:4000])
-    ) + _intent_block + _merge_only_context(pr) + (
-        "NOTE: This is a HUMAN-authored pull request under pre-review — not a bot "
-        "fix. Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
+        % (pr.title or "", (pr.body or "").strip()[:body_cap])
+    ) + _intent_block + _merge_only_context(pr) + opening + (
+        "Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
         "correctness/regressions, weight these merge-safety defects heavily (they "
         "have broken prod before):\n"
         "1) TEMPLATE RENDER CRASHES — Jinja dot-access of a dict method (`x.items`, "
@@ -828,13 +904,22 @@ def state_logic_issue_body(pr):
     Shared with scripts/local_review.py, so a local pre-push review asks exactly
     what AB asks; change the brief here and both change."""
     # Review input: title, description and the two defect shapes to look for.
+    # A promotion PR is framed as one and its description is carried whole; see
+    # _promotion_route.
+    route = _promotion_route(pr)
+    body_cap = _PROMOTION_BRIEF_CHARS if route else _BRIEF_BODY_CHARS
+    opening = (
+        "NOTE: This is a PROMOTION pull request from `%s` into `%s`, on the head "
+        "branch the fleet's promote.yml workflow builds; it carries one or more "
+        "units of work already on `%s`. " % (route[0], route[1], route[0])
+        if route else
+        "NOTE: This is a HUMAN-authored pull request under pre-review. ")
     return (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
-        % (pr.title or "", (pr.body or "").strip()[:4000])
-    ) + (
-        "NOTE: This is a HUMAN-authored pull request under pre-review. Ignore style, "
-        "naming, and general correctness — a SEPARATE broad reviewer already covers "
-        "those. Your ONLY job is two specific defect shapes:\n\n"
+        % (pr.title or "", (pr.body or "").strip()[:body_cap])
+    ) + opening + (
+        "Ignore style, naming, and general correctness — a SEPARATE broad reviewer "
+        "already covers those. Your ONLY job is two specific defect shapes:\n\n"
         "1) STATE/STATUS COVERAGE — for every boolean/enum/status value this diff "
         "computes or changes the computation of: list every distinct state the "
         "underlying data can actually be in (not just the two the author had in "
@@ -938,19 +1023,22 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z(\"'`])")
 
 def _norm_conf_pct(value):
     """Confidence as a "58%" string, or None when it isn't a usable number."""
+    # Missing or non-numeric is None here: fix_engine's normaliser reads it as
+    # 0.0, which the comment would show as a confident "0%".
+    try:
+        c = float(value)
+    except (TypeError, ValueError):
+        return None
+    if c != c or c in (float("inf"), float("-inf")):
+        return None
     # Use fix_engine's normaliser, or a local copy if it cannot be imported.
     try:
         from fix_engine import _norm_confidence
     except Exception:  # noqa: BLE001 — never let comment rendering fail on this
         def _norm_confidence(v):
             """Scale a confidence to 0-1 (percent values are divided by 100)."""
-            c = float(v)
-            return max(0.0, min(1.0, c / 100.0 if c > 1.0 else c))
-    # Format as a whole percent; bad values give None.
-    try:
-        return "%.0f%%" % (_norm_confidence(value) * 100)
-    except (TypeError, ValueError):
-        return None
+            return max(0.0, min(1.0, v / 100.0 if v > 1.0 else v))
+    return "%.0f%%" % (_norm_confidence(c) * 100)
 
 
 def _reviewer_blocks(review):
@@ -1885,7 +1973,7 @@ def _maybe_auto_merge(gh, repo, pr, config):
         if should_merge:
             try:
                 import pr_remediate
-                pending, why = pr_remediate.remediation_pending(rec, config)
+                pending, why = pr_remediate.remediation_pending(rec, config, pr_files)
             except Exception as e:  # noqa: BLE001 — never let this break a merge
                 logger.warning("pr_review: remediation_pending check skipped for %s: %s", key, e)
                 pending, why = False, ""
@@ -2152,7 +2240,7 @@ def _review_one(gh, repo, pr, config, force=False):
     record_pr_review(repo.full_name, pr.number, pr.title, pr.html_url, findings, head_sha,
                      summary=summary, review=review, review2=state_review,
                      base_ref=getattr(getattr(pr, "base", None), "ref", "") or "",
-                     head_ref=_head_ref)
+                     head_ref=_head_ref, config=config)
     # Log the outcome unless it was a cache hit.
     if action != "cached":
         logger.info("pr_review: %s PR #%s reviewed (%d findings, comment %s)",
@@ -2307,7 +2395,35 @@ def fix_pr_description(repo_full_name, number, config=None):
         _release_issue(lock_id)
 
 
-def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_model_out=None):
+def _rework_brief(rounds):
+    """The fix-prompt section for a consolidated rework (pr_remediate, once
+    review thrash is detected): what to do differently, the score trend, then
+    every round's panel critiques, oldest first (review_progress.rework_rounds).
+    Point fixes to the latest critique stopped converging, so the model gets
+    every round's findings and one pass to resolve them together. With it, fix_one_pr
+    (rework=True) replaces the last pass's critiques with this brief and
+    skips its description shortcut: the rework is of the code."""
+    # The instructions, then the trend, then each round's critiques.
+    out = ["\nCONSOLIDATED REWORK: point fixes stopped converging. The panel scores below went "
+           "up and down without progress, so do not patch only the latest critique. Instead:",
+           "1. Re-read the whole change end to end.",
+           "2. Group every finding below, from all rounds, by root cause.",
+           "3. Choose one coherent design that resolves every root cause at once. You may "
+           "restructure, narrow or simplify the change, but do not widen it, and keep the "
+           "PR's stated intent.",
+           "4. Make all the edits in this single pass.",
+           "5. An objection resolved in an earlier round must stay resolved.",
+           "\nScore per round as [panels approved, lowest panel confidence], oldest first: "
+           + " -> ".join(str(r.get("score")) for r in rounds)]
+    for i, r in enumerate(rounds, 1):
+        out.append("\n--- Round %d of %d: head %s, score %s ---" % (
+            i, len(rounds), r.get("head") or "?", r.get("score")))
+        out.append("Skeptical reviewer critique:\n" + (r.get("panel_critique") or "(none)"))
+        out.append("State-logic / control-flow reviewer critique:\n" + (r.get("panel2_critique") or "(none)"))
+    return "\n".join(out)
+
+
+def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_model_out=None, rework=False):
     """Entry point for the UI's per-PR "Fix" button (routes.py
     /api/pr-review/fix) — the ONLY way this ever runs; AppBuilder never applies a
     PR fix on its own. A human clicks Fix, and this:
@@ -2330,6 +2446,8 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
          commit onto the PR's EXISTING branch — never a new branch/PR — then
          triggers an immediate reprocess so the review comment/panel reflect
          the fix right away.
+
+    ``rework``: one consolidated rework of the code (see _rework_brief).
 
     Returns (True, message) on a pushed fix, (False, message) on any refusal/
     rejection (surfaced to the UI, not an error). Raises only on setup failure
@@ -2358,7 +2476,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
     # the loop below spends its whole budget producing code edits that cannot
     # possibly address the finding, and the PR stalls with attempts exhausted.
     _rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_full_name, number)) or {}
-    if _panel_objects_to_description(_rec.get("panel_critique") or ""):
+    if not rework and _panel_objects_to_description(_rec.get("panel_critique") or ""):
         try:
             _ok, _msg = fix_pr_description(repo_full_name, number, config=config)
         except Exception as e:  # noqa: BLE001
@@ -2449,6 +2567,10 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
         # named the exact conflated states and the exact over-broad branch),
         # so the fixer was asked to satisfy a review it had only half of.
         panel2_critique = (rec.get("panel2_critique") or "").strip()
+        # A consolidated rework gets every round, not just the last pass,
+        # including this head's live critiques in full (see rework_rounds).
+        import review_progress
+        rounds = review_progress.rework_rounds(rec, head_sha) if rework else []
 
         # Self-improvement: also read the pre-review AB actually POSTED on this PR
         # and fold every below-target panel's dissent into the fix prompt. This
@@ -2474,7 +2596,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
         # Nothing to fix: stop.
         if (not findings and not panel_critique and not panel2_critique and not score_feedback
-                and _ci_state != "failure"):
+                and not rounds and _ci_state != "failure"):
             return False, "No findings to fix — this PR has a clean pre-review."
 
         # Build the fix prompt: PR text, objective, findings, critiques and score feedback.
@@ -2491,14 +2613,17 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             "argue with it, do not merely add a comment acknowledging it, and do not widen the "
             "change beyond what the critiques require. If two critiques conflict, satisfy the "
             "one that concerns correctness or security.")
+        # A rework's rounds include this head's critiques, so they replace the two below.
+        if rounds:
+            lines.append(_rework_brief(rounds))
         if findings:
             lines.append("\nAppBuilder pre-review findings to fix:")
             for f in findings:
                 lines.append("- [%s] %s: %s" % (
                     (f.get("level") or "advisory").upper(), f.get("title") or "", f.get("detail") or ""))
-        if panel_critique:
+        if panel_critique and not rounds:
             lines.append("\nSkeptical reviewer critique (from the last panel pass):\n" + panel_critique)
-        if panel2_critique:
+        if panel2_critique and not rounds:
             lines.append("\nState-logic / control-flow reviewer critique (from the last panel pass):\n"
                          + panel2_critique)
         if score_feedback:
@@ -2609,6 +2734,13 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                                             task_id=lock_id, requirements=requirements,
                                             used_model_out=used_model_out)
                 except Exception as e:
+                    # No model may run it: the caller forbade the picker's safety
+                    # floor (must_escalate_to_human) and the picker found none, so
+                    # a retry would find none either. Nothing was generated; the
+                    # caller decides (pr_remediate gives a rework back for it).
+                    import llm_client   # lazy, like this function's other imports
+                    if isinstance(e, llm_client.LlmHumanEscalationNeeded):
+                        return False, "%s %s" % (fix_failures.NO_MODEL, e)
                     last_failure = "Fix generation failed: %s" % e
                     error_context = last_failure
                     # Generation raised before producing anything — barren.

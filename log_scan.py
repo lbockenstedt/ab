@@ -365,6 +365,9 @@ _SELF_SCAN_NOISE = re.compile(
     # The targeted-edit syntax guard left the file untouched: a rejected
     # candidate, not a deployed syntax error or a new AppBuilder defect.
     r'|REJECTING edit to [^\n]+: the file parsed before the edit and does not parse after it'
+    # An unsafe model-supplied path is a successful containment refusal, not
+    # a defect in AppBuilder. Keep the guard; only suppress its own log line.
+    r'|Refusing to apply fix with unsafe path:'
     r'|No verified fix found after'
     r'|Could not save to persistent storage'
     r'|Critical failure saving config'

@@ -79,9 +79,11 @@ def test_not_pending_when_status_exhausted():
     assert isinstance(result[1], str) and len(result[1]) > 0
 
 def test_not_pending_when_attempts_reached_max():
-    # Exhausted means BOTH budgets are spent: reaching the ordinary ceiling
-    # still buys one premium escalation turn (premium_turn_available).
-    rec = _rec(panel_verdict="Deny", remediation_attempts=3, premium_attempts=1)
+    # Exhausted means EVERY budget is spent: reaching the ordinary ceiling
+    # still buys one premium escalation turn (premium_turn_available) and one
+    # consolidated rework (rework_pending).
+    rec = _rec(panel_verdict="Deny", remediation_attempts=3, premium_attempts=1,
+               remediation_reworks=1)
     result = remediation_pending(rec, CONFIG)
     assert result[0] == False
     assert isinstance(result[1], str) and len(result[1]) > 0
@@ -96,7 +98,7 @@ def test_attempt_ceiling_bounds_the_delay():
 
     for attempts in [3, 4, 9]:
         rec = _rec(panel_verdict="Deny", remediation_attempts=attempts,
-                   premium_attempts=1)
+                   premium_attempts=1, remediation_reworks=1)
         result = remediation_pending(rec, CONFIG)
         assert result[0] == False
         assert isinstance(result[1], str) and len(result[1]) > 0
@@ -104,20 +106,22 @@ def test_attempt_ceiling_bounds_the_delay():
 
 def test_premium_turn_extends_the_ceiling_exactly_once():
     """The premium tier adds one rung past the ordinary ceiling -- and the
-    ladder must still terminate, at max_attempts + the premium budget."""
+    ladder must still terminate, at max_attempts + the premium budget (the
+    consolidated rework spent too)."""
     for attempts in [3, 4, 9]:
         rec = _rec(panel_verdict="Deny", remediation_attempts=attempts,
                    premium_attempts=0)
         assert remediation_pending(rec, CONFIG)[0] is True, attempts
         spent = _rec(panel_verdict="Deny", remediation_attempts=attempts,
-                     premium_attempts=1)
+                     premium_attempts=1, remediation_reworks=1)
         pending, why = remediation_pending(spent, CONFIG)
         assert pending is False and "exhausted" in why
 
 
 def test_premium_turn_can_be_switched_off():
     cfg = dict(CONFIG, pr_remediate_premium_attempts=0)
-    rec = _rec(panel_verdict="Deny", remediation_attempts=3, premium_attempts=0)
+    rec = _rec(panel_verdict="Deny", remediation_attempts=3, premium_attempts=0,
+               remediation_reworks=1)
     assert remediation_pending(rec, cfg)[0] is False
 
 def test_garbage_attempt_values_do_not_raise():
@@ -130,8 +134,9 @@ def test_garbage_attempt_values_do_not_raise():
 
 
 def test_two_heads_without_a_gain_stop_remediation():
-    """Soft stop: fixes that stop raising the best review hand the PR to a human."""
-    rec = _rec(panel_verdict="Deny", remediation_stalls=2)
+    """Soft stop: once the consolidated rework is spent, fixes that stop
+    raising the best review hand the PR to a human."""
+    rec = _rec(panel_verdict="Deny", remediation_stalls=2, remediation_reworks=1)
     assert remediation_pending(rec, CONFIG) == (False, "remediation stalled: no gain over the best review")
     assert remediation_pending(rec, dict(CONFIG, pr_remediate_stall_limit=0))[0] is True
     assert remediation_pending(_rec(panel_verdict="Deny", remediation_stalls=1), CONFIG)[0] is True
@@ -143,3 +148,31 @@ def test_the_stall_limit_has_a_settings_control():
     assert routes.count('config.setdefault("pr_remediate_stall_limit", 2)') == 2
     assert '"pr_remediate_stall_limit": lambda v:' in routes
     assert 'name="pr_remediate_stall_limit"' in open("templates/index.html", encoding="utf-8").read()
+
+
+@pytest.mark.parametrize("knob, default", [("pr_remediate_min_gain", 0.03),
+                                           ("pr_remediate_rework_limit", 1)])
+def test_the_thrash_knobs_have_settings_controls(knob, default):
+    """Fleet rule: UI for everything, with a tooltip, and the same default."""
+    routes = open("routes.py", encoding="utf-8").read()
+    assert routes.count('config.setdefault("%s", %s)' % (knob, default)) == 2
+    assert '"%s": lambda v:' % knob in routes
+    html = open("templates/index.html", encoding="utf-8").read()
+    tag = html[html.rindex("<input", 0, html.index('name="%s"' % knob)):]
+    assert "title=" in tag[:tag.index(">")]
+    assert "settings.get('%s', %s)" % (knob, default) in tag
+
+
+@pytest.mark.parametrize("knob, raw, expected", [
+    ("pr_remediate_min_gain", "0.05", 0.05), ("pr_remediate_min_gain", "2", 0.5),
+    ("pr_remediate_min_gain", "-1", 0.0), ("pr_remediate_min_gain", "x", 0.03),
+    ("pr_remediate_rework_limit", "2", 2), ("pr_remediate_rework_limit", "-1", 0),
+    ("pr_remediate_rework_limit", "", 1), ("pr_remediate_rework_limit", "9", 3),
+])
+def test_the_thrash_knobs_are_clamped_on_save(knob, raw, expected):
+    """The form value is clamped by the same helper that reads it."""
+    from test_feature_settings_roundtrip import _FakeRequest, _base_pairs, _load_ns, _run
+    ns = _load_ns()
+    ns["_config_holder"]["config"] = {}
+    _run(ns["save_settings"](_FakeRequest(_base_pairs(**{knob: raw}))))
+    assert ns["_config_holder"]["config"][knob] == expected
