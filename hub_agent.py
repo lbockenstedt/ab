@@ -1527,8 +1527,9 @@ class HubAgentClient:
                         msg = json.loads(body)
                     except json.JSONDecodeError:
                         continue
-                    if self.secret and self.signer and sig and not self.signer.verify_bytes(body.encode(), sig):
-                        logger.warning("Invalid signature — dropping")
+                    if self.secret and (not self.signer or not sig
+                                        or not self.signer.verify_bytes(body.encode(), sig)):
+                        logger.warning("Missing or invalid signature — dropping")
                         continue
                     # Slow handlers run as their own task so this loop keeps
                     # draining the socket; everything else stays inline (ordering).
