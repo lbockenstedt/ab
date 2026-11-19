@@ -119,7 +119,8 @@ def _auth_mutation_routes():
     return namespace
 
 
-@pytest.mark.parametrize("store_state", ["missing", "empty", "corrupt", "invalid", "unreadable"])
+@pytest.mark.parametrize(
+    "store_state", ["missing", "empty", "corrupt", "invalid", "unreadable", "repair-failed"])
 def test_bootstrap_gate_distinguishes_unreadable_store(
         auth_module, monkeypatch, store_state):
     """Only a genuinely empty installation exposes setup; unreadable stores stay closed."""
@@ -128,15 +129,21 @@ def test_bootstrap_gate_distinguishes_unreadable_store(
     from starlette.responses import RedirectResponse
 
     auth = auth_module
-    if store_state in {"empty", "corrupt", "invalid"}:
+    if store_state in {"empty", "corrupt", "invalid", "repair-failed"}:
         contents = {"empty": '{"users": {}, "session_secret": "test-key"}',
-                    "corrupt": "{", "invalid": '{"users": []}'}[store_state]
+                    "corrupt": "{", "invalid": '{"users": []}',
+                    "repair-failed": '{"users": {}}'}[store_state]
         Path(auth.USERS_FILE).write_text(contents)
     if store_state == "unreadable":
         def refuse_read():
             """Model an existing store the service cannot read."""
             raise PermissionError("test user store unavailable")
         monkeypatch.setattr(auth, "_read_store_raw", refuse_read)
+    if store_state == "repair-failed":
+        def refuse_repair(_store):
+            """Model a readable legacy store on a read-only filesystem."""
+            raise PermissionError("test user store is read-only")
+        monkeypatch.setattr(auth, "_write_store", refuse_repair)
 
     source = (Path(__file__).resolve().parents[1] / "routes.py").read_text()
     wanted = {"login_page", "setup_admin_page", "setup_admin_submit", "_login_redirect_path"}
@@ -152,7 +159,7 @@ def test_bootstrap_gate_distinguishes_unreadable_store(
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "routes.py", "exec"), namespace)
     request = SimpleNamespace(cookies={})
-    setup_closed = store_state in {"corrupt", "invalid", "unreadable"}
+    setup_closed = store_state in {"corrupt", "invalid", "unreadable", "repair-failed"}
     assert auth.any_users() is setup_closed
     login = asyncio.run(namespace["login_page"](request))
     if setup_closed:

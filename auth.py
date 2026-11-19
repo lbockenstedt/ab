@@ -137,7 +137,10 @@ def _read_store() -> dict:
             return _unreadable_store(e)
         if not data.get("session_secret"):
             data["session_secret"] = secrets.token_hex(32)
-            _write_store(data)
+            try:
+                _write_store(data)
+            except Exception as error:  # noqa: BLE001
+                return _unreadable_store(error)
         return data
 
 
