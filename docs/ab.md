@@ -120,6 +120,10 @@ an explicitly empty value still clears it.
 
 ## Notable behaviors & gotchas
 
+- **Boundary-required fix PRs** — a configured staged-path boundary hit, or a failed
+  boundary check, always publishes through a topic-branch PR, regardless of confidence
+  or direct-push eligibility. Non-boundary low-confidence integration pushes are unchanged.
+
 - **Model Registry has its own Settings tab** — the capability/cost rules that rank every enabled endpoint used to be a raw JSON textarea inside Settings → LLM (Step 3). A rule carries 3 identity fields, 4 ranking fields drawn from 3 closed vocabularies (`cost_tier`, `max_complexity`/`capability_rank`, `speed_tier`) and 6 capability booleans, so editing it meant knowing both the field names and the legal values by heart, with a typo silently reclassifying a model. **Settings → Model Registry** now renders one card per rule with a labelled dropdown/number/checkbox per field, plus filter, duplicate and delete. The dropdown vocabularies are pinned to `model_registry.COST_TIER_RANK`/`COMPLEXITY_RANK`/`SPEED_RANK` by `test_model_registry_ui.py`, so adding a tier in Python fails the suite until the UI offers it. `capability_rank` and `speed_tier` both have server-side fallbacks, so clearing them *removes* the key rather than writing a zero — and a saved value the UI doesn't recognise is kept and marked, never silently rewritten on the next Save. The JSON is still the only thing that posts (`name="model_registry_json"`, rewritten by the cards on every edit) and remains editable under **Advanced — raw JSON**.
 - **Hub agent, not spoke** — registered in `active_connections` as `module_type="agent"`; does not register a spoke module or handle `CS_*`/`PXMX_*`/`LE_*` commands.
 - **Reimplements lm-core signing** — `hub_agent.py::MessageSigner` mirrors `lm/core/src/security/signer.py` (HMAC-SHA256 canonical JSON) so it can talk to the hub without depending on lm-core.

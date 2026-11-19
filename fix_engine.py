@@ -6105,24 +6105,24 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # PR is the safe direction for this invariant.
             boundary_forced_pr = False
             boundary_pr_reason = ""
-            if can_direct_push:
-                # List the staged files and check them against the configured boundaries.
-                try:
-                    _changed_for_boundary = [p for p in repo_git.git.diff("--cached", "--name-only").splitlines() if p.strip()]
-                    _b_hits = feature_boundary.boundary_hits(_changed_for_boundary, config.get("feature_boundaries") or [])
-                except Exception as be:
-                    _b_hits = None
-                    boundary_forced_pr = True
-                    boundary_pr_reason = f"Core-systems boundary check failed ({type(be).__name__}); human-reviewed PR required"
-                    logger.warning(f"Boundary check failed for {repo_name} ({be}); fail-closed to human-reviewed PR.")
-                # Any boundary hit forces a pull request.
-                if _b_hits:
-                    _b_ids = ", ".join(h.get("id", "?") for h in _b_hits)
-                    boundary_forced_pr = True
-                    boundary_pr_reason = f"Diff touches core-systems boundary path(s): {_b_ids}; human-reviewed PR required"
-                    logger.info(f"Direct push blocked for {repo_name}: {boundary_pr_reason}")
-                if boundary_forced_pr:
-                    can_direct_push = False
+            # The low-confidence fallback can also push to a shared branch, so
+            # evaluate boundaries even when trusted direct push is unavailable.
+            try:
+                _changed_for_boundary = [p for p in repo_git.git.diff("--cached", "--name-only").splitlines() if p.strip()]
+                _b_hits = feature_boundary.boundary_hits(_changed_for_boundary, config.get("feature_boundaries") or [])
+            except Exception as be:
+                _b_hits = None
+                boundary_forced_pr = True
+                boundary_pr_reason = f"Core-systems boundary check failed ({type(be).__name__}); human-reviewed PR required"
+                logger.warning(f"Boundary check failed for {repo_name} ({be}); fail-closed to human-reviewed PR.")
+            # Any boundary hit forces a pull request.
+            if _b_hits:
+                _b_ids = ", ".join(h.get("id", "?") for h in _b_hits)
+                boundary_forced_pr = True
+                boundary_pr_reason = f"Diff touches core-systems boundary path(s): {_b_ids}; human-reviewed PR required"
+                logger.info(f"Direct push blocked for {repo_name}: {boundary_pr_reason}")
+            if boundary_forced_pr:
+                can_direct_push = False
 
             # Log the direct-push decision and its inputs.
             logger.info(f"Deployment decision for {repo_name}: DirectPushSetting={direct_push_setting}, IsTrusted={is_trusted}, IsOwner={is_owner}, BoundaryForcedPR={boundary_forced_pr} -> can_direct_push={can_direct_push}")
@@ -6215,8 +6215,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (boundary_pr_reason if boundary_forced_pr else (direct_push_refused_reason if direct_push_refused_reason else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met")))
                 decision_reason = reason
                 logger.info(f"Decision: Pull Request. Reason: {reason}.")
-                # Low confidence goes to the dev branch; high confidence to its own bug branch.
-                target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else auto_branch_name("bug", issue=issue)
+                # A required human PR always needs a topic branch, regardless of confidence.
+                target_branch = (config.get("dev_branch", "dev")
+                                 if final_confidence < confidence_threshold and not boundary_forced_pr
+                                 else auto_branch_name("bug", issue=issue))
                 try:
                     repo_git.git.checkout(target_branch)
                 except:
