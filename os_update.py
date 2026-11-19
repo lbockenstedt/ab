@@ -114,6 +114,25 @@ FIX_ACCESS_TIMEOUT_S = 120
 _USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]*$")
 # Debian package name, optionally arch-qualified. Same rule as the helper's.
 _PKG_RE = re.compile(r"^[a-z0-9][a-z0-9+.\-]*(:[a-z0-9\-]+)?$")
+# apt prints "404  Not Found" (two spaces) when a repository no longer has a file.
+_APT_404_RE = re.compile(r"\b404\s+Not Found", re.IGNORECASE)
+
+
+def _apt_failure_hint(stderr: str) -> str:
+    """Why an apt run failed when the cause is the package source, else "".
+
+    A 404 on the repository means the source dropped the files, which is
+    permanent (a retry just fails again). It is typically a release past end
+    of support whose repository moved to an archive, so the fix is on the
+    host's apt sources or release, not another patch run. Naming it keeps the
+    failure from reading as a transient error.
+    """
+    # Only the 404 case is identified; anything else is left to the raw apt text.
+    if _APT_404_RE.search(stderr or ""):
+        return (" — the package repository returned 404: this OS release may be past "
+                "end of support (its repository moved to an archive); fix the apt "
+                "sources or upgrade the OS")
+    return ""
 
 
 def _is_root() -> bool:
@@ -283,7 +302,7 @@ def check_updates(refresh: bool = True) -> Dict[str, Any]:
                 # A failing metadata refresh is reported, not fatal: the cached
                 # list is still useful, and a dead mirror shouldn't blank the panel.
                 warnings.append(f"apt-get update exited {r.returncode}: "
-                                f"{(r.stderr or '').strip()[:300]}")
+                                f"{(r.stderr or '').strip()[:300]}{_apt_failure_hint(r.stderr)}")
         except subprocess.TimeoutExpired:
             warnings.append(f"apt-get update timed out after {CHECK_TIMEOUT_S}s")
         except Exception as exc:  # noqa: BLE001
@@ -391,7 +410,8 @@ def apply_updates(packages: Optional[List[str]] = None) -> Dict[str, Any]:
         "reboot_required": _reboot_required(),
         "output": ((r.stdout or "") + (r.stderr or ""))[-4000:],
         "message": "" if ok else f"{step} exited {r.returncode}: "
-                                 f"{(r.stderr or '').strip()[-300:]}",
+                                 f"{(r.stderr or '').strip()[-300:]}"
+                                 f"{_apt_failure_hint(r.stderr)}",
     }
 
 
