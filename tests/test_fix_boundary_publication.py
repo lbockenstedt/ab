@@ -5,11 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import git
 
 import feature_boundary
 
 
-def _publish(confidence, can_direct_push, boundary_result, existing=False):
+def _publish(confidence, can_direct_push, boundary_result, existing=False, checkout=None):
     """Execute the actual boundary gate and fallback publication with offline fakes."""
     source = (Path(__file__).resolve().parents[1] / "fix_engine.py").read_text()
     gate_start = source.index("            boundary_forced_pr = False")
@@ -48,7 +49,7 @@ def _publish(confidence, can_direct_push, boundary_result, existing=False):
         "config": config, "feature_boundary": feature_boundary,
         "logger": logging.getLogger(__name__), "repo_name": "owner/repo",
         "repo_git": SimpleNamespace(
-            git=SimpleNamespace(diff=diff, checkout=lambda branch: None),
+            git=SimpleNamespace(diff=diff, checkout=checkout or (lambda *args: None)),
             remotes=SimpleNamespace(origin=object())),
         "repo_obj": SimpleNamespace(
             clone_url="https://example.test/repo", default_branch="production",
@@ -88,6 +89,31 @@ def test_boundary_publication_reuses_existing_topic_pr():
     assert pushed == ["bug/1-fix"]
     assert created == []
     assert state["pr"] is prior
+
+
+def test_existing_topic_branch_receives_current_fix_commit(tmp_path):
+    """Reusing a real local topic branch must not leave the new fix on integration."""
+    repo = git.Repo.init(tmp_path, initial_branch="integration")
+    with repo.config_writer() as config:
+        config.set_value("user", "name", "Test")
+        config.set_value("user", "email", "test@example.test")
+    source = tmp_path / "source.py"
+    source.write_text("value = 1\n")
+    repo.index.add(["source.py"])
+    repo.index.commit("base")
+    repo.git.checkout("-b", "bug/1-fix")
+    source.write_text("value = 2\n")
+    repo.index.add(["source.py"])
+    repo.index.commit("prior attempt")
+    repo.git.checkout("integration")
+    source.write_text("value = 3\n")
+    repo.index.add(["source.py"])
+    fixed_head = repo.index.commit("new reviewed fix").hexsha
+    _, pushed, created, _ = _publish(
+        0.90, True, "hit", existing=True, checkout=repo.git.checkout)
+    assert pushed == ["bug/1-fix"] and not created
+    assert repo.active_branch.name == "bug/1-fix"
+    assert repo.head.commit.hexsha == fixed_head
 
 
 @pytest.mark.parametrize("confidence,expected", [(0.90, "integration"), (0.95, "bug/1-fix")])

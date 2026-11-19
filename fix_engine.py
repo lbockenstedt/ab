@@ -6219,10 +6219,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 target_branch = (config.get("dev_branch", "dev")
                                  if final_confidence < confidence_threshold and not boundary_forced_pr
                                  else auto_branch_name("bug", issue=issue))
-                try:
-                    repo_git.git.checkout(target_branch)
-                except:
-                    repo_git.create_head(target_branch).checkout()
+                # Preserve the just-created fix even when this branch already
+                # exists from a prior attempt; a plain checkout restores its old HEAD.
+                repo_git.git.checkout("-B", target_branch)
                 # A low-confidence fix targets the shared dev branch, so this
                 # push is NOT always to a throwaway AppBuilder branch. Force-
                 # pushing a shared branch rewrites it to whatever this working
