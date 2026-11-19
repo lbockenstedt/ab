@@ -332,6 +332,31 @@ def test_unsafe_repo_targets_remain_rejected(tmp_path):
         tmp_path / ".github/workflows/promote-reusable.yml")
 
 
+def test_symlinks_escaping_repo_are_rejected(tmp_path):
+    """A symlinked parent directory or a relative final symlink must not escape."""
+    target = _load_funcs()["_safe_repo_target"]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("x\n")
+    # Parent-directory symlink: the leaf is a plain (not yet existing) file.
+    (repo / "linked-dir").symlink_to(outside, target_is_directory=True)
+    assert target(str(repo), "linked-dir/file.py") is None
+    assert target(str(repo), "linked-dir/secret.txt") is None
+    # Relative final symlink: resolved against its own directory, not the cwd.
+    (repo / "sub").mkdir()
+    (repo / "sub" / "rel.txt").symlink_to("../../outside/secret.txt")
+    assert target(str(repo), "sub/rel.txt") is None
+    # Symlinks that stay inside the repo are still allowed.
+    (repo / "inner").mkdir()
+    (repo / "inner" / "ok.txt").write_text("y\n")
+    (repo / "sub" / "ok.txt").symlink_to("../inner/ok.txt")
+    (repo / "inner-link").symlink_to(repo / "inner", target_is_directory=True)
+    assert target(str(repo), "sub/ok.txt") == str(repo / "sub" / "ok.txt")
+    assert target(str(repo), "inner-link/new.py") == str(repo / "inner-link" / "new.py")
+
+
 def test_empty_search_rejects_batch_before_any_writes(tmp_path):
     """Empty anchors surface retry feedback without partially applying a batch."""
     apply = _load_funcs()["parse_and_apply"]
