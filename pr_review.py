@@ -691,6 +691,74 @@ def _merge_only_context(pr):
         % len(commits))
 
 
+# How much of a PR's description, and of its stated intent, the review briefs
+# carry. lm's promote-reusable.yml (which every repo's promote.yml calls at lm
+# main) quotes the intent of every unit a promotion PR carries, up to 16,000
+# characters, so a promotion's briefs carry its whole description: GitHub
+# refuses a PR body over 65,536 characters, so nothing is cut. At the ordinary
+# 2,000 characters, a four-unit promotion such as ab#586 would show its
+# reviewers about one unit's intent.
+_BRIEF_BODY_CHARS = 4000
+_BRIEF_INTENT_CHARS = 2000
+_PROMOTION_BRIEF_CHARS = 65536
+
+# The promotion PRs promote.yml opens: head branch -> (source, target). These
+# are the promote/* names branch-flow.yml's check-direction admits into qa and
+# main, exact names and never a glob (docs/ab.md), including the dev -> main
+# override.
+_PROMOTION_ROUTES = {
+    "promote/dev-to-qa": ("dev", "qa"),
+    "promote/qa-to-main": ("qa", "main"),
+    "promote/dev-to-main": ("dev", "main"),
+}
+
+
+def _promotion_route(pr):
+    """``(source, target)`` when ``pr`` is a promotion PR as promote.yml opens
+    it: a _PROMOTION_ROUTES head branch in the PR's own repo, merging into
+    that route's target. None for any other PR.
+
+    Stricter than _PROMOTION_PR_HEAD_RE, which only decides when the fast lane
+    reviews a PR: the briefs tell the reviewers where the PR came from, so a
+    look-alike (a suffixed branch, a fork, another base) keeps the ordinary
+    brief."""
+    head = getattr(pr, "head", None)
+    base = getattr(pr, "base", None)
+    route = _PROMOTION_ROUTES.get(getattr(head, "ref", None))
+    # A fork's PR has a head repo of its own, and a deleted fork's has none;
+    # only the repo's own promote branch is the one promote.yml builds.
+    head_repo = getattr(getattr(head, "repo", None), "full_name", None)
+    base_repo = getattr(getattr(base, "repo", None), "full_name", None)
+    if (route is None or getattr(base, "ref", None) != route[1]
+            or not head_repo or head_repo != base_repo):
+        return None
+    return route
+
+
+def _promotion_note(route):
+    """The opening of panel 1's brief for a promotion PR, in place of the
+    human-authored note. ab#586's reviewer, told a promotion was a
+    HUMAN-authored PR, read it as a hand-made PR into qa (fleet rule 2.1) and
+    its VERSION advance as a breach of rule 2.2."""
+    source, target = route
+    # Step 1: what the PR is, and why the VERSION change is expected.
+    note = (
+        "NOTE: This is a PROMOTION pull request from `%s` into `%s`. Its head "
+        "branch is the one the fleet's promote.yml workflow builds, and "
+        "promote.yml is the only way changes reach `%s` (fleet rule 2.1). It "
+        "carries one or more units of work already on `%s`; where the "
+        "description quotes several units' intents, judge each unit's changes "
+        "against its own intent, and the diff as the sum of the units. A "
+        "VERSION change that advances `%s`'s own value by one step is "
+        "promote.yml's pin-and-advance (fleet rule 2.2), expected rather than "
+        "a defect. " % (source, target, target, source, target))
+    # Step 2: the dev -> main override skips qa, which rule 2.1 alone does not say.
+    if route == ("dev", "main"):
+        note += ("This is the dev -> main override, which skips qa; "
+                 "promote.yml permits it for an urgent fix. ")
+    return note
+
+
 def skeptical_issue_body(pr):
     """The review brief panel 1 (the skeptical panel) judges a PR against: title,
     description, stated intent, merge-only note and the merge-safety checklist.
@@ -707,12 +775,18 @@ def skeptical_issue_body(pr):
     # Specification Rule") requires every fleet PR to carry one -- so whether the
     # section is present is a merge-relevant fact, not a formatting detail. It is
     # stated plainly here so the verdict turns on what the PR actually says.
+    #
+    # A promotion PR is framed as one and its description is carried whole; see
+    # _promotion_route.
+    route = _promotion_route(pr)
+    body_cap, intent_cap = ((_PROMOTION_BRIEF_CHARS,) * 2 if route
+                            else (_BRIEF_BODY_CHARS, _BRIEF_INTENT_CHARS))
     try:
         import pr_template
         _intent = pr_template.stated_intent(pr.body or "")
         _intent_block = (
             "STATED INTENT (from the PR's '%s' section):\n%s\n\n"
-            % (pr_template.INTENT, _intent[:2000])
+            % (pr_template.INTENT, _intent[:intent_cap])
             if _intent else
             "STATED INTENT: none. The PR description does not carry an "
             "'%s' section, which AGENTS.md requires of every fleet PR.\n\n"
@@ -721,12 +795,14 @@ def skeptical_issue_body(pr):
         logger.info("pr_review: intent extraction skipped (%s)", e)
         _intent_block = ""
     # Review input: title, description, intent, merge note and the merge-safety checklist.
+    opening = (_promotion_note(route) if route else
+               "NOTE: This is a HUMAN-authored pull request under pre-review — not a "
+               "bot fix. ")
     return (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
-        % (pr.title or "", (pr.body or "").strip()[:4000])
-    ) + _intent_block + _merge_only_context(pr) + (
-        "NOTE: This is a HUMAN-authored pull request under pre-review — not a bot "
-        "fix. Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
+        % (pr.title or "", (pr.body or "").strip()[:body_cap])
+    ) + _intent_block + _merge_only_context(pr) + opening + (
+        "Judge whether it is SAFE and CORRECT to merge as-is. In addition to "
         "correctness/regressions, weight these merge-safety defects heavily (they "
         "have broken prod before):\n"
         "1) TEMPLATE RENDER CRASHES — Jinja dot-access of a dict method (`x.items`, "
@@ -828,13 +904,22 @@ def state_logic_issue_body(pr):
     Shared with scripts/local_review.py, so a local pre-push review asks exactly
     what AB asks; change the brief here and both change."""
     # Review input: title, description and the two defect shapes to look for.
+    # A promotion PR is framed as one and its description is carried whole; see
+    # _promotion_route.
+    route = _promotion_route(pr)
+    body_cap = _PROMOTION_BRIEF_CHARS if route else _BRIEF_BODY_CHARS
+    opening = (
+        "NOTE: This is a PROMOTION pull request from `%s` into `%s`, on the head "
+        "branch the fleet's promote.yml workflow builds; it carries one or more "
+        "units of work already on `%s`. " % (route[0], route[1], route[0])
+        if route else
+        "NOTE: This is a HUMAN-authored pull request under pre-review. ")
     return (
         "PR TITLE: %s\n\nPR DESCRIPTION:\n%s\n\n"
-        % (pr.title or "", (pr.body or "").strip()[:4000])
-    ) + (
-        "NOTE: This is a HUMAN-authored pull request under pre-review. Ignore style, "
-        "naming, and general correctness — a SEPARATE broad reviewer already covers "
-        "those. Your ONLY job is two specific defect shapes:\n\n"
+        % (pr.title or "", (pr.body or "").strip()[:body_cap])
+    ) + opening + (
+        "Ignore style, naming, and general correctness — a SEPARATE broad reviewer "
+        "already covers those. Your ONLY job is two specific defect shapes:\n\n"
         "1) STATE/STATUS COVERAGE — for every boolean/enum/status value this diff "
         "computes or changes the computation of: list every distinct state the "
         "underlying data can actually be in (not just the two the author had in "
