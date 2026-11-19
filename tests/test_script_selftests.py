@@ -22,7 +22,15 @@ tests. Each gets a clean interpreter, exactly as when run by hand.
 
 Discovery is dynamic on purpose: a new self-test file is picked up with no edit
 here, so the next one cannot be born invisible.
+
+Every test file with a top-level ``if __name__ == "__main__":`` block is run,
+including files that also hold pytest tests: their ``__main__`` block can check
+more than the collected tests do. The first rule here (defines ``main()``, no
+``def test_``) skipped those files and an ``async def main()`` script, so
+test_feature_drive_classify.py's main went on failing unseen (its ast harness
+lacked the ``_meta`` helper) while its pytest tests passed.
 """
+import ast
 import os
 import pathlib
 import subprocess
@@ -35,18 +43,41 @@ import pytest
 _TESTS = pathlib.Path(__file__).resolve().parent
 _HERE = _TESTS.parent
 
+def _is_main_guard(node):
+    """True for a top-level ``if __name__ == "__main__":`` statement."""
+    if not isinstance(node, ast.If):
+        return False
+    t = node.test
+    if not (isinstance(t, ast.Compare) and len(t.ops) == 1
+            and isinstance(t.ops[0], ast.Eq) and len(t.comparators) == 1):
+        return False
+    sides = [t.left, t.comparators[0]]
+    has_name = any(isinstance(s, ast.Name) and s.id == "__name__" for s in sides)
+    has_main = any(isinstance(s, ast.Constant) and s.value == "__main__" for s in sides)
+    return has_name and has_main
+
 
 def _is_script_selftest(path):
-    """A file that defines main() but exposes no pytest-collectable test."""
+    """A file that does work when run as a script: it has a top-level
+    ``__main__`` block, whatever its entry point is called and whether or not
+    pytest also collects tests from it."""
     try:
         src = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return "\ndef main()" in src and "\ndef test_" not in src
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return False
+    return any(_is_main_guard(n) for n in tree.body)
 
 
 def _discover():
-    return sorted(p.name for p in _TESTS.glob("test_*.py") if _is_script_selftest(p))
+    """Names of the test files to run as scripts. Never this module: given a
+    ``__main__`` block, it would run itself, which would run itself again."""
+    me = pathlib.Path(__file__).name
+    return sorted(p.name for p in _TESTS.glob("test_*.py")
+                  if p.name != me and _is_script_selftest(p))
 
 
 SCRIPT_SELFTESTS = _discover()
@@ -63,6 +94,29 @@ def test_script_selftests_are_discovered():
         "_is_script_selftest is probably wrong; this module would otherwise "
         "pass while testing nothing"
     )
+
+
+@pytest.mark.parametrize("src, runs", [
+    # pytest tests plus a __main__ block (test_feature_drive_classify.py's shape)
+    ('import sys\n\n\ndef test_a():\n    pass\n\n\nif __name__ == "__main__":\n'
+     '    sys.exit(0)\n', True),
+    # an async entry point
+    ("async def main():\n    return 0\n\n\nif __name__ == '__main__':\n"
+     "    import asyncio\n    asyncio.run(main())\n", True),
+    # a main() that nothing calls: running the file does nothing
+    ("import sys\n\n\ndef main():\n    return 0\n", False),
+    # the words without a top-level block
+    ('def f():\n    if __name__ == "__main__":\n        pass\n\n\n'
+     "NOTE = \"if __name__ == '__main__': main()\"\n", False),
+    # a multiline string holding the block at column zero
+    ('DOC = """\nif __name__ == "__main__":\n    pass\n"""\n', False),
+])
+def test_any_file_with_a_main_block_is_run_as_a_script(tmp_path, src, runs):
+    """Files are picked by their top-level ``__main__`` block, whatever the
+    entry point is called and whether or not pytest collects tests there."""
+    path = tmp_path / "test_example.py"
+    path.write_text(src)
+    assert _is_script_selftest(path) is runs
 
 
 @pytest.mark.parametrize("script", SCRIPT_SELFTESTS)

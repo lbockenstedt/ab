@@ -9,7 +9,7 @@ See [`docs/ab.md`](docs/ab.md) for the complete architecture reference and [`doc
 | Path | What it holds |
 | :--- | :--- |
 | `*.py` (root) | The application: one flat set of modules. Start at `main.py` (FastAPI app), `routes.py`, `agent_orchestrator.py`, `fix_engine.py`, `pr_review.py`; `AGENTS.md` has the full orientation. |
-| `tests/` | pytest suite. Run `pytest -q` from the repo root; `pytest.ini` points it here and puts the root on the import path. |
+| `tests/` | pytest suite. Run `pytest -q` from the repo root; `pytest.ini` points it here and puts the root on the import path. Any test file with an `if __name__ == "__main__":` block is also run as a script, in its own process from the repo root, by `tests/test_script_selftests.py`; it passes when it exits 0. |
 | `templates/` | The WebUI (`index.html`). |
 | `scripts/` | Operator and maintenance scripts. |
 | `docs/` | AppBuilder docs (`docs/ab.md`) and copies of the fleet pages from `lm/docs`. |
