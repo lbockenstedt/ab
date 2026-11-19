@@ -26,6 +26,7 @@ import re
 import requests
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 # Thread pool, timestamps, .env loading and the GitHub API.
@@ -695,13 +696,15 @@ def _wait_for_spokes_online(config, min_count=1, timeout=90):
 
 
 _UPDATE_CHECK_LOCK = threading.Lock()
+_UPDATE_RECOVERY_COMMIT = None
 
 
 def check_for_updates():
     """Checks GitHub for new versions, performs pre-flight syntax checks, and signals a restart if safe."""
+    global _UPDATE_RECOVERY_COMMIT
     if not _UPDATE_CHECK_LOCK.acquire(blocking=False):
         logger.info("Update check already in progress.")
-        return None, "Update check already in progress."
+        return False, "Update check already in progress."
     try:
         # The restart flag clears before restart; only watchdog verification
         # retires this durable marker and makes the current HEAD a safe baseline.
@@ -711,10 +714,26 @@ def check_for_updates():
             pass
         else:
             logger.info("Update deferred: previous update awaiting watchdog verification.")
-            return None, "Update deferred: previous update awaiting watchdog verification."
+            return False, "Update deferred: previous update awaiting watchdog verification."
 
         # Remember the current commit as the last known good one.
         self_repo = git.Repo(os.getcwd())
+
+        def restore_checkout(commit):
+            """Release recovery ownership only after HEAD confirms the pinned baseline."""
+            global _UPDATE_RECOVERY_COMMIT
+            if self_repo.head.commit.hexsha != commit:
+                self_repo.git.reset("--hard", commit)
+            if self_repo.head.commit.hexsha != commit:
+                raise RuntimeError("Rollback did not restore the expected checkout")
+            _UPDATE_RECOVERY_COMMIT = None
+
+        if _UPDATE_RECOVERY_COMMIT is not None:
+            try:
+                restore_checkout(_UPDATE_RECOVERY_COMMIT)
+            except Exception as e:
+                logger.error("Unverified checkout recovery failed: %s", e)
+                return False, f"Update deferred: unverified checkout awaiting recovery ({e})."
         old_commit = self_repo.head.commit.hexsha
 
         update_state = load_update_state()
@@ -739,6 +758,8 @@ def check_for_updates():
             logger.warning(f"Remote head {remote_head[:7]} is in failed_commits blocklist. Skipping pull.")
             return None, f"Update skipped: remote head {remote_head[:7]} is a known-bad commit."
 
+        # Pin before checkout mutation; failed rollback must never become the next baseline.
+        _UPDATE_RECOVERY_COMMIT = old_commit
         # Advance to the fetched remote head. /opt/ab is a DEPLOYMENT MIRROR,
         # not a dev tree — a plain `git pull` aborts with "local changes would be
         # overwritten" the moment any tracked file is dirtied at runtime, wedging
@@ -782,7 +803,7 @@ def check_for_updates():
             # Syntax error: roll back and blocklist the commit.
             if syntax_error:
                 logger.error(f"Syntax check failed for commit {new_commit[:7]}. Rolling back to {old_commit[:7]}...")
-                self_repo.git.reset("--hard", old_commit)
+                restore_checkout(old_commit)
                 update_state = load_update_state()
                 if new_commit not in update_state["failed_commits"]:
                     update_state["failed_commits"].append(new_commit)
@@ -807,16 +828,35 @@ def check_for_updates():
                     # retries it.
                     logger.error("Self-update: dependency sync failed (%s). Rolling back to %s.",
                                  pip_msg, old_commit[:7])
-                    self_repo.git.reset("--hard", old_commit)
+                    restore_checkout(old_commit)
                     return None, f"Update failed: dependency install failed ({pip_msg}). Rolled back to {old_commit[:7]}."
 
-            # Write the update_pending marker with the new commit.
+            # Publish only a closed, complete marker at the watchdog's observed pathname.
+            marker_tmp = None
             try:
-                with open(os.path.join(CONFIG_DIR, "update_pending"), "w") as f:
+                with tempfile.NamedTemporaryFile(
+                        mode="w", encoding="utf-8", dir=CONFIG_DIR,
+                        prefix="update_pending.", suffix=".tmp", delete=False) as f:
+                    marker_tmp = f.name
                     f.write(new_commit)
-                logger.info("Update pending signal created. Triggering restart...")
+                os.replace(marker_tmp, os.path.join(CONFIG_DIR, "update_pending"))
             except Exception as e:
-                logger.warning(f"Could not create update_pending signal: {e}")
+                logger.error("Could not publish update_pending signal: %s", e)
+                if marker_tmp is not None:
+                    try:
+                        os.remove(marker_tmp)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as cleanup_error:
+                        logger.error("Could not remove pending-update temp file: %s", cleanup_error)
+                try:
+                    restore_checkout(old_commit)
+                except Exception as rollback_error:
+                    logger.error("Pending-update rollback failed: %s", rollback_error)
+                    return None, f"Update failed: could not publish update_pending ({e}); rollback failed: {rollback_error}."
+                return None, f"Update failed: could not publish update_pending ({e}). Rolled back to {old_commit[:7]}."
+            _UPDATE_RECOVERY_COMMIT = None
+            logger.info("Update pending signal created. Triggering restart...")
 
             # Signal the dedicated restart_worker to apply the restart. This is decoupled
             # from the scan cycle (and from state["paused"]) so the running process reliably
@@ -826,6 +866,7 @@ def check_for_updates():
             return True, f"Update found: {cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
 
         # Already up to date.
+        _UPDATE_RECOVERY_COMMIT = None
         return None, "No updates available."
     # Any other failure: report it.
     except Exception as e:
@@ -903,7 +944,8 @@ def updater_worker():
         try:
             logger.info("Checking for self-updates...")
             updated, msg = check_for_updates()
-            _log_restart_event("auto_update", msg, ok=bool(updated))
+            if updated is not False:
+                _log_restart_event("auto_update", msg, ok=bool(updated))
         except Exception as e:
             logger.error(f"Updater worker error: {e}")
         # Always record the check time so the watchdog can see the thread is alive.
