@@ -371,20 +371,25 @@ def _removed(patch):
             if ln.startswith("-") and not ln.startswith("---")]
 
 
-def _added_linenos(patch):
-    """New-file line numbers of the added lines in a unified diff."""
+def _added_rows(patch):
+    """(new-file line number, text) of each added line in a unified diff."""
     # Walk each hunk from its '+start' and count new-side lines.
-    out, n = set(), 0
+    out, n = [], 0
     for line in (patch or "").splitlines():
         m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
         if m:
             n = int(m.group(1))
         elif line.startswith("+") and not line.startswith("+++"):
-            out.add(n)
+            out.append((n, line[1:]))
             n += 1
         elif line.startswith(" "):
             n += 1
     return out
+
+
+def _added_linenos(patch):
+    """New-file line numbers of the added lines in a unified diff."""
+    return {n for n, _ in _added_rows(patch)}
 
 
 # lm WebUI ratchets (core/tests/test_webui_ratchets.py): counts may only go down.
@@ -759,6 +764,75 @@ def check_docs_updated(files):
                "does and how to use it." % ", ".join(sorted(set(why))[:6]))]
 
 
+# Review scope budget (fleet rule 1.8). The NAC change grew from 6 files to 52
+# during review and took 16 rounds: past this size one pass can't read it all.
+_SCOPE_FILES = 15
+_SCOPE_LINES = 1500
+# Comment markers by file type; .py, .sh, .ps1 and the rest use '#'.
+_COMMENT_START = {".js": ("//", "/*", "*"), ".html": ("<!--", "//", "/*", "*")}
+
+
+def _docstring_lines(text):
+    """Line numbers inside the docstrings of Python source (none if it doesn't parse)."""
+    import ast
+    try:
+        tree = _parse(text)
+    except (SyntaxError, ValueError):
+        return set()
+    lines = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                and ast.get_docstring(node, clean=False) is not None):
+            lines.update(range(node.body[0].lineno, node.body[0].end_lineno + 1))
+    return lines
+
+
+def _code_lines(name, patch, text=None):
+    """How many added lines are code: not blank, not a comment and, in Python,
+    not in a docstring. Docstrings come from parsing the whole new file
+    (``text``), because a hunk can start inside one; without the text, or when
+    it doesn't parse, they count as code. Other strings are data and count."""
+    rows = _added_rows(patch)
+    starts = _COMMENT_START.get(os.path.splitext(name)[1], ("#",))
+    docs = _docstring_lines(text) if rows and text and name.endswith(".py") else set()
+    n = 0
+    for lineno, line in rows:
+        line = line.strip()
+        if line and not line.startswith(starts) and lineno not in docs:
+            n += 1
+    return n
+
+
+def check_change_scope(files, head_ref=None, fetch=None):
+    """A note when a change is over the review scope budget: source files that
+    gain code, and their added or changed lines, without tests, docs, comments,
+    docstrings or blank lines. ``fetch(path)`` returns a file's new text or None,
+    as in check_full_files; Python docstrings are found in it. Advisory only: a
+    large change can be right, and its intent then says why it can't be split.
+    Promotions and back-merges are skipped."""
+    if (head_ref or "").startswith(("promote/", "backmerge/")):
+        return []
+    # Count every file: counting is cheap, so no _MAX_FILES cap on the total.
+    counted, lines = 0, 0
+    for f in files or []:
+        name = getattr(f, "filename", "") or ""
+        if (getattr(f, "status", "") == "removed" or not name.endswith(_CODE_EXT)
+                or _TEST_RE.search(name) or _DOC_RE.search(name)):
+            continue
+        text = fetch(name) if fetch and name.endswith(".py") else None
+        n = _code_lines(name, getattr(f, "patch", None), text)
+        counted += 1 if n else 0
+        lines += n
+    if counted <= _SCOPE_FILES and lines <= _SCOPE_LINES:
+        return []
+    return [_f("advisory", "Change is over the review scope budget",
+               "Adds or changes %s source lines in %d files (budget: %s lines, %d files; tests, "
+               "docs, comments and docstrings not counted). Keep the change to its intent: put "
+               "other copies of the same defect and unrelated clean-ups in their own change, or "
+               "say in the PR intent why it can't be split." % (format(lines, ","), counted,
+                                                                format(_SCOPE_LINES, ","), _SCOPE_FILES))]
+
+
 def check_fleet_rules(files, repo_full_name="", head_ref=None, config=None):
     """Run every diff rule; returns findings (never raises)."""
     cfg = config or {}
@@ -828,7 +902,8 @@ def _promoted_version(repo_path, name):
 
 def check_worktree(repo_path, repo_full_name="", config=None, base=None, head_ref=None):
     """All rules on a local worktree's uncommitted changes (or the commits since
-    ``base``), including the whole-file rules and the copied/dead-code scan."""
+    ``base``), including the whole-file rules, the copied/dead-code scan and the
+    scope budget."""
     try:
         files = local_diff_files(repo_path, base)
     except Exception:  # noqa: BLE001
@@ -847,6 +922,10 @@ def check_worktree(repo_path, repo_full_name="", config=None, base=None, head_re
     try:
         out += check_full_files(files, _read)
         out += check_copies_and_dead_code(repo_path, files)
+        # The scope note is not in check_fleet_rules: AB's PR fix hands every
+        # finding from there to the model as work, and no edit shrinks a change.
+        # Last, so a failure here costs only the note.
+        out += check_change_scope(files, head_ref, _read)
     except Exception:  # noqa: BLE001
         pass
     return out

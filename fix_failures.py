@@ -57,6 +57,26 @@ def is_contended_failure(message):
     return CONTENDED_LOCK in message
 
 
+# fix_one_pr returns this at once when the picker found no model that may run
+# the fix and the caller forbade its safety floor (must_escalate_to_human, which
+# a consolidated rework sets): the pool emptied after the caller judged it, or
+# the prompt needs more context than any model left has. Nothing was generated,
+# so like a barren reply it says nothing about the fix. Unlike contention it can
+# repeat until the pool changes, so the caller bounds it with the barren allowance.
+NO_MODEL = "No model in the pool can run this fix."
+
+
+def is_no_model_failure(message):
+    """True when `message` reports that no model in the pool could run the fix.
+
+    Substring, for the same reason is_barren_failure is.
+    """
+    # Only strings can match.
+    if not isinstance(message, str):
+        return False
+    return NO_MODEL in message
+
+
 def is_barren_failure(message):
     """True when `message` reports a model reply with nothing evaluable in it.
 
