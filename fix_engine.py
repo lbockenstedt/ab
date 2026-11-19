@@ -5393,6 +5393,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         if not token:
             logger.error(f"Manual trigger failed: No GitHub Token configured.")
             return False, "No GitHub Token configured"
+        if llm_preference == "claude" and _find_claude_cli_slot(config) is None:
+            logger.error("Claude CLI fix requested but no claude_cli provider is configured.")
+            return False, "Claude CLI is not configured in the LLM Vault."
 
         # Fetch the issue; if it was deleted or not found, drop it from history.
         gh_current = Github(token)
@@ -5484,19 +5487,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         # Turn the user's provider preference into a picker restriction.
         # llm_preference maps straight onto the picker's restrict= hard filter —
         # "cloud"/"local"/"claude" narrow WHICH tier is eligible, same meaning as
-        # the old force_cloud/force_provider pins, but without needing to resolve
-        # a specific slot number up front (claude_cli's slot is looked up here only
-        # to fail fast with a clear message when none is configured).
+        # the old force_cloud/force_provider pins, without pinning a specific slot.
+        # Claude CLI availability was checked before issue work began.
         restrict = None
         if llm_preference == "cloud":
             restrict = "cloud"
         elif llm_preference == "local":
             restrict = "local"
         elif llm_preference == "claude":
-            if _find_claude_cli_slot(config) is None:
-                logger.error("Claude CLI fix requested but no claude_cli provider is configured.")
-                update_task_state(task_id=issue_id, action="end")
-                return False, "Claude CLI is not configured in the LLM Vault."
             restrict = "claude"
             logger.info(f"Claude CLI fix requested for {issue_id} — restricting the picker to claude_cli")
 
