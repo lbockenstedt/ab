@@ -107,6 +107,8 @@ Ollama startup warmup is separate and is not disabled by this policy.
 
 ## Key commands / handlers
 
+- **Closed-issue recurrence:** a failed GitHub reopen is reported as failure and remains retryable; no recurrence comment is posted.
+  Once reopening succeeds, failure of the optional evidence comment does not turn it into a failed reopen.
 - **Inbound from hub** (`hub_agent.py::_handle_message`): `APPROVAL_REQUIRED`, `APPROVED`, `SPOKE_UPDATE_SESSION_KEY` (provisions session secret), `SPOKE_SET_HUB_SECRET`, `HUB_RESPONSE` (correlated reply to a `HUB_REQUEST`), `DENIED`, `get_version`/`GET_VERSION` (signed `COMMAND_RESULT` with `data.version`), `SET_LOG_LEVEL`/`SPOKE_SET_LOG_LEVEL` (WebUI "Enable Debug" broadcast).
 - **Outbound to hub** (`client.request_sync`): `GET_LOGS` (aggregated spoke logs, 20s timeout), `TRIGGER_ALL_UPDATES` (kick all spoke self-updates, 60s timeout). These replace the old static-token HTTP calls (`LM_ADMIN_TOKEN`/`X-Admin-Token`) the hub never honored.
 - **Bug/feature report acknowledgements:** ingestion counts and caches a report only after `MARK_BUG_FILED` or `MARK_BUG_DUPLICATE` returns `status: "ok"`.

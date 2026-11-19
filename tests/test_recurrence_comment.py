@@ -83,3 +83,83 @@ def test_open_duplicate_updates_the_comment_redacts_and_stamps_the_record(monkey
     assert "**3** time(s)" in issue.comments[0].body and "10.9.8.7" not in issue.comments[0].body
     assert "c73fbb13" not in issue.title and _IP not in issue.body
     assert store["o/nw:211"]["last_recurrence_at"]
+
+
+def test_closed_duplicate_comment_failure_keeps_successful_reopen(monkeypatch, caplog):
+    """Optional comment failure does not invalidate a confirmed reopen."""
+    issue = Issue(number=211, title="t", body="b", comments=())
+    issue.state = "closed"
+    caplog.set_level("INFO")
+    monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
+    monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", True))
+    monkeypatch.setattr(github_ops, "load_processed", lambda: {})
+    monkeypatch.setattr(github_ops, "save_processed", lambda p: None)
+
+    def raise_comment(body):
+        """Simulate failure of the optional recurrence comment."""
+        raise RuntimeError("API rate limit")
+    issue.create_comment = raise_comment
+
+    got = github_ops.create_automated_issue(
+        None, ["o/nw"], N(full_name="o/nw"),
+        {"title": "slow command", "body": "seen", "repo": "o/nw"})
+    assert got is issue
+    assert issue.state == "open"
+    assert not issue.comments
+    assert "Reopened issue #211" in caplog.text
+    assert "Could not add recurrence comment" in caplog.text
+
+
+def test_closed_duplicate_edit_succeeds_retry_restores(monkeypatch, caplog):
+    """A failed reopen is not reported as success and remains retryable."""
+    issue = Issue(number=211, title="t", body="b", comments=())
+    issue.state = "closed"
+    caplog.set_level("INFO")
+    call_count = [0]
+
+    def flaky_edit(**kw):
+        """Fail the first reopen and apply the second."""
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("API rate limit")
+        for k, v in kw.items():
+            setattr(issue, k, v)
+    issue.edit = flaky_edit
+
+    monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
+    monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", True))
+    monkeypatch.setattr(github_ops, "load_processed", lambda: {})
+    monkeypatch.setattr(github_ops, "save_processed", lambda p: None)
+
+    got1 = github_ops.create_automated_issue(
+        None, ["o/nw"], N(full_name="o/nw"),
+        {"title": "slow command", "body": "seen", "repo": "o/nw"})
+    assert got1 is None
+    assert issue.state == "closed"
+    assert not issue.comments
+    assert "Could not reopen issue #211" in caplog.text
+    assert "Reopened issue #211" not in caplog.text
+
+    got2 = github_ops.create_automated_issue(
+        None, ["o/nw"], N(full_name="o/nw"),
+        {"title": "slow command", "body": "seen", "repo": "o/nw"})
+    assert got2 is issue
+    assert issue.state == "open"
+    assert len(issue.comments) == 1
+
+
+def test_happy_closed_duplicate_opens_issue_and_posts_comment(monkeypatch):
+    """A confirmed reopen returns the issue and adds one recurrence comment."""
+    issue = Issue(number=211, title="t", body="b", comments=())
+    issue.state = "closed"
+    monkeypatch.setattr(github_ops, "_in_update_cooldown", lambda: (False, 0))
+    monkeypatch.setattr(github_ops, "find_global_duplicate_issue", lambda *a: (issue, "o/nw", True))
+    monkeypatch.setattr(github_ops, "load_processed", lambda: {})
+    monkeypatch.setattr(github_ops, "save_processed", lambda p: None)
+
+    got = github_ops.create_automated_issue(
+        None, ["o/nw"], N(full_name="o/nw"),
+        {"title": "slow command", "body": "seen", "repo": "o/nw"})
+    assert got is issue
+    assert issue.state == "open"
+    assert len(issue.comments) == 1

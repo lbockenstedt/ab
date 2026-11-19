@@ -748,6 +748,8 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                     existing_issue.edit(state='open')
                 except Exception as reopen_err:
                     logger.warning(f"Could not reopen issue #{existing_issue.number}: {reopen_err}")
+                    return None
+                logger.info(f"Reopened issue #{existing_issue.number} for {current_repo_name}")
                 try:
                     existing_issue.create_comment(
                         f"🔁 **Recurrence detected — reopening instead of filing a duplicate**\n\n"
@@ -755,7 +757,6 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                         f"issue was closed.\n\n"
                         f"```\n{body_text}\n```"
                     )
-                    logger.info(f"Reopened issue #{existing_issue.number} for {current_repo_name}")
                 except Exception as comment_err:
                     logger.warning(f"Could not add recurrence comment to #{existing_issue.number}: {comment_err}")
                 return existing_issue
