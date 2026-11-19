@@ -76,11 +76,11 @@ class OidcError(Exception):
 # ── config ──────────────────────────────────────────────────────────────────
 
 def _config_store() -> tuple:
-    """Return ``(load_config, save_config)`` from config_store, importable in
+    """Return ``(load_config, update_config)`` from config_store, importable in
     isolation (the recovery/test path may not have config_store wired)."""
     # Imported lazily so this module can load even where config_store is unavailable.
-    from config_store import load_config, save_config
-    return load_config, save_config
+    from config_store import load_config, update_config
+    return load_config, update_config
 
 
 def _bool_env(val, default: bool) -> bool:
@@ -153,30 +153,30 @@ def save_oidc_config(patch: dict) -> dict:
     ``client_secret`` is only overwritten when a non-empty value is supplied, so
     saving other fields from the WebUI never wipes a stored secret. Returns the
     stored (redacted) config."""
-    # Load the full config and copy the current OIDC section so it can be edited.
-    load_config, save_config = _config_store()
-    config = load_config() or {}
-    oidc = dict(config.get("oidc", {}) or {})
-    # Copy each plain field the caller supplied, normalised to a trimmed string.
-    for key in ("tenant_id", "client_id", "redirect_uri", "allowed_group",
-                "cert_path", "key_path"):
-        if key in patch:
-            oidc[key] = str(patch.get(key) or "").strip()
-    # Update the enabled flag only when the caller sent it.
-    if "enabled" in patch:
-        oidc["enabled"] = bool(patch.get("enabled"))
-    # Secret: blank input keeps the existing one; a sentinel clears it.
-    if "client_secret" in patch:
-        sec = str(patch.get("client_secret") or "")
-        if sec == "__CLEAR__":
-            oidc["client_secret"] = ""
-        elif sec.strip():
-            oidc["client_secret"] = sec.strip()
-    # Store the updated section and write config.json back to disk.
-    config["oidc"] = oidc
-    save_config(config)
+    _, update_config = _config_store()
+
+    def edit(config):
+        """Apply the patch while preserving the current secret unless changed explicitly."""
+        oidc = dict(config.get("oidc", {}) or {})
+        # Copy each plain field the caller supplied, normalised to a trimmed string.
+        for key in ("tenant_id", "client_id", "redirect_uri", "allowed_group",
+                    "cert_path", "key_path"):
+            if key in patch:
+                oidc[key] = str(patch.get(key) or "").strip()
+        if "enabled" in patch:
+            oidc["enabled"] = bool(patch.get("enabled"))
+        # Blank keeps the freshly read secret; only the sentinel clears it.
+        if "client_secret" in patch:
+            sec = str(patch.get("client_secret") or "")
+            if sec == "__CLEAR__":
+                oidc["client_secret"] = ""
+            elif sec.strip():
+                oidc["client_secret"] = sec.strip()
+        config["oidc"] = oidc
+        return oidc
+
     # Return the saved values with the secret hidden.
-    return redact_config(oidc)
+    return redact_config(update_config(edit))
 
 
 def redact_config(oidc: dict) -> dict:

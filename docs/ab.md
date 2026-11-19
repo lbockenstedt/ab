@@ -16,9 +16,12 @@ A standalone autonomous bot that polls GitHub repos for issues labeled `automate
 The configuration/state writer creates missing parent directories and writes
 through a unique temporary file in the destination directory before atomically
 replacing the JSON file. Concurrent saves cannot rename or clean up each other's
-temporary files; the last successful replacement wins. This does not merge
-concurrent read-modify-write updates. Write failures retain caller-specific
-logging and fallback behavior.
+temporary files. Configuration edits serialize a fresh read, mutation and write
+through `update_config`; unchanged edits do not write. The complete Settings
+form rejects a concurrent change with HTTP 409 and a reload-and-retry message,
+before `.env` or post-save side effects. Other full state snapshots still use
+last-replacement-wins, not merging. Write failures retain caller-specific logging
+and fallback behavior.
 
 `/etc/ab/config.json` is never replaced while it cannot be read. If it exists
 with content AB cannot open or parse (for example a maintenance script left it

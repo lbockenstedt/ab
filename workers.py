@@ -65,7 +65,7 @@ from main import (
     recompute_issue_counters,
     save_processed,
     logger,
-    save_config,
+    update_config,
     save_update_state,
     state,
     update_task_state,
@@ -567,11 +567,13 @@ def _hub_agent_on_connection(connected):
 
 def _persist_config_key(key, value):
     """Callback helper: upsert a single key into config.json (agent-managed secrets)."""
-    # Load, update and save the config; a failure is only a warning.
-    try:
-        cfg = load_config()
+    def edit(cfg):
+        """Set only the requested key in the current config."""
         cfg[key] = value
-        save_config(cfg)
+
+    # Edit the latest config; a failure is only a warning.
+    try:
+        update_config(edit)
     except Exception as e:
         logger.warning(f"Could not persist {key} to config: {e}")
 
@@ -2484,7 +2486,7 @@ __EXCLUDE = {"git", "json", "os", "py_compile", "requests", "time",
              "_llm_cb_snapshot", "_local_health_url", "_normalize_lmstudio_url",
              "_provider_configured", "_provider_credit_cb_snapshot",
              "_set_update_cooldown", "get_log_path", "get_version", "load_config",
-             "load_processed", "load_update_state", "logger", "save_config",
+             "load_processed", "load_update_state", "logger", "update_config",
              "save_update_state", "state", "update_task_state"}
 # Export every name defined here except the ones above.
 __all__ = [__n for __n in dir() if not __n.startswith("__") and __n not in __EXCLUDE]

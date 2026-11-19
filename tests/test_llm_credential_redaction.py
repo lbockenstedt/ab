@@ -22,6 +22,8 @@ import ast
 import asyncio
 import sys
 import uuid
+from copy import deepcopy
+from threading import RLock
 
 
 def _extract_redaction_source(src):
@@ -64,7 +66,7 @@ def _load_ns():
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in (
                 "_public_llm_entry", "save_llm_credential", "get_llm_config",
-                "create_llm_entry", "update_llm_entry"):
+                "create_llm_entry", "update_llm_entry", "delete_llm_entry", "delete_llm_credential"):
             segs.append(ast.get_source_segment(src, node))
 
     class _NoLog:
@@ -83,15 +85,23 @@ def _load_ns():
             return self._payload
 
     _config_holder = {"config": {}}
+    lock = RLock()
 
     def load_config():
-        return dict(_config_holder["config"])
+        return deepcopy(_config_holder["config"])
 
-    def save_config(cfg):
-        _config_holder["config"] = dict(cfg)
+    def update_config(edit):
+        with lock:
+            current = load_config()
+            draft = deepcopy(current)
+            result = edit(draft)
+            if draft != current:
+                _config_holder["config"] = deepcopy(draft)
+            return result
 
     ns = {
-        "logger": _NoLog(), "load_config": load_config, "save_config": save_config,
+        "logger": _NoLog(), "load_config": load_config, "update_config": update_config,
+        "asyncio": asyncio, "state": {},
         "JSONResponse": _JSONResponse, "Request": _FakeRequest, "uuid": uuid,
         # Side-effect collaborator: the entry routes kick an endpoint re-probe so
         # a newly added LLM shows in the header immediately. Stubbed out here —
@@ -111,7 +121,7 @@ def _check(label, cond):
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # Synthetic, non-credential-shaped sentinel used only to assert this exact

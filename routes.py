@@ -2,10 +2,11 @@
 # Standard modules, FastAPI, GitHub and AppBuilder PR/branch helpers.
 import asyncio, fnmatch, git, json, os, re, shutil, subprocess, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import Request, HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from github import Github
 from app_state import (ReviewPersistenceError, activity_feed_items, mark_pr_approved,
                        pr_approval_snapshot, update_pr_review)
@@ -33,6 +34,7 @@ def _model_stage_rows(config, model_options):
 from log_scan import _explicit_log_level  # main re-exports only public names
 from main import (
     CHAT_CONFIG_DEFAULTS,
+    ConfigConflictError,
     CONFIG_DIR,
     ENV_FILE,
     STARTUP_STAMP_FILE,
@@ -86,11 +88,11 @@ from main import (
     OLLAMA_BASE_URL,
     run_scan_cycle,
     save_chats,
-    save_config,
     save_processed,
     set_active_chat,
     state,
     templates,
+    update_config,
     update_task_state,
     validate_llm_config_on_startup,
 )
@@ -454,7 +456,7 @@ async def oidc_config_set(request: Request):
         body = {}
     # Save it and return the stored copy.
     try:
-        stored = _o.save_oidc_config(body or {})
+        stored = await asyncio.to_thread(_o.save_oidc_config, body or {})
     except Exception as e:  # noqa: BLE001
         logger.exception("oidc: could not save config")
         return {"status": "error", "message": str(e)}
@@ -2119,19 +2121,16 @@ async def toggle_model(request: Request):
         if not model_name or enabled is None:
             return JSONResponse(status_code=400, content={"error": "Missing model or enabled status"})
 
-        # Add or remove it from the enabled list.
-        config = load_config()
-        enabled_list = config.get("enabled_models", [])
+        def edit(config):
+            """Set membership in the current enabled-model list."""
+            enabled_list = config.setdefault("enabled_models", [])
+            if enabled and model_name not in enabled_list:
+                enabled_list.append(model_name)
+            elif not enabled and model_name in enabled_list:
+                enabled_list.remove(model_name)
+            return enabled_list
 
-        if enabled and model_name not in enabled_list:
-            enabled_list.append(model_name)
-        elif not enabled and model_name in enabled_list:
-            enabled_list.remove(model_name)
-
-        # Save.
-        config["enabled_models"] = enabled_list
-        save_config(config)
-
+        enabled_list = await asyncio.to_thread(update_config, edit)
         return {"status": "success", "enabled_models": enabled_list}
     except Exception as e:
         logger.error(f"Error toggling model: {e}")
@@ -3156,6 +3155,7 @@ async def save_settings(request: Request):
     data = dict(form_data)
 
     config_data = load_config()
+    baseline = deepcopy(config_data)
 
     # Labels: any, none, or the chosen ones.
     labels_mode = data.get("label_mode", "SPECIFIC")
@@ -3746,7 +3746,6 @@ async def save_settings(request: Request):
         if _vm and _size:
             _allowed.setdefault(_vm, []).append(_size)
     config_data["autoscale_allowed"] = _allowed
-    _have = load_config()
     for _k, _dv in {**_hc.DEFAULTS, **_gha.DEFAULTS, **_as.DEFAULTS}.items():
         if _k in ("health_check_enabled", "gh_outage_backoff_enabled", "autoscale_enabled"):
             continue
@@ -3757,7 +3756,7 @@ async def save_settings(request: Request):
                 raise ValueError
             config_data[_k] = _n if isinstance(_dv, float) else int(_n)
         except ValueError:
-            config_data[_k] = _have.get(_k, _dv)
+            config_data[_k] = baseline.get(_k, _dv)
     # Per-module hub-log auto-filing: only CHECKED modules have their errors
     # filed as issues. Empty = OFF for every module (the default) → enable one at
     # a time. getlist so repeated checkbox values aren't collapsed by dict(form_data).
@@ -3804,8 +3803,23 @@ async def save_settings(request: Request):
                 new_tests[repo.strip()] = cmd.strip()
         config_data["repo_tests"] = new_tests
 
-    # Save the config.
-    save_config(config_data)
+    # Commit the whole validated form only if nothing changed since parsing began.
+    def replace(latest):
+        """Replace the matching snapshot with the validated form."""
+        latest.clear()
+        latest.update(config_data)
+
+    wants_json = "application/json" in (request.headers.get("accept") or "")
+    try:
+        await asyncio.to_thread(update_config, replace, expected=baseline)
+    except ConfigConflictError as exc:
+        if wants_json:
+            return JSONResponse(status_code=409, content={"status": "error", "message": str(exc)})
+        return HTMLResponse(status_code=409, content="""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Settings changed — AppBuilder</title></head>
+<body><main><h1>Settings changed</h1>
+<p>Your changes were not saved. <a href="/settings">Reload the Settings page</a> and retry.</p>
+</main></body></html>""")
 
     # Read the current .env file.
     env_vars = {}
@@ -3839,7 +3853,7 @@ async def save_settings(request: Request):
     _save_msg = "Settings saved"
     if _save_warnings:
         _save_msg += " (" + "; ".join(_save_warnings) + ")"
-    if "application/json" in (request.headers.get("accept") or ""):
+    if wants_json:
         return {"status": "ok", "message": _save_msg}
     return RedirectResponse(url="/settings", status_code=303)
 
@@ -3852,22 +3866,18 @@ async def save_llm_credential(request: Request):
     provider = (data.get("provider") or "").lower().strip()
     if not provider:
         return JSONResponse(status_code=400, content={"error": "provider required"})
-    # Load the stored credentials.
-    config = load_config()
-    creds = config.setdefault("llm_credentials", {})
-    existing = creds.get(provider) or {}
-    # api_key is only present in the payload when the operator actually typed
-    # into the (never-populated-with-the-real-value) key field on the
-    # Settings page — see settings_page's redaction + saveCredential's JS.
-    # Absent means "leave the stored key alone", not "clear it"; an empty
-    # string IS a legitimate value here (an explicit clear when the operator
-    # types into the field then deletes it).
-    creds[provider] = {
-        "api_key": (data.get("api_key") if "api_key" in data else existing.get("api_key")) or "",
-        "base_url": (data.get("base_url") or "").strip(),
-    }
-    # Save.
-    save_config(config)
+    def edit(config):
+        """Upsert this provider's credential without clearing an omitted key."""
+        creds = config.setdefault("llm_credentials", {})
+        existing = creds.get(provider) or {}
+        # The key field isn't populated in the UI. Omission keeps the fresh
+        # stored key; an explicit blank clears it.
+        creds[provider] = {
+            "api_key": (data.get("api_key") if "api_key" in data else existing.get("api_key")) or "",
+            "base_url": (data.get("base_url") or "").strip(),
+        }
+
+    await asyncio.to_thread(update_config, edit)
     return {"status": "ok", "provider": provider}
 
 
@@ -3886,22 +3896,24 @@ async def delete_llm_credential(request: Request):
     provider = (data.get("provider") or "").lower().strip()
     if not provider:
         return JSONResponse(status_code=400, content={"error": "provider required"})
-    # Remove its credential.
-    config = load_config()
-    creds = config.get("llm_credentials") or {}
-    removed = provider in creds
-    creds.pop(provider, None)
-    config["llm_credentials"] = creds
+    def edit(config):
+        """Remove the provider credential and count its remaining references."""
+        creds = config.get("llm_credentials") or {}
+        removed = provider in creds
+        creds.pop(provider, None)
+        config["llm_credentials"] = creds
+        if provider == "copilot":
+            config.pop("copilot_device", None)
+        entries_using = sum(1 for e in (config.get("llm_entries") or [])
+                            if (e.get("provider") or "").lower().strip() == provider)
+        return removed, entries_using
+
+    removed, entries_using = await asyncio.to_thread(update_config, edit)
     # Copilot stores an OAuth token, not a pasted key — clear the in-flight
     # device code + cached API token too so a deconfigure is a full sign-out.
     if provider == "copilot":
-        config.pop("copilot_device", None)
         state.pop("copilot_auth", None)
         state.pop("copilot_device", None)
-    # Save and count the entries still using it.
-    save_config(config)
-    entries_using = sum(1 for e in (config.get("llm_entries") or [])
-                        if (e.get("provider") or "").lower().strip() == provider)
     logger.info("LLM credential deconfigured for '%s' (removed=%s, %d entr%s still reference it).",
                 provider, removed, entries_using, "y" if entries_using == 1 else "ies")
     return {"status": "ok", "provider": provider, "removed": removed, "entries_using": entries_using}
@@ -3937,15 +3949,17 @@ def _copilot_poll_loop(device_code, interval, provider):
             continue
         # Got a token: save it and finish.
         if d.get("access_token"):
-            cfg = load_config()
-            cfg.setdefault("llm_credentials", {})[provider] = {"api_key": d["access_token"], "base_url": ""}
-            cfg.pop("copilot_device", None)
+            def edit(cfg):
+                """Store the authorized token and remove the pending device code."""
+                cfg.setdefault("llm_credentials", {})[provider] = {"api_key": d["access_token"], "base_url": ""}
+                cfg.pop("copilot_device", None)
+
             # An unsaveable config.json (unreadable, or no space / read-only) makes
-            # save_config raise. This thread has no caller to report that to, so the
+            # update_config raise. This thread has no caller to report that to, so the
             # UI would sit on "pending" for a token GitHub already issued, or show
             # "authorized" for one that was never stored; end the flow with an error.
             try:
-                save_config(cfg)
+                update_config(edit)
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Copilot device flow: authorized, but the credential could not be stored: {e}")
                 state["copilot_auth"] = {"status": "error",
@@ -4016,14 +4030,15 @@ async def copilot_signout(request: Request):
     except Exception:
         body = {}
     provider = (body.get("provider") or "copilot").lower().strip() or "copilot"
-    # Remove its credential and any pending device code.
-    config = load_config()
-    creds = config.get("llm_credentials") or {}
-    gh = (creds.get(provider) or {}).get("api_key")
-    creds.pop(provider, None)
-    config["llm_credentials"] = creds
-    config.pop("copilot_device", None)
-    save_config(config)
+    def edit(config):
+        """Remove the authorization and return the token for cache eviction."""
+        creds = config.get("llm_credentials") or {}
+        gh = (creds.pop(provider, None) or {}).get("api_key")
+        config["llm_credentials"] = creds
+        config.pop("copilot_device", None)
+        return gh
+
+    gh = await asyncio.to_thread(update_config, edit)
     # Clear the auth state.
     state.pop("copilot_auth", None)
     state.pop("copilot_device", None)
@@ -4113,9 +4128,11 @@ async def create_llm_entry(request: Request):
     if not entry["model"]:
         return JSONResponse(status_code=400, content={"error": "model required"})
     # Add it, save and re-probe.
-    config = load_config()
-    config.setdefault("llm_entries", []).append(entry)
-    save_config(config)
+    def edit(config):
+        """Append the new entry to the current endpoint list."""
+        config.setdefault("llm_entries", []).append(entry)
+
+    await asyncio.to_thread(update_config, edit)
     _refresh_llm_endpoints()
     return {"status": "ok", "entry": _public_llm_entry(entry)}
 
@@ -4123,13 +4140,14 @@ async def create_llm_entry(request: Request):
 @router.put("/api/llm/entries/{entry_id}")
 async def update_llm_entry(entry_id: str, request: Request):
     """Update an existing named provider/model entry."""
-    # Read the changes and load the entries.
+    # Read the changes; find the matching entry in the transaction's fresh list.
     data = await request.json()
-    config = load_config()
-    entries = config.get("llm_entries") or []
-    # Update the matching entry, save and re-probe.
-    for e in entries:
-        if e.get("id") == entry_id:
+
+    def edit(config):
+        """Update the matching entry and return it, or None if absent."""
+        for e in config.get("llm_entries") or []:
+            if e.get("id") != entry_id:
+                continue
             e["label"] = (data.get("label") or e.get("label") or "").strip()
             e["provider"] = (data.get("provider") or e.get("provider") or "openai").lower().strip()
             e["model"] = (data.get("model") or e.get("model") or "").strip()
@@ -4150,21 +4168,31 @@ async def update_llm_entry(entry_id: str, request: Request):
                 e["api_key"] = (data.get("api_key") or "").strip()
             if "enabled" in data:
                 e["enabled"] = bool(data.get("enabled"))
-            save_config(config)
-            _refresh_llm_endpoints()
-            return {"status": "ok", "entry": _public_llm_entry(e)}
-    # No such entry.
-    return JSONResponse(status_code=404, content={"error": "entry not found"})
+            return e
+        return None
+
+    entry = await asyncio.to_thread(update_config, edit)
+    if entry is None:
+        return JSONResponse(status_code=404, content={"error": "entry not found"})
+    _refresh_llm_endpoints()
+    return {"status": "ok", "entry": _public_llm_entry(entry)}
 
 
 @router.delete("/api/llm/entries/{entry_id}")
 async def delete_llm_entry(entry_id: str):
     """Delete a named endpoint entry."""
     # Remove it, save and re-probe.
-    config = load_config()
-    config["llm_entries"] = [e for e in (config.get("llm_entries") or []) if e.get("id") != entry_id]
-    save_config(config)
-    _refresh_llm_endpoints()
+    def edit(config):
+        """Remove the entry if present and report whether it was removed."""
+        entries = config.get("llm_entries") or []
+        remaining = [e for e in entries if e.get("id") != entry_id]
+        if len(remaining) == len(entries):
+            return False
+        config["llm_entries"] = remaining
+        return True
+
+    if await asyncio.to_thread(update_config, edit):
+        _refresh_llm_endpoints()
     return {"status": "ok"}
 
 
@@ -4284,10 +4312,11 @@ async def save_console_accounts(request: Request):
             content={"error": f"Invalid usernames: {', '.join(invalid)}"},
         )
 
-    # Save to config
-    config = load_config()
-    config["console_accounts"] = selected
-    save_config(config)
+    def edit(config):
+        """Save the validated console account selection."""
+        config["console_accounts"] = selected
+
+    await asyncio.to_thread(update_config, edit)
 
     # Relay to the LM hub, which owns the console module. Persisted above, so a
     # dropped relay is never data loss — the next save re-pushes it.

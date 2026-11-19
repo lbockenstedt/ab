@@ -19,6 +19,7 @@ main module's file instead.
 import os
 import copy
 import json
+import threading
 import git
 from datetime import datetime
 
@@ -152,6 +153,12 @@ class ConfigUnreadableError(RuntimeError):
     """
 
 
+class ConfigConflictError(RuntimeError):
+    """A settings snapshot no longer matches the current config."""
+
+
+# Serialize read-modify-write transactions and legacy full-snapshot writes.
+_config_lock = threading.RLock()
 # Last config that loaded cleanly from CONFIG_FILE; served while the file is unreadable.
 _last_good_config = None
 # The unreadable-file error already logged, so the 5-second heartbeat poll logs it once.
@@ -180,20 +187,22 @@ def _read_persistent_config():
         raise ConfigUnreadableError(f"{CONFIG_FILE}: {e}") from e
 
 
-def _remember_good_config(config):
-    """Keep a copy of a config that is on disk, with the defaults load_config adds.
-
-    Callers mutate the dict they get from load_config, so the cache holds its own copy.
-    """
-    global _last_good_config
-    good = copy.deepcopy(config)
-    good.setdefault("enabled_models", [])
+def _apply_config_defaults(config):
+    """Fill missing defaults without sharing mutable values across snapshots."""
+    config.setdefault("enabled_models", [])
     # Apply chat-agent defaults for any keys the stored config does not set, so
     # every caller (chat agent loop, index builder, settings form) sees a complete
     # config regardless of how old the persisted config.json is.
     for _k, _v in CHAT_CONFIG_DEFAULTS.items():
-        good.setdefault(_k, _v)
-    _last_good_config = good
+        if _k not in config:
+            config[_k] = copy.deepcopy(_v)
+    return config
+
+
+def _remember_good_config(config):
+    """Keep an independent, defaulted copy of a config that is on disk."""
+    global _last_good_config
+    _last_good_config = _apply_config_defaults(copy.deepcopy(config))
 
 
 def save_config(config):
@@ -216,7 +225,12 @@ def save_config(config):
     stale/default config, losing whatever was persisted. os.replace is atomic
     on POSIX, so readers only ever see the fully-written old or new file.
     """
-    existing = _read_persistent_config()
+    with _config_lock:
+        _save_config(config, _read_persistent_config())
+
+
+def _save_config(config, existing):
+    """Write under the caller's lock, using the validated primary to gate fallback."""
     try:
         # No pre-flight existence/access check: os.access(CONFIG_DIR, W_OK) is
         # False for a directory that merely does not exist yet, so the old guard
@@ -249,6 +263,25 @@ def save_config(config):
         _remember_good_config(config)
         logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
 
+
+def update_config(mutator, *, expected=None):
+    """Apply a synchronous, in-memory edit to the latest config and return its result.
+
+    The settings form can supply its original defaulted view as ``expected`` to
+    reject stale whole-form edits. A callback runs once, only after validation,
+    and must not perform I/O or suspend. Unchanged config is not written.
+    """
+    with _config_lock:
+        current, _ = _config_view(_read_persistent_config())
+        if expected is not None and current != expected:
+            raise ConfigConflictError("Settings changed while saving. Reload the Settings page and retry.")
+        edited = copy.deepcopy(current)
+        result = mutator(edited)
+        if edited != current:
+            save_config(edited)
+        return result
+
+
 def load_config():
     """Load settings from /etc/ab/config.json, else ./config.json, else built-in defaults.
 
@@ -270,9 +303,6 @@ def load_config():
             else:
                 logger.info(f"Persistent config {CONFIG_FILE} is readable again")
             _unreadable_logged = None
-        # Ensure enabled_models exists
-        if config is not None:
-            config.setdefault("enabled_models", [])
     except ConfigUnreadableError as e:
         if _unreadable_logged != str(e):
             logger.error(f"Persistent config is unreadable; not using defaults and not "
@@ -280,13 +310,16 @@ def load_config():
             _unreadable_logged = str(e)
         if _last_good_config is not None:
             return copy.deepcopy(_last_good_config)
-    # A config read from a file (CONFIG_FILE, else ./config.json) is what AB runs on, so it
-    # becomes the last good one. The built-in defaults never do: a file that is deleted or
-    # emptied and then turns unreadable (e.g. a root script rewriting it) keeps serving the
-    # last config read from a file, not the defaults.
+    config, from_file = _config_view(config)
+    # Only a config read from disk replaces the last good one, not built-in defaults.
+    if from_file:
+        _remember_good_config(config)
+    return config
+
+
+def _config_view(config):
+    """Default the primary, or use the cwd file and then built-in defaults."""
     from_file = config is not None
-    # Built-in defaults used when no config file can be read at all.
-    # Fallback to local config
     if config is None:
         try:
             with open("config.json", "r") as f:
@@ -307,15 +340,7 @@ def load_config():
                 "enabled_models": [],
                 "self_diagnosis_repo": ""
             }
-    # Apply chat-agent defaults for any keys the stored config does not set, so
-    # every caller (chat agent loop, index builder, settings form) sees a complete
-    # config regardless of how old the persisted config.json is.
-    for _k, _v in CHAT_CONFIG_DEFAULTS.items():
-        if _k not in config:
-            config[_k] = _v
-    if from_file:
-        _remember_good_config(config)
-    return config
+    return _apply_config_defaults(config), from_file
 
 def load_processed():
     # Persistent location first.
@@ -569,6 +594,8 @@ __all__ = [
     "CHAT_CONFIG_DEFAULTS",
     "STARTUP_STAMP_FILE",
     "save_config",
+    "update_config",
+    "ConfigConflictError",
     "load_config",
     "load_processed",
     "save_processed",
