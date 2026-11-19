@@ -194,7 +194,8 @@ async def login_submit(request: Request):
     # Where the request came from, for the logs.
     src = (request.client.host if request.client else "?")
     # Wrong user or password: log it, report it, and show the form again.
-    if not _a.verify_credentials(username, password):
+    session_token = await asyncio.to_thread(_a.authenticate_session, username, password)
+    if not session_token:
         logger.warning("auth: failed login for %r from %s", username, src)
         # Relay to the hub's threat monitor so repeat attempts against THIS
         # box count toward the same brute-force threshold/NSG block as the
@@ -212,7 +213,7 @@ async def login_submit(request: Request):
     # Success: set the session cookie and redirect.
     logger.info("auth: %r signed in from %s", username, src)
     resp = RedirectResponse(nxt, status_code=303)
-    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+    resp.set_cookie(_a.SESSION_COOKIE, session_token,
                     max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https", path="/")
     return resp
@@ -265,14 +266,17 @@ async def setup_admin_submit(request: Request):
     # Passwords must match and the account must be valid.
     if p1 != p2:
         return _again("Passwords do not match.")
-    ok, msg = _a.create_user(username, p1)
+    ok, msg, session_token = await asyncio.to_thread(
+        _a.create_first_user_and_issue_session, username, p1)
     if not ok:
+        if msg == "Setup already completed.":
+            raise HTTPException(status_code=404, detail="Setup already completed")
         return _again(msg)
     # Log the new account, then sign the user in.
     logger.warning("auth: FIRST ACCOUNT %r created from %s — setup is now closed.",
                    username, request.client.host if request.client else "?")
     resp = RedirectResponse("/", status_code=303)
-    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+    resp.set_cookie(_a.SESSION_COOKIE, session_token,
                     max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https", path="/")
     return resp
@@ -371,19 +375,20 @@ async def oidc_callback(request: Request, code: str = "", state: str = "",
         jwks = await _o.fetch_jwks(doc.get("jwks_uri"))
         claims = _o.verify_id_token(cfg, id_token, nonce, jwks)
         _o.enforce_allowed_group(cfg.allowed_group, _o.extract_member_groups(claims))
-        username = _o.provision_entra_user(claims)
+        username, session_token = await asyncio.to_thread(
+            _o.provision_entra_user_and_issue_session, claims)
     except _o.OidcError as e:
         logger.warning("oidc: login rejected — %s", e)
         return _sso_error_page(str(e), status=403)
     except Exception as e:  # noqa: BLE001
         logger.exception("oidc: callback failed")
         return _sso_error_page(f"Microsoft sign-in failed: {e}", status=502)
-    # Open a session and clear the state cookie.
+    # Use only the token signed in the account-store provisioning transaction.
     import auth as _a
     src = (request.client.host if request.client else "?")
     logger.info("auth: %r signed in via Entra from %s", username, src)
     resp = RedirectResponse("/", status_code=303)
-    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+    resp.set_cookie(_a.SESSION_COOKIE, session_token,
                     max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https", path="/")
     resp.delete_cookie(_o.STATE_COOKIE, path="/")
@@ -486,7 +491,17 @@ async def auth_create_user(request: Request):
     """Create an account from the JSON body."""
     import auth as _a
     data = await request.json()
-    ok, msg = _a.create_user((data.get("username") or "").strip(), data.get("password") or "")
+    try:
+        ok, msg = await asyncio.to_thread(
+            _a.create_user_for_actor,
+            (data.get("username") or "").strip(), data.get("password") or "",
+            request.cookies.get(_a.SESSION_COOKIE) or "")
+    except _a.SessionExpiredError:
+        response = JSONResponse(
+            {"status": "error", "message": "Session expired; sign in again."},
+            status_code=401)
+        response.delete_cookie(_a.SESSION_COOKIE, path="/")
+        return response
     return {"status": "ok" if ok else "error", "message": msg}
 
 
@@ -495,25 +510,54 @@ async def auth_set_password(request: Request):
     """Change an account's password."""
     import auth as _a
     data = await request.json()
-    ok, msg = _a.set_password((data.get("username") or "").strip(), data.get("password") or "")
-    return {"status": "ok" if ok else "error", "message": msg}
+    try:
+        ok, msg, session_token = await asyncio.to_thread(
+            _a.set_password_and_issue_actor_session,
+            (data.get("username") or "").strip(), data.get("password") or "",
+            request.cookies.get(_a.SESSION_COOKIE) or "")
+    except _a.SessionExpiredError:
+        response = JSONResponse(
+            {"status": "error", "message": "Session expired; sign in again."},
+            status_code=401)
+        response.delete_cookie(_a.SESSION_COOKIE, path="/")
+        return response
+    result = {"status": "ok" if ok else "error", "message": msg}
+    # Mutation and caller refresh shared a lock; no later key lookup can revive a stale cookie.
+    if ok and session_token:
+        result_response = JSONResponse(result)
+        result_response.set_cookie(
+            _a.SESSION_COOKIE, session_token, max_age=_a.SESSION_TTL_S,
+            httponly=True, samesite="lax", secure=request.url.scheme == "https", path="/")
+        return result_response
+    return result
 
 
 @router.post("/api/auth/users/delete")
 async def auth_delete_user(request: Request):
     """Delete an account (but not your own)."""
     import auth as _a
-    # Read the user to delete and who is asking.
+    # Read the requested target; the mutation validates the original cookie atomically.
     data = await request.json()
     username = (data.get("username") or "").strip()
-    me = getattr(request.state, "user", None)
-    if username and username == me:
-        # Deleting the account you are signed in as would log you out mid-action
-        # and is almost never what was meant.
-        return {"status": "error", "message": "You cannot delete the account you are signed in as."}
-    # Delete it.
-    ok, msg = _a.delete_user(username)
-    return {"status": "ok" if ok else "error", "message": msg}
+    try:
+        ok, msg, session_token = await asyncio.to_thread(
+            _a.delete_user_and_issue_actor_session, username,
+            request.cookies.get(_a.SESSION_COOKIE) or "")
+    except _a.SessionExpiredError:
+        response = JSONResponse(
+            {"status": "error", "message": "Session expired; sign in again."},
+            status_code=401)
+        response.delete_cookie(_a.SESSION_COOKIE, path="/")
+        return response
+    result = {"status": "ok" if ok else "error", "message": msg}
+    # Deletion and caller refresh share a lock; self/final-user checks are in that transaction.
+    if ok and session_token:
+        result_response = JSONResponse(result)
+        result_response.set_cookie(
+            _a.SESSION_COOKIE, session_token, max_age=_a.SESSION_TTL_S,
+            httponly=True, samesite="lax", secure=request.url.scheme == "https", path="/")
+        return result_response
+    return result
 
 
 @router.get("/api/health")

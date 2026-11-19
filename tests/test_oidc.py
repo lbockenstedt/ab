@@ -170,6 +170,10 @@ def test_provision_entra_user_creates_passwordless_account(ab_env):
     # second login refreshes, does not duplicate
     oidc.provision_entra_user({"oid": "o1", "email": "sso@x.com", "name": "SSO2"})
     assert len([u for u in auth.list_users() if u["username"] == "sso@x.com"]) == 1
+    username, token = oidc.provision_entra_user_and_issue_session(
+        {"oid": "o1", "email": "sso@x.com", "name": "SSO3"})
+    assert username == "sso@x.com"
+    assert token and auth.verify_session(token) == username
 
 
 def test_local_account_not_converted_to_sso(ab_env):

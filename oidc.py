@@ -594,10 +594,8 @@ def enforce_allowed_group(allowed_group: str, member_of: list) -> None:
 
 # ── provisioning ────────────────────────────────────────────────────────────
 
-def provision_entra_user(claims: dict) -> str:
-    """Provision (first login) or refresh an Entra user in the local user store
-    and return the username to open a session for. The username is the user's
-    email / UPN when available (stable + human-readable), else the ``oid``."""
+def _entra_user_values(claims: dict) -> tuple[str, str, str, str]:
+    """Return the stable username and profile values extracted from verified claims."""
     # Read the stable object id, email/UPN and display name from the token claims.
     oid = str(claims.get("oid") or "").strip()
     email = str(claims.get("email") or claims.get("preferred_username") or "").strip()
@@ -606,9 +604,26 @@ def provision_entra_user(claims: dict) -> str:
     if not oid and not email:
         raise OidcError("id_token missing both oid and email claims")
     # Use the email as the username when present (readable), else the object id.
-    username = email or oid
+    return email or oid, email, name, oid
+
+
+def provision_entra_user(claims: dict) -> str:
+    """Provision or refresh a user and return its username, preserving this API."""
+    username, email, name, oid = _entra_user_values(claims)
     # Create or update the local "entra" account for this user.
-    _auth.upsert_external_user(username, provider="entra", email=email,
-                               name=name, oid=oid)
-    # The caller opens a session for this username.
+    ok, message = _auth.upsert_external_user(
+        username, provider="entra", email=email, name=name, oid=oid)
+    if not ok:
+        # A rejected username collision must not continue to session issuance.
+        raise OidcError(f"Could not provision Entra account: {message}")
     return username
+
+
+def provision_entra_user_and_issue_session(claims: dict) -> tuple[str, str]:
+    """Provision an Entra account and sign its session in the same store transaction."""
+    username, email, name, oid = _entra_user_values(claims)
+    ok, message, token = _auth.upsert_external_user_and_issue_session(
+        username, provider="entra", email=email, name=name, oid=oid)
+    if not ok or not token:
+        raise OidcError(f"Could not provision Entra account: {message}")
+    return username, token

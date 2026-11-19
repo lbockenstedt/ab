@@ -31,13 +31,13 @@ def test_login_redirect_stays_local(monkeypatch, method, destination, expected):
     for node in nodes:
         node.decorator_list = []
     namespace = {
-        "Request": object, "RedirectResponse": RedirectResponse,
+        "Request": object, "RedirectResponse": RedirectResponse, "asyncio": asyncio,
         "logger": SimpleNamespace(info=lambda *args: None),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "routes.py", "exec"), namespace)
     monkeypatch.setitem(sys.modules, "auth", SimpleNamespace(
         any_users=lambda: True, verify_session=lambda token: "fixture-user",
-        verify_credentials=lambda *args: True, issue_session=lambda user: "fixture-session",
+        authenticate_session=lambda *args: "fixture-session",
         SESSION_COOKIE="ab_session", SESSION_TTL_S=60,
     ))
 
