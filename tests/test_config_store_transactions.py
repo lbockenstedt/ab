@@ -3,6 +3,7 @@ import ast
 import asyncio
 import json
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier, get_ident
@@ -301,19 +302,38 @@ def test_existing_primary_write_failure_does_not_fall_back(store):
 def test_no_production_raw_config_saves():
     """Reject direct uses of the raw writer outside the store and tests."""
     violations = []
-    for folder, dirs, filenames in os.walk(ROOT):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in {"tests", "__pycache__", "venv"}]
-        for filename in filenames:
-            if not filename.endswith(".py") or filename.startswith("test_"):
-                continue
-            path = Path(folder) / filename
-            if path == ROOT / "config_store.py":
-                continue
-            for node in ast.walk(ast.parse(path.read_bytes(), filename=str(path))):
-                # Catch raw calls through a name or module attribute, including
-                # references passed as callbacks and explicitly aliased imports.
-                if ((isinstance(node, ast.Name) and node.id == "save_config")
-                        or (isinstance(node, ast.Attribute) and node.attr == "save_config")
-                        or (isinstance(node, ast.alias) and node.name == "save_config")):
-                    violations.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+    # CI also checks out dependency repos here; they do not belong to AB.
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", "*.py"], cwd=ROOT, check=True,
+        capture_output=True, text=True).stdout
+    for filename in filter(None, tracked.split("\0")):
+        relative = Path(filename)
+        if (relative.name.startswith("test_") or relative == Path("config_store.py")
+                or any(p.startswith(".") or p in {"tests", "__pycache__", "venv"}
+                       for p in relative.parts[:-1])):
+            continue
+        path = ROOT / relative
+        for node in ast.walk(ast.parse(path.read_bytes(), filename=str(path))):
+            # Include callback references and aliased imports, not just calls.
+            if ((isinstance(node, ast.Name) and node.id == "save_config")
+                    or (isinstance(node, ast.Attribute) and node.attr == "save_config")
+                    or (isinstance(node, ast.alias) and node.name == "save_config")):
+                violations.append(f"{relative}:{node.lineno}")
     assert not violations, f"Use update_config for production writes: {violations}"
+
+
+def test_source_guard_ignores_foreign_checkout_but_checks_owned_files(tmp_path, monkeypatch):
+    """CI dependency checkouts are not AB sources; tracked AB files remain guarded."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    owned = tmp_path / "owned.py"
+    owned.write_text("update_config(lambda config: None)\n")
+    subprocess.run(["git", "add", "owned.py"], cwd=tmp_path, check=True)
+    dependency = tmp_path / "foreign_checkout"
+    dependency.mkdir()
+    (dependency / "module.py").write_text("save_config({})\n")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    test_no_production_raw_config_saves()
+
+    owned.write_text("save_config({})\n")
+    with pytest.raises(AssertionError, match=r"owned\.py:1"):
+        test_no_production_raw_config_saves()
