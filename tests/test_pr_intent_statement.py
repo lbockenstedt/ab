@@ -91,6 +91,68 @@ def test_unfilled_template_comment_is_not_an_intent():
     assert pr_template.stated_intent(body) == ""
 
 
+def test_an_unclosed_comment_hides_the_rest_of_the_body():
+    """A comment whose `-->` was deleted hides everything after it on GitHub,
+    headings included, so none of that text is what the PR says it does."""
+    body = ("## \U0001F3AF Intent & Problem Statement\n"
+            "<!-- What problem does this change solve?\n\n"
+            "## \U0001F6E0\uFE0F Proposed Solution & Changes\nhidden too\n")
+    assert pr_template.extract(body, pr_template.INTENT) == ""
+    assert pr_template.extract(body, pr_template.SOLUTION) == ""
+    assert pr_template.stated_intent(body) == ""
+    # Without the template, the fallback paragraph is hidden too.
+    assert pr_template.stated_intent("<!-- never closed\n\nstill hidden") == ""
+
+
+def test_a_mid_line_comment_opener_is_plain_text():
+    """GitHub shows a `<!--` that does not start a line, so an intent that
+    quotes one, as the fix for this very bug does, is kept whole."""
+    body = pr_template.render(intent="Strip `<!--` openers that never close.",
+                              solution="s")
+    assert pr_template.extract(body, pr_template.INTENT) == \
+        "Strip `<!--` openers that never close."
+
+
+def test_a_comment_marker_in_a_fenced_code_block_is_code():
+    """GitHub shows a fenced code block as typed, comment markers included,
+    so they neither hide the text after the block nor disappear."""
+    fence = "```html\n<!-- never closed\n<!-- closed -->\n```\n"
+    body = pr_template.render(intent="Quote it:\n" + fence + "after the block",
+                              solution="s")
+    assert pr_template.extract(body, pr_template.INTENT) == \
+        "Quote it:\n" + fence + "after the block"
+    assert pr_template.extract(body, pr_template.SOLUTION) == "s"
+    # A tilde fence's info string may hold a backtick.
+    assert pr_template.stated_intent("~~~ `x`\n<!-- y\n~~~\nz") == \
+        "~~~ `x`\n<!-- y\n~~~\nz"
+    # A fence runs to the end when no later line closes it, as on GitHub:
+    # none of these does (shorter, the other character, text after the
+    # fence), so the opener after them is code too.
+    assert pr_template.stated_intent("~~~\n<!-- never closed\n") == \
+        "~~~\n<!-- never closed"
+    text = "````\n```\n~~~~\n````~\n<!-- x"
+    assert pr_template.stated_intent(text) == text
+
+
+def test_an_indented_comment_hides_only_itself_when_closed():
+    """Up to three spaces may indent a comment. A closed one hides only
+    itself; an unclosed one still hides the rest of the body."""
+    heading = "## \U0001F3AF Intent & Problem Statement\n"
+    assert pr_template.extract(heading + "  <!-- note -->\nreal intent\n",
+                               pr_template.INTENT) == "real intent"
+    assert pr_template.extract(heading + "real intent\n   <!-- never closed\n"
+                               "hidden\n", pr_template.INTENT) == "real intent"
+
+
+def test_a_heading_inside_a_comment_is_not_a_section():
+    body = ("## \U0001F3AF Intent & Problem Statement\n"
+            "<!--\n## \U0001F6E0\uFE0F Proposed Solution & Changes\n-->\n"
+            "the real intent\n")
+    assert pr_template.extract(body, pr_template.INTENT) == "the real intent"
+    # Nor does a hidden heading make the body look like the template.
+    assert pr_template.has_template(body) is False
+
+
 def test_missing_section_extracts_empty():
     assert pr_template.extract("nothing here", pr_template.INTENT) == ""
 
