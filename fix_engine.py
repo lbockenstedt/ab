@@ -4478,6 +4478,26 @@ def _targeted_file_context(content, identifiers, max_chars, window=60, max_hits_
     return "\n".join(parts) if parts else None
 
 
+def _publication_boundary_requirement(repo_git, config, repo_name):
+    """Require a human PR when the staged tree hits a boundary or cannot be checked."""
+    try:
+        paths = [p for p in repo_git.git.diff("--cached", "--name-only").splitlines()
+                 if p.strip()]
+        hits = feature_boundary.boundary_hits(paths, config.get("feature_boundaries") or [])
+    except Exception as error:
+        reason = (f"Core-systems boundary check failed ({type(error).__name__}); "
+                  "human-reviewed PR required")
+        logger.warning(f"Boundary check failed for {repo_name} ({error}); fail-closed to human-reviewed PR.")
+        return True, reason
+    if not hits:
+        return False, ""
+
+    ids = ", ".join(hit.get("id", "?") for hit in hits)
+    reason = f"Diff touches core-systems boundary path(s): {ids}; human-reviewed PR required"
+    logger.info(f"Direct push blocked for {repo_name}: {reason}")
+    return True, reason
+
+
 def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None):
     """files_override: skip the identify_files_to_fix guess and target exactly
     these repo-relative paths instead — for callers (pr_review's fix_one_pr)
@@ -6103,24 +6123,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # check is against the actual staged diff (repo_git.git.add(A=True)
             # ran above), never a prediction. Fail-closed: any error forcing a
             # PR is the safe direction for this invariant.
-            boundary_forced_pr = False
-            boundary_pr_reason = ""
             # The low-confidence fallback can also push to a shared branch, so
             # evaluate boundaries even when trusted direct push is unavailable.
-            try:
-                _changed_for_boundary = [p for p in repo_git.git.diff("--cached", "--name-only").splitlines() if p.strip()]
-                _b_hits = feature_boundary.boundary_hits(_changed_for_boundary, config.get("feature_boundaries") or [])
-            except Exception as be:
-                _b_hits = None
-                boundary_forced_pr = True
-                boundary_pr_reason = f"Core-systems boundary check failed ({type(be).__name__}); human-reviewed PR required"
-                logger.warning(f"Boundary check failed for {repo_name} ({be}); fail-closed to human-reviewed PR.")
-            # Any boundary hit forces a pull request.
-            if _b_hits:
-                _b_ids = ", ".join(h.get("id", "?") for h in _b_hits)
-                boundary_forced_pr = True
-                boundary_pr_reason = f"Diff touches core-systems boundary path(s): {_b_ids}; human-reviewed PR required"
-                logger.info(f"Direct push blocked for {repo_name}: {boundary_pr_reason}")
+            boundary_forced_pr, boundary_pr_reason = _publication_boundary_requirement(
+                repo_git, config, repo_name)
             if boundary_forced_pr:
                 can_direct_push = False
 
@@ -6172,6 +6178,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             if version_bumped:
                 commit_msg += f" (Version Bump to {new_v})"
             repo_git.git.add(A=True)  # re-stage so a version bump made after the earlier add(A=True) is included
+            # Late publication mutations must pass the same gate as the fix itself.
+            if not boundary_forced_pr:
+                boundary_forced_pr, boundary_pr_reason = _publication_boundary_requirement(
+                    repo_git, config, repo_name)
+                if boundary_forced_pr:
+                    can_direct_push = False
             repo_git.index.commit(f'{commit_msg}')
 
             # Push straight to the integration branch; on rejection, rebase and try once more.

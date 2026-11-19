@@ -1,5 +1,6 @@
 """Configured boundaries must force a topic PR on every publication fallback."""
 import logging
+import ast
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,10 +11,91 @@ import git
 import feature_boundary
 
 
+@pytest.mark.parametrize("final_check", ["hit", "error", "clear"])
+def test_final_staged_tree_is_checked_after_publication_mutations(tmp_path, final_check):
+    """The actual commit/direct-push sequence includes paths added by the version step."""
+    repo = git.Repo.init(tmp_path, initial_branch="integration")
+    with repo.config_writer() as writer:
+        writer.set_value("user", "name", "Test")
+        writer.set_value("user", "email", "test@example.test")
+    report = tmp_path / "report.py"
+    report.write_text("value = 1\n")
+    repo.index.add(["report.py"])
+    repo.index.commit("base")
+    report.write_text("value = 2\n")
+    source = (Path(__file__).resolve().parents[1] / "fix_engine.py").read_text()
+    start = source.index("            # Stage every change from the fix.")
+    end = source.index("            # Pushed: report it", start)
+    pushes = []
+    staged_diff = repo.git.diff
+    reads = []
+
+    def diff(*args):
+        """Only the final staged-diff check can fail."""
+        reads.append(args)
+        if final_check == "error" and len(reads) == 2:
+            raise RuntimeError("final staged diff unavailable")
+        return staged_diff(*args)
+
+    def bump(path):
+        """Model the existing late publisher mutation without a real VERSION file."""
+        (path / "generated.txt").write_text("publication-generated content\n")
+        return "synthetic"
+
+    class RemoteContext:
+        """Avoid touching any external remote."""
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    repo.create_remote("origin", str(tmp_path / "offline.git"))
+    config = {
+        "trusted_repos": ["owner/repo"], "direct_push_enabled": True,
+        "feature_boundaries": [
+            {"id": "generated", "paths": ["generated.txt" if final_check != "clear"
+                                         else "unrelated.txt"], "enabled": True}],
+    }
+    logger = logging.getLogger(__name__)
+    namespace = {
+        "config": config, "feature_boundary": feature_boundary, "logger": logger,
+        "repo_name": "owner/repo", "path": tmp_path,
+        "repo_git": SimpleNamespace(
+            git=SimpleNamespace(add=repo.git.add, diff=diff),
+            index=repo.index, remotes=repo.remotes),
+        "gh_current": SimpleNamespace(get_user=lambda: SimpleNamespace(login="bot")),
+        "repo_obj": SimpleNamespace(owner=SimpleNamespace(login="bot"), clone_url="unused"),
+        "resolve_self_diagnosis_repo": lambda _config: "other/repo",
+        "may_direct_push": lambda *args, **kwargs: (True, "test"),
+        "base_branch": "integration", "final_verdict": "Approve", "token": "",
+        "bump_repo_version": bump, "issue": SimpleNamespace(number=1, title="fix"),
+        "_authenticated_remote": lambda *args: RemoteContext(),
+        "push_or_raise": lambda remote, branch: pushes.append(branch),
+    }
+    # Load the pure gate helper if present; never import the worker-starting module.
+    helpers = [node for node in ast.parse(source).body
+               if isinstance(node, ast.FunctionDef)
+               and node.name == "_publication_boundary_requirement"]
+    exec(compile(ast.Module(body=helpers, type_ignores=[]), "fix_engine.py", "exec"), namespace)
+    snippet = "".join(line for line in source[start:end].splitlines(keepends=True)
+                      if not line.lstrip().startswith("#"))
+    exec(textwrap.dedent(snippet), namespace)
+    assert "generated.txt" in repo.head.commit.stats.files
+    if final_check == "clear":
+        assert pushes == ["HEAD:integration"]
+        assert namespace["can_actually_direct_push"] is True
+    else:
+        assert pushes == []
+        assert namespace["can_direct_push"] is False
+        assert namespace["boundary_forced_pr"] is True
+        assert namespace["can_actually_direct_push"] is False
+
+
 def _publish(confidence, can_direct_push, boundary_result, existing=False, checkout=None):
     """Execute the actual boundary gate and fallback publication with offline fakes."""
     source = (Path(__file__).resolve().parents[1] / "fix_engine.py").read_text()
-    gate_start = source.index("            boundary_forced_pr = False")
+    gate_start = source.index("            boundary_forced_pr, boundary_pr_reason = ")
     gate_end = source.index("            # Log the direct-push decision", gate_start)
     publish_start = source.index("                target_branch = ", gate_end)
     publish_end = source.index("                # Report the PR.", publish_start)
@@ -63,6 +145,10 @@ def _publish(confidence, can_direct_push, boundary_result, existing=False, check
         "find_existing_pull_request": lambda *args: prior if existing else None,
         "_fix_pr_body": lambda *args: "test intent",
     }
+    helpers = [node for node in ast.parse(source).body
+               if isinstance(node, ast.FunctionDef)
+               and node.name == "_publication_boundary_requirement"]
+    exec(compile(ast.Module(body=helpers, type_ignores=[]), "fix_engine.py", "exec"), namespace)
     exec(textwrap.dedent(source[gate_start:gate_end]), namespace)
     exec(textwrap.dedent(source[publish_start:publish_end]), namespace)
     return namespace, pushed, created, prior
