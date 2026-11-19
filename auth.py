@@ -166,9 +166,9 @@ def store_is_readable() -> bool:
 
 
 def any_users() -> bool:
-    """True once at least one account exists (first-run setup is then closed)."""
-    # Any non-empty users map means setup has already happened.
-    return bool(_read_store().get("users"))
+    """Keep setup closed when accounts exist or their store cannot be read."""
+    data = _read_store()
+    return bool(data.get("_unreadable") or data.get("users"))
 
 
 def list_users() -> list:

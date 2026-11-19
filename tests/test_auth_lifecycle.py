@@ -119,6 +119,53 @@ def _auth_mutation_routes():
     return namespace
 
 
+@pytest.mark.parametrize("store_state", ["missing", "empty", "corrupt", "invalid", "unreadable"])
+def test_bootstrap_gate_distinguishes_unreadable_store(
+        auth_module, monkeypatch, store_state):
+    """Only a genuinely empty installation exposes setup; unreadable stores stay closed."""
+    import asyncio
+    from fastapi import HTTPException
+    from starlette.responses import RedirectResponse
+
+    auth = auth_module
+    if store_state in {"empty", "corrupt", "invalid"}:
+        contents = {"empty": '{"users": {}, "session_secret": "test-key"}',
+                    "corrupt": "{", "invalid": '{"users": []}'}[store_state]
+        Path(auth.USERS_FILE).write_text(contents)
+    if store_state == "unreadable":
+        def refuse_read():
+            """Model an existing store the service cannot read."""
+            raise PermissionError("test user store unavailable")
+        monkeypatch.setattr(auth, "_read_store_raw", refuse_read)
+
+    source = (Path(__file__).resolve().parents[1] / "routes.py").read_text()
+    wanted = {"login_page", "setup_admin_page", "setup_admin_submit", "_login_redirect_path"}
+    nodes = [node for node in ast.parse(source).body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and node.name in wanted]
+    for node in nodes:
+        node.decorator_list = []
+    namespace = {
+        "Request": object, "HTTPException": HTTPException,
+        "RedirectResponse": RedirectResponse, "asyncio": asyncio,
+        "templates": SimpleNamespace(TemplateResponse=lambda **kwargs: kwargs),
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "routes.py", "exec"), namespace)
+    request = SimpleNamespace(cookies={})
+    setup_closed = store_state in {"corrupt", "invalid", "unreadable"}
+    assert auth.any_users() is setup_closed
+    login = asyncio.run(namespace["login_page"](request))
+    if setup_closed:
+        assert login["context"]["setup_mode"] is False
+        for route in ("setup_admin_page", "setup_admin_submit"):
+            with pytest.raises(HTTPException) as error:
+                asyncio.run(namespace[route](request))
+            assert error.value.status_code == 404
+    else:
+        assert login.headers["location"] == "/setup-admin"
+        assert asyncio.run(namespace["setup_admin_page"](request))["context"]["setup_mode"]
+
+
 def _oidc_callback_route():
     """Load only the OIDC error helper and callback without importing main."""
     import asyncio
