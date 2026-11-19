@@ -30,9 +30,9 @@ more than the collected tests do. The first rule here (defines ``main()``, no
 test_feature_drive_classify.py's main went on failing unseen (its ast harness
 lacked the ``_meta`` helper) while its pytest tests passed.
 """
+import ast
 import os
 import pathlib
-import re
 import subprocess
 import sys
 
@@ -43,8 +43,18 @@ import pytest
 _TESTS = pathlib.Path(__file__).resolve().parent
 _HERE = _TESTS.parent
 
-# The block that running a file by hand executes; only a top-level one counts.
-_MAIN_BLOCK = re.compile(r"""^if __name__ == ["']__main__["']\s*:""", re.M)
+def _is_main_guard(node):
+    """True for a top-level ``if __name__ == "__main__":`` statement."""
+    if not isinstance(node, ast.If):
+        return False
+    t = node.test
+    if not (isinstance(t, ast.Compare) and len(t.ops) == 1
+            and isinstance(t.ops[0], ast.Eq) and len(t.comparators) == 1):
+        return False
+    sides = [t.left, t.comparators[0]]
+    has_name = any(isinstance(s, ast.Name) and s.id == "__name__" for s in sides)
+    has_main = any(isinstance(s, ast.Constant) and s.value == "__main__" for s in sides)
+    return has_name and has_main
 
 
 def _is_script_selftest(path):
@@ -55,7 +65,11 @@ def _is_script_selftest(path):
         src = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return bool(_MAIN_BLOCK.search(src))
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return False
+    return any(_is_main_guard(n) for n in tree.body)
 
 
 def _discover():
@@ -94,6 +108,8 @@ def test_script_selftests_are_discovered():
     # the words without a top-level block
     ('def f():\n    if __name__ == "__main__":\n        pass\n\n\n'
      "NOTE = \"if __name__ == '__main__': main()\"\n", False),
+    # a multiline string holding the block at column zero
+    ('DOC = """\nif __name__ == "__main__":\n    pass\n"""\n', False),
 ])
 def test_any_file_with_a_main_block_is_run_as_a_script(tmp_path, src, runs):
     """Files are picked by their top-level ``__main__`` block, whatever the
