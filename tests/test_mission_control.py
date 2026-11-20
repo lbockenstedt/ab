@@ -202,7 +202,7 @@ def test_approving_a_pr_swaps_in_a_delegated_merge_button():
     approve = html[html.index("async function approvePr"):]
     approve = approve[:approve.index("\n        }\n")]
     assert "onclick=" not in approve
-    assert 'data-mc="merge" data-repo="${repo}" data-num="${number}"' in approve
+    assert 'data-mc="merge" data-repo="${_bfEsc(repo)}" data-num="${_bfEsc(number)}"' in approve
 
 
 def test_re_evaluate_accepts_a_feature_waiting_on_its_requester(monkeypatch):
