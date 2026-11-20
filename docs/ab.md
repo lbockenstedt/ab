@@ -241,6 +241,11 @@ an explicitly empty value still clears it.
 
 ## Issue lifecycle (stuck-issue guards)
 
+- **OS request lifetime:** Producers share a nonblocking file lock through publication, waiting and timeout withdrawal; complete request/status files use unique staging paths, and exclusive request publication never overwrites a queued action. New consumers claim atomically and reject expired work before invoking the OS helper; legacy leases use file mtime plus the existing action wait.
+  A live caller uses a monotonic wait and withdraws its matching queued request at timeout. Claimed work is never killed or replayed: a missing acknowledgement reports an unknown outcome, not a successful cancellation. An expired request left by a dead producer is retired; malformed or foreign state is reported explicitly, with foreign withdrawal files preserved for diagnosis.
+  The watchdog defers code reload while the OS request thread is active, so exec cannot interrupt result publication. An old watchdog's first reload is still an upgrade limitation: roll out when no OS apply is in flight. Old consumers ignore lease fields, and mixed legacy producers do not honor the new lock; the stronger guarantees require the new code on both sides.
+  Persisted expiry uses wall-clock epoch across restarts, so backward clock jumps can postpone expiry of dead-producer leftovers. Crash-left claim files are not replayed or swept, and late results after a caller timeout are not delivered automatically.
+
 - **Explicit provider preflight:** A Claude CLI request without a configured provider fails before GitHub lookup, writing a `processing` record, triaging the issue or notifying the hub that work has begun.
   CLI slot discovery uses the shared configured-state predicate: a model is required, but no API key is needed for CLI session authentication. An incomplete slot does not hide a later usable one.
   The existing issue history is retained, and the request reports the same configuration error instead of leaving a false in-progress row.

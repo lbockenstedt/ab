@@ -483,6 +483,9 @@ def _maybe_reload_on_code_change(orig_mtime):
     ollama-setup request is silently never picked up). Compare the source mtime
     each idle loop; on a change, os.execv into the new code. Only fires when the
     loop is idle (between iterations), never mid-helper-run."""
+    # The background OS worker must publish its result before exec kills its thread.
+    if _os_update_thread is not None and _os_update_thread.is_alive():
+        return
     # Current modification time of this file (skip the check if it cannot be read).
     try:
         cur = os.path.getmtime(_WATCHDOG_SRC)

@@ -16,11 +16,15 @@ core/src/os_update.py and scripts/lm-os-update — keep them in sync rather than
 editing them here.
 """
 # json reads/writes the request and status hand-off files shared with the watchdog.
+import fcntl
 import json
+import logging
+import math
 # os provides file existence checks, atomic renames and path joins.
 import os
 # time drives the polling loop and deadline while waiting on the watchdog.
 import time
+import tempfile
 # uuid gives each request a unique id so a stale status file is never mistaken for ours.
 import uuid
 # Type hints only; they document the shapes of values passed around.
@@ -50,6 +54,7 @@ POLL_S = 2.0
 # Message shown when the root-owned sudo helper is missing, so patching is impossible.
 NO_HELPER = ("the lm-os-update helper is not installed on LM-AB — "
              "re-run ab's install.sh to enable patching")
+logger = logging.getLogger(__name__)
 
 
 def handle_command(cmd_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -77,23 +82,136 @@ def handle_command(cmd_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
     return _delegate("apply", None, APPLY_WAIT_S)
 
 
+def _publish_json(path: str, data: Dict[str, Any], *, exclusive: bool = False) -> None:
+    """Publish a complete file, optionally refusing to replace a queued request."""
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w", dir=os.path.dirname(path), prefix="." + os.path.basename(path) + ".",
+                delete=False) as handle:
+            tmp = handle.name
+            json.dump(data, handle)
+        # A hard link publishes atomically without overwriting an unclaimed request.
+        if exclusive:
+            os.link(tmp, path)
+        else:
+            os.replace(tmp, path)
+            tmp = None
+    finally:
+        if tmp is not None:
+            _remove_private(tmp)
+
+
+def _remove_private(path: str) -> None:
+    """Remove only our private handoff file, logging a cleanup failure."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        logger.error("OS handoff cleanup failed for %s: %s", path, error)
+
+
+def _read_request(path: str) -> tuple[Dict[str, Any], float]:
+    """Read one request and the publication time of that exact opened file."""
+    with open(path) as handle:
+        request = json.load(handle)
+        modified = os.fstat(handle.fileno()).st_mtime
+    if not isinstance(request, dict):
+        raise ValueError("OS request must be an object")
+    return request, modified
+
+
+def _request_expiry(request: Dict[str, Any], modified: float) -> float:
+    """Validate a lease, deriving a bounded deadline for older producers."""
+    if (not isinstance(request.get("id"), str) or not request["id"]
+            or request.get("action") not in ("apply", "reboot")):
+        raise ValueError("invalid OS request identity or action")
+    # Legacy producers already used these wait bounds; mtime supplies their start.
+    wait = REBOOT_WAIT_S if request["action"] == "reboot" else APPLY_WAIT_S
+    expires = request.get("expires_at", modified + wait)
+    if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+        raise ValueError("invalid OS request deadline")
+    try:
+        expires = float(expires)
+    except OverflowError:
+        raise ValueError("invalid OS request deadline") from None
+    if not math.isfinite(expires):
+        raise ValueError("invalid OS request deadline")
+    return expires
+
+
+def _claim_request(kind: str) -> Optional[str]:
+    """Atomically win a queued file against the consumer or timeout withdrawal."""
+    claimed = f"{REQUEST_FILE}.{kind}.{uuid.uuid4().hex}"
+    try:
+        os.rename(REQUEST_FILE, claimed)
+    except FileNotFoundError:
+        return None
+    return claimed
+
+
+def _cancel_queued(req_id: str, kind: str = "cancel") -> bool:
+    """Withdraw only the matching request; preserve foreign files for diagnosis."""
+    claimed = _claim_request(kind)
+    if claimed is None:
+        return False
+    try:
+        request, _ = _read_request(claimed)
+    except (OSError, ValueError) as error:
+        logger.error("Cannot identify withdrawn OS request %s: %s", claimed, error)
+        return False
+    if request.get("id") != req_id:
+        logger.error("Foreign OS request preserved at %s; withdrawal outcome unknown", claimed)
+        return False
+    _remove_private(claimed)
+    return True
+
+
 def _delegate(action: str, packages: Optional[List[str]], wait_s: float) -> Dict[str, Any]:
-    """Ask the watchdog to run ``action`` and wait for its result."""
-    # Refuse to queue a second request while one is still waiting to be picked up.
-    if os.path.exists(REQUEST_FILE):
-        return {"status": "ERROR", "message": "an OS update is already queued on LM-AB"}
-    # Tag this request with a unique id so we can match the watchdog's reply to it.
+    """Serialize producer lifetimes, including withdrawal, across threads/processes."""
+    try:
+        with open(REQUEST_FILE + ".lock", "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {"status": "ERROR", "message": "an OS update is already queued on LM-AB"}
+            return _delegate_locked(action, packages, wait_s)
+    except OSError as error:
+        logger.error("OS watchdog handoff failed: %s", error)
+        return {"status": "ERROR", "message": f"OS watchdog handoff failed; outcome unknown: {error}"}
+
+
+def _delegate_locked(action: str, packages: Optional[List[str]], wait_s: float) -> Dict[str, Any]:
+    """Publish under producer ownership and wait without extending a queued lease."""
+    # A dead producer can leave a request, but never an indefinitely valid lease.
+    try:
+        previous, modified = _read_request(REQUEST_FILE)
+        expires = _request_expiry(previous, modified)
+    except FileNotFoundError:
+        pass
+    except ValueError as error:
+        logger.error("Queued OS request is invalid: %s", error)
+        return {"status": "ERROR", "message": f"queued OS request is invalid: {error}"}
+    else:
+        if expires > time.time():
+            return {"status": "ERROR", "message": "an OS update is already queued on LM-AB"}
+        if not _cancel_queued(previous["id"], "expired"):
+            return {"status": "ERROR", "message": "queued OS request changed; outcome unknown"}
+
     req_id = uuid.uuid4().hex
-    # Write to a temp file first, then rename, so the watchdog never reads a half-written file.
-    tmp = REQUEST_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump({"id": req_id, "action": action, "packages": packages}, f)
-    os.replace(tmp, REQUEST_FILE)
-    # Stop waiting after wait_s seconds so the hub gets an answer before it gives up.
-    deadline = time.time() + wait_s
-    # Poll the status file until the watchdog reports this request done or we time out.
-    while time.time() < deadline:
-        time.sleep(POLL_S)
+    deadline = time.monotonic() + wait_s
+    try:
+        _publish_json(REQUEST_FILE, {
+            "id": req_id, "action": action, "packages": packages,
+            "expires_at": time.time() + wait_s,
+        }, exclusive=True)
+    except FileExistsError:
+        return {"status": "ERROR", "message": "an OS update is already queued on LM-AB"}
+
+    # A status for another request is not an acknowledgement of this action.
+    while time.monotonic() < deadline:
+        time.sleep(min(POLL_S, max(0.0, deadline - time.monotonic())))
         # Read the latest status written by the watchdog.
         try:
             with open(STATUS_FILE) as f:
@@ -102,36 +220,41 @@ def _delegate(action: str, packages: Optional[List[str]], wait_s: float) -> Dict
         except (OSError, ValueError):
             continue
         # Only accept a finished status carrying our own request id.
-        if status.get("id") == req_id and status.get("state") == "done":
+        if isinstance(status, dict) and status.get("id") == req_id and status.get("state") == "done":
             return status.get("result") or {"status": "ERROR", "message": "no result"}
-    # The deadline passed without a matching result.
-    return {"status": "ERROR",
-            "message": f"the LM-AB watchdog did not finish the {action} within {int(wait_s)}s"}
+    withdrawn = _cancel_queued(req_id)
+    detail = ("queued request withdrawn; an already claimed action may still complete"
+              if withdrawn else "action may still be running or completed; outcome unknown")
+    return {"status": "ERROR", "message":
+            f"the LM-AB watchdog did not finish the {action} within {int(wait_s)}s; {detail}"}
 
 
 def run_request() -> None:
-    """Watchdog side: run a queued request (if any) and record its result."""
-    # Load the pending request, if any.
-    try:
-        with open(REQUEST_FILE) as f:
-            req = json.load(f)
-    # No request queued (or the file is unreadable): nothing to do this cycle.
-    except (OSError, ValueError):
+    """Claim once, reject expired work and publish the result before releasing ownership."""
+    claimed = _claim_request("claim")
+    if claimed is None:
         return
-    # Claimed before running, so the request can never run twice.
-    os.remove(REQUEST_FILE)
-    # Run the requested action; a reboot goes to reboot_node, everything else is an apply.
+    req = {}
     try:
-        if req.get("action") == "reboot":
-            result = os_update.reboot_node()
-        else:
-            result = os_update.apply_updates(req.get("packages"))
-    # Never let a failure crash the watchdog; report it back to ab as an error result.
-    except Exception as exc:  # noqa: BLE001
-        result = {"status": "ERROR", "message": f"watchdog: {exc}"}
-    # Write the result atomically (temp file + rename) so ab never sees a partial file.
-    tmp = STATUS_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump({"id": req.get("id"), "state": "done", "result": result,
-                   "at": time.time()}, f)
-    os.replace(tmp, STATUS_FILE)
+        # Recheck the lease after ownership is won, before any privileged action.
+        try:
+            req, modified = _read_request(claimed)
+            expires = _request_expiry(req, modified)
+            if time.time() >= expires:
+                result = {"status": "ERROR", "message": "OS request expired before start; not executed"}
+            elif req["action"] == "reboot":
+                result = os_update.reboot_node()
+            else:
+                result = os_update.apply_updates(req.get("packages"))
+        except Exception as error:  # noqa: BLE001 - never retry a claimed privileged action
+            logger.error("OS watchdog request failed: %s", error)
+            result = {"status": "ERROR", "message": f"watchdog: {error}"}
+        # Lost acknowledgement is never repaired by replaying the claimed action.
+        _publish_json(STATUS_FILE, {
+            "id": req.get("id"), "state": "done", "result": result, "at": time.time(),
+        })
+    except OSError as error:
+        logger.error("OS watchdog status publication failed: %s", error)
+        raise
+    finally:
+        _remove_private(claimed)
