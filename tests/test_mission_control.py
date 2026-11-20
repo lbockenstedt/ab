@@ -96,6 +96,43 @@ def test_failed_qa_shows_the_headline_not_the_test_log():
     assert why.startswith("Fix failed QA tests after 3 attempt(s).") and "ruff" not in why
 
 
+@pytest.mark.parametrize("kind,why,flight", [
+    ("Direct Commit", "Fix is committed.", "committed, awaiting verification"),
+    ("Commit to dev", "Fix is committed.", "committed, awaiting verification"),
+    ("Pull Request", "Fix PR published.", "fix PR published"),
+    ("Published branch (PR unconfirmed)", "PR could not be confirmed", "PR unconfirmed"),
+])
+def test_incomplete_publication_shows_its_actual_phase_and_completion_error(kind, why, flight):
+    """Human attention and flight cards must not claim an unknown PR or applied code."""
+    record = {"status": "pending_verification", "commit_type": kind,
+              "timestamp": _ago(1), "error": "cleanup failed"}
+    assert why in mission_control._issue_why(record)
+    assert "cleanup failed" in mission_control._issue_why(record)
+    card = mission_control.flight_cards({"o/r:1": record}, {}, now=NOW)[0]
+    assert flight in card["now"] and "cleanup failed" in card["now"]
+    if kind == "Published branch (PR unconfirmed)":
+        assert "committed" not in card["now"] and "PR open" not in card["now"]
+
+
+def test_dashboard_exposes_unknown_pr_artifacts_without_claiming_an_applied_fix(monkeypatch):
+    """Render the new phase through the real template and keep remote errors escaped."""
+    import routes
+    monkeypatch.setattr(auth, "any_users", lambda: True)
+    monkeypatch.setattr(auth, "verify_session", lambda token: "admin")
+    monkeypatch.setattr(routes, "load_config", lambda: {"dashboard_mission_control": False})
+    monkeypatch.setitem(state, "processed", {
+        "o/r:1": {"status": "pending_verification", "commit_type": "Published branch (PR unconfirmed)",
+                  "commit": "0123456789abcdef", "branch": "ai-fix/1",
+                  "timestamp": datetime.now().isoformat(),
+                  "error": "<img src=x onerror=alert(1)> response lost"}})
+    monkeypatch.setitem(state, "pr_reviews", {})
+    monkeypatch.setitem(state, "active_tasks", {})
+    html = TestClient(main.app).get("/").text
+    assert "PR could not be confirmed" in html and "Complete publication before resolving" in html
+    assert "ai-fix/1" in html and "0123456" in html and "Completion incomplete:" in html
+    assert "&lt;img" in html and "<img src=x onerror" not in html
+
+
 def test_dashboard_renders_attention_with_actions_and_api(monkeypatch):
     monkeypatch.setattr(auth, "any_users", lambda: True)
     monkeypatch.setattr(auth, "verify_session", lambda token: "admin")
@@ -379,7 +416,7 @@ def test_each_open_pr_state_maps_to_its_step_and_now_text(pr, ci, step, now_text
 @pytest.mark.parametrize("status, step, now_text", [
     ("pending_verification", None, "committed, awaiting verification"),
     ({"status": "pending_verification", "commit_type": "Pull Request"}, "pr",
-     "fix PR open — awaiting merge, then verification"),
+     "fix PR published — confirm merge, then verification"),
     ("processing", "fix", "fixing — continues on the next scan (in 12m)"),
     ("reopened", "triage", "reopened — fixing again on the next scan (in 12m)"),
     ("awaiting_review", "review", "queued: waiting for reviewers"),

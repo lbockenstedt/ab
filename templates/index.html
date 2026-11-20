@@ -820,7 +820,11 @@
                                 <div class="text-slate-600 text-xs">
                                     {% if info.status == 'fixed' %}AI fix pushed / PR opened
                                     {% elif info.status == 'verified' %}Verified clean in production
-                                    {% elif info.status == 'pending_verification' %}Pending verification — auto-committed; confirm the issue is gone, then Resolve (or Re-open)
+                                    {% elif info.status == 'pending_verification' %}
+                                        {% if info.commit_type == 'Published branch (PR unconfirmed)' %}Branch pushed; PR could not be confirmed. Complete publication before resolving.
+                                        {% elif info.commit_type == 'Pull Request' %}Fix PR published; confirm merge and verify before resolving.
+                                        {% else %}Pending verification — auto-committed; confirm the issue is gone, then Resolve (or Re-open){% endif %}
+                                        {% if info.error %}<div class="text-orange-700">Completion incomplete: {{ info.error }}</div>{% endif %}
                                     {% elif info.status == 'resolved' %}Resolved (human-confirmed)
                                     {% elif info.status == 'closed' %}Closed on GitHub (resolved)
                                     {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
@@ -850,14 +854,15 @@
                                 </div>
                                 {% endif %}
                                 <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-xs italic">
-                                    {% if info.status == 'fixed' or info.status == 'verified' or info.status == 'closed' %}
-                                        <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
+                                    {% if info.status in ('fixed', 'verified', 'closed', 'pending_verification') %}
+                                        <span class="font-semibold">{{ 'Published:' if info.status == 'pending_verification' else 'Fixed:' }}</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
                                         <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Method:</span> {{ info.commit_type if info.commit_type else 'N/A' }}
                                         <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Reason:</span> {{ info.decision_reason if info.decision_reason else 'N/A' }}
                                         <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
+                                        {% if info.branch %}<span class="mx-2 text-slate-500">|</span><span class="font-semibold">Branch:</span> {{ info.branch }}{% endif %}
                                         <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% elif info.status == 'non-actionable' %}

@@ -96,7 +96,13 @@ def _issue_why(info):
     """Why an issue is waiting on a person, in one line."""
     status = info.get("status")
     if status == "pending_verification":
-        return "Fix is committed. Confirm the problem is gone, then Resolve, or Reopen to retry."
+        if info.get("commit_type") == "Published branch (PR unconfirmed)":
+            why = "Branch pushed; PR could not be confirmed. Complete publication before resolving."
+        elif info.get("commit_type") == "Pull Request":
+            why = "Fix PR published. Confirm merge and verify before resolving."
+        else:
+            why = "Fix is committed. Confirm the problem is gone, then Resolve, or Reopen to retry."
+        return why + (" Completion incomplete: " + _short(info["error"]) if info.get("error") else "")
     if status == "failed":
         why = info.get("error") or "AppBuilder could not find a fix it could verify."
         if info.get("failure_kind") == "qa_failed":
@@ -506,10 +512,13 @@ def flight_cards(processed, pr_reviews, active_tasks=None, ci_seen=None, next_po
             continue
         attempts = "attempt %s/%s" % (info["attempts"], info.get("max_attempts") or "?") if info.get("attempts") else ""
         flight = {
-            "pending_verification": (("pr", {"triage", "fix", "tests", "review"}, "fix PR open — awaiting merge, then verification")
-                                     if info.get("commit_type") == "Pull Request"
-                                     else ("", {"triage", "fix", "tests", "review", "commit"},
-                                           "committed, awaiting verification")),
+            "pending_verification": (
+                ("pr", {"triage", "fix", "tests", "review"}, "branch pushed; PR unconfirmed — needs manual completion")
+                if info.get("commit_type") == "Published branch (PR unconfirmed)" else (
+                    ("pr", {"triage", "fix", "tests", "review"}, "fix PR published — confirm merge, then verification")
+                    if info.get("commit_type") == "Pull Request"
+                    else ("", {"triage", "fix", "tests", "review", "commit"},
+                          "committed, awaiting verification"))),
             "processing": ("fix", {"triage"}, "fixing — continues on the next scan" + (" (%s)" % poll if poll else "")),
             "awaiting_review": ("review", {"triage", "fix"}, "queued: waiting for reviewers"),
             "reopened": ("triage", set(), "reopened — fixing again on the next scan" + (" (%s)" % poll if poll else "")),
@@ -520,6 +529,8 @@ def flight_cards(processed, pr_reviews, active_tasks=None, ci_seen=None, next_po
         if not flight:
             continue
         stage, done, text = flight
+        if status == "pending_verification" and info.get("error"):
+            text += ": " + _short(info["error"])
         repo, number = _repo_and_number(key, ":")
         since = _when(info.get("timestamp"))
         cards.append({"id": key, "live": False, "title": "%s #%s" % (repo, number),

@@ -1456,6 +1456,8 @@ def scan_repo_issues(gh_current, config, processed):
                                 retrying.add(issue_id)
                             elif status in ["fixed", "awaiting_prod_verification"]:
                                 continue
+                            elif status == "pending_verification" and processed[issue_id].get("commit"):
+                                continue
                             if status == "awaiting_local":
                                 pass
                             # For awaiting_review, we let it proceed to check the 1-hour timer in process_single_issue

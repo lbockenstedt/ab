@@ -5386,6 +5386,42 @@ def _release_issue(issue_id):
         _inflight_issues.discard(issue_id)
 
 
+def _push_fix_with_evidence(repo_git, refspec, publication, *, branch, commit_type, force=False):
+    """Capture the exact pre-push HEAD and retain only an acknowledged publication."""
+    commit_hash = repo_git.head.commit.hexsha
+    push_or_raise(repo_git.remotes.origin, refspec, force=force)
+    publication.update(commit=commit_hash, branch=branch, commit_type=commit_type)
+
+
+def _fix_publication_outcome(publication):
+    """Describe only the branch, commit and PR that this attempt actually confirmed."""
+    kind = publication["commit_type"].removeprefix("Published ")
+    outcome = f"{kind} {publication['branch']} at {publication['commit']}"
+    if publication.get("pr_url"):
+        outcome += f" ({publication['pr_url']})"
+    return outcome
+
+
+def _record_fix_publication(issue_id, publication, context, was_reopened, error=None):
+    """Commit a known published phase without reading lazy external metadata."""
+    record = {
+        **context, **publication, "status": "pending_verification",
+        "timestamp": datetime.now().isoformat(),
+    }
+    if publication["commit_type"] != "Published branch (PR unconfirmed)":
+        record["fixed_at"] = datetime.now().isoformat(timespec="seconds")
+    if error:
+        record["error"] = error
+
+    # Do not replace a newer operator-reopened flag with the pre-push snapshot.
+    def fixed(current):
+        """Replace the outcome while retaining a fresh operator-reopened flag."""
+        prior = current.get(issue_id) or {}
+        current[issue_id] = {**record, "reopened": prior.get("reopened", was_reopened)}
+
+    update_processed(fixed)
+
+
 def process_single_issue(repo_name, issue_num, llm_preference=None):
     """Core logic to fix a single issue. Used by poller and manual triggers."""
     global state
@@ -5394,6 +5430,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
     if not _claim_issue(issue_id):
         logger.info(f"{issue_id}: already being processed by another worker — skipping duplicate.")
         return False, "Already being processed"
+    publication, publication_context = {}, {}
+    publication_counted = False
     # Load settings; a GitHub token is required.
     try:
         config = load_config()
@@ -6208,23 +6246,40 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     can_direct_push = False
             repo_git.index.commit(f'{commit_msg}')
 
+            # Snapshot lazy metadata before any external publication can succeed.
+            publication_context = {
+                "title": issue.title, "issue_url": getattr(issue, "html_url", "") or "",
+                "commit_msg": commit_msg, "files": list(fixes.keys()),
+                "original_body": issue.body, "opened_at": _opened_at(issue),
+            }
+
             # Push straight to the integration branch; on rejection, rebase and try once more.
             if can_direct_push and final_verdict == "Approve":
                 try:
+                    publication_context["decision_reason"] = "Trusted repo & approved"
                     with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
-                        push_or_raise(repo_git.remotes.origin, f"HEAD:{base_branch}")
+                        _push_fix_with_evidence(
+                            repo_git, f"HEAD:{base_branch}", publication,
+                            branch=base_branch, commit_type="Direct Commit")
                     can_actually_direct_push = True
                     decision_reason = "Trusted repo & approved"
                 except Exception as pe:
+                    if publication:
+                        raise
                     logger.warning(f"Direct push failed for {repo_name} ({pe}). Attempting rebase...")
                     try:
+                        publication_context["decision_reason"] = "Trusted repo & approved (after rebase)"
                         with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
                             repo_git.remotes.origin.pull(base_branch, rebase=True)
-                            push_or_raise(repo_git.remotes.origin, f"HEAD:{base_branch}")
+                            _push_fix_with_evidence(
+                                repo_git, f"HEAD:{base_branch}", publication,
+                                branch=base_branch, commit_type="Direct Commit")
                         can_actually_direct_push = True
                         decision_reason = "Trusted repo & approved (after rebase)"
                         logger.info(f"Push successful after rebase for {repo_name}")
                     except Exception as re_err:
+                        if publication:
+                            raise
                         logger.warning(f"Direct push failed even after rebase: {re_err}. Falling back to PR.")
                         # A half-done rebase would make the PR fallback's checkout fail.
                         try:
@@ -6241,14 +6296,11 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 commit_type = "Direct Commit"
                 _progress(issue_id, "committed to %s — updating spokes" % base_branch, stage="commit")
                 detail_msg = f"The fix was verified and pushed directly to the {base_branch} branch. Avg Confidence: {final_confidence:.2%}"
-                # Fix is live on main — tell every spoke to pull and restart, then let
-                # the QA service verify against the updated code.
-                _trigger_spoke_updates(config)
-                _wait_for_spokes_online(config, min_count=1, timeout=90)
             else:
                 # Otherwise open a pull request; explain why there was no direct push.
                 reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (boundary_pr_reason if boundary_forced_pr else (direct_push_refused_reason if direct_push_refused_reason else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met")))
                 decision_reason = reason
+                publication_context["decision_reason"] = reason
                 logger.info(f"Decision: Pull Request. Reason: {reason}.")
                 # A required human PR always needs a topic branch, regardless of confidence.
                 target_branch = (config.get("dev_branch", "dev")
@@ -6270,10 +6322,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     repo_default_branch=getattr(repo_obj, "default_branch", None))
                 if not force_ok:
                     logger.info(f"fix_engine: pushing {target_branch} without --force — {force_why}")
-                with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
-                    push_or_raise(repo_git.remotes.origin, target_branch, force=force_ok)
-                # Reuse an open PR for this branch, or create one.
                 base_branch, _ = integration_branch(config, repo_obj)
+                published_type = (f"Commit to {base_branch}" if target_branch == base_branch
+                                  else "Published branch (PR unconfirmed)")
+                with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
+                    _push_fix_with_evidence(
+                        repo_git, target_branch, publication, branch=target_branch,
+                        commit_type=published_type, force=force_ok)
+                # Reuse an open PR for this branch, or create one.
 
                 existing_pr = (None if target_branch == base_branch
                                else find_existing_pull_request(repo_obj, target_branch, base_branch))
@@ -6286,7 +6342,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     pr = None
                 elif existing_pr:
                     pr = existing_pr
-                    logger.info(f"Found existing open PR for {target_branch} -> {base_branch}: {pr.html_url}")
+                    publication.update(pr_url=pr.html_url, commit_type="Pull Request")
+                    logger.info(f"Found existing open PR for {target_branch} -> {base_branch}: {publication['pr_url']}")
                 else:
                     # Create the PR; on a 422 (it probably already exists), look it up again.
                     try:
@@ -6297,7 +6354,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             head=target_branch,
                             base=base_branch
                         )
-                        logger.info(f"Created new PR for {target_branch} -> {base_branch}: {pr.html_url}")
+                        publication.update(pr_url=pr.html_url, commit_type="Pull Request")
+                        logger.info(f"Created new PR for {target_branch} -> {base_branch}: {publication['pr_url']}")
                     except GithubException as ge:
                         if ge.status == 422:
                             logger.warning(
@@ -6308,8 +6366,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
                             if existing_pr:
                                 pr = existing_pr
+                                publication.update(pr_url=pr.html_url, commit_type="Pull Request")
                                 logger.info(
-                                    f"Found existing open PR after 422 error: {pr.html_url}"
+                                    f"Found existing open PR after 422 error: {publication['pr_url']}"
                                 )
                             else:
                                 logger.error(
@@ -6328,15 +6387,24 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                   f"(confidence below the direct-merge threshold, so it is promoted "
                                   f"{base_branch} -> qa -> main rather than via a PR).")
                 else:
-                    pr_url = pr.html_url
+                    pr_url = publication["pr_url"]
                     commit_type = "Pull Request"
                     _progress(issue_id, "opened PR #%s" % pr.number, stage="pr")
                     detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr_url}"
 
 
-            # Summarise the change for the success comment.
+            # Persist the known phase before notifications, fan-out or issue closure.
+            _record_fix_publication(
+                issue_id, publication, publication_context, was_reopened)
+            state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
+            publication_counted = True
+            if can_actually_direct_push:
+                _trigger_spoke_updates(config)
+                _wait_for_spokes_online(config, min_count=1, timeout=90)
+
+            # Summarise the change for the optional success comment.
             files_list = ", ".join(fixes.keys()) if fixes else "No files changed"
-            commit_hash = repo_git.head.commit.hexsha
+            commit_hash = publication["commit"]
 
             # Post the success comment to the issue.
             comment_body = (
@@ -6351,7 +6419,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             except Exception as ce:
                 logger.warning(f"Could not post success comment to {issue_id}: {ce}")
 
-            issue_id = f"{repo_name}:{issue_num}"
             # Auto-committed → close on GitHub, then hold in PENDING VERIFICATION: a
             # human opens AppBuilder, confirms the issue is actually gone and clicks
             # Resolved (→ Resolved bucket), or clicks Re-open if it's still there.
@@ -6359,52 +6426,20 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             issue.edit(state='closed')
             _notify_bug_fixed(issue)  # LM "File a Bug" → hub → UI shows "Fixed"
             _apply_closed_label(repo_obj, issue, issue_id)
-            new_status = "pending_verification"
-
-            # Record the fix (commit, files, how it landed) and update counters.
-            record = {
-                "status": new_status,
-                "timestamp": datetime.now().isoformat(),
-                "commit": commit_hash,
-                "commit_msg": commit_msg,
-                "files": list(fixes.keys()),
-                "commit_type": commit_type,
-                "decision_reason": decision_reason,
-                "reopened": was_reopened,
-                "original_body": issue.body,
-                # When the issue was opened and the fix landed, for the dashboard's
-                # Median fix time (timestamp moves when a person clicks Resolved).
-                "opened_at": _opened_at(issue),
-                "fixed_at": datetime.now().isoformat(timespec="seconds"),
-            }
-            if pr_url:
-                record["pr_url"] = pr_url
-
-            def fixed(current):
-                """Intentionally replace the outcome; retain a fresh reopened flag."""
-                prior = current.get(issue_id) or {}
-                current[issue_id] = {**record, "reopened": prior.get("reopened", was_reopened)}
-
-            try:
-                update_processed(fixed)
-            except ProcessedStoreError as e:
-                outcome = f"{record['commit_type']} {record['commit']}"
-                if record.get("pr_url"):
-                    outcome += f" ({record['pr_url']})"
-                message = f"Published {outcome}; History persistence failed: {e}"
-                logger.error(f"{issue_id}: {message}")
-                update_task_state(task_id=issue_id, action="end")
-                return False, message
-            state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
 
             # End the task.
             update_task_state(task_id=issue_id, action="end")
             return True, f"Fixed via {commit_type}"
 
     except ProcessedStoreError as e:
-        logger.error(f"History persistence failed for {issue_id}; external actions may have completed: {e}")
-        update_task_state(task_id=issue_id, action="end")
-        return False, f"History persistence failed (external actions may have completed): {e}"
+        message = (f"Published {_fix_publication_outcome(publication)}; History persistence failed: {e}"
+                   if publication else f"History persistence failed (external actions may have completed): {e}")
+        logger.error(f"{issue_id}: {message}")
+        try:
+            update_task_state(task_id=issue_id, action="end")
+        except Exception as cleanup_err:
+            logger.error(f"Failed to clean up task state for {issue_id}: {cleanup_err}")
+        return False, message
     except Exception as e:
         # Flatten embedded newlines into the single ERROR line — the self-log
         # scanner captures single ERROR-level lines verbatim with no
@@ -6430,6 +6465,19 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             update_task_state(task_id=issue_id, action="end")
         except Exception as cleanup_err:
             logger.error(f"Failed to clean up task state for {issue_id}: {cleanup_err}")
+        if publication:
+            message = f"Published {_fix_publication_outcome(publication)}; completion failed: {_flat}"
+            logger.error(f"{issue_id}: {message}")
+            try:
+                _record_fix_publication(
+                    issue_id, publication, publication_context, was_reopened, error=_flat[:500])
+                # Completion can fail after this attempt was already recorded and counted.
+                if not publication_counted:
+                    state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
+            except Exception as store_error:
+                logger.error(f"Could not persist published outcome for {issue_id}: {store_error}")
+                message += f"; History persistence failed: {store_error}"
+            return False, message
         # Record the errored issue as `failed` so it stays VISIBLE in the Status table
         # (Failed) and remains retryable. An unhandled exception (e.g. an ollama 400 /
         # timeout mid-fix) otherwise never lands in the processed store, so the issue

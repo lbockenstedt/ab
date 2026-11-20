@@ -572,8 +572,9 @@ def test_actual_fix_publication_tail_preserves_known_outcome_on_disk_failure(his
               edit=lambda **kwargs: external.append("closed"))
     repo = N(clone_url="https://github.com/o/r.git", default_branch="main",
              create_pull=lambda **kwargs: PR())
-    git_repo = N(head=N(commit=N(hexsha=commit)), git=N(checkout=lambda *args: None),
-                 remotes=N(origin=N()))
+    git_repo = N(head=N(commit=N(hexsha=commit)),
+                 git=N(checkout=lambda *args: None, add=lambda **kwargs: None),
+                 index=N(commit=lambda message: N(hexsha=commit)), remotes=N(origin=N()))
     def update(mutator):
         callbacks.append(mutator.__name__)
         return app.update_processed(mutator)
@@ -591,7 +592,7 @@ def test_actual_fix_publication_tail_preserves_known_outcome_on_disk_failure(his
 
     ns = dict(vars(fix_engine), state=app.state, issue=issue, issue_id="o/r:1",
               repo_name="o/r", issue_num=1, repo_obj=repo, repo_git=git_repo, config={},
-              can_actually_direct_push=kind == "Direct Commit",
+              path="unused-no-filesystem", can_direct_push=kind == "Direct Commit",
               final_confidence=.91 if kind == "Commit to dev" else .99,
               confidence_threshold=.95, final_verdict="Approve", boundary_forced_pr=False,
               boundary_pr_reason="", direct_push_refused_reason=None, decision_reason="approved",
@@ -606,6 +607,9 @@ def test_actual_fix_publication_tail_preserves_known_outcome_on_disk_failure(his
               may_force_push=lambda *args, **kwargs: (False, "protected"),
               integration_branch=lambda *args: ("dev", "integration"),
               auto_branch_name=lambda *args, **kwargs: "ai-fix/1",
+              bump_repo_version=lambda path: None,
+              _publication_boundary_requirement=lambda *args: (False, ""),
+              _fix_pr_body=lambda *args: "Reviewed fix",
               push_or_raise=lambda *args, **kwargs: external.append("pushed"),
               find_existing_pull_request=lambda *args: None,
               call_llm=forbidden, apply_ai_fix=forbidden,
@@ -613,22 +617,27 @@ def test_actual_fix_publication_tail_preserves_known_outcome_on_disk_failure(his
     tree = ast.parse(Path(fix_engine.__file__).read_text())
     pipeline = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                     and n.name == "process_single_issue")
-    # Start at the real final publication branch; retain the real enclosing error
-    # handlers/finally so an unintended fall-through/rewrite is exercised too.
+    # Include actual pushes and their evidence capture, not just the record tail.
     parent, index = next(
         (node, i) for node in ast.walk(pipeline) if isinstance(getattr(node, "body", None), list)
         for i, stmt in enumerate(getattr(node, "body", []))
         if isinstance(stmt, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "pr_url" for target in stmt.targets)
-        and isinstance(stmt.value, ast.Constant) and stmt.value.value is None)
+            isinstance(target, ast.Name) and target.id == "version_bumped" for target in stmt.targets))
     outer = next(n for n in pipeline.body if isinstance(n, ast.Try) and n.finalbody)
     tail = copy.deepcopy(outer)
     tail.body = copy.deepcopy(parent.body[index:])
     fn = ast.parse(
-        "def publish(issue_id=issue_id, base_branch=base_branch, decision_reason=decision_reason):\n"
+        "def publish(issue_id=issue_id, base_branch=base_branch, can_direct_push=can_direct_push,\n"
+        "            boundary_forced_pr=boundary_forced_pr, boundary_pr_reason=boundary_pr_reason):\n"
+        "    publication = {}\n"
+        "    publication_context = {}\n"
+        "    publication_counted = False\n"
         "    pass\n").body[0]
-    fn.body = [tail]
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])),
+    fn.body[-1] = tail
+    helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+               and node.name in ("_push_fix_with_evidence", "_record_fix_publication",
+                                 "_fix_publication_outcome")]
+    exec(compile(ast.fix_missing_locations(ast.Module(body=helpers + [fn], type_ignores=[])),
                  "actual_fix_publication", "exec"), ns)
     result = ns["publish"]()
     assert result[0] is False and commit in result[1] and kind in result[1]
@@ -641,7 +650,8 @@ def test_actual_fix_publication_tail_preserves_known_outcome_on_disk_failure(his
     assert callbacks == ["fixed"] and len(writes) == 1
     assert writes[0]["o/r:1"]["commit"] == commit
     assert writes[0]["o/r:1"]["commit_type"] == kind
-    assert "closed" in external and ended == [{"task_id": "o/r:1", "action": "end"}]
+    assert not {"closed", "notified", "update requested"}.intersection(external)
+    assert ended == [{"task_id": "o/r:1", "action": "end"}]
     assert history.read_bytes() == before and app.state == view
 
 
