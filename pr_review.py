@@ -1336,9 +1336,14 @@ def _render(findings, head_sha, summary="", review=None, state_review=None,
 
 
 def _find_marker_comment(pr):
-    """Return our existing review comment on the PR, or None."""
+    """Return our existing review comment on the PR, or None.
+
+    Only a comment from an author with write access counts: anyone can comment
+    on a public repo, and a copied marker plus head line would otherwise make
+    AB skip the review as already current, or edit the wrong comment."""
+    from pr_review_score import is_trusted_comment
     for c in pr.get_issue_comments():
-        if PR_REVIEW_MARKER in (c.body or ""):
+        if PR_REVIEW_MARKER in (c.body or "") and is_trusted_comment(c):
             return c
     return None
 

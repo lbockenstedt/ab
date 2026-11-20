@@ -315,13 +315,16 @@ def _flag_classifier_exhausted(gh_repo, issue, rec):
 
 
 def _already_commented(issue, marker_prefix):
-    """True if a comment carrying `marker_prefix` already exists — the
+    """True if a trusted comment carrying `marker_prefix` already exists — the
     idempotency check shared by _flag_issue and _clarify_issue so a repeat
     scan of the same still-open issue doesn't re-comment every cycle."""
     # Look through existing comments for the marker; on API errors assume none.
+    # A stranger's copied marker (anyone can comment on a public repo) must not
+    # stop AB's own comment, so only authors with write access count.
+    from pr_review_score import is_trusted_comment
     try:
         for c in issue.get_comments():
-            if marker_prefix in (c.body or ""):
+            if marker_prefix in (c.body or "") and is_trusted_comment(c):
                 return True
     except Exception as e:
         logger.debug(f"feature_drive: comment scan failed, proceeding as not-yet-commented: {e}")

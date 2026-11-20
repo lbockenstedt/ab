@@ -123,19 +123,19 @@ def test_reviewer_models_come_from_abs_latest_review(monkeypatch):
 
     def gh(*args):
         calls.append(args)
-        return [{"body": "quoting **Reviewer (copilot/old-model)**"},
-                {"body": ("<!-- ab-pr-review -->\n**Reviewer (copilot/model-a)** — Approve\n"
+        return [{"author_association": "OWNER", "body": "quoting **Reviewer (copilot/old-model)**"},
+                {"author_association": "OWNER", "body": ("<!-- ab-pr-review -->\n**Reviewer (copilot/model-a)** — Approve\n"
                           "**Reviewer (copilot)** — Approve\n"
                           "**Reviewer (copilot/model-b)** — Reject\n"
                           "**Reviewer (copilot/model-a)** — Approve")},
-                {"body": "<!-- ab-pr-review -->\n**Reviewer (copilot/stale-model)**"}]
+                {"author_association": "OWNER", "body": "<!-- ab-pr-review -->\n**Reviewer (copilot/stale-model)**"}]
     monkeypatch.setattr(local_review, "_gh_json", gh)
     seats = ["copilot/model-a", "copilot/model-b"]
     assert local_review._reviewer_seats("owner/repo") == {"panel1": seats, "panel2": seats}
     assert "sort=updated" in calls[0][1]
 
 
-@pytest.mark.parametrize("reply", [None, [], [{"body": "no review here"}]])
+@pytest.mark.parametrize("reply", [None, [], [{"author_association": "OWNER", "body": "no review here"}]])
 def test_no_reviewer_models_is_an_error_not_an_empty_panel(monkeypatch, reply):
     """gh failing and AB never having reviewed are both errors: an empty list
     would launch no reviewers and let the gate pass with nothing reviewed."""
@@ -148,9 +148,9 @@ def test_no_reviewer_models_is_an_error_not_an_empty_panel(monkeypatch, reply):
 def test_the_newest_ab_review_wins_across_repos(monkeypatch):
     """The target repo's own last review can be older than AB's latest panel."""
     import main  # noqa: F401
-    replies = {"owner/repo": [{"updated_at": "2026-01-01T00:00:00Z",
+    replies = {"owner/repo": [{"author_association": "OWNER", "updated_at": "2026-01-01T00:00:00Z",
                                "body": "<!-- ab-pr-review -->\n**Reviewer (copilot/old)**"}],
-               "lbockenstedt/ab": [{"updated_at": "2026-02-01T00:00:00Z",
+               "lbockenstedt/ab": [{"author_association": "OWNER", "updated_at": "2026-02-01T00:00:00Z",
                                     "body": "<!-- ab-pr-review -->\n**Reviewer (copilot/new)**"}]}
     monkeypatch.setattr(local_review, "_slug", lambda path: "lbockenstedt/ab")
     monkeypatch.setattr(local_review, "_gh_json", lambda _api, url: replies[url.split("/")[1] + "/" + url.split("/")[2]])
@@ -164,15 +164,15 @@ def test_each_panel_is_gated_on_its_own_seats(monkeypatch, tmp_path, capsys):
     import pr_review
     body = ("<!-- ab-pr-review -->\n**Reviewer (copilot/a)**\n**Reviewer (copilot/b)**\n"
             + pr_review._STATE_PANEL_HEADER + "\n**Reviewer (copilot/a)**\n**Reviewer (copilot/c)**")
-    monkeypatch.setattr(local_review, "_gh_json", lambda *a: [{"body": body}])
+    monkeypatch.setattr(local_review, "_gh_json", lambda *a: [{"author_association": "OWNER", "body": body}])
     seats = local_review._reviewer_seats("owner/repo")
     assert seats == {"panel1": ["copilot/a", "copilot/b"], "panel2": ["copilot/a", "copilot/c"]}
 
     # Panel 2 waits for panel 1, so the newest review often has no panel 2
     # seats; they come from the newest review that has them, not panel 1's.
-    newer = {"updated_at": "2026-02-01T00:00:00Z", "body": "<!-- ab-pr-review -->\n**Reviewer (copilot/d)**"}
+    newer = {"author_association": "OWNER", "updated_at": "2026-02-01T00:00:00Z", "body": "<!-- ab-pr-review -->\n**Reviewer (copilot/d)**"}
     monkeypatch.setattr(local_review, "_gh_json",
-                        lambda *a: [newer, {"updated_at": "2026-01-01T00:00:00Z", "body": body}])
+                        lambda *a: [newer, {"author_association": "OWNER", "updated_at": "2026-01-01T00:00:00Z", "body": body}])
     assert local_review._reviewer_seats("owner/repo") == {"panel1": ["copilot/d"],
                                                           "panel2": ["copilot/a", "copilot/c"]}
 

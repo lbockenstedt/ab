@@ -840,8 +840,11 @@ def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=N
     sha = (prior_commit or "").strip()
     if not sha:
         try:
+            # Only AB's (or a maintainer's) comments: anyone can comment on a
+            # public repo's issue and name an unrelated commit.
+            from pr_review_score import is_trusted_comment
             for c in issue.get_comments():
-                m = _FIX_COMMIT_RE.search(c.body or "")
+                m = is_trusted_comment(c) and _FIX_COMMIT_RE.search(c.body or "")
                 if m:
                     sha = m.group(1)  # keep the LAST (most recent) fix commit cited
         except Exception:  # noqa: BLE001

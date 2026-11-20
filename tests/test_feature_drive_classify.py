@@ -90,7 +90,7 @@ def _load_ns():
             self.labels = [lbl for lbl in self.labels if lbl.name != name]
             self.added_labels.append("-" + name)
         def create_comment(self, body):
-            c = type("C", (), {"body": body})
+            c = type("C", (), {"body": body, "author_association": "OWNER"})
             self._comments.append(c)
             self.comments_posted.append(body)
 

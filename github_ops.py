@@ -524,7 +524,11 @@ def upsert_recurrence_comment(issue, repo_name, body_text, now=None):
     Older per-repeat comments are counted (and stripped of identity data)
     once, when the comment is created."""
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M UTC")
-    comments = list(issue.get_comments())
+    # Only comments from authors with write access are AppBuilder's: anyone can
+    # comment on a public repo's issue, and a copied marker would otherwise
+    # steer the counts or make AB edit a stranger's comment.
+    from pr_review_score import is_trusted_comment
+    comments = [c for c in issue.get_comments() if is_trusted_comment(c)]
     mine = next((c for c in comments if (c.body or "").startswith(_RECURRENCE_MARKER)), None)
     legacy = [c for c in comments if _LEGACY_RECURRENCE in (c.body or "")]
     if mine is None:

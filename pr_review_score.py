@@ -97,19 +97,41 @@ def _gh_json(repo, pr, fields):
     return json.loads(out)
 
 
+# Author associations of people with write access to a fleet repo. AppBuilder
+# posts with the owner's token (association OWNER). The repos are public, so
+# anyone can post a comment that carries an AppBuilder marker; only one from
+# these associations is AppBuilder's (or a maintainer's) comment.
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
+def is_trusted_comment(c):
+    """True if a PR or issue comment was written by someone with write access.
+
+    `c` is a PyGithub IssueComment (`.author_association`), a REST API dict
+    (`author_association`) or a `gh pr view --json comments` dict
+    (`authorAssociation`). A comment with no association is untrusted."""
+    if isinstance(c, dict):
+        assoc = c.get("author_association") or c.get("authorAssociation")
+    else:
+        assoc = getattr(c, "author_association", None)
+    return str(assoc or "").upper() in TRUSTED_ASSOCIATIONS
+
+
 def _latest_review_comment(comments):
     """The most recent AppBuilder pre-review comment body, or None.
 
     `comments` is an iterable of objects/dicts exposing a comment body — either
     `gh` JSON dicts ({"body": ...}) or PyGithub IssueComment objects (.body).
+    A marker comment from an untrusted author is ignored (is_trusted_comment):
+    its critique text would otherwise be fed to the fix engine as AB's review.
     """
-    # Find every comment carrying AppBuilder's pre-review marker.
+    # Find every trusted comment carrying AppBuilder's pre-review marker.
     marker = _marker()
     hits = []
     # Accept both gh dicts and PyGithub comment objects.
     for c in comments:
         body = c.get("body") if isinstance(c, dict) else getattr(c, "body", None)
-        if body and marker in body:
+        if body and marker in body and is_trusted_comment(c):
             hits.append(body)
     # oldest-first from both gh and PyGithub; the last marker comment is current.
     return hits[-1] if hits else None

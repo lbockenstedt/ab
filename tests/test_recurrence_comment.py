@@ -15,6 +15,8 @@ _IP = ".".join(("198", "51", "100", "9"))  # documentation range, built not lite
 
 
 class Comment:
+    author_association = "OWNER"  # AB posts as the repo owner
+
     def __init__(self, body):
         self.body = body
 

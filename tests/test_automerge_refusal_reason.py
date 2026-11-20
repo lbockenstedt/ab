@@ -71,6 +71,8 @@ class _Logger:
 
 
 class _Comment:
+    author_association = "OWNER"  # AB posts as the repo owner
+
     def __init__(self, body, fail=False):
         self.body, self.fail, self.edits = body, fail, []
 
