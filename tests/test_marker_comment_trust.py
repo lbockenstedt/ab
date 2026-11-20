@@ -7,10 +7,10 @@ import importlib.util
 import os
 from types import SimpleNamespace as N
 
-import main  # noqa: F401 - loads pr_review, github_ops and fix_engine in import order
 import feature_drive
 import fix_engine
 import github_ops
+import main  # noqa: F401 - pr_review expects main loaded, as the other AB tests do
 import pr_review
 import pr_review_score as prs
 
