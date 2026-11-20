@@ -122,8 +122,16 @@ async def hub_agent_reregister():
     """Force re-onboarding: clear the stored session secret and restart the agent.
 
     Used after a key revoke/re-approval, or to re-trigger the pending-approval
-    flow. Returns immediately; the agent reconnects zero-touch in the background.
+    flow. Local setup finishes before the response; approval remains background work.
     """
+    # The worker must retain admission if the HTTP await is cancelled.
+    return await asyncio.to_thread(
+        _run_issue_action, "hub-agent:reregister", _reregister_hub_agent,
+        busy_message="Hub agent re-registration already in progress")
+
+
+def _reregister_hub_agent():
+    """Finish the original local stop/pause/setup workflow under its worker-owned claim."""
     try:
         # Clear the secret and stop the running client.
         _persist_config_key("HUB_AGENT_SECRET", "")
@@ -1612,7 +1620,7 @@ async def system_stats():
 
 
 @router.get("/api/diagnostics")
-async def diagnostics():
+def diagnostics():
     """Surfaces running-vs-disk-vs-origin versions, stale-code state, per-provider
     status (including the previously-silent skip reasons), and update/restart state,
     so the user can see what is wrong from the UI instead of reading CLI logs."""
@@ -4433,18 +4441,19 @@ class _IssueActionBusy(RuntimeError):
     """Abort a history mutation before writing when one of its issues is claimed."""
 
 
-def _issue_busy_response(issue_ids):
+def _issue_busy_response(issue_ids, *, message=None):
     """Report refused operator work without pretending it was queued or applied."""
-    message = "Issue action refused; still being processed: " + ", ".join(issue_ids)
+    if message is None:
+        message = "Issue action refused; still being processed: " + ", ".join(issue_ids)
     logger.info(message)
     return JSONResponse(status_code=409, content={"status": "error", "message": message})
 
 
-def _run_issue_action(issue_id, operation, *args):
+def _run_issue_action(issue_id, operation, *args, busy_message=None):
     """Own the whole synchronous operator workflow, even if its HTTP await is cancelled."""
     claimed, busy = _claim_issues([issue_id])
     if not claimed:
-        return _issue_busy_response(busy)
+        return _issue_busy_response(busy, message=busy_message)
     try:
         return operation(*args)
     finally:

@@ -6529,14 +6529,19 @@
             } catch (e) { console.warn('hub agent refresh failed', e); }
         }
 
+        // Change the badge only after local setup is acknowledged, not after a refused RPC.
         async function hubAgentReregister() {
             if (!confirm('Re-register the Hub agent? This clears the stored session key and restarts zero-touch onboarding (you must re-approve ab in the Hub WebUI).')) return;
             try {
                 const r = await fetch('/api/hub-agent/reregister', {method: 'POST'});
-                const d = await r.json().catch(() => ({}));
+                const d = await r.json();
+                if (!r.ok || d.status !== 'restarted') {
+                    showToast(d.message || 'Hub agent re-registration was not confirmed', 'error');
+                    return;
+                }
                 _renderHubAgentBadge('pending', d.message || 're-registering…');
             } catch (e) {
-                _renderHubAgentBadge('error', String(e));
+                showToast('Hub agent re-registration failed: ' + String(e), 'error');
             }
         }
 
