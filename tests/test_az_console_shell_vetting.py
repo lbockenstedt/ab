@@ -182,11 +182,19 @@ READ_ONLY_HOLES = [
     ("dig glued batch file", "dig -4f /etc/shadow"),
     ("dig glued batch file 2", "dig -uf/etc/ab/.env"),
     ("dig glued key file", "dig -4k /etc/ab/key"),
-    # podman's global flags are accepted after the subcommand.
+    # podman is not allowlisted: its global flags work after the subcommand,
+    # and some create files.
     ("podman remote url", "podman ps --url tcp://attacker.example:8888"),
     ("podman remote flag", "podman info --remote"),
     ("podman connection", "podman ps --connection=evil"),
     ("podman short remote", "podman ps -r"),
+    ("podman output file", "podman ps --out=/var/log/x"),
+    ("podman cpu profile", "podman ps --cpu-profile /tmp/profile"),
+    ("podman memory profile", "podman ps --memory-profile=/tmp/m"),
+    ("podman read-only form", "podman ps -a"),
+    ("uniq glob to two logs", "uniq /var/log/[ak][ue][tr][hn].log"),
+    ("uniq glob to two units", "uniq /usr/lib/systemd/system/[as]sh.service"),
+    ("uniq glob after flag", "uniq -c /var/log/syslog*"),
 ]
 
 # Real diagnostics the console must keep supporting.
@@ -270,8 +278,8 @@ LEGITIMATE = [
     "ps -aux",
     "dig -4 appbuilder.ext.orange-tme.com",
     "dig +short -x 10.0.0.4",
-    "podman ps -a",
-    "podman logs --tail 50 ab",
+    "docker ps -a",
+    "docker logs --tail 50 ab",
 ]
 
 

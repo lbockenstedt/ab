@@ -201,11 +201,12 @@ an explicitly empty value still clears it.
     and the options of those that can write, run a command or read another file are
     checked: curl and wget (loopback URLs only, a short option allowlist, wget output to
     stdout), systemctl (read verbs and an option allowlist), `service <name> status`,
-    docker/podman (ps, images, logs, stats … — not `inspect`, which prints container
-    environments, and `top` only with a container name; podman's global options such as
-    `--url`, `--remote` or `-c` are refused after the subcommand too), ip
+    docker (ps, images, logs, stats … — not `inspect`, which prints container
+    environments, and `top` only with a container name; podman is refused, since it
+    takes global options such as `--url`, `--out` or `--cpu-profile` after the
+    subcommand), ip
     (show/list/get), date, hostname and env (print only), sort, uniq (one input file, no
-    `--`: a second file is written), journalctl, ss, ps (no BSD `e`, which prints process
+    `--` and no glob: a second file is written), journalctl, ss, ps (no BSD `e`, which prints process
     environments; a dash cluster with `e` must be `-e` plus value-free letters such as
     `-ef` or `-eo`), dig (no `-f`/`-k`, even glued as `-4f`), ping, find, du and wc.
   - **Globs:** an unquoted `*`, `?` or `[` is allowed only in a plain path under `/var/log`

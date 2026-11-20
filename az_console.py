@@ -97,7 +97,7 @@ _SHELL_READ_BINARIES = {
     "systemctl", "journalctl", "service", "cat", "tail", "head", "grep", "egrep",
     "ls", "stat", "ps", "top", "df", "du", "free", "uptime", "uname", "hostname",
     "date", "whoami", "id", "env", "printenv", "ss", "netstat", "ip", "curl",
-    "wget", "ping", "dig", "nslookup", "docker", "podman", "echo", "which",
+    "wget", "ping", "dig", "nslookup", "docker", "echo", "which",
     "find", "wc", "sort", "uniq", "true", "test", "pgrep",
 }
 # Binaries that are general-purpose interpreters: being on the "read-only" list
@@ -425,7 +425,7 @@ def _vet_wget(binary, args):
     return _vet_fetch_targets(binary, targets)
 
 
-# docker/podman subcommands that only inspect state. `inspect` is absent: it
+# docker subcommands that only inspect state. `inspect` is absent: it
 # prints each container's environment, which holds its secrets. `top` passes
 # extra arguments to ps (`docker top c e` prints the environment), so it is
 # allowed with a container name only.
@@ -439,18 +439,11 @@ _CONTAINER_NESTED_READ = {
 }
 
 
-_PODMAN_GLOBAL_OPTS = {
-    "url", "connection", "remote", "identity", "ssh", "runtime", "runtime-flag",
-    "conmon", "root", "runroot", "imagestore", "storage-driver", "storage-opt",
-    "cgroup-manager", "events-backend", "hooks-dir", "network-cmd-path",
-    "network-config-dir", "tmpdir", "volumepath", "module", "config", "db-backend",
-    "transient-store", "registries-conf", "cdi-spec-dir",
-}
-
-
 def _vet_container(binary, args):
-    """docker/podman: a read-only subcommand first, no global options (-H
-    points the client at another daemon)."""
+    """docker: a read-only subcommand first, no global options (-H points the
+    client at another daemon). docker reads its global options only before
+    the subcommand. podman is not allowed: it also takes them after it, and
+    some (--out, the hidden --cpu-profile) create files as root."""
     if not args or args[0].startswith("-"):
         return False, (f"{binary} needs a read-only subcommand first, with no global "
                        f"options (allowed: ps/images/logs/stats/…)")
@@ -465,15 +458,6 @@ def _vet_container(binary, args):
         return False, (f"{binary} '{' '.join(args[:2])}' is not a read-only subcommand "
                        f"(allowed: ps/images/logs/stats/version/info/port/diff/history/"
                        f"events, image ls, container ls/logs, top <name>)")
-    # podman accepts its global options after the subcommand too, and these
-    # point it at a remote service or another runtime or storage.
-    if binary == "podman":
-        for t in args[1:]:
-            if (any(c in _short_cluster(t) for c in "rc")
-                    or (t.startswith("--") and t[2:].split("=", 1)[0].lower()
-                        in _PODMAN_GLOBAL_OPTS)):
-                return _refuse_opt(binary, t, "is a global option (remote service, "
-                                   "runtime or storage)")
     return True, ""
 
 
@@ -571,9 +555,13 @@ def _vet_sort(binary, args):
 
 def _vet_uniq(binary, args):
     """uniq: a second file operand is an OUTPUT file, so allow at most one.
-    Values of -f/-s/-w are not operands; `--` is refused because every token
-    after it is an operand, including one that starts with '-'."""
+    Values of -f/-s/-w are not operands. `--` is refused because every token
+    after it is an operand, even one starting with '-', and a glob because bash
+    may expand one word into two files."""
     operands, skip = 0, False
+    if any(c in t for t in args for c in "*?["):
+        return False, ("uniq writes its second file operand, and a glob can expand "
+                       "to two files; name one file in read-only mode")
     for t in args:
         if skip:
             skip = False
@@ -771,7 +759,7 @@ def _vet_find(binary, args):
 # command or reads a file; cat/head/tail paths are checked by _vet_read_operands.
 _BINARY_VETTERS = {
     "find": _vet_find, "curl": _vet_curl, "wget": _vet_wget,
-    "docker": _vet_container, "podman": _vet_container, "env": _vet_env,
+    "docker": _vet_container, "env": _vet_env,
     "systemctl": _vet_systemctl, "service": _vet_service,
     "journalctl": _vet_journalctl, "sort": _vet_sort, "uniq": _vet_uniq,
     "grep": _vet_grep, "egrep": _vet_grep, "ip": _vet_ip, "date": _vet_date,
