@@ -26,6 +26,7 @@ Regression guards this pins:
 import ast
 import contextlib
 import sys
+from types import SimpleNamespace
 
 from github import GithubException
 
@@ -223,6 +224,7 @@ class _FakeIndex:
         self._repo = repo
     def commit(self, msg):
         self._repo.commits.append(msg)
+        return SimpleNamespace(hexsha="0123456789abcdef0123456789abcdef01234567")
 
 
 class _FakeRemote:

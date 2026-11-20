@@ -318,10 +318,11 @@ def _identity(prior) -> dict:
     return {k: v for k, v in (prior or {}).items() if k in ("title", "issue_url") and v}
 
 
-def _mark_failed(issue_id, reason):
-    """Record the issue as a failed feature build, with the reason, and refresh the counters."""
+def _mark_failed(issue_id, reason, extra=None):
+    """Record failed completion while retaining any confirmed publication artifacts."""
     # Overwrite the issue's record with the failure status and save.
-    record = {"status": "feature_failed", "reason": reason, "timestamp": datetime.now().isoformat()}
+    record = {**(extra or {}), "status": "feature_failed", "reason": reason,
+              "timestamp": datetime.now().isoformat()}
 
     def replace(processed):
         """Carry identity from the current record, deliberately replace other fields."""
@@ -466,6 +467,7 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
         logger.info(f"feature_build: another build is already in progress — deferring {issue_id}")
         return False, "build lock busy"
 
+    publication = {}
     try:
         # Everything below runs while holding the build lock (released in finally).
         token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
@@ -629,7 +631,7 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
 
             # Commit the build to the feature branch.
             commit_msg = f"AI Feature #{issue.number}: {(issue.title or '')[:50]}"
-            repo_git.index.commit(commit_msg)
+            commit_hash = repo_git.index.commit(commit_msg).hexsha
 
             try:
                 # branch_name comes from auto_branch_name("feature", ...), so
@@ -645,8 +647,12 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
                 # Push using a temporary token-bearing remote URL.
                 with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
                     push_or_raise(repo_git.remotes.origin, branch_name, force=_force_ok)
+                    publication = {"branch": branch_name, "commit": commit_hash,
+                                   "commit_type": "Published feature branch"}
             # A failed push marks the issue failed.
             except Exception as e:
+                if publication:
+                    raise
                 logger.error(f"feature_build: push failed for {issue_id}: {e}")
                 _mark_failed(issue_id, f"Push failed: {e}")
                 return False, f"push failed: {e}"
@@ -724,13 +730,16 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
 
             # Record success with build details and return the PR URL.
             pr_url = pr.html_url
+            publication.update(pr_url=pr_url, commit_type="Pull Request")
             try:
                 _mark_built(issue_id, pr_url, extra={
+                    **publication,
                     "build_mode": mode, "build_model": used_model.get("model"),
                     "guardrail_rounds": guard_history, "review_confidence": review_conf,
                     "feature_skill": skill_name})
             except ProcessedStoreError as e:
-                message = f"Built feature PR {pr_url}; History persistence failed: {e}"
+                message = (f"Built feature PR {pr_url} ({branch_name} at {commit_hash}); "
+                           f"History persistence failed: {e}")
                 logger.error(f"feature_build: {issue_id}: {message}")
                 return False, message
             logger.info(f"feature_build: {issue_id} built -> {pr_url}")
@@ -739,15 +748,22 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
     except ProcessedStoreError:
         raise
     except Exception as e:
-        logger.exception(f"feature_build: unexpected error building {issue_id}: {e}")
+        message = f"unexpected error: {e}"
+        if publication:
+            outcome = f"feature branch {publication['branch']} at {publication['commit']}"
+            if publication.get("pr_url"):
+                outcome += f" ({publication['pr_url']})"
+            message = f"Published {outcome}; completion failed: {e}"
+        logger.exception(f"feature_build: {issue_id}: {message}")
         try:
-            _mark_failed(issue_id, f"Unexpected error: {e}")
+            _mark_failed(issue_id, message, extra=publication)
         except ProcessedStoreError as store_error:
             logger.error(f"feature_build: could not persist build failure for {issue_id}: {store_error}")
-            return False, f"unexpected error: {e}; History persistence failed: {store_error}"
-        except Exception:
-            pass
-        return False, f"unexpected error: {e}"
+            return False, f"{message}; History persistence failed: {store_error}"
+        except Exception as store_error:
+            logger.error(f"feature_build: could not record build failure for {issue_id}: {store_error}")
+            return False, f"{message}; History persistence failed: {store_error}"
+        return False, message
     # Always release the build lock.
     finally:
         _BUILD_LOCK.release()
