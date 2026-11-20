@@ -97,15 +97,17 @@ def _gh_json(repo, pr, fields):
     return json.loads(out)
 
 
-# Author associations of people with write access to a fleet repo. AppBuilder
-# posts with the owner's token (association OWNER). The repos are public, so
-# anyone can post a comment that carries an AppBuilder marker; only one from
-# these associations is AppBuilder's (or a maintainer's) comment.
-TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+# The author association whose marker comments count. AppBuilder posts with
+# the owner's token, so its comments are OWNER. The repos are public, so anyone
+# can post a comment that carries an AppBuilder marker. MEMBER and COLLABORATOR
+# are not trusted: on an organisation repo they include people with only read
+# or triage access, and GitHub's association does not say which. OWNER is the
+# account that owns a personal repo, or an organisation owner (admin).
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER"})
 
 
 def is_trusted_comment(c):
-    """True if a PR or issue comment was written by someone with write access.
+    """True if a PR or issue comment was written by the repo's owner.
 
     `c` is a PyGithub IssueComment (`.author_association`), a REST API dict
     (`author_association`) or a `gh pr view --json comments` dict

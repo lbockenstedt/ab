@@ -1,6 +1,6 @@
-"""AppBuilder's marker comments count only when someone with write access wrote
-them. The fleet repos are public, so anyone can post a comment that copies a
-marker: it must not become AB's review (whose critique feeds the fix prompt),
+"""AppBuilder's marker comments count only when the repo's owner (AB's token)
+wrote them. The fleet repos are public, so anyone can post a comment that
+copies a marker: it must not become AB's review (whose critique feeds the fix prompt),
 skip a review as already current, steer recurrence counts, pick the local
 review's seats, suppress AB's own comment or name the prior fix commit."""
 import importlib.util
@@ -52,9 +52,11 @@ class PR:
 
 def test_trust_reads_all_three_comment_shapes():
     assert prs.is_trusted_comment(Comment("x", "OWNER"))
-    assert prs.is_trusted_comment({"author_association": "MEMBER"})
-    assert prs.is_trusted_comment({"authorAssociation": "COLLABORATOR"})
-    for assoc in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN", None):
+    assert prs.is_trusted_comment({"author_association": "OWNER"})
+    assert prs.is_trusted_comment({"authorAssociation": "OWNER"})
+    # On an organisation repo MEMBER and COLLABORATOR include read-only users.
+    for assoc in ("MEMBER", "COLLABORATOR", "NONE", "CONTRIBUTOR",
+                  "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN", None):
         assert not prs.is_trusted_comment(Comment("x", assoc))
         assert not prs.is_trusted_comment({"author_association": assoc})
     assert not prs.is_trusted_comment({"body": "no association"})
