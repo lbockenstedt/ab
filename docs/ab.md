@@ -247,7 +247,9 @@ an explicitly empty value still clears it.
   Persisted expiry uses wall-clock epoch across restarts, so backward clock jumps can postpone expiry of dead-producer leftovers. Crash-left claim files are not replayed or swept, and late results after a caller timeout are not delivered automatically.
 
 - **Explicit provider preflight:** A Claude CLI request without a configured provider fails before GitHub lookup, writing a `processing` record, triaging the issue or notifying the hub that work has begun.
-  CLI slot discovery uses the shared configured-state predicate: a model is required, but no API key is needed for CLI session authentication. An incomplete slot does not hide a later usable one.
+  CLI slot discovery uses the shared configured-state predicate: a model is required, but no API key is needed for CLI session authentication. An incomplete slot does not hide a later usable one within slots 1-4.
+  Discovery intentionally retains that projection: an enabled, model-bearing CLI vault entry can be configured without a key yet remain undiscovered when unassigned or assigned only to slots 5-8. The dashboard's Claude button uses the same lookup, and an explicit Claude fix request is rejected in this state. `tests/test_fix_preference_preflight.py` characterizes this outside-projection state without changing selection behavior.
+  Registry-aware discovery, dashboard eligibility and explicit selection remain a non-blocking follow-up for the owner to scope together; they must not be broadened automatically. CLI session authentication must continue to require no API key.
   The existing issue history is retained, and the request reports the same configuration error instead of leaving a false in-progress row.
 
 - **Self-update ownership:** Manual and scheduled checks share a process-local guard; busy requests are skipped, not queued, and the manual route offloads blocking work from the event loop.
