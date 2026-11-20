@@ -86,6 +86,14 @@ def main():
     tree = ast.parse(src)
     node = next(n for n in ast.walk(tree)
                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "reopen_issue")
+    check("the route offloads the entire reopen workflow",
+          "asyncio.to_thread(_reopen_issue_and_queue, issue_id)" in ast.get_source_segment(src, node))
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_reopen_issue_and_queue")
+    check("the worker runs the reopen body under its issue claim",
+          "_run_issue_action(issue_id, _reopen_issue_claimed, issue_id)" in ast.get_source_segment(src, node))
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_reopen_issue_claimed")
     body = ast.get_source_segment(src, node)
 
     check("the reopen handler consults _issue_is_deleted", "_issue_is_deleted(e)" in body)
@@ -98,7 +106,7 @@ def main():
     check("the local record is dropped so the row cannot be clicked again",
           "current.pop(issue_id, None)" in body)
     check("counters are recomputed after dropping the record",
-          "asyncio.to_thread(update_processed" in body)
+          "update_processed(lambda current: current.pop(issue_id, None))" in body)
     check("failed local removal is not falsely reported as successful",
           "Local removal failed." in body and "_history_failure(e2" in body)
     check("the response is 410, not 500", "status_code=410" in body)
