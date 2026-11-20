@@ -88,7 +88,11 @@ def vet_az_args(argv, allow_mutation=False):
 
 
 # ── server-shell read-only allowlist ────────────────────────────────────────
-# First token of each pipeline segment must be one of these read-only binaries.
+# run-command executes as root, so in read-only mode a command must neither
+# change state nor print a secret. The first token of each pipeline segment
+# must be one of these binaries; _BINARY_VETTERS then checks its options,
+# because several "read-only" tools run commands, write files or print other
+# files when given the right flag (`env -S`, `sort -o`, `date -f`, `ip netns exec`).
 _SHELL_READ_BINARIES = {
     "systemctl", "journalctl", "service", "cat", "tail", "head", "grep", "egrep",
     "ls", "stat", "ps", "top", "df", "du", "free", "uptime", "uname", "hostname",
@@ -104,32 +108,12 @@ _SHELL_INTERPRETERS = {
     "sh", "bash", "zsh", "dash", "ksh", "lua", "node", "php", "tclsh", "expect",
     "xargs", "eval", "exec", "nc", "ncat", "netcat", "socat", "ssh", "telnet",
 }
-# `find` actions that execute or write. `find` itself only reads.
+# `find` actions that execute or write, and -files0-from, whose error messages
+# echo the named file's contents. `find` itself only reads names.
 _FIND_ACTION_FLAGS = {
     "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls", "-fprint",
-    "-fprint0", "-fprintf",
+    "-fprint0", "-fprintf", "-files0-from",
 }
-# curl/wget flags that write to disk, upload, or read a config file of flags.
-_FETCH_WRITE_FLAGS = {
-    "-o", "--output", "-O", "--remote-name", "--output-dir", "-K", "--config",
-    "-T", "--upload-file", "-d", "--data", "--data-binary", "--data-raw",
-    "-F", "--form", "-X", "--request", "--trace", "--trace-ascii", "--dump-header",
-    "-D", "--cookie-jar", "-c", "--post-file", "--input-file", "-i", "--body-file",
-}
-# Hosts a fetch may target in read-only mode: loopback only. Anything else can
-# exfiltrate to an attacker or hit the cloud instance-metadata endpoint to steal
-# the VM's managed-identity token.
-_FETCH_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1", "0.0.0.0"}
-# docker/podman subcommands that only inspect state.
-_CONTAINER_READ_SUBCMDS = {
-    "ps", "images", "image", "logs", "inspect", "stats", "version", "info",
-    "top", "port", "diff", "history", "events",
-}
-# systemctl/service subcommands that are read-only (status/show only).
-_SYSTEMCTL_READ_SUBCMDS = {"status", "is-active", "is-enabled", "is-failed", "show",
-                           "list-units", "list-unit-files", "cat", "get-default",
-                           "is-system-running", "list-dependencies", "list-timers",
-                           "list-sockets", "show-environment"}
 # Raw substrings that redirect output (a write), refused anywhere in the command.
 # Hard mutation markers refused anywhere in read-only mode. Split by how they
 # must be matched: shell operators are raw substrings, but command names must be
@@ -149,82 +133,659 @@ _SHELL_MUTATION_COMMANDS = {
 # Command substitution / process substitution smuggle a second command inside an
 # otherwise-innocent one (`cat $(curl evil)`), so they are refused outright.
 _SHELL_SUBSTITUTION = ["`", "$(", "${", "<(", ">("]
+# Any other '$' expands a variable or an ANSI-C string ($'restart') that shlex
+# reads differently from bash, and '<' feeds a file into a command. Either one
+# means the vetter would not see what bash actually runs or reads.
+_SHELL_EXPANSION_CHARS = ["$", "<"]
+# Unquoted, bash brace-expands '{a,b}' after this check has seen the token
+# (`journalctl --{vacuum-size=1K,}` becomes `--vacuum-size=1K --`), and '#'
+# starts a comment that hides the rest of the line from bash but not from shlex.
+_SHELL_UNQUOTED_CHARS = "{}#"
+# A program given by path must be a system binary, not a same-named file
+# elsewhere (`./cat`, `/tmp/x/cat`).
+_SYSTEM_BIN_DIRS = {"/bin", "/usr/bin", "/sbin", "/usr/sbin"}
 # Detects "sed ... -i" (in-place file edit) anywhere in a segment.
 _SED_INPLACE_RE = re.compile(r"\bsed\b[^|;]*\s-\w*i")  # sed -i (in-place edit)
 
+# ── file reads (as root) ────────────────────────────────────────────────────
+# Binaries that print file contents. Every operand naming a path is checked by
+# _read_path_ok, because root can read /etc/shadow, /etc/ab/.env, private keys
+# and /proc/<pid>/environ, and the output goes back into the chat.
+_CONTENT_READERS = {"cat", "tail", "head", "grep", "egrep", "sort", "uniq"}
+# Readable in full, with globs and recursive grep: logs and unit files hold no
+# secrets.
+_OPEN_READ_ROOTS = ("/var/log/", "/usr/lib/systemd/", "/lib/systemd/")
+# Readable file by file, minus secret-looking names. Globs and recursion are
+# refused here, since a pattern would hide the name from the check.
+_NAMED_READ_ROOTS = ("/etc/nginx/", "/etc/systemd/", "/etc/apt/sources.list.d/")
+# Application trees under /opt: only versions, logs and source, never the .env,
+# data or config files that sit beside them.
+_OPT_READ_NAME_RE = re.compile(
+    r"VERSION|.+\.(log|py|js|html|css|md|txt|sh|service)|.+\.log\.\d+")
+# Individual host-information files that hold no secrets. /proc is listed file
+# by file: /proc/<pid>/environ holds secrets and /proc/<pid>/root is the whole
+# root filesystem.
+_READ_FILES = {
+    "/etc/hostname", "/etc/hosts", "/etc/os-release", "/etc/lsb-release",
+    "/etc/issue", "/etc/timezone", "/etc/resolv.conf",
+    "/etc/nsswitch.conf", "/etc/machine-id", "/etc/logrotate.conf",
+    "/etc/sysctl.conf", "/etc/docker/daemon.json", "/etc/ssh/sshd_config",
+    "/etc/waagent.conf", "/etc/apt/sources.list",
+    "/proc/loadavg", "/proc/meminfo", "/proc/cpuinfo", "/proc/uptime",
+    "/proc/version", "/proc/mounts", "/proc/stat", "/proc/vmstat",
+    "/proc/diskstats", "/proc/swaps", "/proc/partitions", "/proc/pressure/cpu",
+    "/proc/pressure/memory", "/proc/pressure/io", "/proc/net/dev",
+    "/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/route",
+    "/proc/net/sockstat",
+}
+# Path components that mark a secret: credential dirs (.git/config can hold a
+# token in the remote URL), env files, keys and anything named like a secret.
+_SECRET_COMPONENTS = {".git", ".ssh", ".gnupg", ".docker", ".azure", ".aws", ".kube",
+                      ".netrc", ".pgpass", ".git-credentials"}
+_SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx", ".env")
+_SECRET_PREFIXES = (".env", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
+_SECRET_WORDS = ("secret", "token", "passw", "credential", "private", "htpasswd", "shadow")
+
+
+def _unquoted_chars(cmd):
+    """The characters of cmd that bash sees outside single or double quotes
+    (a backslash escapes the next character, except inside single quotes)."""
+    out, quote, i = [], "", 0
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _glob_words(cmd):
+    """The shell words of cmd (raw text) that hold an unquoted glob character
+    (* ? [), which bash expands into file names after this check has run."""
+    words, cur, glob, quote, i = [], [], False, "", 0
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "\\" and quote != "'":
+            cur.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c.isspace() or c in ";|&":
+            if glob:
+                words.append("".join(cur))
+            cur, glob = [], False
+            i += 1
+            continue
+        elif c in "*?[":
+            glob = True
+        cur.append(c)
+        i += 1
+    if glob:
+        words.append("".join(cur))
+    return words
+
+
+# A glob word may only be a plain path under an open root: it then expands to
+# log and unit file names, never to an option (`-*` matching a file named
+# `-delete`) or to a file outside the root.
+_GLOB_WORD_RE = re.compile(r"[A-Za-z0-9_./*?\[\]-]+")
+
+
+def _glob_word_ok(word):
+    """True if an unquoted glob word is a quote-free path under an open root."""
+    return (bool(_GLOB_WORD_RE.fullmatch(word)) and word.startswith(_OPEN_READ_ROOTS)
+            and ".." not in word.split("/"))
+
+
+def _secret_component(part):
+    """True if one path component looks like it names a secret."""
+    p = part.lower()
+    return (p in _SECRET_COMPONENTS or p.endswith(_SECRET_SUFFIXES)
+            or p.startswith(_SECRET_PREFIXES) or any(w in p for w in _SECRET_WORDS))
+
+
+def _read_path_ok(path, open_only=False):
+    """(ok, reason) for a path a content reader would print as root.
+    open_only limits it to the open roots (for recursive grep)."""
+    # Only absolute paths: a relative one depends on run-command's cwd, and
+    # ~ and {a,b} are expanded by bash after this check.
+    if not path.startswith("/"):
+        return False, f"'{path}': read-only mode reads absolute paths only"
+    if any(c in path for c in "{}~"):
+        return False, f"'{path}': brace and tilde expansion are not allowed"
+    # Canonicalise without touching the disk: drop '' and '.', refuse '..'.
+    parts = [p for p in path.split("/") if p not in ("", ".")]
+    if ".." in parts:
+        return False, f"'{path}': '..' is not allowed"
+    canon = "/" + "/".join(parts)
+    # Logs and unit files: anything goes, including globs.
+    if (canon + "/").startswith(_OPEN_READ_ROOTS):
+        return True, ""
+    refusal = (f"'{path}' is outside the read-only file allowlist (logs under /var/log, "
+               f"unit files, app versions/logs/source under /opt, host info) or may hold "
+               f"a secret; enable CHAT_AZURE_ALLOW_MUTATION to read it")
+    # Everywhere else the exact name is checked, so a glob would bypass it.
+    if open_only or any(c in canon for c in "*?["):
+        return False, refusal
+    if canon in _READ_FILES:
+        return True, ""
+    if any(_secret_component(p) for p in parts):
+        return False, refusal
+    if canon.startswith(_NAMED_READ_ROOTS):
+        return True, ""
+    if canon.startswith("/opt/") and _OPT_READ_NAME_RE.fullmatch(parts[-1]):
+        return True, ""
+    return False, refusal
+
+
+def _vet_read_operands(binary, args, open_only=False):
+    """Check every path a content reader is given, as an operand or as an
+    option value (`--file=/x`, `-f/x`). Tokens without '/' name files in
+    run-command's own working directory."""
+    for tok in args:
+        if "~" in tok:
+            return False, f"{binary}: '~' expands to a home directory; use an absolute path"
+        if "/" not in tok:
+            continue
+        # Option value: after '=' (--file=/x) or from the first '/' (-f/x).
+        if tok.startswith("-"):
+            path = tok.split("=", 1)[1] if "=" in tok else tok[tok.index("/"):]
+        else:
+            path = tok
+        ok, why = _read_path_ok(path, open_only)
+        if not ok:
+            return False, f"{binary}: {why} (a grep pattern may not contain '/')"
+    return True, ""
+
+
+# ── option helpers ──────────────────────────────────────────────────────────
+def _long_opt_hits(tok, names):
+    """True if tok is a GNU long option equal to, or abbreviating, one of names.
+    getopt_long accepts any unambiguous prefix (`--out` for `--output`), so an
+    exact-name check alone would be bypassable."""
+    if not tok.startswith("--") or tok == "--":
+        return False
+    name = tok[2:].split("=", 1)[0].lower()
+    return bool(name) and any(n.startswith(name) for n in names)
+
+
+def _short_cluster(tok):
+    """Letters of a single-dash option cluster (`-tlnp` -> 'tlnp'), else ''."""
+    if tok.startswith("-") and not tok.startswith("--"):
+        return tok[1:]
+    return ""
+
+
+def _refuse_opt(binary, tok, what):
+    """Standard refusal for an option that is not allowed in read-only mode."""
+    return False, (f"{binary} '{tok}' {what}; enable CHAT_AZURE_ALLOW_MUTATION "
+                   f"to permit it")
+
+
+_NUM_RE = re.compile(r"\d+(\.\d+)?")
+
+# ── per-binary vetters: each takes (binary, args) and returns (ok, reason) ──
+# Loopback only, in a form curl and wget parse the same way this regex does: no
+# userinfo, fragment or backslash that could move the real host elsewhere.
+_FETCH_URL_RE = re.compile(
+    r"(?:https?://)?(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(?::\d{1,5})?"
+    r"(?:/[A-Za-z0-9._~/?=&%:+,-]*)?", re.IGNORECASE)
+
 
 def _fetch_target_ok(tok):
-    """True if a curl/wget URL/host argument points at loopback."""
-    # Strip any scheme ("http://") so only host[:port]/path is left.
-    raw = tok
-    if "://" in raw:
-        raw = raw.split("://", 1)[1]
-    # Drop the path and query string, leaving host[:port].
-    raw = raw.split("/", 1)[0].split("?", 1)[0]
-    if "@" in raw:  # user:pass@host
-        raw = raw.rsplit("@", 1)[1]
-    # Pull out the host, keeping brackets for IPv6 and dropping any :port.
-    if raw.startswith("["):  # bracketed IPv6
-        host = raw.split("]", 1)[0] + "]"
-    else:
-        host = raw.split(":", 1)[0]
-    # Allowed only if the host is one of the loopback names.
-    return host.lower() in _FETCH_ALLOWED_HOSTS
+    """True if a curl/wget URL argument points at loopback. Anything else can
+    exfiltrate to an attacker or reach the instance-metadata endpoint."""
+    return bool(_FETCH_URL_RE.fullmatch(tok))
 
 
-def _vet_binary_args(binary, toks):
-    """Per-binary argument vetting for read-only mode. Being an allowlisted
-    binary is not enough: several read-only tools can execute or write when
-    given the right flags. Returns (ok, reason)."""
-    # Everything after the binary name.
-    args = toks[1:]
-    # find: refuse actions that run commands or write files.
-    if binary == "find":
-        for a in args:
-            if a.lower() in _FIND_ACTION_FLAGS:
-                return False, (f"find '{a}' executes or writes; enable "
-                               f"CHAT_AZURE_ALLOW_MUTATION to permit it")
-        return True, ""
-    # curl/wget: refuse write/upload flags, and only allow loopback targets.
-    if binary in ("curl", "wget"):
-        for a in args:
-            if a.split("=", 1)[0] in _FETCH_WRITE_FLAGS:
-                return False, (f"{binary} '{a}' writes, uploads or sends a request "
-                               f"body; enable CHAT_AZURE_ALLOW_MUTATION to permit it")
-        # Non-flag arguments are the URLs/hosts being fetched.
-        targets = [a for a in args if not a.startswith("-")]
-        if not targets:
-            return False, f"{binary} needs an explicit loopback URL in read-only mode"
-        for t in targets:
-            if not _fetch_target_ok(t):
-                return False, (f"{binary} may only fetch loopback URLs in read-only "
-                               f"mode (got '{t}'); enable CHAT_AZURE_ALLOW_MUTATION "
-                               f"to reach other hosts")
-        return True, ""
-    # docker/podman: the first non-flag argument must be an inspect-only subcommand.
-    if binary in ("docker", "podman"):
-        sub = next((a for a in args if not a.startswith("-")), "")
-        if sub.lower() not in _CONTAINER_READ_SUBCMDS:
-            return False, (f"{binary} '{sub or '(none)'}' is not a read-only "
-                           f"subcommand (allowed: ps/images/logs/inspect/stats/…)")
-        return True, ""
-    # env: allowed only as a bare "print the environment".
-    if binary == "env":
-        # Bare `env` prints the environment; `env FOO=bar cmd` runs a command.
-        for a in args:
-            if not a.startswith("-") or "=" in a:
-                return False, ("env may only print the environment in read-only "
-                               "mode (no VAR=value assignments, no command)")
-        return True, ""
-    # Other allowlisted binaries need no extra argument checks.
+def _vet_fetch_targets(binary, targets):
+    """Every URL must be loopback, and there must be at least one."""
+    if not targets:
+        return False, f"{binary} needs an explicit loopback URL in read-only mode"
+    for t in targets:
+        if not _fetch_target_ok(t):
+            return False, (f"{binary} may only fetch loopback URLs in read-only mode "
+                           f"(got '{t}'); enable CHAT_AZURE_ALLOW_MUTATION to reach "
+                           f"other hosts")
     return True, ""
+
+
+# curl options are an allowlist: its option set is large (proxies, --connect-to,
+# --resolve, headers, -w %output{file}) and only plain GETs are needed here.
+_CURL_FLAGS = {"-s", "--silent", "-S", "--show-error", "-k", "--insecure", "-I",
+               "--head", "-f", "--fail", "-v", "--verbose", "-i", "--include",
+               "--compressed", "--no-progress-meter"}
+_CURL_NUM_OPTS = {"-m", "--max-time", "--connect-timeout"}
+_CURL_CLUSTER_RE = re.compile(r"-[sSkIfvi]*(m(\d+(\.\d+)?)?)?")
+
+
+def _vet_curl(binary, args):
+    """curl: allowlisted flags only, loopback URLs only."""
+    targets, i = [], 0
+    while i < len(args):
+        t = args[i]
+        m = _CURL_CLUSTER_RE.fullmatch(t)
+        if t in _CURL_FLAGS:
+            pass
+        elif t in _CURL_NUM_OPTS or (m and t != "-" and m.group(1) == "m"):
+            # A timeout whose number is the next token.
+            if i + 1 >= len(args) or not _NUM_RE.fullmatch(args[i + 1]):
+                return False, f"{binary} '{t}' needs a number"
+            i += 1
+        elif m and t != "-":
+            pass
+        elif t.startswith("-"):
+            return _refuse_opt(binary, t, "is not allowed in read-only mode (allowed: "
+                               "-s -S -k -I -f -v -i, -m/--max-time N, --connect-timeout N)")
+        else:
+            targets.append(t)
+        i += 1
+    return _vet_fetch_targets(binary, targets)
+
+
+_WGET_FLAGS = {"-q", "--quiet", "-S", "--server-response", "--spider",
+               "--no-check-certificate", "-nv", "--no-verbose"}
+
+
+def _vet_wget(binary, args):
+    """wget: allowlisted flags only, loopback URLs only, and the body must go
+    to stdout (-O -) or nowhere (--spider) rather than into a file."""
+    targets, to_stdout, i = [], False, 0
+    while i < len(args):
+        t = args[i]
+        if t in _WGET_FLAGS:
+            to_stdout |= t == "--spider"
+        elif t in ("-O-", "-qO-", "--output-document=-"):
+            to_stdout = True
+        elif t in ("-O", "-qO") and i + 1 < len(args) and args[i + 1] == "-":
+            to_stdout, i = True, i + 1
+        elif t in ("-T", "-t") and i + 1 < len(args) and _NUM_RE.fullmatch(args[i + 1]):
+            i += 1
+        elif re.fullmatch(r"--(timeout|tries)=\d+(\.\d+)?", t):
+            pass
+        elif t.startswith("-"):
+            return _refuse_opt(binary, t, "is not allowed in read-only mode (allowed: "
+                               "-q -S -nv --spider --no-check-certificate, -O -, -T/-t N)")
+        else:
+            targets.append(t)
+        i += 1
+    if not to_stdout:
+        return False, (f"{binary} would save a file; use `-O -` (print) or --spider "
+                       f"in read-only mode")
+    return _vet_fetch_targets(binary, targets)
+
+
+# docker/podman subcommands that only inspect state. `inspect` is absent: it
+# prints each container's environment, which holds its secrets. `top` passes
+# extra arguments to ps (`docker top c e` prints the environment), so it is
+# allowed with a container name only.
+_CONTAINER_READ_SUBCMDS = {
+    "ps", "images", "logs", "stats", "version", "info", "port", "diff",
+    "history", "events",
+}
+_CONTAINER_NESTED_READ = {
+    "image": {"ls", "list", "history"},
+    "container": {"ls", "list", "ps", "logs", "port", "diff", "stats"},
+}
+
+
+_PODMAN_GLOBAL_OPTS = {
+    "url", "connection", "remote", "identity", "ssh", "runtime", "runtime-flag",
+    "conmon", "root", "runroot", "imagestore", "storage-driver", "storage-opt",
+    "cgroup-manager", "events-backend", "hooks-dir", "network-cmd-path",
+    "network-config-dir", "tmpdir", "volumepath", "module", "config", "db-backend",
+    "transient-store", "registries-conf", "cdi-spec-dir",
+}
+
+
+def _vet_container(binary, args):
+    """docker/podman: a read-only subcommand first, no global options (-H
+    points the client at another daemon)."""
+    if not args or args[0].startswith("-"):
+        return False, (f"{binary} needs a read-only subcommand first, with no global "
+                       f"options (allowed: ps/images/logs/stats/…)")
+    sub = args[0].lower()
+    if sub == "top":
+        ok = len(args) == 2 and not args[1].startswith("-")
+    elif sub in _CONTAINER_NESTED_READ:
+        ok = len(args) > 1 and args[1].lower() in _CONTAINER_NESTED_READ[sub]
+    else:
+        ok = sub in _CONTAINER_READ_SUBCMDS
+    if not ok:
+        return False, (f"{binary} '{' '.join(args[:2])}' is not a read-only subcommand "
+                       f"(allowed: ps/images/logs/stats/version/info/port/diff/history/"
+                       f"events, image ls, container ls/logs, top <name>)")
+    # podman accepts its global options after the subcommand too, and these
+    # point it at a remote service or another runtime or storage.
+    if binary == "podman":
+        for t in args[1:]:
+            if (any(c in _short_cluster(t) for c in "rc")
+                    or (t.startswith("--") and t[2:].split("=", 1)[0].lower()
+                        in _PODMAN_GLOBAL_OPTS)):
+                return _refuse_opt(binary, t, "is a global option (remote service, "
+                                   "runtime or storage)")
+    return True, ""
+
+
+def _vet_env(binary, args):
+    """env: only a bare print of the environment. Any other option can run a
+    command (`env -S"bash -c id"`, `env -i cmd`)."""
+    if all(a in ("-0", "--null") for a in args):
+        return True, ""
+    return False, ("env may only print the environment in read-only mode (no options, "
+                   "VAR=value assignments or command)")
+
+
+# systemctl/service subcommands that are read-only (status/show only).
+_SYSTEMCTL_READ_SUBCMDS = {"status", "is-active", "is-enabled", "is-failed", "show",
+                           "list-units", "list-unit-files", "cat", "get-default",
+                           "is-system-running", "list-dependencies", "list-timers",
+                           "list-sockets", "show-environment"}
+# systemctl options are an allowlist, and options that take a value consume
+# it, so `-p status restart ab` is read as the verb `restart`, as systemctl does.
+_SYSTEMCTL_FLAGS = {"--no-pager", "--no-legend", "-a", "--all", "-l", "--full",
+                    "--plain", "--failed", "-q", "--quiet", "--value", "-r",
+                    "--recursive", "--no-ask-password", "--system"}
+_SYSTEMCTL_VALUE_OPTS = {"-n", "--lines", "-t", "--type", "--state", "-p",
+                         "--property", "-P", "-o", "--output"}
+
+
+def _vet_systemctl(binary, args):
+    """systemctl: allowlisted options, and the verb (first positional) must
+    be a read-only one. Bare `systemctl` lists units."""
+    positional, i = [], 0
+    while i < len(args):
+        t = args[i]
+        if t == "--":
+            positional += args[i + 1:]
+            break
+        if not t.startswith("-"):
+            positional.append(t)
+        elif (t in _SYSTEMCTL_FLAGS or re.fullmatch(r"-n\d+", t)
+              or (t.startswith("--") and "=" in t
+                  and t.split("=", 1)[0] in _SYSTEMCTL_VALUE_OPTS)):
+            pass
+        elif t in _SYSTEMCTL_VALUE_OPTS:
+            if i + 1 >= len(args):
+                return False, f"systemctl '{t}' needs a value"
+            i += 1
+        else:
+            return _refuse_opt(binary, t, "is not allowed in read-only mode")
+        i += 1
+    verb = positional[0].lower() if positional else ""
+    if verb and verb not in _SYSTEMCTL_READ_SUBCMDS:
+        return False, (f"systemctl '{verb}' is not a read-only subcommand "
+                       f"(allowed: status/is-active/show/…)")
+    return True, ""
+
+
+_UNIT_NAME_RE = re.compile(r"[A-Za-z0-9@._:-]+")
+
+
+def _vet_service(binary, args):
+    """service: exactly `service <name> status` or `service --status-all`.
+    The name may not contain '/', since service runs /etc/init.d/<name>."""
+    if args == ["--status-all"]:
+        return True, ""
+    if (len(args) == 2 and not args[0].startswith("-")
+            and _UNIT_NAME_RE.fullmatch(args[0]) and args[1].lower() == "status"):
+        return True, ""
+    return False, ("service is limited to `service <name> status` and "
+                   "`service --status-all` in read-only mode")
+
+
+# journalctl options that delete, rotate or write journal data or files.
+_JOURNALCTL_WRITE_OPTS = ("vacuum-size", "vacuum-time", "vacuum-files", "rotate",
+                          "flush", "sync", "relinquish-var", "smart-relinquish-var",
+                          "setup-keys", "update-catalog", "cursor-file")
+
+
+def _vet_journalctl(binary, args):
+    """journalctl: refuse the options that change the journal or write a file."""
+    for t in args:
+        if _long_opt_hits(t, _JOURNALCTL_WRITE_OPTS):
+            return _refuse_opt(binary, t, "changes the journal or writes a file")
+    return True, ""
+
+
+def _vet_sort(binary, args):
+    """sort: refuse -o (write), -T (temp files), --compress-program (exec) and
+    the options that read other files."""
+    for t in args:
+        if (any(c in _short_cluster(t) for c in "oT")
+                or _long_opt_hits(t, ("output", "compress-program", "files0-from",
+                                      "temporary-directory", "random-source"))):
+            return _refuse_opt(binary, t, "writes a file, runs a program or reads another file")
+    return True, ""
+
+
+def _vet_uniq(binary, args):
+    """uniq: a second file operand is an OUTPUT file, so allow at most one.
+    Values of -f/-s/-w are not operands; `--` is refused because every token
+    after it is an operand, including one that starts with '-'."""
+    operands, skip = 0, False
+    for t in args:
+        if skip:
+            skip = False
+        elif t == "--":
+            return _refuse_opt(binary, t, "makes the next tokens file operands, and "
+                               "the second one is written")
+        elif t == "-" or not t.startswith("-"):
+            operands += 1
+        elif t.startswith("--"):
+            skip = "=" not in t and _long_opt_hits(t, ("skip-fields", "skip-chars",
+                                                       "check-chars"))
+        else:
+            skip = t[-1] in "fsw" and not any(c.isdigit() for c in t)
+    if operands > 1:
+        return False, ("uniq writes its second file operand; give it at most one "
+                       "input in read-only mode")
+    return True, ""
+
+
+def _vet_grep(binary, args):
+    """grep/egrep: a recursive search only under the open roots, since it would
+    read every file below a directory, secrets included."""
+    recursive = any(any(c in _short_cluster(t) for c in "rRd")
+                    or _long_opt_hits(t, ("recursive", "dereference-recursive", "directories"))
+                    for t in args)
+    if recursive:
+        # '.' and '..' have no '/', but recurse from run-command's working
+        # directory, whose parent holds every earlier run-command script.
+        if any(t in (".", "..") for t in args):
+            return False, f"{binary}: a recursive search needs an absolute path under /var/log"
+        return _vet_read_operands(binary, args, open_only=True)
+    return True, ""
+
+
+def _vet_files0(binary, args):
+    """du/wc: --files0-from reads file names from a file and echoes them in
+    errors, which prints that file's contents."""
+    for t in args:
+        if _long_opt_hits(t, ("files0-from",)):
+            return _refuse_opt(binary, t, "prints another file's contents in its errors")
+    return True, ""
+
+
+# ip: allowlisted options, and the verb after the object must be a read one.
+_IP_FLAGS = {"-4", "-6", "-s", "-stats", "-statistics", "-d", "-details", "-o",
+             "-oneline", "-br", "-brief", "-c", "-color", "-j", "-json", "-p",
+             "-pretty", "-h", "-human", "-r", "-resolve"}
+_IP_VALUE_FLAGS = {"-f", "-family"}
+_IP_READ_VERBS = {"show", "list", "ls", "lst", "get", "help"}
+
+
+def _vet_ip(binary, args):
+    """ip: `ip [opts] <object> [show|list|get …]`. Refuses add/del/set/flush,
+    `netns exec` (runs a command) and -batch (reads a file)."""
+    positional, i = [], 0
+    while i < len(args):
+        t = args[i]
+        if not t.startswith("-"):
+            positional.append(t)
+        elif t in _IP_VALUE_FLAGS:
+            if i + 1 >= len(args):
+                return False, f"ip '{t}' needs a value"
+            i += 1
+        elif t not in _IP_FLAGS:
+            return _refuse_opt(binary, t, "is not allowed in read-only mode")
+        i += 1
+    if len(positional) > 1 and positional[1].lower() not in _IP_READ_VERBS:
+        return False, (f"ip '{positional[0]} {positional[1]}' is not a read-only command "
+                       f"(allowed: show/list/get)")
+    return True, ""
+
+
+_DATE_FLAGS = {"-u", "--utc", "--universal", "-R", "--rfc-email", "-I", "--iso-8601"}
+_DATE_SPEC_RE = re.compile(r"(-I|--iso-8601=|--rfc-3339=)(date|hours|minutes|seconds|ns)")
+
+
+def _vet_date(binary, args):
+    """date: print-only options. -s sets the clock and -f prints another
+    file's lines in its errors."""
+    i = 0
+    while i < len(args):
+        t = args[i]
+        if t in ("-d", "--date"):
+            if i + 1 >= len(args):
+                return False, f"date '{t}' needs a value"
+            i += 1
+        elif not (t.startswith(("+", "--date=")) or t in _DATE_FLAGS
+                  or _DATE_SPEC_RE.fullmatch(t)):
+            return _refuse_opt(binary, t, "is not allowed in read-only mode (allowed: "
+                               "+FORMAT, -u, -d/--date, -I, -R, --rfc-3339)")
+        i += 1
+    return True, ""
+
+
+_HOSTNAME_FLAGS = {"-f", "--fqdn", "--long", "-s", "--short", "-i", "--ip-address",
+                   "-I", "--all-ip-addresses", "-d", "--domain", "-A", "--all-fqdns",
+                   "-a", "--alias"}
+
+
+def _vet_hostname(binary, args):
+    """hostname: print options only. A bare name or -F sets the hostname."""
+    for t in args:
+        if t not in _HOSTNAME_FLAGS:
+            return _refuse_opt(binary, t, "sets the hostname or is not a print option")
+    return True, ""
+
+
+def _vet_ss(binary, args):
+    """ss: refuse -K (kills sockets), -D (writes a file) and -F (reads one)."""
+    for t in args:
+        if any(c in _short_cluster(t) for c in "KDF") or _long_opt_hits(t, ("kill", "diag", "filter")):
+            return _refuse_opt(binary, t, "kills sockets or reads/writes a file")
+    return True, ""
+
+
+# ps option letters that take the next token as their value, for dash-style
+# and BSD-style clusters, and long options that do.
+_PS_DASH_VALUE = set("CGgOopqstUu")
+_PS_BSD_VALUE = set("OopqtUk")
+_PS_LONG_VALUE = {"--format", "--sort", "--pid", "--ppid", "--user", "--User",
+                  "--group", "--Group", "--cols", "--columns", "--lines", "--rows",
+                  "--sid", "--tty", "--quick-pid", "--width"}
+
+
+def _ps_takes_next(letters, value_letters):
+    """True if the first value-taking letter of a cluster is its last letter,
+    so its value is the next token (otherwise the value is attached)."""
+    for idx, c in enumerate(letters):
+        if c in value_letters:
+            return idx == len(letters) - 1
+    return False
+
+
+# A dash cluster holding 'e' must be -e plus letters that take no value. When
+# procps cannot parse a dash cluster (`-auxe`: -u takes 'xe' as a user), it
+# re-reads it BSD-style, where 'e' prints every process's environment.
+_PS_DASH_E_RE = re.compile(r"-e[fFHjlLwy]*[oO]?")
+
+
+def _vet_ps(binary, args):
+    """ps: refuse the BSD-style 'e' modifier, which prints every process's
+    environment (and the services load their secrets into it). Option values
+    such as `-o user,etime` are skipped so their letters do not count."""
+    skip = False
+    for t in args:
+        if skip:
+            skip = False
+        elif t.startswith("--"):
+            skip = "=" not in t and t in _PS_LONG_VALUE
+        elif t.startswith("-"):
+            if "e" in t and not _PS_DASH_E_RE.fullmatch(t):
+                return _refuse_opt(binary, t, "may be re-read BSD-style, where 'e' "
+                                   "prints every process's environment (use -ef or -eo)")
+            skip = _ps_takes_next(t[1:], _PS_DASH_VALUE)
+        elif "e" in t:
+            return False, ("ps BSD-style 'e' prints every process's environment, which "
+                           "holds secrets; use `ps aux` or `ps -ef`")
+        else:
+            skip = _ps_takes_next(t, _PS_BSD_VALUE)
+    return True, ""
+
+
+# dig reads leading flag letters, then a value letter, so `-4f FILE` is -4 -f.
+_DIG_FILE_OPT_RE = re.compile(r"-[46dhimnruv]*[fk]")
+
+
+def _vet_dig(binary, args):
+    """dig: refuse -f (batch file, echoed in errors) and -k (reads a key file),
+    also when glued behind flag letters."""
+    for t in args:
+        if _DIG_FILE_OPT_RE.match(t):
+            return _refuse_opt(binary, t, "reads a file")
+    return True, ""
+
+
+def _vet_ping(binary, args):
+    """ping: refuse -f, a root-only flood."""
+    for t in args:
+        if "f" in _short_cluster(t):
+            return _refuse_opt(binary, t, "floods the target")
+    return True, ""
+
+
+def _vet_find(binary, args):
+    """find: refuse actions that run commands, write files or echo a file."""
+    for a in args:
+        if a.lower() in _FIND_ACTION_FLAGS:
+            return _refuse_opt(binary, a, "executes, writes or reads another file")
+    return True, ""
+
+
+# Allowlisted binaries whose options need checking. The others (ls, stat, df,
+# free, uptime, uname, whoami, id, printenv, echo, which, true, test, pgrep,
+# top, netstat, nslookup, cat, head, tail) have no option that writes, runs a
+# command or reads a file; cat/head/tail paths are checked by _vet_read_operands.
+_BINARY_VETTERS = {
+    "find": _vet_find, "curl": _vet_curl, "wget": _vet_wget,
+    "docker": _vet_container, "podman": _vet_container, "env": _vet_env,
+    "systemctl": _vet_systemctl, "service": _vet_service,
+    "journalctl": _vet_journalctl, "sort": _vet_sort, "uniq": _vet_uniq,
+    "grep": _vet_grep, "egrep": _vet_grep, "ip": _vet_ip, "date": _vet_date,
+    "hostname": _vet_hostname, "ss": _vet_ss, "ps": _vet_ps, "du": _vet_files0,
+    "wc": _vet_files0, "dig": _vet_dig, "ping": _vet_ping,
+}
 
 
 def vet_shell_command(cmd, allow_mutation=False):
     """Vet a shell command to run ON an LM VM. Returns (ok, reason). In
-    read-only mode: no mutation markers anywhere, and every pipeline/`;`/`&&`
-    segment must START with a read-only binary (systemctl/service restricted
-    to status-like subcommands). Conservative — anything unrecognised fails."""
+    read-only mode: no redirects, substitutions or expansions; every
+    pipeline/`;`/`&&` segment must START with a read-only binary whose options
+    pass its vetter; and content readers may only read allowlisted paths.
+    Conservative — anything unrecognised fails."""
     # Refuse empty or non-string commands.
     if not cmd or not isinstance(cmd, str) or not cmd.strip():
         return False, "no shell command provided"
@@ -244,6 +805,22 @@ def vet_shell_command(cmd, allow_mutation=False):
             return False, (f"'{sub}' (command/process substitution) can run an "
                            f"arbitrary nested command; enable CHAT_AZURE_ALLOW_MUTATION "
                            f"to permit it")
+    # Refuse variable/ANSI-C expansion and input redirection.
+    for ch in _SHELL_EXPANSION_CHARS:
+        if ch in cmd:
+            return False, (f"'{ch}' (expansion or input redirection) hides what the "
+                           f"command really runs or reads; enable "
+                           f"CHAT_AZURE_ALLOW_MUTATION to permit it")
+    # Refuse unquoted brace expansion and comments.
+    for ch in _SHELL_UNQUOTED_CHARS:
+        if ch in _unquoted_chars(cmd):
+            return False, (f"unquoted '{ch}' changes what bash runs after this check "
+                           f"(brace expansion or a comment); quote it")
+    # Refuse unquoted globs except plain paths under the open log roots.
+    for word in _glob_words(cmd):
+        if not _glob_word_ok(word):
+            return False, (f"unquoted glob '{word}' could expand into an option or "
+                           f"another file; quote it, or glob only under /var/log")
     # Refuse in-place sed edits.
     if _SED_INPLACE_RE.search(low):
         return False, "in-place sed edit (sed -i) is a mutation; enable CHAT_AZURE_ALLOW_MUTATION"
@@ -272,8 +849,12 @@ def vet_shell_command(cmd, allow_mutation=False):
             return False, "could not parse shell command safely"
         if not toks:
             continue
-        # The program name, without any directory prefix.
+        # The program name, without any directory prefix; a prefix must be a
+        # system binary directory.
         binary = os.path.basename(toks[0]).lower()
+        if "/" in toks[0] and os.path.dirname(toks[0]) not in _SYSTEM_BIN_DIRS:
+            return False, (f"'{toks[0]}' is not a system binary path; use the bare "
+                           f"command name")
         # Interpreters can run anything, so they are never allowed in read-only mode.
         if binary in _SHELL_INTERPRETERS:
             return False, (f"'{binary}' is a general-purpose interpreter and can run "
@@ -287,18 +868,17 @@ def vet_shell_command(cmd, allow_mutation=False):
         if binary not in _SHELL_READ_BINARIES:
             return False, (f"'{binary}' is not an allowlisted read-only command; "
                            f"enable CHAT_AZURE_ALLOW_MUTATION for arbitrary commands")
-        # Apply the per-binary flag checks (find/curl/docker/env).
-        ok, why = _vet_binary_args(binary, toks)
-        if not ok:
-            return False, why
-        # systemctl/service: only status-style subcommands are allowed.
-        if binary in ("systemctl", "service"):
-            sub = next((t for t in toks[1:] if not t.startswith("-")), "")
-            # `service <name> status` puts the subcommand last; accept either order.
-            subs = {t for t in toks[1:] if not t.startswith("-")}
-            if not (sub in _SYSTEMCTL_READ_SUBCMDS or subs & _SYSTEMCTL_READ_SUBCMDS):
-                return False, (f"systemctl/service '{sub}' is not a read-only subcommand "
-                               f"(allowed: status/is-active/show/…)")
+        # Files a content reader prints must be on the read allowlist.
+        if binary in _CONTENT_READERS:
+            ok, why = _vet_read_operands(binary, toks[1:])
+            if not ok:
+                return False, why
+        # Then the binary's own option checks.
+        vetter = _BINARY_VETTERS.get(binary)
+        if vetter:
+            ok, why = vetter(binary, toks[1:])
+            if not ok:
+                return False, why
     # Every segment passed.
     return True, "read-only shell command"
 
@@ -430,9 +1010,14 @@ def run_server_shell(vm, cmd, config, timeout=180):
     # az binary and the resource group the VM lives in.
     az = (config or {}).get("AZURE_AZ_BIN") or "az"
     rg = _resource_group(config)
+    # In read-only mode, limit the script on the VM too: the local timeout only
+    # stops `az`, and a command that never exits (tail -f, ping, docker stats)
+    # would hold the VM's run-command slot for about 90 minutes.
+    script = cmd if allow else (
+        f"timeout -k 5 {max(timeout - 30, 10)} bash -c {shlex.quote(cmd)}")
     # Build the run-command call; the script output comes back as plain text.
     argv = [az, "vm", "run-command", "invoke", "-g", rg, "-n", vm,
-            "--command-id", "RunShellScript", "--scripts", cmd,
+            "--command-id", "RunShellScript", "--scripts", script,
             "--query", "value[0].message", "-o", "tsv"]
     # Run it; report timeouts or a missing az binary as errors.
     try:

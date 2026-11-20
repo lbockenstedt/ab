@@ -190,6 +190,43 @@ an explicitly empty value still clears it.
 
 ## Notable behaviors & gotchas
 
+- **Chat's Azure server shell is read-only unless `CHAT_AZURE_ALLOW_MUTATION` is on** —
+  the command runs as root through `az vm run-command`, so `az_console.vet_shell_command`
+  refuses anything it cannot prove is read-only and secret-free:
+  - **Shell syntax:** no redirects, `$` (variables, `$(...)`, `$'...'`), `<`, backticks,
+    `&`, newlines, or unquoted `{`, `}` and `#` (bash brace expansion and comments run
+    something other than what was checked). A program given by path must be in
+    `/bin`, `/usr/bin`, `/sbin` or `/usr/sbin`.
+  - **Programs and options:** each pipeline segment starts with an allowlisted program,
+    and the options of those that can write, run a command or read another file are
+    checked: curl and wget (loopback URLs only, a short option allowlist, wget output to
+    stdout), systemctl (read verbs and an option allowlist), `service <name> status`,
+    docker/podman (ps, images, logs, stats … — not `inspect`, which prints container
+    environments, and `top` only with a container name; podman's global options such as
+    `--url`, `--remote` or `-c` are refused after the subcommand too), ip
+    (show/list/get), date, hostname and env (print only), sort, uniq (one input file, no
+    `--`: a second file is written), journalctl, ss, ps (no BSD `e`, which prints process
+    environments; a dash cluster with `e` must be `-e` plus value-free letters such as
+    `-ef` or `-eo`), dig (no `-f`/`-k`, even glued as `-4f`), ping, find, du and wc.
+  - **Globs:** an unquoted `*`, `?` or `[` is allowed only in a plain path under `/var/log`
+    or the systemd unit directories, so bash cannot expand it into an option
+    (`find / -*` matching a file named `-delete`) or a file elsewhere.
+  - **Files read (cat, head, tail, grep, sort, uniq):** absolute paths only, no `..`.
+    Anything under `/var/log` and the systemd unit directories, including globs and
+    recursive grep. Otherwise named files only: host-info files in `/etc` and `/proc`,
+    `/etc/nginx`, `/etc/systemd`, and versions, logs and source under `/opt`. Names
+    that look like secrets (`.env`, `.git`, `.ssh`, keys, `*secret*`, `*token*`,
+    `*passw*` …) are refused everywhere outside `/var/log`.
+  - **Not covered:** a symlink under an allowed path, secrets that services write into
+    their own logs or command lines (`docker logs`, `journalctl`, `ps`), and plain GETs to
+    services on the VM's loopback. A grep pattern containing `/` or `$` is refused; use
+    a shorter pattern.
+  - **Time limit:** a read-only command runs under `timeout` on the VM (the call's
+    timeout less 30 s, at least 10 s), so `tail -f`, `top` or `ping` without `-c` ends
+    instead of holding the VM's run-command slot. Mutation mode is not wrapped.
+  - **Known false refusals** (the check splits on raw text): a quoted `|`, `>` or `$`,
+    `2>&1`, and abbreviations such as `ip a s`. Rephrase the command.
+
 - **Boundary-required fix PRs** — a configured staged-path boundary hit, or a failed
   boundary check, always publishes through a topic-branch PR, regardless of confidence
   or direct-push eligibility. Non-boundary low-confidence integration pushes are unchanged.
