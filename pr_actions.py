@@ -236,7 +236,7 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
         import gh_actions_health
         stuck = gh_actions_health.infra_failed_runs(repo_name, head_sha, token)
         if stuck:
-            gh_actions_health.note_infra_failure(len(stuck))
+            gh_actions_health.note_infra_failure(repo_name, stuck)
             return "infra", "%d workflow run(s) never started (GitHub Actions outage)" % len(stuck)
         _remember_ci(repo_name, head_sha, [], [])
         return "unknown", ""
@@ -687,7 +687,7 @@ def merge_pr(gh, repo_name, number, *, expected_head=None):
                 token = _github_token()
                 stuck = gh_actions_health.infra_failed_runs(repo_name, pr.head.sha, token)
                 if stuck:
-                    gh_actions_health.note_infra_failure(len(stuck))
+                    gh_actions_health.note_infra_failure(repo_name, stuck)
                     down, _ = gh_actions_health.outage(load_config())
                     rerun = 0 if down else gh_actions_health.rerun_infra_failed(
                         repo_name, pr.head.sha, token)
