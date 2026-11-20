@@ -63,20 +63,22 @@ def test_final_staged_tree_is_checked_after_publication_mutations(tmp_path, fina
         "repo_name": "owner/repo", "path": tmp_path,
         "repo_git": SimpleNamespace(
             git=SimpleNamespace(add=repo.git.add, diff=diff),
-            index=repo.index, remotes=repo.remotes),
+            head=repo.head, index=repo.index, remotes=repo.remotes),
         "gh_current": SimpleNamespace(get_user=lambda: SimpleNamespace(login="bot")),
         "repo_obj": SimpleNamespace(owner=SimpleNamespace(login="bot"), clone_url="unused"),
         "resolve_self_diagnosis_repo": lambda _config: "other/repo",
         "may_direct_push": lambda *args, **kwargs: (True, "test"),
         "base_branch": "integration", "final_verdict": "Approve", "token": "",
-        "bump_repo_version": bump, "issue": SimpleNamespace(number=1, title="fix"),
+        "bump_repo_version": bump, "issue": SimpleNamespace(number=1, title="fix", body="body"),
+        "_opened_at": lambda issue: None, "fixes": {"report.py": "value = 2"},
+        "publication": {},
         "_authenticated_remote": lambda *args: RemoteContext(),
-        "push_or_raise": lambda remote, branch: pushes.append(branch),
+        "push_or_raise": lambda remote, branch, **kwargs: pushes.append(branch),
     }
     # Load the pure gate helper if present; never import the worker-starting module.
     helpers = [node for node in ast.parse(source).body
                if isinstance(node, ast.FunctionDef)
-               and node.name == "_publication_boundary_requirement"]
+               and node.name in ("_publication_boundary_requirement", "_push_fix_with_evidence")]
     exec(compile(ast.Module(body=helpers, type_ignores=[]), "fix_engine.py", "exec"), namespace)
     snippet = "".join(line for line in source[start:end].splitlines(keepends=True)
                       if not line.lstrip().startswith("#"))
@@ -132,6 +134,7 @@ def _publish(confidence, can_direct_push, boundary_result, existing=False, check
         "logger": logging.getLogger(__name__), "repo_name": "owner/repo",
         "repo_git": SimpleNamespace(
             git=SimpleNamespace(diff=diff, checkout=checkout or (lambda *args: None)),
+            head=SimpleNamespace(commit=SimpleNamespace(hexsha="synthetic-fix-sha")),
             remotes=SimpleNamespace(origin=object())),
         "repo_obj": SimpleNamespace(
             clone_url="https://example.test/repo", default_branch="production",
@@ -144,10 +147,11 @@ def _publish(confidence, can_direct_push, boundary_result, existing=False, check
         "integration_branch": lambda *args: ("integration", None),
         "find_existing_pull_request": lambda *args: prior if existing else None,
         "_fix_pr_body": lambda *args: "test intent",
+        "publication": {},
     }
     helpers = [node for node in ast.parse(source).body
                if isinstance(node, ast.FunctionDef)
-               and node.name == "_publication_boundary_requirement"]
+               and node.name in ("_publication_boundary_requirement", "_push_fix_with_evidence")]
     exec(compile(ast.Module(body=helpers, type_ignores=[]), "fix_engine.py", "exec"), namespace)
     exec(textwrap.dedent(source[gate_start:gate_end]), namespace)
     exec(textwrap.dedent(source[publish_start:publish_end]), namespace)

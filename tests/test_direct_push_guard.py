@@ -147,11 +147,17 @@ def test_guard_runs_before_the_direct_push_and_disables_it():
     """A refusal must clear can_direct_push so control falls through to the
     existing pull-request path, rather than merely logging and pushing anyway."""
     src = _fix_engine_src()
-    guard_at = src.index("may_direct_push(")
-    push_at = src.index('push_or_raise(repo_git.remotes.origin, f"HEAD:{base_branch}")')
+    pipeline = next(node for node in ast.parse(src).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "process_single_issue")
+    calls = [node for node in ast.walk(pipeline)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+    guard_at = min(node.lineno for node in calls if node.func.id == "may_direct_push")
+    push_at = min(node.lineno for node in calls
+                  if node.func.id == "_push_fix_with_evidence"
+                  and isinstance(node.args[1], ast.JoinedStr))
     assert guard_at < push_at, "the guard must be evaluated before the push"
 
-    window = src[guard_at:push_at]
+    window = "\n".join(src.splitlines()[guard_at - 1:push_at - 1])
     assert "can_direct_push = False" in window, (
         "a refused direct push must disable direct-push mode so the PR path runs")
 
