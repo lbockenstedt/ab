@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import builtins
+from datetime import datetime
 import json
 import logging
 import os
@@ -19,6 +20,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 REGISTER = "/api/hub-agent/reregister"
 CLAIM = "hub-agent:reregister"
+
+
+def _load_source(ns, filename, names):
+    """Bind selected actual functions without importing application startup."""
+    nodes = [node for node in ast.parse((ROOT / filename).read_text()).body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, "exec"), ns)
 
 
 def _case(tmp_path, *, pause=None, error=None):
@@ -68,12 +76,89 @@ def _case(tmp_path, *, pause=None, error=None):
                       "hub_agent_reregister", "_reregister_hub_agent", "hub_agent_status", "diagnostics"},
     }
     for filename, names in wanted.items():
-        nodes = [node for node in ast.parse((ROOT / filename).read_text()).body
-                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, "exec"), ns)
+        _load_source(ns, filename, names)
     app = FastAPI()
     app.include_router(ns["router"])
     return N(app=app, ns=ns, events=events, failure=failure)
+
+
+def _bind_actual_startup(case, configured, callback_status):
+    """Run actual worker startup/status callbacks with a delayed or immediate fake client."""
+    original_config, original_start = case.ns["load_config"], case.ns["_start_hub_agent"]
+    delivered = {}
+
+    def config():
+        """Use one controlled configuration for startup and the real status route."""
+        original_config()
+        return {"HUB_WS_URL": "wss://example.invalid"} if configured else {}
+
+    def factory(cfg, **callbacks):
+        """Model a returned thread before its first callback, or an immediate approval."""
+        original_start()
+        delivered.update(callbacks)
+        if callback_status:
+            callbacks["on_status"](callback_status, "new client status")
+            callbacks["on_connection"](True)
+
+    fake_module = N(start_agent_from_config=factory)
+
+    def import_dependency(name, *args, **kwargs):
+        """Replace only this function namespace's client import, never global sys.modules."""
+        if name == "hub_agent":
+            if case.failure[0] == "import":
+                raise RuntimeError("unexpected import failure")
+            return fake_module
+        return builtins.__import__(name, *args, **kwargs)
+
+    # Share actual state and configuration with the ASGI routes, not a copied snapshot.
+    case.ns["load_config"] = config
+    ns = dict(case.ns, datetime=datetime, _hub_agent_on_secret=None,
+              _hub_agent_on_hub_secret=None, _hub_agent_on_recovery_psk=None,
+              __builtins__={**vars(builtins), "__import__": import_dependency})
+    _load_source(ns, "workers.py", {
+        "_start_hub_agent", "_hub_agent_on_status", "_hub_agent_on_connection"})
+    case.ns["_start_hub_agent"] = ns["_start_hub_agent"]
+    return delivered
+
+
+@pytest.mark.parametrize("configured,callback_status,failure,expected", [
+    (True, None, None, "not_registered"),
+    (True, "approved", None, "approved"),
+    (False, None, None, "not_registered"),
+    (True, None, "import", "error"),
+    (True, None, "config", "error"),
+    (True, None, "start", "error"),
+])
+def test_actual_startup_cannot_retain_previous_client_snapshot(
+        tmp_path, configured, callback_status, failure, expected):
+    """Cover delayed/rapid callbacks, no URL and handled startup failures through real ASGI."""
+    case = _case(tmp_path, error=failure)
+    callbacks = _bind_actual_startup(case, configured, callback_status)
+    case.ns["state"].update(
+        hub_agent_status="approved", hub_agent_connected=True, hub_agent_message="previous client")
+
+    async def exercise():
+        """Observe actual worker state without inventing a first background callback."""
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=case.app), base_url="http://test") as client:
+            response = await client.post(REGISTER)
+            # Recover only the injected read failure so the status endpoint can report it.
+            case.failure[0] = None
+            observed = await client.get("/api/hub-agent/status")
+            assert response.status_code == 200 and response.json()["status"] == "restarted"
+            assert observed.status_code == 200 and observed.json()["status"] == expected
+            assert observed.json()["connected"] is (callback_status == "approved")
+            assert observed.json()["message"] != "previous client"
+            assert not case.ns["_inflight_issues"]
+            if configured and not callback_status and not failure:
+                assert observed.json()["message"] == "Starting Hub agent"
+                callbacks["on_status"]("approved", "later client status")
+                callbacks["on_connection"](True)
+                later = await client.get("/api/hub-agent/status")
+                assert later.json()["status"] == "approved" and later.json()["connected"] is True
+                assert later.json()["message"] == "later client status"
+
+    asyncio.run(exercise())
 
 
 def test_registration_work_runs_off_the_asgi_loop_with_an_unrelated_fix_active(tmp_path):

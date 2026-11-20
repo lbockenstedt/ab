@@ -614,6 +614,9 @@ def _start_hub_agent():
     state reports "not_registered" — AppBuilder runs fine without Hub integration.
     """
     try:
+        # A new client's first callback must not inherit the previous client's cached approval.
+        state.update(hub_agent_status="not_registered", hub_agent_connected=False,
+                     hub_agent_message="Starting Hub agent")
         # Use HUB_WS_URL, else derive it from HUB_QUERY_URL.
         import hub_agent
         cfg = load_config()
