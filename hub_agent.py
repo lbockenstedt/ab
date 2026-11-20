@@ -23,6 +23,7 @@ import logging
 import os
 import socket
 import ssl
+import stat
 import sys
 import threading
 import time
@@ -960,28 +961,156 @@ class HubAgentClient:
         """Write a material file by same-directory replace; return True if changed."""
         # Make sure the content ends with a newline.
         content = content if content.endswith("\n") else content + "\n"
-        # Unchanged: just fix the permissions and report no change.
+        # Unchanged and already at the right mode: nothing to do.
+        if self._file_is_current(path, content, mode):
+            return False
+        # Stage a fully written copy, then atomically swap it into place.
+        tmp = self._stage_file(path, content, mode)
+        try:
+            os.replace(tmp, path)
+        except BaseException:
+            self._discard_file(tmp)
+            raise
+        return True
+
+    @staticmethod
+    def _file_is_current(path: str, content: str, mode: int) -> bool:
+        """Return True if ``path`` already holds ``content`` with permission bits ``mode``.
+
+        A file with the right content but the wrong mode is chmod-ed. If that
+        chmod fails, this returns False so the caller rewrites the file: the new
+        copy is created with the right mode, so an old world-readable key does
+        not stay exposed just because its content did not change.
+        """
+        # Different or unreadable content: the caller writes it.
         try:
             with open(path, "r") as f:
-                if f.read() == content:
-                    try:
-                        os.chmod(path, mode)
-                    except OSError:
-                        pass
+                if f.read() != content:
                     return False
         except OSError:
+            return False
+        # Same content: make sure the mode is right too.
+        try:
+            if stat.S_IMODE(os.stat(path).st_mode) != mode:
+                os.chmod(path, mode)
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _discard_file(path: str) -> None:
+        """Remove ``path`` if it exists; used to clean up staged temp files."""
+        try:
+            os.remove(path)
+        except OSError:
             pass
-        # Write to a unique temporary file next to the target, flush to disk, and set its mode.
+
+    @staticmethod
+    def _stage_file(path: str, content: str, mode: int) -> str:
+        """Write ``content`` to a new temp file next to ``path`` and return the temp name.
+
+        The temp file is created owner-only (0600) with O_EXCL, never under the
+        umask: these are private keys and .env secrets, and open(..., "w") would
+        leave them world-readable until the chmod (or for good, if the chmod
+        failed). It is fsynced and given its final ``mode`` before it is returned,
+        so the caller's os.replace is the only step left. On failure the temp file
+        is removed and the error is raised.
+        """
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         tmp = f"{path}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
-        with open(tmp, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        # Atomically swap it into place.
-        os.replace(tmp, path)
-        return True
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, mode)
+        except BaseException:
+            # Never leave a stray temp copy of a key behind.
+            HubAgentClient._discard_file(tmp)
+            raise
+        return tmp
+
+    def _install_cert_pair(self, cert_path: str, cert_pem: str, key_path: str, key_pem: str) -> None:
+        """Check a cert/key pair, then replace both files so a failure keeps the old pair.
+
+        Runs in a worker thread (the handlers call it through asyncio.to_thread):
+        it parses the pair and fsyncs files, which must not block the event loop.
+
+        Steps:
+        1. Refuse a pair that will not load (``_cert_pair_error``); nothing is written.
+        2. Stage both new files (written, fsynced, final mode). A failure here
+           changes nothing on disk.
+        3. Replace the key, then the cert. If the cert replace fails, put the old
+           key back (or remove the new key if there was none), so the files on
+           disk are never a new key with the old cert after an ERROR reply.
+        The one remaining window is a crash between the two os.replace calls.
+        """
+        # 1. Check the pair before touching anything.
+        bad = self._cert_pair_error(cert_pem, key_pem)
+        if bad:
+            raise ValueError(bad)
+        # Remember the old key so a failed cert swap can restore it.
+        try:
+            with open(key_path, "r") as f:
+                old_key = f.read()
+        except FileNotFoundError:
+            old_key = None
+        # 2. Stage both files.
+        staged = []
+        try:
+            staged.append(self._stage_file(key_path, key_pem, 0o600))
+            staged.append(self._stage_file(cert_path, cert_pem, 0o644))
+            # 3. Swap them in, key first; roll the key back if the cert swap fails.
+            os.replace(staged[0], key_path)
+            try:
+                os.replace(staged[1], cert_path)
+            except BaseException as swap_err:
+                # A failed rollback leaves the new key with the old cert, which is
+                # not the "old pair kept" state an ordinary ERROR means, so it is
+                # raised as its own error naming the mismatch.
+                try:
+                    if old_key is None:
+                        try:
+                            os.remove(key_path)
+                        except FileNotFoundError:
+                            pass
+                    else:
+                        self._atomic_write_file(key_path, old_key, 0o600)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("Could not restore the previous key at %s: %s", key_path, e)
+                    raise RuntimeError(
+                        f"cert install failed ({type(swap_err).__name__}) and the previous key "
+                        f"could not be restored ({type(e).__name__}): {key_path} no longer "
+                        f"matches {cert_path}; reinstall the pair") from swap_err
+                raise
+        finally:
+            for tmp in staged:
+                self._discard_file(tmp)
+
+    @staticmethod
+    def _cert_pair_error(cert_pem: str, key_pem: str) -> str:
+        """Return why ``cert_pem``/``key_pem`` would not load as a TLS pair, or "" if they do.
+
+        Checked before anything is written: INSTALL_CERT restarts AB to load the
+        pair, and a malformed or mismatched pair would leave uvicorn unable to
+        start (or the hub link unable to handshake) until someone fixed the
+        files by hand. The check is the same ``load_cert_chain`` the listener uses,
+        run on copies in a private temporary directory.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="ab-certcheck-") as d:
+            cert_path = os.path.join(d, "cert.pem")
+            key_path = os.path.join(d, "key.pem")
+            for path, body in ((cert_path, cert_pem), (key_path, key_pem)):
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    f.write(body)
+            try:
+                ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(cert_path, key_path)
+            except (ssl.SSLError, OSError, ValueError) as e:
+                return f"cert/key do not load as a pair ({type(e).__name__})"
+        return ""
 
     def _persist_env_key(self, key: str, value: str) -> None:
         """Persist a single environment key in /etc/ab/.env atomically."""
@@ -1008,13 +1137,7 @@ class HubAgentClient:
         if not replaced:
             out.append(rendered)
         # Write atomically with owner-only permissions, then update this process's environment.
-        tmp = f"{env_file}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
-        with open(tmp, "w") as f:
-            f.write("\n".join(out) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, env_file)
+        self._atomic_write_file(env_file, "\n".join(out) + "\n", 0o600)
         os.environ[key] = value
 
     @staticmethod
@@ -1149,18 +1272,11 @@ class HubAgentClient:
             if not cert or not key:
                 status, message = "ERROR", "missing cert/key"
             else:
-                # Write the cert and key (key owner-only).
                 fc = cert if cert.endswith("\n") else cert + "\n"
                 pk = key if key.endswith("\n") else key + "\n"
-                os.makedirs(os.path.dirname(self._client_cert_file) or ".", exist_ok=True)
-                with open(self._client_cert_file, "w") as f:
-                    f.write(fc)
-                with open(self._client_key_file, "w") as f:
-                    f.write(pk)
-                try:
-                    os.chmod(self._client_key_file, 0o600)
-                except OSError:
-                    pass
+                # Check the pair, then replace both files (old pair kept on any failure).
+                await asyncio.to_thread(self._install_cert_pair,
+                                        self._client_cert_file, fc, self._client_key_file, pk)
                 # Present the new cert from now on.
                 self._present_cert = True
                 self._cert_ever_worked = False
@@ -1217,25 +1333,34 @@ class HubAgentClient:
                     fc = fc + (chain if chain.endswith("\n") else chain + "\n")
                 # WebUI server cert ONLY (so GitHub webhooks + browsers trust it).
                 # Do NOT write the hub mTLS client cert here — see docstring.
+                # A pair that will not load would stop AB starting after the
+                # restart, so it is checked first and the old pair kept on failure.
                 webui_cert = os.environ.get("AB_SSL_CERT", "/etc/ab/cert.pem")
                 webui_key = os.environ.get("AB_SSL_KEY", "/etc/ab/key.pem")
-                os.makedirs(os.path.dirname(webui_cert) or ".", exist_ok=True)
-                with open(webui_cert, "w") as f:
-                    f.write(fc)
-                with open(webui_key, "w") as f:
-                    f.write(pk)
-                try:
-                    os.chmod(webui_key, 0o600)
-                except OSError:
-                    pass
+                await asyncio.to_thread(self._install_cert_pair, webui_cert, fc, webui_key, pk)
                 # Save the CA bundle (the separate chain, or the non-leaf certs of the fullchain).
+                # The pair and the bundle go live together. If the bundle save fails,
+                # the new pair is on disk but not loaded, and an older bundle may
+                # still be in place. Restarting then could reconnect to the hub with
+                # a stale trust bundle and lose the link the retry needs, so the
+                # reply is ERROR (the hub re-pushes any target whose last status is
+                # not SUCCESS) with a message naming this partial state, and there
+                # is no restart. The hub's retry rewrites the same pair, saves the
+                # bundle, and replies SUCCESS with the restart.
+                domain = data.get("domain") or "?"
                 ca_bundle = chain.strip() or self._ca_bundle_from_fullchain(fc)
-                if ca_bundle:
-                    self._persist_hub_ca_bundle(ca_bundle)
-                # Report success.
-                message = (f"WebUI cert installed for {data.get('domain') or '?'}"
-                           " — restarting to load it")
-                logger.info("INSTALL_CERT: %s", message)
+                try:
+                    if ca_bundle:
+                        await asyncio.to_thread(self._persist_hub_ca_bundle, ca_bundle)
+                except Exception as e:  # noqa: BLE001
+                    status = "ERROR"
+                    message = (f"WebUI cert for {domain} written but not loaded: hub CA bundle "
+                               f"not saved ({type(e).__name__}); no restart until the hub's retry saves it")
+                    logger.warning("INSTALL_CERT: %s: %s", message, e)
+                else:
+                    # Report success.
+                    message = f"WebUI cert installed for {domain} — restarting to load it"
+                    logger.info("INSTALL_CERT: %s", message)
         except Exception as e:  # noqa: BLE001
             status, message = "ERROR", str(e)
             logger.warning("INSTALL_CERT failed: %s", e)
@@ -1718,7 +1843,7 @@ class HubAgentClient:
                 return
             # Save it and acknowledge.
             try:
-                changed = self._persist_hub_ca_bundle(ca_bundle)
+                changed = await asyncio.to_thread(self._persist_hub_ca_bundle, ca_bundle)
                 await self._ack(
                     msg, "SUCCESS",
                     "hub CA bundle installed"
