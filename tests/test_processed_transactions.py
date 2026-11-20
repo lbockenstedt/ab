@@ -359,6 +359,387 @@ def test_external_success_then_local_failure_is_truthful_and_does_not_dispatch(h
     assert edits and response.status_code == 500
     assert b"History persistence failed" in response.body
     assert b"GitHub" in response.body
+    assert fix_engine._claim_issue("o/r:1")
+    fix_engine._release_issue("o/r:1")
+
+
+@pytest.mark.parametrize("route", [
+    "resolve_issue", "reopen_issue", "retry_issue", "delete_issue",
+    "clear_history", "delete_all_issues",
+])
+def test_operator_action_cannot_change_an_actively_published_issue(history, monkeypatch, route):
+    """A visible publication still being completed must not lose an operator action."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "published-sha"}})
+    before, calls = history.read_bytes(), []
+    issue = N(state="closed", create_comment=lambda body: calls.append("comment"),
+              edit=lambda **kwargs: calls.append(("edit", kwargs)),
+              remove_from_labels=lambda label: calls.append(("remove", label)))
+    monkeypatch.setattr(routes, "load_config", lambda: {"GITHUB_TOKEN": "test-token"})
+    def github(token):
+        """Record any forbidden external lookup rather than touching GitHub."""
+        calls.append("github")
+        return N(get_repo=lambda name: N(get_issue=lambda number: issue))
+    monkeypatch.setattr(routes, "Github", github)
+    monkeypatch.setattr(routes, "_apply_closed_label", lambda *args: calls.append("label"))
+    monkeypatch.setattr(fix_engine, "_notify_bug_fixed", lambda *args: calls.append("notify"))
+    monkeypatch.setattr(routes, "threading", N(
+        Thread=lambda **kwargs: N(start=lambda: calls.append("thread"))))
+    monkeypatch.setitem(routes.state, "dismiss_jobs", {})
+    monkeypatch.setattr(storage, "_atomic_write_json",
+                        lambda *args: pytest.fail("busy action must not write history"))
+    assert fix_engine._claim_issue("o/r:1")
+    try:
+        fn = getattr(routes, route)
+        response = asyncio.run(fn() if route == "clear_history" else fn(request("o/r:1")))
+        assert getattr(response, "status_code", 200) == 409
+        assert b"o/r:1" in response.body
+        assert history.read_bytes() == before and not calls
+        assert not routes.state["dismiss_jobs"]
+    finally:
+        fix_engine._release_issue("o/r:1")
+
+
+def test_batch_claims_are_atomic_across_numeric_and_case_aliases():
+    """Competing batches cannot partially claim or bypass the same GitHub identity."""
+    ready, attempted = threading.Barrier(2), threading.Barrier(2)
+    batches = [["O/R:001", "o/r:2"], ["o/r:1", "o/r:3"]]
+    def claim_batch(issue_ids):
+        """Keep the winning batch held until both atomic attempts have finished."""
+        ready.wait(5)
+        acquired, _ = fix_engine._claim_issues(issue_ids)
+        try:
+            attempted.wait(5)
+            return acquired
+        finally:
+            if acquired:
+                fix_engine._release_issues(issue_ids)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(claim_batch, batches))
+    assert results.count(True) == 1
+    all_ids = ["o/r:1", "O/R:001", "o/r:2", "o/r:3"]
+    acquired, busy = fix_engine._claim_issues(all_ids)
+    try:
+        assert acquired and not busy
+        assert not fix_engine._claim_issue("O/R:0001")
+    finally:
+        if acquired:
+            fix_engine._release_issues(all_ids)
+
+
+@pytest.fixture
+def operator_remote(monkeypatch):
+    """Use a stateful fake GitHub issue for actual operator-route workflows."""
+    calls = []
+    issue = N(state="closed", create_comment=lambda body: calls.append("comment"),
+              remove_from_labels=lambda label: calls.append(("remove", label)))
+    def edit(**kwargs):
+        """Retain the remote state change as well as its ordering."""
+        calls.append(("edit", kwargs))
+        for key, value in kwargs.items():
+            setattr(issue, key, value)
+    issue.edit = edit
+    monkeypatch.setattr(routes, "load_config", lambda: {"GITHUB_TOKEN": "test-token"})
+    monkeypatch.setattr(routes, "Github",
+                        lambda token: N(get_repo=lambda name: N(get_issue=lambda number: issue)))
+    monkeypatch.setattr(routes, "_apply_closed_label", lambda *args: calls.append("label"))
+    monkeypatch.setattr(fix_engine, "_notify_bug_fixed", lambda *args: calls.append("notify"))
+    return N(issue=issue, calls=calls)
+
+
+@pytest.mark.parametrize("route", ["resolve_issue", "reopen_issue", "retry_issue", "delete_issue"])
+def test_operator_alias_cannot_bypass_the_active_pipeline_claim(history, operator_remote, route):
+    """The actual route must conflict with the scanner's canonical numeric identity."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "published"}})
+    before = history.read_bytes()
+    assert fix_engine._claim_issue("o/r:1")
+    try:
+        response = asyncio.run(getattr(routes, route)(request("O/R:001")))
+        assert response.status_code == 409 and history.read_bytes() == before
+        assert not operator_remote.calls
+    finally:
+        fix_engine._release_issue("o/r:1")
+
+
+def test_reopen_releases_its_action_claim_before_the_new_fix_starts(history, monkeypatch, operator_remote):
+    """A successfully admitted Reopen cannot reject its own immediate re-fix."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "previous"}})
+    invoked = []
+    def fix(repo, number):
+        """The new fix must be able to acquire the real pipeline claim."""
+        assert fix_engine._claim_issue("o/r:1")
+        try:
+            invoked.append((repo, number))
+            return True, "fixed"
+        finally:
+            fix_engine._release_issue("o/r:1")
+    monkeypatch.setattr(routes, "process_single_issue", fix)
+    monkeypatch.setattr(routes, "threading", N(
+        Thread=lambda **kwargs: N(start=kwargs["target"])))
+    response = asyncio.run(routes.reopen_issue(request("o/r:1")))
+    assert response["status"] == "triggered" and invoked == [("o/r", 1)]
+    assert storage.load_processed()["o/r:1"]["status"] == "reopened"
+    assert operator_remote.issue.state == "open"
+
+
+def test_reopen_thread_failure_retains_the_recorded_intent_without_a_claim(
+        history, monkeypatch, operator_remote):
+    """Failure to queue after the reopen must report its real partial outcome."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "previous"}})
+    def fail():
+        """Fail before any new fix worker has started."""
+        raise RuntimeError("thread unavailable")
+    monkeypatch.setattr(routes, "threading", N(Thread=lambda **kwargs: N(start=fail)))
+    response = asyncio.run(routes.reopen_issue(request("o/r:1")))
+    assert response.status_code == 500 and b"reopened and recorded" in response.body
+    assert operator_remote.issue.state == "open"
+    assert storage.load_processed()["o/r:1"]["status"] == "reopened"
+    assert fix_engine._claim_issue("o/r:1")
+    fix_engine._release_issue("o/r:1")
+
+
+@pytest.mark.parametrize("failure", [None, "close"])
+def test_actual_publication_wait_rejects_resolve_until_all_completion_writes_finish(
+        history, monkeypatch, operator_remote, failure):
+    """Pause the actual publication tail at fan-out, then sign off after its release."""
+    from test_fix_publication_outcomes import _run_publication
+    entered, resume = threading.Event(), threading.Event()
+    def publish_record(record):
+        """Mirror the actual generated record into the real disk/view transaction."""
+        app.update_processed(lambda current: current.update({"o/r:1": record}))
+    def wait(*args, **kwargs):
+        """Pause the real post-record spoke wait without an external OS action."""
+        entered.set()
+        assert resume.wait(5)
+    def run():
+        """Use the same real claim around the actual tail and its outer handlers."""
+        assert fix_engine._claim_issue("o/r:1")
+        try:
+            return _run_publication(failure=failure, after_store=publish_record, wait_spokes=wait)
+        finally:
+            fix_engine._release_issue("o/r:1")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run)
+        try:
+            assert entered.wait(5)
+            before = history.read_bytes()
+            response = asyncio.run(routes.resolve_issue(request("o/r:1")))
+            assert response.status_code == 409 and history.read_bytes() == before
+            assert not operator_remote.calls
+        finally:
+            resume.set()
+        result = future.result(5)
+    assert result.result[0] is (failure is None)
+    assert storage.load_processed()["o/r:1"]["status"] == "pending_verification"
+    response = asyncio.run(routes.resolve_issue(request("o/r:1")))
+    assert response["status"] == "success"
+    assert storage.load_processed()["o/r:1"]["status"] == "resolved"
+
+
+def test_cancelled_resolve_keeps_its_claim_until_the_sync_workflow_finishes(
+        history, monkeypatch, operator_remote):
+    """Disconnecting an HTTP waiter must not admit a conflicting operator action."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "published"}})
+    entered, resume, finished = threading.Event(), threading.Event(), threading.Event()
+    github, run_action = routes.Github, routes._run_issue_action
+    def paused_github(token):
+        """Keep the offloaded remote work alive after cancellation of its await."""
+        entered.set()
+        assert resume.wait(5)
+        return github(token)
+    def observed_action(*args):
+        """Signal only after the actual synchronous workflow releases its claim."""
+        try:
+            return run_action(*args)
+        finally:
+            if args[1] is routes._resolve_issue_claimed:
+                finished.set()
+    monkeypatch.setattr(routes, "Github", paused_github)
+    monkeypatch.setattr(routes, "_run_issue_action", observed_action)
+    async def scenario():
+        """Cancel the first request while its worker still owns the remote mutation."""
+        task = asyncio.create_task(routes.resolve_issue(request("o/r:1")))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            response = await routes.reopen_issue(request("o/r:1"))
+            assert response.status_code == 409
+            assert not fix_engine._claim_issue("o/r:1")
+        finally:
+            resume.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+    asyncio.run(scenario())
+    assert storage.load_processed()["o/r:1"]["status"] == "resolved"
+    assert fix_engine._claim_issue("o/r:1")
+    fix_engine._release_issue("o/r:1")
+
+
+@pytest.mark.parametrize("route,error,status", [
+    ("resolve_issue", OSError("GitHub offline"), 502),
+    ("reopen_issue", OSError("GitHub offline"), 500),
+    ("reopen_issue", fix_engine.GithubException(410, {"message": "was deleted"}, None), 410),
+])
+def test_operator_remote_failure_and_deleted_issue_release_the_claim(
+        history, monkeypatch, operator_remote, route, error, status):
+    """Every remote failure exit must allow a later operator attempt."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "published"}})
+    def failed_github(token):
+        """Raise the actual error handled by the real synchronous route workflow."""
+        raise error
+    monkeypatch.setattr(routes, "Github", failed_github)
+    response = asyncio.run(getattr(routes, route)(request("o/r:1")))
+    assert response.status_code == status
+    assert ("o/r:1" in storage.load_processed()) is (status != 410)
+    assert fix_engine._claim_issue("o/r:1")
+    fix_engine._release_issue("o/r:1")
+
+
+@pytest.mark.parametrize("route", ["resolve_issue", "reopen_issue"])
+def test_operator_missing_token_releases_the_claim(history, monkeypatch, route):
+    """Pre-network validation failure cannot strand an admitted action."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "published"}})
+    before = history.read_bytes()
+    monkeypatch.setattr(routes, "load_config", dict)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    response = asyncio.run(getattr(routes, route)(request("o/r:1")))
+    assert response.status_code in (400, 500) and history.read_bytes() == before
+    assert fix_engine._claim_issue("o/r:1")
+    fix_engine._release_issue("o/r:1")
+
+
+@pytest.mark.parametrize("route", ["delete_issue", "delete_all_issues"])
+@pytest.mark.parametrize("failure", ["construct", "start"])
+def test_dismissal_thread_failure_reports_the_partial_clear_and_releases_all_claims(
+        history, monkeypatch, route, failure):
+    """Failed ownership transfer must not leave an accepted-looking background job."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "published"}})
+    def fail():
+        """Model failure before the background thread has begun any work."""
+        raise RuntimeError("thread unavailable")
+    def thread(**kwargs):
+        """Cover both constructor and start failures during claim transfer."""
+        if failure == "construct":
+            fail()
+        return N(start=fail)
+    monkeypatch.setattr(routes, "threading", N(Thread=thread))
+    monkeypatch.setitem(routes.state, "dismiss_jobs", {})
+    response = asyncio.run(getattr(routes, route)(request("o/r:1")))
+    assert response.status_code == 500 and b"could not start" in response.body
+    assert storage.load_processed() == {}
+    if route == "delete_issue":
+        assert routes.state["dismiss_jobs"]["o/r:1"]["status"] == "error"
+    assert fix_engine._claim_issue("o/r:1")
+    fix_engine._release_issue("o/r:1")
+
+
+@pytest.mark.parametrize("route", ["clear_history", "delete_all_issues"])
+def test_bulk_failed_write_releases_the_current_batch_without_clearing_it(history, monkeypatch, route):
+    """Real persistence failure rolls back every reversible admission reservation."""
+    records = {"o/r:1": {"status": "pending_verification"}, "o/r:2": {"status": "failed"}}
+    seed(records)
+    before = history.read_bytes()
+    def fail(*args):
+        """Reject the actual atomic write after the callback reserved its batch."""
+        raise OSError("disk full")
+    monkeypatch.setattr(storage, "_atomic_write_json", fail)
+    monkeypatch.setattr(routes, "threading", N(
+        Thread=lambda **kwargs: pytest.fail("no background work after failed persistence")))
+    fn = getattr(routes, route)
+    response = asyncio.run(fn() if route == "clear_history" else fn(request("unused")))
+    assert response.status_code == 500 and history.read_bytes() == before
+    assert storage.load_processed() == records
+    acquired, busy = fix_engine._claim_issues(records)
+    try:
+        assert acquired and not busy
+    finally:
+        if acquired:
+            fix_engine._release_issues(records)
+
+
+@pytest.mark.parametrize("route", ["clear_history", "delete_all_issues"])
+def test_busy_bulk_action_does_not_partially_claim_or_clear_the_other_rows(history, route):
+    """One active row refuses the whole operation without releasing its owner."""
+    records = {"o/r:1": {"status": "resolved"}, "o/r:2": {"status": "pending_verification"}}
+    seed(records)
+    before = history.read_bytes()
+    assert fix_engine._claim_issue("o/r:2")
+    try:
+        fn = getattr(routes, route)
+        response = asyncio.run(fn() if route == "clear_history" else fn(request("unused")))
+        assert response.status_code == 409 and history.read_bytes() == before
+        assert not fix_engine._claim_issue("o/r:2")
+        acquired = fix_engine._claim_issue("o/r:1")
+        try:
+            assert acquired
+        finally:
+            if acquired:
+                fix_engine._release_issue("o/r:1")
+    finally:
+        fix_engine._release_issue("o/r:2")
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_dismissal_owns_the_issue_through_every_background_retry(history, monkeypatch, exhausted):
+    """A removed history row cannot be re-fixed while its GitHub close is running."""
+    seed({"o/r:1": {"status": "pending_verification", "commit": "published"}})
+    entered, resume, released = threading.Event(), threading.Event(), threading.Event()
+    attempts = []
+    release = routes._release_issues
+    def close(issue_id):
+        """Pause the first real retry attempt and control its eventual outcome."""
+        attempts.append(issue_id)
+        if len(attempts) == 1:
+            entered.set()
+            assert resume.wait(5)
+        if exhausted or len(attempts) < 3:
+            raise OSError("GitHub temporarily unavailable")
+        return True, "closed"
+    def release_and_signal(issue_ids):
+        """Signal only after the actual background owner releases its identities."""
+        release(issue_ids)
+        released.set()
+    monkeypatch.setattr(routes, "_close_issue_on_github", close)
+    monkeypatch.setattr(routes, "_release_issues", release_and_signal)
+    monkeypatch.setattr(routes, "time", N(sleep=lambda seconds: None))
+    monkeypatch.setitem(routes.state, "dismiss_jobs", {})
+    try:
+        response = asyncio.run(routes.delete_issue(request("o/r:1")))
+        assert response["background"] and entered.wait(5)
+        assert not fix_engine._claim_issue("O/R:001")
+        assert storage.load_processed() == {}
+    finally:
+        resume.set()
+    assert released.wait(5)
+    assert len(attempts) == (routes._DISMISS_MAX_RETRIES if exhausted else 3)
+    assert routes.state["dismiss_jobs"]["o/r:1"]["status"] == ("error" if exhausted else "done")
+    assert fix_engine._claim_issue("o/r:1")
+    fix_engine._release_issue("o/r:1")
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_bulk_background_close_keeps_alias_claims_until_its_last_effect(history, monkeypatch, failed):
+    """Fresh raw row IDs stay scoped while duplicate identities release only once."""
+    records = {"o/r:1": {"status": "resolved"}, "O/R:001": {"status": "pending_verification"}}
+    seed(records)
+    jobs, closed = [], []
+    monkeypatch.setattr(routes, "threading", N(
+        Thread=lambda **kwargs: N(start=lambda: jobs.append(kwargs["target"]))))
+    def close(issue_id):
+        """Check the batch claim during every actual background-loop invocation."""
+        assert not fix_engine._claim_issue("o/r:1")
+        closed.append(issue_id)
+        if failed:
+            raise OSError("GitHub offline")
+        return True, "closed"
+    monkeypatch.setattr(routes, "_close_issue_on_github", close)
+    response = asyncio.run(routes.delete_all_issues(request("unused")))
+    assert response["status"] == "success" and storage.load_processed() == {}
+    assert not fix_engine._claim_issue("o/r:1")
+    jobs[0]()
+    assert closed == list(records)
+    assert fix_engine._claim_issue("o/r:1")
+    fix_engine._release_issue("o/r:1")
 
 
 def test_bulk_clear_background_ids_are_the_committed_removed_set(history, monkeypatch):

@@ -67,7 +67,8 @@ def test_missing_claude_provider_does_not_mark_processing_or_notify_hub(prior, s
     path = Path(__file__).resolve().parents[1] / "fix_engine.py"
     nodes = [node for node in ast.parse(path.read_text()).body
              if isinstance(node, ast.FunctionDef)
-             and node.name in ("process_single_issue", "_claim_issue", "_release_issue")]
+             and node.name in ("process_single_issue", "_claim_issue", "_release_issue",
+                               "_issue_claim_key", "_claim_issues", "_release_issues")]
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), ns)
 
     result = ns["process_single_issue"]("o/r", 1, llm_preference="claude")

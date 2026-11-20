@@ -12,6 +12,7 @@ from app_state import (ReviewPersistenceError, activity_feed_items, mark_pr_appr
                        pr_approval_snapshot, update_pr_review)
 from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
+from fix_engine import _claim_issues, _release_issues
 import mission_control
 from fastapi import APIRouter
 
@@ -4425,17 +4426,91 @@ async def local_llm_delete(request: Request):
 @router.post("/clear_history")
 async def clear_history():
     """Clears all processed issues and resets success/failure counters."""
-    # Changes the shared state.
-    global state
-    logger.info("Clearing all issue history and resetting counters.")
+    return await asyncio.to_thread(_clear_issue_history, False)
 
-    # Empty the history and reset the counters.
+
+class _IssueActionBusy(RuntimeError):
+    """Abort a history mutation before writing when one of its issues is claimed."""
+
+
+def _issue_busy_response(issue_ids):
+    """Report refused operator work without pretending it was queued or applied."""
+    message = "Issue action refused; still being processed: " + ", ".join(issue_ids)
+    logger.info(message)
+    return JSONResponse(status_code=409, content={"status": "error", "message": message})
+
+
+def _run_issue_action(issue_id, operation, *args):
+    """Own the whole synchronous operator workflow, even if its HTTP await is cancelled."""
+    claimed, busy = _claim_issues([issue_id])
+    if not claimed:
+        return _issue_busy_response(busy)
     try:
-        await asyncio.to_thread(update_processed, lambda current: current.clear())
-    except ProcessedStoreError as e:
-        return _history_failure(e)
+        return operation(*args)
+    finally:
+        _release_issues([issue_id])
 
-    return {"status": "success", "message": "All history and tasks have been cleared."}
+
+def _clear_issue_history(close_on_github):
+    """Reserve committed-current rows through clearing and any background dismissals."""
+    claimed = []
+    transferred = False
+
+    def clear(current):
+        """Reserve all current identities or abort without a local write."""
+        issue_ids = list(current)
+        acquired, busy = _claim_issues(issue_ids)
+        if not acquired:
+            raise _IssueActionBusy(busy)
+        claimed.extend(issue_ids)
+        current.clear()
+        return issue_ids
+
+    try:
+        try:
+            removed = update_processed(clear)
+        except _IssueActionBusy as conflict:
+            return _issue_busy_response(conflict.args[0])
+        except ProcessedStoreError as e:
+            return _history_failure(e)
+        if not close_on_github:
+            logger.info("Cleared all issue history and reset counters.")
+            return {"status": "success", "message": "All history and tasks have been cleared."}
+        if not removed:
+            return {"status": "no_issues", "message": "No issues in history to delete."}
+
+        def bulk_close():
+            """Keep the batch reserved until its final GitHub side effect finishes."""
+            closed = failed = 0
+            try:
+                for issue_id in removed:
+                    try:
+                        ok, _msg = _close_issue_on_github(issue_id)
+                        if ok:
+                            closed += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        failed += 1
+                        logger.warning(f"delete_all: could not close {issue_id} on GitHub: {e}")
+                logger.info(f"delete_all_issues: closed {closed}/{len(removed)} on GitHub, {failed} failed.")
+            finally:
+                _release_issues(claimed)
+
+        # Transfer only after a successful start; otherwise the local finally releases.
+        try:
+            threading.Thread(target=bulk_close, daemon=True).start()
+        except Exception as e:
+            logger.error(f"History cleared, but GitHub dismissal thread could not start: {e}")
+            return JSONResponse(status_code=500, content={
+                "status": "error", "message": f"History cleared, but GitHub closes could not start: {e}"})
+        transferred = True
+        return {"status": "success", "message":
+                f"Cleared {len(removed)} issue(s) from history. Closing them on GitHub in the background."}
+    finally:
+        # A failed write/start must never strand a process-local reservation.
+        if not transferred:
+            _release_issues(claimed)
 
 
 def _history_failure(error, external=""):
@@ -4547,30 +4622,51 @@ async def delete_issue(request: Request):
         issue_num = int(issue_num_str)
     except ValueError:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue number"})
+    return await asyncio.to_thread(_delete_issue_and_close, issue_id)
 
-    # Remove from local processed history.
-    def remove(current):
-        """Return whether the committed-current history contained the dismissed row."""
-        was_present = issue_id in current
-        current.pop(issue_id, None)
-        return was_present
 
+def _delete_issue_and_close(issue_id):
+    """Transfer an admitted dismissal's claim through its background retries."""
+    claimed, busy = _claim_issues([issue_id])
+    if not claimed:
+        return _issue_busy_response(busy)
+    transferred = False
     try:
-        was_in_history = await asyncio.to_thread(update_processed, remove)
-    except ProcessedStoreError as e:
-        return _history_failure(e)
+        def remove(current):
+            """Return whether the committed-current history contained the dismissed row."""
+            was_present = issue_id in current
+            current.pop(issue_id, None)
+            return was_present
 
-    # Close it on GitHub in the background.
-    state["dismiss_jobs"][issue_id] = {"status": "pending", "message": ""}
-    threading.Thread(target=_close_issue_on_github_with_retry, args=(issue_id,), daemon=True).start()
+        try:
+            was_in_history = update_processed(remove)
+        except ProcessedStoreError as e:
+            return _history_failure(e)
+        state["dismiss_jobs"][issue_id] = {"status": "pending", "message": ""}
 
-    # Reply straight away.
-    return {
-        "status": "success",
-        "message": f"{'Removed from history. ' if was_in_history else ''}Closing on GitHub in the background…",
-        "issue_id": issue_id,
-        "background": True,
-    }
+        def close():
+            """Release only after every background dismissal effect has stopped."""
+            try:
+                _close_issue_on_github_with_retry(issue_id)
+            finally:
+                _release_issues([issue_id])
+
+        try:
+            threading.Thread(target=close, daemon=True).start()
+        except Exception as e:
+            message = f"Local history removed, but GitHub dismissal could not start: {e}"
+            logger.error(f"{issue_id}: {message}")
+            state["dismiss_jobs"][issue_id] = {"status": "error", "message": message}
+            return JSONResponse(status_code=500, content={"status": "error", "message": message})
+        transferred = True
+        return {
+            "status": "success",
+            "message": f"{'Removed from history. ' if was_in_history else ''}Closing on GitHub in the background…",
+            "issue_id": issue_id, "background": True,
+        }
+    finally:
+        if not transferred:
+            _release_issues([issue_id])
 
 
 # Statuses of a parked feature request (feature_needs_info: the requester was
@@ -4646,45 +4742,7 @@ async def delete_all_issues(request: Request):
     can't time out the request. Mirrors the retry_all_failed background
     pattern. Each issue is closed best-effort — one failure doesn't abort
     the sweep."""
-    # Changes the shared state.
-    global state
-    # Snapshot the ids to close.
-    def clear(current):
-        """Capture exactly the IDs removed by this clear, not a pre-lock snapshot."""
-        removed = list(current)
-        current.clear()
-        return removed
-
-    try:
-        to_close = await asyncio.to_thread(update_processed, clear)
-    except ProcessedStoreError as e:
-        return _history_failure(e)
-    if not to_close:
-        return {"status": "no_issues", "message": "No issues in history to delete."}
-
-    # Clear local history + counters now; close on GitHub in the background
-    # against the snapshot so the clear doesn't race the sweep.
-    def _bulk_close():
-        """Close each issue on GitHub, counting successes and failures."""
-        closed = failed = 0
-        for issue_id in to_close:
-            try:
-                ok, _msg = _close_issue_on_github(issue_id)
-                if ok:
-                    closed += 1
-                else:
-                    failed += 1
-            except Exception as e:
-                failed += 1
-                logger.warning(f"delete_all: could not close {issue_id} on GitHub: {e}")
-        logger.info(f"delete_all_issues: closed {closed}/{len(to_close)} on GitHub, {failed} failed.")
-
-    # Run it in the background and reply straight away.
-    threading.Thread(target=_bulk_close, daemon=True).start()
-    return {
-        "status": "success",
-        "message": f"Cleared {len(to_close)} issue(s) from history. Closing them on GitHub in the background.",
-    }
+    return await asyncio.to_thread(_clear_issue_history, True)
 
 
 @router.post("/resolve_issue")
@@ -4697,7 +4755,11 @@ async def resolve_issue(request: Request):
     issue_id = data.get("issue_id", "").strip()
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
+    return await asyncio.to_thread(_run_issue_action, issue_id, _resolve_issue_claimed, issue_id)
 
+
+def _resolve_issue_claimed(issue_id):
+    """Resolve remotely and locally while its worker owns the issue reservation."""
     # The number must be numeric.
     repo_name, issue_num_str = issue_id.rsplit(":", 1)
     try:
@@ -4753,10 +4815,7 @@ async def resolve_issue(request: Request):
         return msg
 
     try:
-        # PyGithub is synchronous — every call inside _do_resolve blocks, same
-        # note as pr_review_approve. Offloaded so a slow GitHub response can't
-        # stall the whole app.
-        github_msg = await asyncio.get_event_loop().run_in_executor(None, _do_resolve)
+        github_msg = _do_resolve()
         logger.info(f"Resolved issue {issue_id}: status -> closed, {github_msg}")
     except Exception as e:
         logger.warning(f"Could not close {issue_id} on GitHub: {e}")
@@ -4782,7 +4841,7 @@ async def resolve_issue(request: Request):
         return True
 
     try:
-        resolved = await asyncio.to_thread(update_processed, resolve)
+        resolved = update_processed(resolve)
     except ProcessedStoreError as e:
         return _history_failure(e, f"{github_msg} Local update failed. ")
     if resolved:
@@ -4864,7 +4923,14 @@ async def retry_issue(request: Request):
     # It must look like "repo:number".
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
+    return await asyncio.to_thread(_retry_issue_when_idle, issue_id)
 
+
+def _retry_issue_when_idle(issue_id):
+    """Reject an active retry explicitly, then queue only after releasing admission."""
+    result = _run_issue_action(issue_id, lambda: None)
+    if isinstance(result, JSONResponse):
+        return result
     # Split it.
     repo_name, issue_num = issue_id.split(":")
 
@@ -4914,6 +4980,33 @@ async def reopen_issue(request: Request):
     issue_id = data.get("issue_id")
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
+    return await asyncio.to_thread(_reopen_issue_and_queue, issue_id)
+
+
+def _reopen_issue_and_queue(issue_id):
+    """Finish the claimed reopen before letting its new fix acquire the same claim."""
+    result = _run_issue_action(issue_id, _reopen_issue_claimed, issue_id)
+    if isinstance(result, JSONResponse):
+        return result
+    repo_name, issue_num = result
+    logger.info(f"Manual reopen: {issue_id}")
+
+    def run_fix():
+        """Fix the issue again after the operator workflow has released its claim."""
+        success, msg = process_single_issue(repo_name, issue_num)
+        logger.info(f"Reopen re-fix {'ok' if success else 'FAILED'} for {issue_id}: {msg}")
+
+    try:
+        threading.Thread(target=run_fix, daemon=True).start()
+    except Exception as e:
+        message = f"GitHub issue reopened and recorded, but the fix thread could not start: {e}"
+        logger.error(f"{issue_id}: {message}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": message})
+    return {"status": "triggered", "message": f"Reopened + re-queued {issue_id}"}
+
+
+def _reopen_issue_claimed(issue_id):
+    """Reopen GitHub and commit the operator's intent under one worker-owned claim."""
     # The number must be numeric.
     repo_name, issue_num_str = issue_id.rsplit(":", 1)
     try:
@@ -4950,10 +5043,7 @@ async def reopen_issue(request: Request):
             pass
 
     try:
-        # PyGithub is synchronous — every call inside _do_reopen blocks, same
-        # note as pr_review_approve. Offloaded so a slow GitHub response can't
-        # stall the whole app.
-        await asyncio.get_event_loop().run_in_executor(None, _do_reopen)
+        _do_reopen()
     except Exception as e:  # noqa: BLE001
         if _issue_is_deleted(e):
             # Gone for good. Drop our record so the UI stops offering Reopen for
@@ -4962,7 +5052,7 @@ async def reopen_issue(request: Request):
             logger.warning(f"Reopen skipped for {issue_id}: the issue was deleted on GitHub — "
                            f"removing it from AppBuilder's records")
             try:
-                await asyncio.to_thread(update_processed, lambda current: current.pop(issue_id, None))
+                update_processed(lambda current: current.pop(issue_id, None))
             except ProcessedStoreError as e2:
                 return _history_failure(e2, f"{issue_id} was deleted on GitHub. Local removal failed. ")
             return JSONResponse(status_code=410, content={
@@ -4991,20 +5081,10 @@ async def reopen_issue(request: Request):
                 "timestamp": stamp,
             }
 
-        await asyncio.to_thread(update_processed, reopen)
+        update_processed(reopen)
     except ProcessedStoreError as e:
         return _history_failure(e, "GitHub issue reopened, but it was not re-queued. ")
-    # Log the reopen.
-    logger.info(f"Manual reopen: {issue_id}")
-
-    def run_fix():
-        """Fix the issue again and log the result."""
-        success, msg = process_single_issue(repo_name, issue_num)
-        logger.info(f"Reopen re-fix {'ok' if success else 'FAILED'} for {issue_id}: {msg}")
-
-    # Run it in the background.
-    threading.Thread(target=run_fix, daemon=True).start()
-    return {"status": "triggered", "message": f"Reopened + re-queued {issue_id}"}
+    return repo_name, issue_num
 
 
 @router.post("/retry_all_failed")

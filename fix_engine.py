@@ -5368,22 +5368,45 @@ _inflight_lock = threading.Lock()
 _inflight_issues = set()
 
 
-def _claim_issue(issue_id):
-    """Atomically claim *issue_id* for processing. Returns False if another worker
-    already holds it (caller should skip — do NOT release what it didn't claim)."""
-    # Under the lock: fail if already claimed, otherwise claim it.
+def _issue_claim_key(issue_id):
+    """Share claims across case/numeric aliases of a GitHub repo:number identity."""
+    repo, separator, number = issue_id.rpartition(":")
+    if not separator or "/" not in repo:
+        return issue_id
+    try:
+        number = int(number)
+    except ValueError:
+        return issue_id
+    return f"{repo.strip().casefold()}:{number}"
+
+
+def _claim_issues(issue_ids):
+    """Claim every identity or none, returning the conflicting identities on failure."""
+    keys = {_issue_claim_key(issue_id) for issue_id in issue_ids}
     with _inflight_lock:
-        if issue_id in _inflight_issues:
-            return False
-        _inflight_issues.add(issue_id)
-        return True
+        busy = sorted(keys & _inflight_issues)
+        if busy:
+            return False, busy
+        _inflight_issues.update(keys)
+        return True, []
+
+
+def _claim_issue(issue_id):
+    """Claim one issue, never releasing a claim owned by another operation."""
+    claimed, _ = _claim_issues([issue_id])
+    return claimed
+
+
+def _release_issues(issue_ids):
+    """Release one owned batch atomically, including duplicate identity aliases."""
+    keys = {_issue_claim_key(issue_id) for issue_id in issue_ids}
+    with _inflight_lock:
+        _inflight_issues.difference_update(keys)
 
 
 def _release_issue(issue_id):
     """Release the in-flight claim on issue_id."""
-    # Under the lock, drop the claim.
-    with _inflight_lock:
-        _inflight_issues.discard(issue_id)
+    _release_issues([issue_id])
 
 
 def _push_fix_with_evidence(repo_git, refspec, publication, *, branch, commit_type, force=False):

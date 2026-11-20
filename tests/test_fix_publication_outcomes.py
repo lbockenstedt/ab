@@ -22,7 +22,7 @@ REBASED_SHA = "abcdef0123456789abcdef0123456789abcdef01"
 PR_URL = "https://github.com/o/r/pull/123"
 
 
-def _run_publication(kind="direct", failure=None, store_failure=False):
+def _run_publication(kind="direct", failure=None, store_failure=False, after_store=None, wait_spokes=None):
     """Run the actual final publication branch and its actual outer handlers."""
     events, writes = [], []
     store = {"o/r:1": {"status": "processing", "title": "Keep identity"}}
@@ -135,6 +135,8 @@ def _run_publication(kind="direct", failure=None, store_failure=False):
         store.clear()
         store.update(candidate)
         events.append(("stored", candidate["o/r:1"]["status"]))
+        if after_store:
+            after_store(copy.deepcopy(store["o/r:1"]))
         return result
 
     def complete(name):
@@ -161,7 +163,7 @@ def _run_publication(kind="direct", failure=None, store_failure=False):
               _notify_bug_fixed=complete("notify"), _apply_closed_label=complete("label"),
               _opened_at=lambda item: "2026-01-01T00:00:00",
               _progress=complete("progress"), _trigger_spoke_updates=complete("spokes"),
-              _wait_for_spokes_online=complete("wait_spokes"),
+              _wait_for_spokes_online=wait_spokes or complete("wait_spokes"),
               _authenticated_remote=authenticated, push_or_raise=push,
               may_force_push=lambda *args, **kwargs: (False, "protected"),
               integration_branch=lambda *args: ("dev", "integration"),

@@ -20,7 +20,7 @@ import ast
 import asyncio
 import threading
 import time as real_time
-from _history import bind_history
+from _history import bind_history, bind_issue_actions
 
 
 def _load_ns():
@@ -72,6 +72,7 @@ def _load_ns():
     exec("\n\n".join(segs), ns)
     ns["_FakeRequest"] = _FakeRequest
     bind_history(ns)
+    bind_issue_actions(ns)
     return ns
 
 

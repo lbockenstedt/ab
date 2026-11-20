@@ -75,3 +75,20 @@ def patch_history(monkeypatch, module, initial):
     if hasattr(module, "ProcessedStoreError"):
         monkeypatch.setattr(module, "ProcessedStoreError", ns["ProcessedStoreError"])
     return ns
+
+
+def bind_issue_actions(ns):
+    """Load real claim/admission helpers without importing the application or workers."""
+    root = Path(__file__).resolve().parents[1]
+    ns.update(_inflight_lock=threading.Lock(), _inflight_issues=set())
+    names = {
+        "fix_engine.py": {"_issue_claim_key", "_claim_issues", "_claim_issue",
+                          "_release_issues", "_release_issue"},
+        "routes.py": {"_IssueActionBusy", "_issue_busy_response", "_run_issue_action",
+                      "_clear_issue_history", "_delete_issue_and_close", "_history_failure"},
+    }
+    for filename, wanted in names.items():
+        nodes = [node for node in ast.parse((root / filename).read_text()).body
+                 if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in wanted]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, "exec"), ns)
+    return ns

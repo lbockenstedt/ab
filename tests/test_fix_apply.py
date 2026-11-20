@@ -30,7 +30,8 @@ def _load_funcs():
     src = open(path).read()
     tree = ast.parse(src)
     want = {"_safe_repo_target", "_issue_identifiers", "_targeted_file_context",
-            "parse_and_apply", "_claim_issue", "_release_issue",
+            "parse_and_apply", "_claim_issue", "_release_issue", "_issue_claim_key",
+            "_claim_issues", "_release_issues",
             "_robust_json_loads", "_sanitize_json_string_newlines",
             "_relax_json_fix_strings", "_repair_missing_object_keys",
             "_json_string_spans", "_looks_truncated_json", "_close_truncated_json",
