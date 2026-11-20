@@ -207,9 +207,14 @@ an explicitly empty value still clears it.
     takes global options such as `--url`, `--out` or `--cpu-profile` after the
     subcommand), ip
     (show/list/get), date, hostname and env (print only), sort, uniq (one input file, no
-    `--` and no glob: a second file is written), journalctl, ss, ps (no BSD `e`, which prints process
-    environments; a dash cluster with `e` must be `-e` plus value-free letters such as
-    `-ef` or `-eo`), dig (no `-f`/`-k`, even glued as `-4f`), ping (only `-4 -6 -n -q -v
+    `--` and no glob: a second file is written), journalctl, ss, ps (no glob characters; a command
+    with an `e` anywhere must fit a strict SysV grammar: `-A -a -d -e -f -F -H -l -L -N
+    -T -w`, `-o`/`--format` with known fields and not with `-f`/`-F`/`-l`, `-p` PIDs,
+    `-C` name, `--sort` with known fields, `--forest`, one `--no-headers`, and no `-L`
+    with `-T` or `-H`. procps re-reads every argument BSD-style when any SysV step
+    fails, so `ps -e -x` or `ps -ef -o pid,cmd` becomes BSD `e`, which prints every
+    process's environment; `environ` is never a known field. `ps aux` has no `e` and is
+    allowed), dig (no `-f`/`-k`, even glued as `-4f`), ping (only `-4 -6 -n -q -v
     -D -O`, `-c` up to 100, `-W` up to 30, `-w` up to 300, `-s` up to 1472 and `-t` up
     to 255; no `-f`, `-i`, `-A` or `-l`), find, du and wc.
   - **Globs:** an unquoted `*`, `?` or `[` is allowed only in a plain path under `/var/log`

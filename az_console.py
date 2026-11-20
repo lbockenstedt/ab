@@ -651,48 +651,109 @@ def _vet_ss(binary, args):
 
 # ps option letters that take the next token as their value, for dash-style
 # and BSD-style clusters, and long options that do.
-_PS_DASH_VALUE = set("CGgOopqstUu")
-_PS_BSD_VALUE = set("OopqtUk")
-_PS_LONG_VALUE = {"--format", "--sort", "--pid", "--ppid", "--user", "--User",
-                  "--group", "--Group", "--cols", "--columns", "--lines", "--rows",
-                  "--sid", "--tty", "--quick-pid", "--width"}
+# ps prints every process's environment (where services keep their secrets)
+# through BSD 'e' or the `environ` format field. procps first parses all
+# arguments SysV-style; if ANY step fails (`-x`, an unknown user, field or sort
+# key, a missing value, `-f` with `-o`, `-L` with `-T` or `-H`, two heading
+# options), it re-reads EVERY argument BSD-style, so `-ef` becomes BSD e+f
+# (procps-ng ps/parser.c arg_parse -> try_bsd). A command with no 'e' anywhere
+# cannot print environments either way. One with an 'e' must fit a strict SysV
+# grammar that procps always accepts: the flags below, -o/-p/-C values and a few
+# long options, with format and sort fields from a known list.
+_PS_FLAGS = set("AadefFHlLNTw")
+_PS_FIELDS = {
+    "pid", "ppid", "pgid", "sid", "tid", "lwp", "nlwp", "uid", "user", "ruser", "euser",
+    "group", "comm", "cmd", "args", "command", "ucmd", "etime", "etimes", "time",
+    "start", "stime", "lstart", "pcpu", "%cpu", "pmem", "%mem", "rss", "vsz", "sz",
+    "stat", "state", "s", "tty", "tname", "ni", "nice", "pri", "psr", "wchan", "f",
+    "c", "cls", "rtprio", "maj_flt", "min_flt"}
+_PS_HEADER_RE = re.compile(r"[A-Za-z0-9_%]*")
+_PS_NAME_RE = re.compile(r"[A-Za-z0-9_.:@+-]+")
+_PS_PIDS_RE = re.compile(r"[1-9]\d{0,8}(,[1-9]\d{0,8})*")
+_PS_LONG = {"--format": "o", "--sort": "sort", "--pid": "p"}
 
 
-def _ps_takes_next(letters, value_letters):
-    """True if the first value-taking letter of a cluster is its last letter,
-    so its value is the next token (otherwise the value is attached)."""
-    for idx, c in enumerate(letters):
-        if c in value_letters:
-            return idx == len(letters) - 1
-    return False
+def _ps_value_ok(kind, val):
+    """True if a ps option value always parses: a field list (an optional
+    `=header` on the last one), sort keys, a pid list or a command name."""
+    if kind == "o":
+        fields, _, header = val.partition("=")
+        return (all(f in _PS_FIELDS for f in fields.split(","))
+                and bool(_PS_HEADER_RE.fullmatch(header)))
+    if kind == "sort":
+        return all(k.lstrip("+-") in _PS_FIELDS for k in val.split(","))
+    if kind == "p":
+        return bool(_PS_PIDS_RE.fullmatch(val))
+    return bool(_PS_NAME_RE.fullmatch(val))
 
 
-# A dash cluster holding 'e' must be -e plus letters that take no value. When
-# procps cannot parse a dash cluster (`-auxe`: -u takes 'xe' as a user), it
-# re-reads it BSD-style, where 'e' prints every process's environment.
-_PS_DASH_E_RE = re.compile(r"-e[fFHjlLwy]*[oO]?")
+def _ps_strict_parse(args):
+    """Parse ps args with the strict SysV grammar. Returns (letters, kinds,
+    no_headers) or the offending token as a str when an argument falls outside."""
+    letters, kinds, no_headers = set(), set(), 0
+    i = 0
+    while i < len(args):
+        t = args[i]
+        i += 1
+        if t == "--forest":
+            letters.add("H")  # the same forest display as -H
+            continue
+        if t == "--no-headers":
+            no_headers += 1
+            continue
+        name, eq, val = t.partition("=")
+        if name in _PS_LONG:
+            if not eq:
+                val = args[i] if i < len(args) else ""
+                i += 1
+            if not _ps_value_ok(_PS_LONG[name], val):
+                return t
+            kinds.add(_PS_LONG[name])
+            continue
+        if not t.startswith("-") or t.startswith("--") or len(t) < 2:
+            return t
+        # A dash cluster: flags, then at most one value letter whose value is
+        # the rest of the token or the next token.
+        for j, c in enumerate(t[1:], 1):
+            if c in _PS_FLAGS:
+                letters.add(c)
+                continue
+            if c not in "opC":
+                return t
+            val = t[j + 1:]
+            if not val:
+                val = args[i] if i < len(args) else ""
+                i += 1
+            if not _ps_value_ok(c, val):
+                return t
+            kinds.add(c)
+            break
+    return letters, kinds, no_headers
 
 
 def _vet_ps(binary, args):
-    """ps: refuse the BSD-style 'e' modifier, which prints every process's
-    environment (and the services load their secrets into it). Option values
-    such as `-o user,etime` are skipped so their letters do not count."""
-    skip = False
+    """ps: refuse anything that could print process environments (see above)."""
     for t in args:
-        if skip:
-            skip = False
-        elif t.startswith("--"):
-            skip = "=" not in t and t in _PS_LONG_VALUE
-        elif t.startswith("-"):
-            if "e" in t and not _PS_DASH_E_RE.fullmatch(t):
-                return _refuse_opt(binary, t, "may be re-read BSD-style, where 'e' "
-                                   "prints every process's environment (use -ef or -eo)")
-            skip = _ps_takes_next(t[1:], _PS_DASH_VALUE)
-        elif "e" in t:
-            return False, ("ps BSD-style 'e' prints every process's environment, which "
-                           "holds secrets; use `ps aux` or `ps -ef`")
-        else:
-            skip = _ps_takes_next(t, _PS_BSD_VALUE)
+        if any(c in t for c in "*?["):
+            return False, f"ps argument {t!r} contains a glob character"
+    if not any("e" in t or "E" in t for t in args):
+        return True, ""
+    usage = ("could make procps re-read the command BSD-style, where 'e' prints every "
+             "process's environment; with an 'e', use dash options only: -A -a -d -e "
+             "-f -F -H -l -L -N -T -w, -o FIELDS (not with -f/-F/-l), -p PIDS, "
+             "-C NAME, --sort, --forest, --no-headers (or drop the 'e': `ps aux`)")
+    parsed = _ps_strict_parse(args)
+    if isinstance(parsed, str):
+        return _refuse_opt(binary, parsed, usage)
+    letters, kinds, no_headers = parsed
+    # The conflicts that fail procps's later SysV steps (thread_option_check,
+    # process_sf_options) and so also send it to the BSD re-read.
+    conflict = (("o" in kinds and letters & set("fFl"))
+                or {"L", "T"} <= letters
+                or (letters & {"L", "T"} and "H" in letters)
+                or no_headers > 1)
+    if conflict:
+        return False, f"ps options {' '.join(args)!r} conflict, so {usage}"
     return True, ""
 
 
