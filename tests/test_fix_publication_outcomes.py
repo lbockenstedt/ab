@@ -359,11 +359,13 @@ def _scan_twice(record, label):
     ({"status": "pending_verification", "commit": SHA}, 0),
     ({"status": "pending_verification"}, 2),
     ({"status": "failed"}, 2),
+    ({"status": "awaiting_human"}, 0),
+    ({"status": "triaged"}, 2),
     ({"status": "fixed"}, 0),
     ({"status": "awaiting_prod_verification"}, 0),
 ])
-def test_scanner_keeps_published_work_out_of_every_auto_fix_tier(record, expected, label):
-    """Only proven publication is held; ordinary retries and legacy rows stay unchanged."""
+def test_scanner_preserves_publication_and_human_holds_in_every_auto_fix_tier(record, expected, label):
+    """Human/publication holds skip every tier; retries and triaged work stay eligible."""
     dispatched, provider_checks = _scan_twice(record, label)
     assert len(dispatched) == provider_checks == expected
 

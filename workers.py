@@ -1446,7 +1446,7 @@ def scan_repo_issues(gh_current, config, processed):
                         if "<!-- report-type: feature -->" in (issue.body or ""):
                             continue
 
-                        # Skip issues already finished (awaiting_review may resume).
+                        # Skip finished or human-held work (awaiting_review may resume).
                         issue_id = f"{repo_name}:{issue.number}"
                         if issue_id in processed:
                             status = processed[issue_id].get("status")
@@ -1454,7 +1454,7 @@ def scan_repo_issues(gh_current, config, processed):
                                 if not _retry_failed_issue(issue, issue_id, processed, config):
                                     continue
                                 retrying.add(issue_id)
-                            elif status in ["fixed", "awaiting_prod_verification"]:
+                            elif status in ["fixed", "awaiting_prod_verification", "awaiting_human"]:
                                 continue
                             elif status == "pending_verification" and processed[issue_id].get("commit"):
                                 continue

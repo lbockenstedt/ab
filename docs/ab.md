@@ -145,6 +145,8 @@ Ollama startup warmup is separate and is not disabled by this policy.
 - **FastAPI routes (own dashboard):** `/api/health`, settings, status/logs endpoints, `hub_agent_status`/`hub_agent_reregister`, scan/poll/fix/verify/iterate/deploy/sync workflow. The hub agent singleton starts at app startup via `_start_hub_agent()` → `hub_agent.start_agent_from_config(...)`.
 - **Single-flight full scans (`workers.run_scan_cycle`):** Scheduled and manual cycles share a process-local guard. Overlapping requests are skipped, not queued; the active cycle keeps its status and owns cleanup until completion.
   Scan Now acknowledges the request rather than guaranteeing a new cycle started. Later scan cycles can run normally; this guard does not coordinate separate AB processes.
+- **Human-review holds (`workers.scan_repo_issues`):** `awaiting_human` is held out of every automatic fix tier, including Bug and critical. After checking the model requirements, use the existing Retry button to try again; changing model settings alone does not release the stored hold.
+  `triaged` remains automatically eligible so triage-only work keeps its existing resume path. Ordinary failed retries and deliberate manual fix endpoints are unchanged; no timer or model-configuration fingerprint releases a human hold.
 - **Promotion (`routes.py`):** `GET /api/promote/repos` (repos the Release Management buttons can target — `monitored_repos` plus the self-diagnosis repo, which is the default selection) and `POST /api/promote` (`{repo, source, target}`) which dispatches that repo's `.github/workflows/promote.yml`. See *Branch promotion buttons* below.
 
 ## Key files
