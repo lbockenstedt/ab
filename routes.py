@@ -5340,6 +5340,20 @@ async def chat_confirm_fix(request: Request):
     issue_num = prop.get("number")
     if not repo_name or issue_num is None:
         return JSONResponse(status_code=400, content={"message": "Invalid proposal"})
+    # Checked again here: the repo may have left the managed list since the
+    # proposal, or the proposal may predate the check in propose_fix.
+    from chat import positive_issue_number
+    from github_ops import repo_in_fix_scope
+    scoped = repo_in_fix_scope(config, repo_name)
+    if not scoped:
+        return JSONResponse(status_code=403, content={
+            "message": f"{repo_name} is not a monitored or trusted repo"})
+    # Run under the configured spelling: a stored URL form passes the scope
+    # check but would fail in Github.get_repo.
+    repo_name = scoped
+    issue_num = positive_issue_number(issue_num)
+    if issue_num is None:
+        return JSONResponse(status_code=400, content={"message": "Invalid proposal"})
 
     # Use the pipeline's own issue_id form so /api/task-details latches onto the
     # update_task_state entries process_single_issue creates internally.

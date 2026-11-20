@@ -56,6 +56,30 @@ def get_monitored_repos(config):
     return list(set(monitored_repos))
 
 
+def repo_in_fix_scope(config, repo_name):
+    """The configured 'owner/repo' spelling of repo_name if it is a monitored or
+    trusted repo, else None. A chat-proposed fix clones the repo, runs its tests
+    and pushes with AB's token, so the repo must be one AB already manages, never
+    whatever name the model (or text injected into its context) supplies.
+    GitHub names are case-insensitive, so the match is too.
+
+    When the same repo is configured in two spellings, the trusted spelling
+    wins, then the self-diagnosis one: fix_engine decides trust with an exact
+    ``repo_name in config["trusted_repos"]`` / ``== self-diagnosis repo`` check,
+    so returning the monitored spelling would silently demote a trusted repo
+    to the PR path."""
+    # Normalise a URL or padded name, then look it up among the managed repos.
+    wanted = clean_repo_name(str(repo_name or "")).lower()
+    if not wanted:
+        return None
+    trusted = [clean_repo_name(str(r)) for r in (config.get("trusted_repos") or []) if r]
+    sd_repo = resolve_self_diagnosis_repo(config)
+    for name in trusted + ([sd_repo] if sd_repo else []) + sorted(get_monitored_repos(config)):
+        if name and name.lower() == wanted:
+            return name
+    return None
+
+
 def resolve_module_repo(module, monitored_repos, config):
     """Maps a Hub log module name to the GitHub repo its issues should be filed in.
 

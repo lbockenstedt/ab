@@ -512,7 +512,7 @@ CHAT_TOOLS = [
     },
     {
         "name": "propose_fix",
-        "description": "Propose running a full automated fix on an issue. Does NOT execute the fix. Returns a confirmation descriptor the user must approve in the UI before the fix runs.",
+        "description": "Propose running a full automated fix on an issue in a monitored or trusted repo. Does NOT execute the fix. Returns a confirmation descriptor the user must approve in the UI before the fix runs.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -809,6 +809,28 @@ def _tool_get_recent_errors(gh, config, args):
             "note": "Use get_issue/list_issues for detail on any error filed as a GitHub issue."}
 
 
+def positive_issue_number(value):
+    """Return ``value`` as a positive issue number, or None if it is not one.
+
+    Tool arguments are parsed JSON with no schema check, and ``int()`` would
+    turn ``true`` or ``1.5`` into issue 1, so a model mistake would aim the fix
+    at the wrong issue. Accepts an int, a whole float such as 7.0, or a string
+    of ASCII digits; never a bool.
+    """
+    # bool is an int subclass: True must not become issue 1.
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        n = value
+    elif isinstance(value, float) and value.is_integer():
+        n = int(value)
+    elif isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
+        n = int(value.strip())
+    else:
+        return None
+    return n if n >= 1 else None
+
+
 def _tool_propose_fix(gh, config, args):
     """Chat tool: prepare (but do not run) an automated fix that the user must confirm."""
     # Repo and issue number are required.
@@ -816,6 +838,16 @@ def _tool_propose_fix(gh, config, args):
     number = args.get("number")
     if not repo_name or number is None:
         return {"error": "repo and number are required"}
+    # Only a repo AB manages, never a name the model was steered into.
+    from github_ops import repo_in_fix_scope
+    scoped = repo_in_fix_scope(config, repo_name)
+    if not scoped:
+        return {"error": f"{_trunc(repo_name, 100)} is not a monitored or trusted repo; "
+                         "a fix can only be proposed for a repo AppBuilder manages"}
+    repo_name = scoped
+    number = positive_issue_number(number)
+    if number is None:
+        return {"error": "number must be a positive issue number"}
     # Best-effort issue title for the confirmation descriptor (no mutation).
     title = ""
     if gh is not None:
@@ -826,7 +858,7 @@ def _tool_propose_fix(gh, config, args):
     # One-time token the UI sends back when the user confirms this fix.
     token = uuid.uuid4().hex
     # Confirming the issue doesn't authorize a model-generated routing override.
-    descriptor = {"kind": "confirm_fix", "repo": repo_name, "number": int(number),
+    descriptor = {"kind": "confirm_fix", "repo": repo_name, "number": number,
                   "title": _trunc(title, 200), "confirm_token": token}
     return descriptor
 

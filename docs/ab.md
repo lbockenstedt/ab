@@ -124,6 +124,20 @@ routing: proxy dispatch and generic Confirm use automatic routing and retain
 confidence escalation. Independent manual routing remains supported. Configured
 Ollama startup warmup is separate and is not disabled by this policy.
 
+A chat-proposed fix (`propose_fix`, then Confirm via `POST /api/chat/confirm_fix`)
+runs only on a repo AppBuilder manages: a monitored repo, a trusted repo or the
+self-diagnosis repo (`github_ops.repo_in_fix_scope`, matched case-insensitively,
+URLs accepted). Any other repo name is refused when the tool runs, so no Confirm
+button appears, and a stored proposal for a repo outside that list (for example,
+one removed since) is refused with 403 when confirmed. The issue number must be a
+positive whole number (a JSON integer, a whole float such as 7.0, or a digit
+string); `true`, `1.5` and other values are refused, both when proposed and
+when confirmed. A confirmed fix runs under the configured `owner/repo`
+spelling, even when the stored proposal holds a URL or another case. Why: the fix clones the repo, runs its tests and pushes with
+AB's token, and the repo name comes from the model, which text injected into the
+chat context can steer. The dashboard's manual Fix trigger is an operator action
+and is unchanged.
+
 ## Key commands / handlers
 
 - **Closed-issue recurrence:** a failed GitHub reopen is reported as failure and remains retryable; no recurrence comment is posted.
