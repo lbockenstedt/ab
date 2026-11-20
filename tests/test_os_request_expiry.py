@@ -50,6 +50,8 @@ def test_timeout_with_no_consumer_withdraws_queued_action(isolated):
     assert not Path(queue.REQUEST_FILE).exists()
     queue.run_request()
     assert not Path(queue.STATUS_FILE).exists()
+    assert "queued request withdrawn; not executed" in result["message"]
+    assert "outcome unknown" not in result["message"]
 
 
 @pytest.mark.parametrize("action", ["apply", "reboot"])
@@ -90,6 +92,7 @@ def test_timeout_after_claim_reports_unknown_without_touching_running_work(isola
     monkeypatch.setattr(queue.time, "sleep", sleep)
     result = queue._delegate("reboot", None, 50)
     assert result["status"] == "ERROR" and "outcome unknown" in result["message"]
+    assert "queued request withdrawn" not in result["message"]
     assert claimed.exists()
 
 

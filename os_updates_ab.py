@@ -223,7 +223,7 @@ def _delegate_locked(action: str, packages: Optional[List[str]], wait_s: float) 
         if isinstance(status, dict) and status.get("id") == req_id and status.get("state") == "done":
             return status.get("result") or {"status": "ERROR", "message": "no result"}
     withdrawn = _cancel_queued(req_id)
-    detail = ("queued request withdrawn; an already claimed action may still complete"
+    detail = ("queued request withdrawn; not executed"
               if withdrawn else "action may still be running or completed; outcome unknown")
     return {"status": "ERROR", "message":
             f"the LM-AB watchdog did not finish the {action} within {int(wait_s)}s; {detail}"}
