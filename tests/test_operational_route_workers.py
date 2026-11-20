@@ -65,7 +65,7 @@ def _case(tmp_path, *, pause=None, error=None):
     wanted = {
         "fix_engine.py": {"_issue_claim_key", "_claim_issues", "_release_issues"},
         "routes.py": {"_issue_busy_response", "_run_issue_action",
-                      "hub_agent_reregister", "_reregister_hub_agent", "diagnostics"},
+                      "hub_agent_reregister", "_reregister_hub_agent", "hub_agent_status", "diagnostics"},
     }
     for filename, names in wanted.items():
         nodes = [node for node in ast.parse((ROOT / filename).read_text()).body
@@ -141,7 +141,8 @@ def test_busy_registration_has_no_setup_effects(tmp_path):
         case.ns["_release_issues"]([CLAIM])
 
 
-def test_existing_handled_startup_error_contract_is_unchanged(tmp_path):
+@pytest.mark.parametrize("startup_status", ["error", "not_registered"])
+def test_existing_handled_startup_status_contract_is_unchanged(tmp_path, startup_status):
     """Do not invent a synchronous startup/connection guarantee while moving execution."""
     case = _case(tmp_path)
     original_start = case.ns["_start_hub_agent"]
@@ -149,7 +150,7 @@ def test_existing_handled_startup_error_contract_is_unchanged(tmp_path):
     def handled_start():
         """Model the existing helper recording its own error without raising to the route."""
         original_start()
-        case.ns["state"]["hub_agent_status"] = "error"
+        case.ns["state"]["hub_agent_status"] = startup_status
 
     case.ns["_start_hub_agent"] = handled_start
 
@@ -158,8 +159,10 @@ def test_existing_handled_startup_error_contract_is_unchanged(tmp_path):
         async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=case.app), base_url="http://test") as client:
             response = await client.post(REGISTER)
+            observed = await client.get("/api/hub-agent/status")
         assert response.status_code == 200 and response.json()["status"] == "restarted"
-        assert case.ns["state"]["hub_agent_status"] == "error"
+        assert observed.status_code == 200 and observed.json()["status"] == startup_status
+        assert case.ns["state"]["hub_agent_status"] == startup_status
         assert not case.ns["_inflight_issues"]
 
     asyncio.run(exercise())

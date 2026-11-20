@@ -6520,16 +6520,22 @@
             if (msg) msg.textContent = message || '';
         }
 
+        // Report whether current status was observed; a setup acknowledgement is not status.
         async function hubAgentRefresh() {
             try {
                 const r = await fetch('/api/hub-agent/status');
-                if (!r.ok) return;
+                if (!r.ok) throw new Error('Hub agent status request failed (HTTP ' + r.status + ')');
                 const d = await r.json();
+                if (!d || typeof d.status !== 'string' || !d.status) throw new Error('Invalid Hub agent status response');
                 _renderHubAgentBadge(d.status, d.message);
-            } catch (e) { console.warn('hub agent refresh failed', e); }
+                return true;
+            } catch (e) {
+                console.warn('hub agent refresh failed', e);
+                return false;
+            }
         }
 
-        // Change the badge only after local setup is acknowledged, not after a refused RPC.
+        // An acknowledged setup can still be failed, unconfigured, pending or already approved.
         async function hubAgentReregister() {
             if (!confirm('Re-register the Hub agent? This clears the stored session key and restarts zero-touch onboarding (you must re-approve ab in the Hub WebUI).')) return;
             try {
@@ -6539,7 +6545,9 @@
                     showToast(d.message || 'Hub agent re-registration was not confirmed', 'error');
                     return;
                 }
-                _renderHubAgentBadge('pending', d.message || 're-registering…');
+                if (!await hubAgentRefresh()) {
+                    showToast('Re-registration acknowledged, but current Hub agent status could not be refreshed', 'error');
+                }
             } catch (e) {
                 showToast('Hub agent re-registration failed: ' + String(e), 'error');
             }
