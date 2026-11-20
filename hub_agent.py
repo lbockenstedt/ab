@@ -373,9 +373,7 @@ class HubAgentClient:
         logging.getLogger().addHandler(_relay_handler)
         self._install_uncaught_exception_relay()
 
-        # Console spokes registry, then try to load the hub CA from the WebUI cert.
-        # Console spokes registry for credential distribution (lm console module).
-        self._console_spokes: set = set()
+        # Try to load the hub CA from the WebUI cert.
         self._bootstrap_hub_ca_from_webui_cert()
 
     # -------------------------------------------------------------- log relay
@@ -1767,11 +1765,9 @@ class HubAgentClient:
             return
 
         if cmd_type in ("CONSOLE_SET_ACCOUNTS", "CONSOLE_SET_CREDENTIALS"):
-            # Console credential accounts pushed from LM hub. Distribute to all
-            # active console spokes via request-response on their control channels.
-            accounts = data.get("accounts") or []
-            if self._console_spokes:
-                await self._distribute_console_credentials(accounts)
+            # AB is an agent, not a console spoke: the LM hub fans console
+            # accounts out to its own console spokes, so AB has nothing to do.
+            # Acknowledged here so the message is not logged as unhandled.
             return
 
         # Reply to one of our requests: resolve the waiting future.
@@ -1983,42 +1979,6 @@ class HubAgentClient:
         logger.debug("Unhandled Hub message type: %s", cmd_type)
 
     # ------------------------------------------------------------------- console
-
-    async def _distribute_console_credentials(self, accounts: list) -> None:
-        """Push console credential accounts to all connected console spokes.
-
-        Each console spoke receives a CONSOLE_SET_CREDENTIALS command via the
-        hub↔spoke control channel. The spoke uses these credentials for auto-login
-        when profiling a device via the console module.
-
-        This is a fire-and-forget broadcast: spokes that are offline or busy
-        will silently drop the message, and their subsequent console operations
-        simply won't use any credentials (fail open to profile without login).
-        """
-        logger.info("Distributing %d console accounts to %d spoke(s)", len(accounts), len(self._console_spokes))
-        # No connection: skip.
-        if not self._ws or not self.signer:
-            logger.debug("No hub connection; skipping console credential distribution")
-            return
-        # Send each console spoke the account names (passwords are not sent).
-        for spoke_id in self._console_spokes:
-            try:
-                msg = {
-                    "header": {
-                        "message_id": str(uuid.uuid4()),
-                        "timestamp": round(time.time(), 6),
-                        "sender_id": self.spoke_id,
-                        "destination_id": spoke_id,
-                    },
-                    "payload": {
-                        "type": "CONSOLE_SET_CREDENTIALS",
-                        "data": {"credentials": [{"username": u, "password": ""} for u in accounts]},
-                    },
-                }
-                await self._ws.send(encode_frame(self.signer, msg))
-                logger.debug("Sent CONSOLE_SET_CREDENTIALS to %s", spoke_id)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Failed to send CONSOLE_SET_CREDENTIALS to %s: %s", spoke_id, e)
 
     def send_console_accounts(self, accounts: list) -> None:
         """Fire-and-forget: relay the operator's console account selection up to
