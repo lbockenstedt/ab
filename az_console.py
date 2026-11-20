@@ -140,7 +140,9 @@ _SHELL_EXPANSION_CHARS = ["$", "<"]
 # Unquoted, bash brace-expands '{a,b}' after this check has seen the token
 # (`journalctl --{vacuum-size=1K,}` becomes `--vacuum-size=1K --`), and '#'
 # starts a comment that hides the rest of the line from bash but not from shlex.
-_SHELL_UNQUOTED_CHARS = "{}#"
+# '(' and ')' open a subshell, arithmetic or a function body: `ls () (id); ls`
+# redefines an allowlisted name as a function that runs any command.
+_SHELL_UNQUOTED_CHARS = "{}#()"
 # A program given by path must be a system binary, not a same-named file
 # elsewhere (`./cat`, `/tmp/x/cat`).
 _SYSTEM_BIN_DIRS = {"/bin", "/usr/bin", "/sbin", "/usr/sbin"}
@@ -862,7 +864,8 @@ def vet_shell_command(cmd, allow_mutation=False):
     for ch in _SHELL_UNQUOTED_CHARS:
         if ch in _unquoted_chars(cmd):
             return False, (f"unquoted '{ch}' changes what bash runs after this check "
-                           f"(brace expansion or a comment); quote it")
+                           f"(brace expansion, a comment, a subshell or a function "
+                           f"definition); quote it")
     # Refuse unquoted globs except plain paths under the open log roots.
     for word in _glob_words(cmd):
         if not _glob_word_ok(word):

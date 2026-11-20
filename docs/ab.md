@@ -194,8 +194,9 @@ an explicitly empty value still clears it.
   the command runs as root through `az vm run-command`, so `az_console.vet_shell_command`
   refuses anything it cannot prove is read-only and secret-free:
   - **Shell syntax:** no redirects, `$` (variables, `$(...)`, `$'...'`), `<`, backticks,
-    `&`, newlines, or unquoted `{`, `}` and `#` (bash brace expansion and comments run
-    something other than what was checked). A program given by path must be in
+    `&`, newlines, or unquoted `{`, `}`, `#`, `(` and `)` (bash brace expansion,
+    comments, subshells and function definitions such as `ls () (id); ls` run
+    something other than what was checked; quote them, as in `grep -E '(a)'`). A program given by path must be in
     `/bin`, `/usr/bin`, `/sbin` or `/usr/sbin`.
   - **Programs and options:** each pipeline segment starts with an allowlisted program,
     and the options of those that can write, run a command or read another file are
