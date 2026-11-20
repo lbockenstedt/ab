@@ -97,7 +97,7 @@ _SHELL_READ_BINARIES = {
     "systemctl", "journalctl", "service", "cat", "tail", "head", "grep", "egrep",
     "ls", "stat", "ps", "top", "df", "du", "free", "uptime", "uname", "hostname",
     "date", "whoami", "id", "env", "printenv", "ss", "netstat", "ip", "curl",
-    "wget", "ping", "dig", "nslookup", "docker", "echo", "which",
+    "ping", "dig", "nslookup", "docker", "echo", "which",
     "find", "wc", "sort", "uniq", "true", "test", "pgrep",
 }
 # Binaries that are general-purpose interpreters: being on the "read-only" list
@@ -242,9 +242,13 @@ _GLOB_WORD_RE = re.compile(r"[A-Za-z0-9_./*?\[\]-]+")
 
 
 def _glob_word_ok(word):
-    """True if an unquoted glob word is a quote-free path under an open root."""
+    """True if an unquoted glob word is a quote-free path under an open root.
+    A glob component starting with '.' is refused: before bash 5.2
+    (globskipdots) `.?`, `.*` and `.[.]` all match `..` and climb out."""
+    parts = word.split("/")
     return (bool(_GLOB_WORD_RE.fullmatch(word)) and word.startswith(_OPEN_READ_ROOTS)
-            and ".." not in word.split("/"))
+            and ".." not in parts
+            and not any(p.startswith(".") and any(c in p for c in "*?[") for p in parts))
 
 
 def _secret_component(part):
@@ -335,7 +339,7 @@ def _refuse_opt(binary, tok, what):
 _NUM_RE = re.compile(r"\d+(\.\d+)?")
 
 # ── per-binary vetters: each takes (binary, args) and returns (ok, reason) ──
-# Loopback only, in a form curl and wget parse the same way this regex does: no
+# Loopback only, in a form curl parses the same way this regex does: no
 # userinfo, fragment or backslash that could move the real host elsewhere.
 _FETCH_URL_RE = re.compile(
     r"(?:https?://)?(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(?::\d{1,5})?"
@@ -343,7 +347,7 @@ _FETCH_URL_RE = re.compile(
 
 
 def _fetch_target_ok(tok):
-    """True if a curl/wget URL argument points at loopback. Anything else can
+    """True if a curl URL argument points at loopback. Anything else can
     exfiltrate to an attacker or reach the instance-metadata endpoint."""
     return bool(_FETCH_URL_RE.fullmatch(tok))
 
@@ -390,38 +394,6 @@ def _vet_curl(binary, args):
         else:
             targets.append(t)
         i += 1
-    return _vet_fetch_targets(binary, targets)
-
-
-_WGET_FLAGS = {"-q", "--quiet", "-S", "--server-response", "--spider",
-               "--no-check-certificate", "-nv", "--no-verbose"}
-
-
-def _vet_wget(binary, args):
-    """wget: allowlisted flags only, loopback URLs only, and the body must go
-    to stdout (-O -) or nowhere (--spider) rather than into a file."""
-    targets, to_stdout, i = [], False, 0
-    while i < len(args):
-        t = args[i]
-        if t in _WGET_FLAGS:
-            to_stdout |= t == "--spider"
-        elif t in ("-O-", "-qO-", "--output-document=-"):
-            to_stdout = True
-        elif t in ("-O", "-qO") and i + 1 < len(args) and args[i + 1] == "-":
-            to_stdout, i = True, i + 1
-        elif t in ("-T", "-t") and i + 1 < len(args) and _NUM_RE.fullmatch(args[i + 1]):
-            i += 1
-        elif re.fullmatch(r"--(timeout|tries)=\d+(\.\d+)?", t):
-            pass
-        elif t.startswith("-"):
-            return _refuse_opt(binary, t, "is not allowed in read-only mode (allowed: "
-                               "-q -S -nv --spider --no-check-certificate, -O -, -T/-t N)")
-        else:
-            targets.append(t)
-        i += 1
-    if not to_stdout:
-        return False, (f"{binary} would save a file; use `-O -` (print) or --spider "
-                       f"in read-only mode")
     return _vet_fetch_targets(binary, targets)
 
 
@@ -737,11 +709,37 @@ def _vet_dig(binary, args):
     return True, ""
 
 
+# ping runs as root, which may flood (-f), set any interval (-i 0), send
+# adaptively (-A), preload (-l) or send 64 KB packets, so options are an
+# allowlist: flags, and value options with an upper bound.
+_PING_FLAGS = set("46nqvDO")
+_PING_LIMITS = {"c": 100, "W": 30, "w": 300, "s": 1472, "t": 255}
+
+
 def _vet_ping(binary, args):
-    """ping: refuse -f, a root-only flood."""
-    for t in args:
-        if "f" in _short_cluster(t):
-            return _refuse_opt(binary, t, "floods the target")
+    """ping: allowlisted flags and bounded -c/-W/-w/-s/-t values only."""
+    i = 0
+    while i < len(args):
+        t = args[i]
+        i += 1
+        if not t.startswith("-") or t == "-":
+            continue
+        # Walk a short cluster: flags until a value letter, whose value is the
+        # rest of the token or the next token (`-c3`, `-nc 3`).
+        for j, c in enumerate(t[1:], 1):
+            if c in _PING_FLAGS:
+                continue
+            if c not in _PING_LIMITS:
+                return _refuse_opt(binary, t, "is not allowed in read-only mode (allowed: "
+                                   "-4 -6 -n -q -v -D -O, -c N<=100, -W N<=30, "
+                                   "-w N<=300, -s N<=1472, -t N<=255)")
+            val = t[j + 1:]
+            if not val:
+                val = args[i] if i < len(args) else ""
+                i += 1
+            if not val.isdigit() or int(val) > _PING_LIMITS[c]:
+                return _refuse_opt(binary, t, f"-{c} needs a number up to {_PING_LIMITS[c]}")
+            break
     return True, ""
 
 
@@ -758,7 +756,7 @@ def _vet_find(binary, args):
 # top, netstat, nslookup, cat, head, tail) have no option that writes, runs a
 # command or reads a file; cat/head/tail paths are checked by _vet_read_operands.
 _BINARY_VETTERS = {
-    "find": _vet_find, "curl": _vet_curl, "wget": _vet_wget,
+    "find": _vet_find, "curl": _vet_curl,
     "docker": _vet_container, "env": _vet_env,
     "systemctl": _vet_systemctl, "service": _vet_service,
     "journalctl": _vet_journalctl, "sort": _vet_sort, "uniq": _vet_uniq,

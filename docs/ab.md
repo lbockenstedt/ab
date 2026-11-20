@@ -199,8 +199,9 @@ an explicitly empty value still clears it.
     `/bin`, `/usr/bin`, `/sbin` or `/usr/sbin`.
   - **Programs and options:** each pipeline segment starts with an allowlisted program,
     and the options of those that can write, run a command or read another file are
-    checked: curl and wget (loopback URLs only, a short option allowlist, wget output to
-    stdout), systemctl (read verbs and an option allowlist), `service <name> status`,
+    checked: curl (loopback URLs only, a short option allowlist; wget is refused, since
+    it writes an HSTS cache to `~/.wget-hsts` after an HTTPS reply), systemctl (read
+    verbs and an option allowlist), `service <name> status`,
     docker (ps, images, logs, stats … — not `inspect`, which prints container
     environments, and `top` only with a container name; podman is refused, since it
     takes global options such as `--url`, `--out` or `--cpu-profile` after the
@@ -208,10 +209,13 @@ an explicitly empty value still clears it.
     (show/list/get), date, hostname and env (print only), sort, uniq (one input file, no
     `--` and no glob: a second file is written), journalctl, ss, ps (no BSD `e`, which prints process
     environments; a dash cluster with `e` must be `-e` plus value-free letters such as
-    `-ef` or `-eo`), dig (no `-f`/`-k`, even glued as `-4f`), ping, find, du and wc.
+    `-ef` or `-eo`), dig (no `-f`/`-k`, even glued as `-4f`), ping (only `-4 -6 -n -q -v
+    -D -O`, `-c` up to 100, `-W` up to 30, `-w` up to 300, `-s` up to 1472 and `-t` up
+    to 255; no `-f`, `-i`, `-A` or `-l`), find, du and wc.
   - **Globs:** an unquoted `*`, `?` or `[` is allowed only in a plain path under `/var/log`
     or the systemd unit directories, so bash cannot expand it into an option
-    (`find / -*` matching a file named `-delete`) or a file elsewhere.
+    (`find / -*` matching a file named `-delete`) or a file elsewhere. A glob component
+    starting with `.` is refused too: before bash 5.2, `.?`, `.*` and `.[.]` match `..`.
   - **Files read (cat, head, tail, grep, sort, uniq):** absolute paths only, no `..`.
     Anything under `/var/log` and the systemd unit directories, including globs and
     recursive grep. Otherwise named files only: host-info files in `/etc` and `/proc`,

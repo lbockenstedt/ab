@@ -195,6 +195,27 @@ READ_ONLY_HOLES = [
     ("uniq glob to two logs", "uniq /var/log/[ak][ue][tr][hn].log"),
     ("uniq glob to two units", "uniq /usr/lib/systemd/system/[as]sh.service"),
     ("uniq glob after flag", "uniq -c /var/log/syslog*"),
+    # Before bash 5.2 (Ubuntu 22.04 has 5.1) a dot-leading glob matches `..`,
+    # so it climbs out of the open root.
+    ("dot glob climbs", "cat /var/log/.?/.?/etc/shadow"),
+    ("dot star climbs", "cat /var/log/.*/.*/etc/shadow"),
+    ("dot bracket climbs", "cat /var/log/.[.]/.[.]/etc/ab/.env"),
+    ("dot glob under units", "head -n 50 /usr/lib/systemd/.?/.?/.?/opt/lm/.env"),
+    ("dot glob recursive grep", "grep -r PASS /var/log/.?/.?/opt/lm"),
+    ("dot glob lists keys", "ls /var/log/.?/.?/root/.ssh"),
+    # wget saves its HSTS cache to ~/.wget-hsts after an HTTPS reply; curl
+    # covers the same loopback reads without writing anything.
+    ("wget https hsts write", "wget -qO- --no-check-certificate https://127.0.0.1/api/hub/health"),
+    ("wget read-only form", "wget -qO- http://127.0.0.1/health"),
+    # ping as root: no interval, adaptive or oversized payload floods.
+    ("ping zero interval", "ping -i 0 -s 65000 10.0.0.1"),
+    ("ping glued interval", "ping -i0 10.0.0.1"),
+    ("ping adaptive", "ping -A 10.0.0.1"),
+    ("ping big payload", "ping -s 65000 10.0.0.1"),
+    ("ping preload", "ping -l 100 10.0.0.1"),
+    ("ping flood in cluster", "ping -nf 10.0.0.1"),
+    ("ping huge count", "ping -c 100000 10.0.0.1"),
+    ("ping long option", "ping --flood 10.0.0.1"),
 ]
 
 # Real diagnostics the console must keep supporting.
@@ -262,7 +283,10 @@ LEGITIMATE = [
     "docker top ab",
     "curl -sS -m 10 http://127.0.0.1:8000/health",
     "curl -skI https://localhost/",
-    "wget -qO- http://127.0.0.1/health",
+    "ping -c 3 10.0.0.1",
+    "ping -c3 -W 2 appbuilder.ext.orange-tme.com",
+    "ping -nq -c 5 -s 1400 10.0.0.1",
+    "ping -4 -w 10 10.0.0.1",
     "env -0",
     "du --max-depth=1 -h /var/log",
     "uniq -c /var/log/syslog",
