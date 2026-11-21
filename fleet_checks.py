@@ -63,6 +63,11 @@ _JS_VAULT_TOKENS = ("vaultPicker", "vault_credential", "vaultSecret", "vaultRequ
 # --- Other rules -----------------------------------------------------------
 _STORAGE_HARD = re.compile(r"^\s*(?:import|from)\s+(sqlite3|shelve|dbm|sqlalchemy|peewee|tinydb)\b")
 _STORAGE_SOFT = re.compile(r"^\s*(?:import|from)\s+(yaml|ruamel|csv|lxml|xml)\b")
+# Reading another tool's SQLite file (the fleet AI spend gate reads Copilot
+# CLI's usage log) stores nothing, so rule 4.1 allows it. It needs both the
+# marker on the import line and a read-only open (mode=ro) in the same change.
+_READ_ONLY_MARK = re.compile(r"#\s*read-only\b", re.I)
+_SQLITE_RO = re.compile(r"mode=ro\b")
 _HARDCODE = re.compile(r"orange-tme\.com|\b172\.21\.\d{1,3}\.\d{1,3}\b", re.I)
 _CODE_EXT = (".py", ".js", ".html", ".sh", ".ps1", ".json", ".j2")
 _NPM_FILES = re.compile(r"(^|/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$")
@@ -187,17 +192,31 @@ def check_vault_secrets(files, repo_full_name="", vault_repos=("lm",)):
 
 
 def check_storage_format(files):
-    """JSON (or variants) only: no SQLite/ORM; YAML/CSV/XML need a reason."""
+    """JSON (or variants) only: no SQLite/ORM; YAML/CSV/XML need a reason.
+
+    A sqlite3 import marked ``# read-only`` in a file that opens the database
+    with ``mode=ro`` reads another tool's data, so it is a warning: CI passes
+    with a note for reviewers, and AB still may not add one on its own."""
     out = []
     for f in _live(files):
         if not f.filename.endswith(".py") or _TEST_RE.search(f.filename):
             continue
-        for ln in _added(getattr(f, "patch", None)):
+        added = _added(getattr(f, "patch", None))
+        opens_read_only = any(_SQLITE_RO.search(ln) for ln in added)
+        for ln in added:
             m = _STORAGE_HARD.match(ln)
+            if m and m.group(1) == "sqlite3" and opens_read_only and _READ_ONLY_MARK.search(ln):
+                out.append(_f("warning", "Read-only SQLite in `%s`" % f.filename,
+                              "`%s` reads another tool's SQLite database (import marked "
+                              "read-only, opened with mode=ro). Check it writes nothing: "
+                              "fleet state stays in JSON files (rule 4.1)." % f.filename))
+                continue
             if m:
                 out.append(_f("error", "Database storage in `%s`" % f.filename,
                               "`%s` imports %s. Fleet storage is plain JSON files only — "
-                              "no SQLite or ORM." % (f.filename, m.group(1))))
+                              "no SQLite or ORM. Reading another tool's SQLite file is "
+                              "allowed when the import is marked `# read-only` and the "
+                              "file opens it with `mode=ro`." % (f.filename, m.group(1))))
                 continue
             m = _STORAGE_SOFT.match(ln)
             if m:
