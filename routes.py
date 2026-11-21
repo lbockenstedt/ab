@@ -13,6 +13,7 @@ from app_state import (ReviewPersistenceError, activity_feed_items, mark_pr_appr
 from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
 from fix_engine import _claim_issues, _release_issues
+import ai_spend
 import mission_control
 from fastapi import APIRouter
 
@@ -3824,6 +3825,8 @@ async def save_settings(request: Request):
     config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
     # Chat tools on or off.
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
+    # Daily AI spend gate on or off (fleet rule 1.10).
+    config_data["AI_SPEND_GATE"] = data.get("AI_SPEND_GATE") == "on"
     # Azure fleet access (chat tools + the Azure VM health check) and its mutation gate.
     config_data["CHAT_AZURE_ENABLED"] = data.get("CHAT_AZURE_ENABLED") == "on"
     config_data["CHAT_AZURE_ALLOW_MUTATION"] = data.get("CHAT_AZURE_ALLOW_MUTATION") == "on"
@@ -4966,6 +4969,20 @@ async def scan_now():
     return {"status": "triggered", "message": "Manual scan requested; an active cycle continues without duplication."}
 
 
+@router.get("/ai_spend")
+async def get_ai_spend():
+    """Today's estimated paid AI spend and the daily gate (fleet rule 1.10)."""
+    return await asyncio.to_thread(ai_spend.status)
+
+
+@router.post("/ai_spend/continue")
+async def continue_ai_spend():
+    """A person reopens the daily AI spend gate for step_usd more, today only."""
+    gate, spent = await asyncio.to_thread(ai_spend.reopen)
+    return {"status": "ok", "gate_usd": round(gate, 2), "spent_usd": round(spent, 2),
+            "message": "AI spend gate open until $%.0f today ($%.0f used)." % (gate, spent)}
+
+
 @router.post("/retry_issue")
 async def retry_issue(request: Request):
     """Retry the fix for one issue in the background."""
@@ -5456,6 +5473,8 @@ __all__ = [
     'resolve_issue',
     'update_now',
     'clear_credit_cooldown',
+    'get_ai_spend',
+    'continue_ai_spend',
     'trigger_fix',
     'scan_now',
     'retry_issue',

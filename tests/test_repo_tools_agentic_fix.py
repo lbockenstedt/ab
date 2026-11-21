@@ -180,6 +180,11 @@ def _load_llm_ns():
         "config_store": type("FakeConfigStore", (), {"LLM_PERF_FILE": "local-test"})(),
         "load_config": lambda: {},
         "repo_tools": repo_tools,
+        # The daily spend gate stays open here; tests/test_ai_spend.py covers it.
+        "ai_spend": type("OpenSpendGate", (), {
+            "GateClosed": type("GateClosed", (Exception,), {}),
+            "closed": staticmethod(lambda config: False),
+        })(),
     }
     exec("\n\n".join(segs), ns)
     ns["_test_calls"] = calls

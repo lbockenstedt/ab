@@ -138,6 +138,52 @@ AB's token, and the repo name comes from the model, which text injected into the
 chat context can steer. The dashboard's manual Fix trigger is an operator action
 and is unchanged.
 
+## Daily AI spend gate
+
+A runaway stop, not a budget (fleet rule 1.10). Once today's estimated spend on
+paid models reaches the fleet's gate (`gate_usd` in `.github/ai-budget.json`,
+default $100), AppBuilder stops offering paid models until local midnight or
+until a person clicks **Continue**. Work that needs one waits; nothing is lost.
+The Copilot CLI hook in `lm` (`.github/hooks/ai_budget.py`) reads the same file
+and keeps its own count, so a workstation's sessions and AppBuilder each get the
+full gate.
+
+- **What counts.** Every successful call through `llm_client` to a model that is
+  not self-hosted (Ollama, LM Studio) and not cost tier `free` in
+  `model_registry` (for example OpenRouter `:free` models). Free and self-hosted
+  models are never gated.
+- **The estimate.** The reply's token counts times that model's prices in
+  `.github/ai-budget.json` (USD per 1M tokens; cached input at the
+  `cache_read` rate). A model the table does not list is charged the dearest
+  listed price, and $7 input, $0.70 cached, $35 output while AppBuilder has no
+  table. A reply with no token counts is counted at about 4 characters a token.
+  The estimate errs high, so the gate closes early rather than late.
+- **When it closes.** One WARNING, "AI spend gate closed: ...". WARNING, not
+  ERROR, so the self-log scan does not file it as a bug. Paid models become
+  unavailable with reason `spend_gate`, a timed cooldown in
+  `llm_client.TIMED_UNAVAILABLE` like a credit cooldown, so free models keep
+  working. A call that finds the gate closed fails over to the next model
+  without tripping a breaker. The scan loop skips fixes while every model waits
+  ("All LLM providers are in cooldown") and retries on the next cycle; a
+  consolidated rework is deferred, uncounted.
+- **Continue.** With the gate on, the topbar shows `AI $spent/$gate` (on wide
+  screens only, while the gate is open), re-read every 30 seconds. Once the gate
+  closes, the pill turns amber and shows a **Continue** button. Continue (`POST /ai_spend/continue`)
+  opens the gate for `step_usd` (default $100) more than today's spend, or than
+  today's gate if that is higher, for today only, and logs it at INFO.
+  `GET /ai_spend` returns today's `spent_usd`, `gate_usd`, `left_usd`, `open`,
+  `calls`, `step_usd`, `day` and `enabled`.
+- **The day and restarts.** The day is the local calendar day. Today's spend and
+  any reopened gate are kept in `ai_spend.json` beside `config.json`
+  (`/etc/ab/ai_spend.json`), so a restart keeps them; a new day starts at zero
+  with the fleet's gate.
+- **Off switch.** **Settings → LLM Configuration → Daily AI spend gate**
+  (`AI_SPEND_GATE`, default on). Turning it off stops the gate, not the count.
+- **Fails open.** If the gate check itself breaks, it is logged at ERROR with the
+  traceback and calls go ahead.
+- **Not counted yet.** The Simulation Build Assistant's Copilot CLI sessions
+  (`sim_session.py`) bypass `llm_client`.
+
 ## Key commands / handlers
 
 - **Closed-issue recurrence:** a failed GitHub reopen is reported as failure and remains retryable; no recurrence comment is posted.
@@ -169,7 +215,7 @@ and is unchanged.
 
 ## Key files
 
-`main.py` (FastAPI app — poller, LLM orchestration, git workflow, triage), `hub_agent.py` (self-contained `HubAgentClient` + `MessageSigner` reimplementing lm-core's HMAC-SHA256 scheme; daemon-thread asyncio loop), `dedup.py` (pure stdlib duplicate-issue detection, `test_dedup.py`), `watchdog.py` (health-gate + auto-update rollback), `install.sh`/`setup.sh`/`update.sh`/`install_github.sh`, `templates/index.html`, `config.json.example`, `.env.example`, `requirements.txt`, `Dockerfile`, `VERSION` (static display string, pinned by hand; change detection keys off the git commit hash, not this file).
+`main.py` (FastAPI app — poller, LLM orchestration, git workflow, triage), `hub_agent.py` (self-contained `HubAgentClient` + `MessageSigner` reimplementing lm-core's HMAC-SHA256 scheme; daemon-thread asyncio loop), `dedup.py` (pure stdlib duplicate-issue detection, `test_dedup.py`), `ai_spend.py` (the daily AI spend gate; see *Daily AI spend gate*), `watchdog.py` (health-gate + auto-update rollback), `install.sh`/`setup.sh`/`update.sh`/`install_github.sh`, `templates/index.html`, `config.json.example`, `.env.example`, `requirements.txt`, `Dockerfile`, `VERSION` (static display string, pinned by hand; change detection keys off the git commit hash, not this file).
 
 ## Authentication & multi-user
 

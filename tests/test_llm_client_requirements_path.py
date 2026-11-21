@@ -38,7 +38,7 @@ def _load_ns():
         # see _entry_is_unhealthy's docstring in llm_client.py)
         "_record_llm_failure", "_record_llm_success", "_entry_is_unhealthy",
         "_is_unsupported_model_error", "_min_capability_rank", "_apply_capability_floor",
-        "_diag_reqs", "llm_diag",
+        "_diag_reqs", "llm_diag", "is_llm_cooldown_error",
     }
     want_assign = {
         "_ALL_SLOTS", "_CODE_SLOTS", "_LOG_SLOTS", "_REVIEW_SLOTS", "_TOOL_400_MARKERS",
@@ -75,6 +75,21 @@ def _load_ns():
     class LlmHumanEscalationNeeded(Exception):
         pass
 
+    class _FakeSpendGate:
+        """ai_spend stand-in (importing it imports main): open unless a test sets is_closed."""
+        GateClosed = type("GateClosed", (Exception,), {})
+        is_closed = False
+
+        def closed(self, _config):
+            """Whether the test closed the gate."""
+            return self.is_closed
+
+        @staticmethod
+        def metered(provider, model, config):
+            """ai_spend.metered: paid unless self-hosted or cost tier "free"."""
+            return (not model_registry.is_local_provider(provider)
+                    and model_registry.resolve(provider, model, config).get("cost_tier") != "free")
+
     calls = {"provider_calls": [], "raise_exc": None, "usage": {}}
 
     def _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream, task_id,
@@ -103,6 +118,7 @@ def _load_ns():
         })(),
         "config_store": type("FakeConfigStore", (), {"LLM_PERF_FILE": "/dev/null"})(),
         "load_config": lambda: {},
+        "ai_spend": _FakeSpendGate(),
     }
     exec("\n\n".join(segs), ns)
     ns["_test_calls"] = calls
@@ -208,6 +224,45 @@ def test_failed_cloud_attempt_does_not_retry_on_local():
         ns["_call_llm_with_requirements"](model_selection.LlmRequirements(complexity="trivial"),
                                          "hi", "sys", None, None, None, None, cfg)
     assert [c[0] for c in ns["_test_calls"]["provider_calls"]] == ["anthropic"]
+
+
+PAID = ("anthropic", "claude-sonnet-5")
+FREE = ("openrouter", "qwen/qwen3-coder:free")
+
+
+def test_closed_spend_gate_parks_paid_models_and_keeps_free_ones():
+    """Fleet rule 1.10: a closed AI spend gate parks paid models only, and the call uses the free one."""
+    ns = _load_ns()
+    ns["ai_spend"].is_closed = True
+    cfg = {"llm_entries": [_entry("paid", *PAID), _entry("free", *FREE)]}
+    reasons = {c["model"]: c["unavailable_reason"] for c in ns["_enumerate_candidates"](cfg)}
+    assert reasons == {PAID[1]: "spend_gate", FREE[1]: None}
+    ns["_call_llm_with_requirements"](model_selection.LlmRequirements(), "hi", "sys", None, None, None, None, cfg)
+    assert [c[0] for c in ns["_test_calls"]["provider_calls"]] == ["openrouter"]
+
+
+def test_closed_spend_gate_with_only_paid_models_waits_like_a_cooldown():
+    """With only paid models behind a closed gate nothing is sent, and callers see a cooldown and defer."""
+    ns = _load_ns()
+    ns["ai_spend"].is_closed = True
+    cfg = {"llm_entries": [_entry("paid", *PAID)]}
+    with pytest.raises(Exception, match="providers cooling down") as exc:
+        ns["_call_llm_with_requirements"](model_selection.LlmRequirements(), "hi", "sys", None, None, None, None, cfg)
+    assert ns["is_llm_cooldown_error"](exc.value)
+    assert not ns["_test_calls"]["provider_calls"]
+
+
+def test_gate_closing_mid_chain_fails_over_without_tripping_a_breaker():
+    """A call refused by a gate that closed after selection fails over, and no breaker trips,
+    so a person's Continue takes effect at once."""
+    ns = _load_ns()
+    cfg = {"llm_entries": [_entry("paid", *PAID), _entry("free", *FREE)]}
+    gate_closed = ns["ai_spend"].GateClosed
+    ns["_test_calls"]["raise_exc"] = lambda p, _m: gate_closed("spend_gate: closed") if p == PAID[0] else None
+    paid = next(c for c in ns["_enumerate_candidates"](cfg) if c["provider"] == PAID[0])
+    assert ns["_try_candidate"](paid, [{"role": "user", "content": "hi"}], None, False, None, cfg) == (None, "spend_gate")
+    assert not ns["_ENDPOINT_CREDIT_CB"] and not ns["_MODEL_RATE_CB"]
+    assert all(c["available"] for c in ns["_enumerate_candidates"](cfg))
 
 
 def main():
