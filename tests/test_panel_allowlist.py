@@ -25,7 +25,7 @@ _PANEL_NAMES = {
 }
 _PANEL_ASSIGNS = {
     "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN", "DEFAULT_PANEL_ALLOWLIST",
-    "_REVIEWER_RETRY_NOTE", "_LOCAL_PROVIDERS", "SKIP_CONFIDENCE_THRESHOLD",
+    "_REVIEWER_RETRY_NOTE", "SKIP_CONFIDENCE_THRESHOLD",
 }
 
 
@@ -192,17 +192,28 @@ def test_local_candidates_are_never_auto_backfilled():
     assert all(c["provider"] not in ("ollama", "ollama2") for c in panel)
 
 
-def test_local_candidate_is_selectable_when_explicitly_allowlisted():
+@pytest.mark.parametrize("provider", ["ollama", "ollama2", "ollama-local", "lmstudio"])
+def test_local_candidate_is_selectable_when_explicitly_allowlisted(provider):
     # An operator who explicitly allowlists a local model gets it seated like
     # any other candidate -- the policy blocks auto-backfill, not opt-in use.
     cands = [
         _cand("copilot", "claude-opus-5", tier="frontier"),
-        _cand("ollama", "qwen-something"),
+        _cand(provider, "qwen-something"),
     ]
     ns = _engine(cands)
     panel = ns["_select_review_panel"](
         {"pr_review_panel_allowlist": ["claude-opus-5*", "qwen-something"]}, builder_n=0)
     assert set(_models(panel)) == {"claude-opus-5", "qwen-something"}
+
+
+@pytest.mark.parametrize("config", [{}, {"pr_review_panel_allowlist": []},
+                                    {"pr_review_panel_allowlist": ["*"]}])
+def test_panel_does_not_infer_local_opt_in_from_model_patterns(config):
+    """Default, disabled and wildcard policies do not explicitly select local seats."""
+    cloud = _cand("claude_cli", "claude-opus-6", tier="frontier")
+    local = _cand("ollama-local", "claude-opus-5-lookalike", tier="free", max_complexity="medium")
+    panel = _engine([local, cloud])["_select_review_panel"](config)
+    assert panel == [cloud]
 
 
 def test_local_backfill_does_not_run_when_frontier_alone_reaches_minimum():

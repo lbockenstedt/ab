@@ -12,6 +12,7 @@ merge_pr is extracted by source with ast (importing pr_actions boots the live
 app) and run against stubs.
 """
 import ast
+from types import SimpleNamespace
 
 
 class GithubException(Exception):
@@ -23,9 +24,10 @@ class GithubException(Exception):
 class _PR:
     def __init__(self, error, merged_after=False):
         self.merged, self.state = False, "open"
+        self.head = SimpleNamespace(sha="reviewed")
         self._error, self._merged_after = error, merged_after
 
-    def merge(self):
+    def merge(self, *, sha):
         raise self._error
 
     def update(self):
@@ -65,7 +67,8 @@ def _merge_pr():
                 getattr(t, "id", "") == "_TRANSIENT_MERGE_REFUSALS" for t in n.targets))]
     updates = []
     ns = {"GithubException": GithubException, "logger": _Logger(),
-          "state": {"pr_reviews": {"o/r#5": {"approved": True}}},
+          "pr_approval_snapshot": lambda *a: {"head": "reviewed", "approved": True},
+          "mark_pr_approved": lambda *a, **k: True,
           "update_pr_review": lambda *a, **k: updates.append(k),
           "_release_parked_checks": lambda *a: 0, "_github_token": lambda: ""}
     exec(compile(ast.Module(body=body, type_ignores=[]), "pr_actions.py", "exec"), ns)

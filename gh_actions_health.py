@@ -10,8 +10,8 @@ This module tells an outage apart from a real failure and holds AppBuilder's
 commit work behind a growing backoff instead:
 
 * ``outage(config)`` -- True while Actions looks down. Two signals, either one is
-  enough: githubstatus.com reports the Actions component as degraded, or our own
-  runs recently started with zero jobs (``note_infra_failure``).
+  enough: githubstatus.com reports the Actions component as degraded, or several
+  distinct runs of ours recently failed with zero jobs (``note_infra_failure``).
 * Backoff starts at ``gh_backoff_start_min`` and doubles on every check that still
   sees the outage, up to ``gh_backoff_max_min``. It resets on recovery.
 * ``infra_failed_runs`` / ``rerun_infra_failed`` find and re-run the runs that
@@ -38,13 +38,14 @@ _STATUS_URL = "https://www.githubstatus.com/api/v2/components.json"
 _STATUS_TTL_S = 120          # how long a status-page answer is reused
 _SYMPTOM_WINDOW_S = 900      # zero-job failures newer than this count as a signal
 _SYMPTOM_MIN = 2             # ...and it takes this many to call it an outage
+_SEEN_TTL_S = 86400          # a run already counted is not counted again for a day
 
 _lock = threading.Lock()
 _state = {
     "status_at": 0.0,        # when the status page was last read
     "status_down": False,    # what it said
     "status_text": "",
-    "symptoms": [],          # timestamps of zero-job failed runs we saw
+    "symptoms": {},          # (repo, run id) -> when that zero-job run was first seen
     "backoff_until": 0.0,    # no commit work before this time
     "backoff_s": 0.0,        # current backoff step (0 = not backing off)
     "reason": "",
@@ -85,23 +86,32 @@ def _status_page_down():
     return down, text
 
 
-def note_infra_failure(count=1):
-    """Record that we just saw ``count`` workflow run(s) fail without any job."""
-    # Keep only recent sightings.
+def note_infra_failure(repo_name, run_ids):
+    """Record zero-job failed workflow runs, counting each (repo, run id) once.
+
+    A stuck run is seen again on every poll of its PR or merge. Counting each
+    sighting let one run that can never start -- a workflow YAML error also
+    fails with zero jobs, and it is not an outage -- reach ``_SYMPTOM_MIN`` on
+    the second poll and hold all of AppBuilder's commit work. A run keeps its
+    first-seen time, so it counts toward the outage only inside the window
+    after it was first seen.
+    """
+    # Forget runs first seen over a day ago, then add only the new ones.
     now = time.time()
+    repo = str(repo_name or "").lower()
     with _lock:
-        recent = [t for t in _state["symptoms"] if now - t < _SYMPTOM_WINDOW_S]
-        recent.extend([now] * max(0, int(count)))
-        _state["symptoms"] = recent
+        seen = {k: t for k, t in _state["symptoms"].items() if now - t < _SEEN_TTL_S}
+        for run_id in run_ids or ():
+            seen.setdefault((repo, str(run_id)), now)
+        _state["symptoms"] = seen
 
 
 def _symptom_down():
-    """True when enough zero-job failures were seen recently."""
-    # Count sightings inside the window.
+    """True when enough distinct zero-job failed runs were first seen recently."""
+    # Count runs first seen inside the window.
     now = time.time()
     with _lock:
-        recent = [t for t in _state["symptoms"] if now - t < _SYMPTOM_WINDOW_S]
-        _state["symptoms"] = recent
+        recent = [t for t in _state["symptoms"].values() if now - t < _SYMPTOM_WINDOW_S]
         return len(recent) >= _SYMPTOM_MIN
 
 

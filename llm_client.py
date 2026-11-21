@@ -31,6 +31,7 @@ import requests
 
 import main  # lazy access to the shared app_state dict via main.state
 from main import logger, load_config
+import ai_spend
 import claude_cli_native_tools
 import config_store
 import llm_perf
@@ -361,11 +362,11 @@ def _record_provider_result(n, status, reason=""):
 
 
 def _find_claude_cli_slot(config):
-    """Return the provider slot number (1-4) configured as claude_cli, or None."""
+    """Return the first usable claude_cli slot (1-4), or None."""
     # Check slots 1-4.
     for n in (1, 2, 3, 4):
-        provider, _, _, _ = _get_provider_config(n, config)
-        if provider == "claude_cli":
+        provider, key, model, _ = _get_provider_config(n, config)
+        if provider == "claude_cli" and _provider_configured(provider, key, model):
             return n
     return None
 
@@ -1093,6 +1094,8 @@ def _any_provider_available(config):
                 rem = _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(cand["provider"], cand["base_url"]))
             elif reason == "rate_limited":
                 rem = _cb_remaining(_MODEL_RATE_CB, cand["key"])
+            elif reason == "spend_gate":
+                rem = ai_spend.seconds_left_today()
             else:
                 rem = 0.0  # dead_model / unknown: not a timed recovery
             if rem > 0:
@@ -1734,6 +1737,10 @@ def _usage_from_openai_json(data, usage_out):
         in_tok = usage.get("prompt_tokens")
         if out_tok is not None or in_tok is not None:
             usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
+            # Cached input is part of prompt_tokens; the spend gate prices it lower.
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+            if cached:
+                usage_out["cached_input_tokens"] = cached
     except Exception:  # noqa: BLE001 — telemetry is never fatal
         pass
 
@@ -2453,6 +2460,10 @@ def _usage_from_responses_json(data, usage_out):
         in_tok = usage.get("input_tokens")
         if out_tok is not None or in_tok is not None:
             usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
+            # Cached input is part of input_tokens; the spend gate prices it lower.
+            cached = (usage.get("input_tokens_details") or {}).get("cached_tokens")
+            if cached:
+                usage_out["cached_input_tokens"] = cached
     except Exception:  # noqa: BLE001 — telemetry is never fatal
         pass
 
@@ -2900,6 +2911,12 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
     # Extract timeout from config, defaulting to 900 seconds if not present
     timeout_s = int(config.get("LLM_TIMEOUT", 900))
 
+    # Fleet rule 1.10: no paid call once today's AI spend gate is closed. This
+    # also stops a candidate chain or tool loop that began while it was open.
+    # Checked before the try, so a closed gate does not mark the entry failing.
+    if ai_spend.blocks(provider, model, config):
+        raise ai_spend.GateClosed(f"spend_gate: today's AI spend gate is closed; {provider}/{model} is paid")
+
     try:
         # Wrap the actual LLM call with a timeout to prevent hanging
         # This catches cases where the provider never responds (stuck network,
@@ -2966,6 +2983,11 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
                 llm_perf.save(config_store.LLM_PERF_FILE, store)
     except Exception:  # noqa: BLE001 — telemetry must never fail an LLM call
         pass
+    # Count a paid call's estimated cost toward today's AI spend gate.
+    try:
+        ai_spend.record(provider, model, usage_out, config, messages, result)
+    except Exception:  # noqa: BLE001 — telemetry must never fail an LLM call
+        logger.exception("AI spend gate: could not record %s/%s", provider, model)
     return result
 
 
@@ -3136,9 +3158,10 @@ def _apply_capability_floor(candidates, config):
 
 
 #: The unavailable_reason values _enumerate_candidates sets that end on their
-#: own: the model is back in the pool once the cooldown or back-off elapses.
+#: own: the model is back in the pool once the cooldown or back-off elapses,
+#: or, for "spend_gate", at local midnight or when a person reopens the gate.
 #: "dead_model" is not one: a routed 404 is kept until AppBuilder restarts.
-TIMED_UNAVAILABLE = frozenset({"credit_cooldown", "rate_limited", "hard_failing"})
+TIMED_UNAVAILABLE = frozenset({"credit_cooldown", "rate_limited", "hard_failing", "spend_gate"})
 
 
 def _enumerate_candidates(config):
@@ -3151,6 +3174,8 @@ def _enumerate_candidates(config):
     row and a legacy env var is one candidate, not two."""
     candidates = []
     seen_keys = set()
+    # Fleet rule 1.10: is today's AI spend gate closed? Then paid models wait.
+    gate_closed = ai_spend.closed(config)
     # Skip unconfigured endpoints and duplicates.
     for entry_id, provider, api_key, model, base_url, rpm in _iter_configured_endpoints(config):
         if not _provider_configured(provider, api_key, model):
@@ -3161,9 +3186,11 @@ def _enumerate_candidates(config):
         seen_keys.add(key)
         # Look up its capabilities.
         caps = model_registry.resolve(provider, model, config)
-        # Mark it unavailable if cooling down, dead or failing.
+        # Mark it unavailable if gated, cooling down, dead or failing.
         available, unavailable_reason = True, None
-        if _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url)) > 0:
+        if gate_closed and ai_spend.metered(provider, model, config):
+            available, unavailable_reason = False, "spend_gate"
+        elif _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url)) > 0:
             available, unavailable_reason = False, "credit_cooldown"
         elif _cb_remaining(_MODEL_RATE_CB, key) > 0:
             available, unavailable_reason = False, "rate_limited"
@@ -3187,11 +3214,7 @@ def _enumerate_candidates(config):
 
 
 def _configured_entries(config):
-    """Every configured endpoint, NOT gated by cooldown/capability — feeds
-    model_selection.safety_floor(), the deliberate last resort that's tried
-    even when everything select_model considered has been ruled out (a rule,
-    never a hardcoded model ID — see model_registry.py's module docstring
-    for the incident that makes a pinned ID the wrong answer here)."""
+    """Endpoint configuration status, before cooldown or capability filtering."""
     return [
         {"id": entry_id, "provider": provider, "model": model, "api_key": api_key,
          "base_url": base_url, "rpm": rpm, "_configured": _provider_configured(provider, api_key, model)}
@@ -3250,6 +3273,10 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
             result = _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream,
                                           task_id, config, **kwargs)
             return result, None
+        # The AI spend gate closed: not a provider fault, so no breaker trips
+        # and a person's Continue takes effect at once.
+        except ai_spend.GateClosed:
+            return None, "spend_gate"
         # Out of credit: pause the whole account.
         except LLMCreditExhausted as ce:
             _cb_trip(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url), str(ce), None, "credit", provider)
@@ -3296,8 +3323,8 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
                                 batch_kind=None, batch_context=None, used_model_out=None):
     """call_llm's requirements= branch. select_model() ranks every candidate;
     on failure the caller walks the Selection's `alternatives` (the rest of
-    that ranked list — no re-invoking the picker mid-failover), then falls
-    to the rule-based safety floor, before giving up. Fully independent of
+    that ranked list — no re-invoking the picker mid-failover). The safety
+    floor is used only when there was no initial selection. Fully independent of
     the slot/task_kind machinery in call_llm proper.
 
     batch_kind/batch_context: consumed here (not by model_selection —
@@ -3366,10 +3393,16 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
             raise LlmHumanEscalationNeeded(
                 f"No candidate satisfies requirements (reqs={reqs!r}) — the caller opted "
                 "into must_escalate_to_human instead of the rule-based safety floor.")
-        # Pick the safety-floor entry, failing if there is none.
-        floor_entry = model_selection.safety_floor(_configured_entries(config))
+        # Relax capability, not availability, explicit routing or run exclusions.
+        floor_entry = model_selection.safety_floor(candidates, reqs)
         if floor_entry is None:
-            raise Exception("No LLM providers configured")
+            if not candidates:
+                raise Exception("No LLM providers configured")
+            cooling = [dict(c, available=True) for c in candidates
+                       if c.get("unavailable_reason") in TIMED_UNAVAILABLE]
+            if model_selection.safety_floor(cooling, reqs) is not None:
+                raise Exception("No matching LLM model available (providers cooling down)")
+            raise Exception("No matching LLM model available")
         # Log why we fell to the floor.
         if floor_excluded_a_selection:
             logger.warning(
@@ -3380,13 +3413,8 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
         else:
             logger.warning("select_model resolved nothing for this call (reqs=%r) — falling to the safety "
                            "floor: %s / %s", reqs, floor_entry["provider"], floor_entry["model"])
-        # The floor entry becomes the only candidate.
-        chain = [{
-            "key": _model_key(floor_entry["provider"], floor_entry.get("base_url", ""), floor_entry["model"]),
-            "provider": floor_entry["provider"], "model": floor_entry["model"],
-            "api_key": floor_entry.get("api_key", ""), "base_url": floor_entry.get("base_url", ""),
-            "rpm": floor_entry.get("rpm", 0),
-        }]
+        # Preserve the old fallback's plain-call behavior (no inferred tools).
+        chain = [{k: floor_entry[k] for k in ("key", "provider", "model", "api_key", "base_url", "rpm")}]
 
     # No candidates at all.
     if not chain:
@@ -3571,7 +3599,7 @@ def is_llm_cooldown_error(e) -> bool:
     # Match any cooldown marker.
     s = str(e).lower()
     return any(k in s for k in ("credit_cooldown", "credit_exhausted",
-                                "rate_limited", "providers cooling down"))
+                                "rate_limited", "providers cooling down", "spend_gate"))
 
 
 # Text and status-code markers of an auth failure.
@@ -3715,6 +3743,14 @@ def _diag_reqs(kwargs, overrides=None):
             continue
         if k in ("complexity", "restrict"):
             merged[k] = v or None if k == "restrict" else (v or "small")
+        elif k == "pin_key":
+            if v is not None and not isinstance(v, str):
+                raise ValueError("pin_key must be a string or null")
+            merged[k] = v or None
+        elif k in ("exclude_models", "explicit_local_keys"):
+            if not isinstance(v, (list, tuple)):
+                raise ValueError(f"{k} must be a list or tuple")
+            merged[k] = tuple(v)
         elif k in ("min_context_tokens",):
             try:
                 merged[k] = int(v)

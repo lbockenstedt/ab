@@ -107,10 +107,13 @@ def _reviewer_seats(repo_slug):
     _state_logic_review), so they get the same seats. A seat is the full provider/model label, so two seats running
     the same model through different providers stay two seats, as in AB.
 
+    Only comments by authors with write access count (is_trusted_comment).
+
     Raises RuntimeError when GitHub cannot be read or no AB review names a
     panel 1 model, so a caller never mistakes "could not find out" for "no
     reviewers"."""
     import pr_review
+    from pr_review_score import is_trusted_comment
     newest = {}  # panel -> (updated_at, seats)
     for slug in dict.fromkeys((repo_slug, _slug(_HERE))):
         comments = _gh_json("api", "repos/%s/issues/comments?sort=updated&direction=desc"
@@ -118,7 +121,10 @@ def _reviewer_seats(repo_slug):
         if comments is None:
             raise RuntimeError("could not read %s's PR comments with gh" % slug)
         for c in comments:
-            if pr_review.PR_REVIEW_MARKER not in (c.get("body") or ""):
+            # Anyone can comment on a public repo; a stranger's copied marker
+            # must not pick the local review's (weaker) reviewer models.
+            if (pr_review.PR_REVIEW_MARKER not in (c.get("body") or "")
+                    or not is_trusted_comment(c)):
                 continue
             skeptical, _, state = (c.get("body") or "").partition(pr_review._STATE_PANEL_HEADER)
             for panel, text in (("panel1", skeptical), ("panel2", state)):

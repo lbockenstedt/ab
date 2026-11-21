@@ -77,8 +77,8 @@ def test_gives_up_when_the_watchdog_never_answers(ab, monkeypatch):
     monkeypatch.setattr(os_updates_ab, "REBOOT_WAIT_S", 0.05)
     res = os_updates_ab.handle_command("OS_REBOOT", {})
     assert res["status"] == "ERROR" and "watchdog" in res["message"]
-    # A request still queued refuses a second one.
-    assert "already queued" in os_updates_ab.handle_command("OS_REBOOT", {})["message"]
+    # A timed-out queued request is withdrawn, never executed unexpectedly later.
+    assert not os.path.exists(os_updates_ab.REQUEST_FILE)
 
 
 def test_watchdog_records_a_failure(ab, monkeypatch):

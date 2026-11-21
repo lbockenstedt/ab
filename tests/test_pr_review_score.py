@@ -64,6 +64,8 @@ def _check(name, cond):
 
 
 class _FakeComment:
+    author_association = "OWNER"  # AB posts as the repo owner
+
     def __init__(self, body):
         self.body = body
 

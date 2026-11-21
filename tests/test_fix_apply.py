@@ -30,7 +30,8 @@ def _load_funcs():
     src = open(path).read()
     tree = ast.parse(src)
     want = {"_safe_repo_target", "_issue_identifiers", "_targeted_file_context",
-            "parse_and_apply", "_claim_issue", "_release_issue",
+            "parse_and_apply", "_claim_issue", "_release_issue", "_issue_claim_key",
+            "_claim_issues", "_release_issues",
             "_robust_json_loads", "_sanitize_json_string_newlines",
             "_relax_json_fix_strings", "_repair_missing_object_keys",
             "_json_string_spans", "_looks_truncated_json", "_close_truncated_json",
@@ -73,6 +74,7 @@ def _check(label, cond):
 
 def main():
     ns = _load_funcs()
+    feedback = {}
     ok = True
 
     # A 22k-line file with the typo at line 20357 and the real fn at 20307 —
@@ -125,15 +127,15 @@ def main():
     # the truncation-repair fallback (_close_truncated_json) was unreachable
     # for the exact case it exists to rescue. It must now be recognized as
     # truncated_json and its complete edit salvaged.
-    ns["parse_and_apply"]("ignored", d)  # reset .last_reason from the prior call
+    ns["parse_and_apply"]("ignored", d, feedback_out=feedback)
     trunc = ('{"confidence": 0.9, "edits": [{"file": "WebUI/main.js", '
              '"search": "    await ensureLDAPTenants();", '
              '"replace": "    await ensureLDAPTenants(); // patched"')
-    trunc_ok, trunc_applied, _ = ns["parse_and_apply"](trunc, d)
+    trunc_ok, trunc_applied, _ = ns["parse_and_apply"](trunc, d, feedback_out=feedback)
     ok &= _check("a response with no closing brace at all is still salvaged",
                  trunc_ok and "WebUI/main.js" in trunc_applied)
     ok &= _check("... and is reported as truncated_json, not no_json",
-                 ns["parse_and_apply"].last_reason != "no_json")
+                 feedback["last_reason"] != "no_json")
 
     # Regression guard for GitHub issue #755 ("Edit search snippet not found in
     # '...'; skipping this edit" — non-actionable, no context): the failing
@@ -157,21 +159,21 @@ def main():
     # parse_and_apply must record the prefix for the caller's WARNING line.
     prose = ("I've reviewed the findings and I don't believe any code change "
              "is warranted here, so I am not proposing edits.")
-    prose_ok, _pa, _pc = ns["parse_and_apply"](prose, d)
+    prose_ok, _pa, _pc = ns["parse_and_apply"](prose, d, feedback_out=feedback)
     ok &= _check("a prose reply does NOT report success", prose_ok is False)
     ok &= _check("... and is classified no_json",
-                 ns["parse_and_apply"].last_reason == "no_json")
+                 feedback["last_reason"] == "no_json")
     ok &= _check("... and the raw reply prefix is captured for the log",
-                 prose[:60] in (getattr(ns["parse_and_apply"], "last_raw_prefix", "") or ""))
+                 prose[:60] in feedback["last_raw_prefix"])
     ok &= _check("... bounded so untrusted model output cannot flood the log",
-                 len(getattr(ns["parse_and_apply"], "last_raw_prefix", "") or "") <= 240)
-    ns["parse_and_apply"]("x" * 5000, d)
+                 len(feedback["last_raw_prefix"]) <= 240)
+    ns["parse_and_apply"]("x" * 5000, d, feedback_out=feedback)
     ok &= _check("a huge barren reply is truncated to the cap",
-                 len(getattr(ns["parse_and_apply"], "last_raw_prefix", "") or "") == 240)
-    ns["parse_and_apply"]("", d)
+                 len(feedback["last_raw_prefix"]) == 240)
+    ns["parse_and_apply"]("", d, feedback_out=feedback)
     ok &= _check("an EMPTY reply records an empty prefix, not a stale one",
-                 (getattr(ns["parse_and_apply"], "last_raw_prefix", None) or "") == ""
-                 and ns["parse_and_apply"].last_reason == "empty")
+                 feedback["last_raw_prefix"] == ""
+                 and feedback["last_reason"] == "empty")
 
     # Regression guard for GitHub issue #760 ("No fixes could be applied
     # (core/src/simulations/routes.py: search snippet not found (starts with:
@@ -360,6 +362,7 @@ def test_symlinks_escaping_repo_are_rejected(tmp_path):
 def test_empty_search_rejects_batch_before_any_writes(tmp_path):
     """Empty anchors surface retry feedback without partially applying a batch."""
     apply = _load_funcs()["parse_and_apply"]
+    feedback = {}
     source = tmp_path / "app.py"
     source.write_text("x = 1\n")
     valid = {"file": "app.py", "search": "x = 1", "replace": "x = 2"}
@@ -371,13 +374,13 @@ def test_empty_search_rejects_batch_before_any_writes(tmp_path):
             result = apply(json.dumps({
                 "confidence": 0.97, "edits": edits,
                 "fixes": {"other.py": "y = 1\n"},
-            }), str(tmp_path))
+            }), str(tmp_path), feedback_out=feedback)
             assert result == (False, {}, 0.0)
-            assert apply.last_reason == "edit_anchor_miss"
-            assert len(apply.last_failures) == 1
-            assert target in apply.last_failures[0]
-            assert "search must be non-empty" in apply.last_failures[0]
-            assert "'fixes'" in apply.last_failures[0]
+            assert feedback["last_reason"] == "edit_anchor_miss"
+            assert len(feedback["last_failures"]) == 1
+            assert target in feedback["last_failures"][0]
+            assert "search must be non-empty" in feedback["last_failures"][0]
+            assert "'fixes'" in feedback["last_failures"][0]
             assert source.read_text() == "x = 1\n"
             assert not (tmp_path / "tests").exists()
             assert not (tmp_path / "other.py").exists()
@@ -386,11 +389,11 @@ def test_empty_search_rejects_batch_before_any_writes(tmp_path):
     valid["replace"] = ""
     ok, applied, confidence = apply(json.dumps({
         "confidence": 0.97, "edits": [valid],
-    }), str(tmp_path))
+    }), str(tmp_path), feedback_out=feedback)
     assert ok and "app.py" in applied and confidence == 0.97
     assert source.read_text() == "\n"
-    assert apply.last_reason is None
-    assert apply.last_failures == []
+    assert feedback["last_reason"] is None
+    assert feedback["last_failures"] == []
 
 
 def test_fix_apply():

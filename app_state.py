@@ -16,7 +16,9 @@ from main. main re-exports config_store and llm_client names into its namespace
 # datetime timestamps task starts and PR reviews.
 import os
 import threading
+import copy
 from datetime import datetime
+from config_store import _processed_lock, _update_processed, _read_processed_authority
 
 # Persistence helpers, version lookup and circuit-breaker snapshots, all re-exported by
 # main (see the module docstring for why importing from main is safe here).
@@ -600,11 +602,57 @@ def _stamp_pr_state(rec, prev):
         logger.debug(f"state_since stamp failed: {e}")
 
 
-def mark_pr_approved(repo, number, approved=True):
-    """Flag a reviewed PR as human-approved (set by the Approve button). Returns
-    True if the record existed and was updated."""
-    # Approval is just one field on the record, so reuse the generic updater.
-    return update_pr_review(repo, number, approved=bool(approved))
+_UNSPECIFIED_HEAD = object()
+
+
+class ReviewPersistenceError(RuntimeError):
+    """A reviewed-head approval could not be persisted."""
+
+
+def pr_approval_snapshot(repo, number):
+    """Read the reviewed head and approval together under the review lock."""
+    with _task_state_lock:
+        rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo, number)) or {}
+        return {"head": rec.get("head"), "approved": bool(rec.get("approved"))}
+
+
+def mark_pr_approved(repo, number, approved=True, *, expected_head=_UNSPECIFIED_HEAD):
+    """Compare-and-set approval for a reviewed head; unconditional revoke remains supported."""
+    try:
+        with _task_state_lock:
+            rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo, number))
+            if not rec:
+                return False
+            # Approval must identify an actual reviewed commit. Conditional revokes
+            # also compare None, so an old missing-head snapshot cannot clear a new review.
+            if approved and (expected_head is _UNSPECIFIED_HEAD or not expected_head):
+                return False
+            if expected_head is not _UNSPECIFIED_HEAD and rec.get("head") != expected_head:
+                return False
+            before = dict(rec)
+            try:
+                rec["approved"] = bool(approved)
+                _stamp_pr_state(rec, before)
+                try:
+                    save_pr_reviews(state["pr_reviews"])
+                except Exception as e:
+                    if approved:
+                        raise ReviewPersistenceError("Could not save PR approval") from e
+                    raise
+            except Exception:
+                # A failed grant cannot authorize a merge. A failed revoke must
+                # remain revoked in memory even though its on-disk copy is stale.
+                if approved:
+                    rec.clear()
+                    rec.update(before)
+                raise
+            return True
+    except ReviewPersistenceError as e:
+        logger.error(f"mark_pr_approved failed for {repo}#{number}: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"mark_pr_approved failed for {repo}#{number}: {e}")
+        return False
 
 
 def _record_merge_milestone(key, fields):
@@ -663,10 +711,12 @@ def update_pr_review(repo, number, **fields):
             before = dict(rec)
             rec.update(fields)
             _stamp_pr_state(rec, before)
-            save_pr_reviews(state["pr_reviews"])
-            # After the record is safely persisted: the ledger is a derived
-            # tally, so losing it is recoverable, but losing the review is not.
-            _record_merge_milestone(key, fields)
+            try:
+                save_pr_reviews(state["pr_reviews"])
+            finally:
+                # Preserve the lifetime milestone even if the review-file
+                # write failed; the earlier best-effort writer did so too.
+                _record_merge_milestone(key, fields)
             return True
     # Persistence problems are logged and reported as "not updated".
     except Exception as e:
@@ -886,15 +936,28 @@ state = {
 state["pr_merge_totals"] = pr_merge_totals()
 
 
+def update_processed(mutator):
+    """Commit history and publish its detached feed/counters in transaction order."""
+    with _processed_lock:
+        committed, result = _update_processed(mutator)
+        recompute_issue_counters(committed)
+        return result
+
+
 def recompute_issue_counters(processed=None):
     """Re-derive the issue counters from the processed store and write them into
     `state`. Call after ANY change to a processed entry's status/reopened flag
     (close, reopen, dismiss, delete) so the dashboard totals always match reality
     instead of drifting from running +=/-= increments. Reopened issues fold into the
     base buckets — recurrence is tracked via the pending-verification workflow."""
-    # Load a fresh snapshot from disk when the caller did not pass one.
-    if processed is None:
-        processed = load_processed()
+    with _processed_lock:
+        if processed is None:
+            processed, _ = _read_processed_authority()
+        return _publish_issue_counters(copy.deepcopy(processed))
+
+
+def _publish_issue_counters(processed):
+    """Publish an already detached, committed view while holding the store lock."""
     # The Activity Feed renders state["processed"]; refresh it from the same
     # snapshot so the sidebar counts and the feed rows can never disagree
     # (background writers like feature_drive only call this, not the routes'
@@ -929,6 +992,7 @@ __all__ = [
     "feature_needs_info_count",
     "feature_built_count",
     "recompute_issue_counters",
+    "update_processed",
     "activity_feed_items",
     "feed_counts",
     "update_task_state",

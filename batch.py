@@ -192,9 +192,11 @@ def _submit_gemini(items, key, model):
         },
         "metadata": {"custom_id": it["custom_id"]},
     } for it in items]
-    # POST the batch; the API key goes in the query string as Google expects.
+    # POST the batch. The key goes in a header, not the query string: requests
+    # puts the URL into its error messages, and those are logged.
     r = requests.post(
-        f"{GOOGLE_BASE}/v1beta/models/{model}:batchGenerateContent?key={key}",
+        f"{GOOGLE_BASE}/v1beta/models/{model}:batchGenerateContent",
+        headers={"x-goog-api-key": key},
         json={"batch": {"inlinedRequests": reqs}}, timeout=60)
     # Raise on HTTP errors.
     r.raise_for_status()
@@ -203,8 +205,9 @@ def _submit_gemini(items, key, model):
 
 def _poll_gemini(op_name, key):
     """Return {custom_id: text} once the Gemini batch operation is done, else None."""
-    # Fetch the operation status.
-    r = requests.get(f"{GOOGLE_BASE}/v1beta/{op_name}?key={key}", timeout=30)
+    # Fetch the operation status (key in a header, as in _submit_gemini).
+    r = requests.get(f"{GOOGLE_BASE}/v1beta/{op_name}",
+                     headers={"x-goog-api-key": key}, timeout=30)
     r.raise_for_status()
     meta = r.json()
     # Not finished yet: tell the caller to keep waiting.
