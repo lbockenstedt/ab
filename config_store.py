@@ -84,6 +84,9 @@ CHAT_CONFIG_DEFAULTS = {
     # spoke_ids and/or module_types to never triage (e.g. an undeployed spoke).
     "HEARTBEAT_STALE_S": 300,          # Max age (seconds) of a heartbeat line before triage.
     "heartbeat_exclude": [],           # spoke_ids / module_types to skip (list).
+    # The AI_SPEND_GATE knob: the daily gate on paid AI spend (fleet rule 1.10,
+    # ai_spend.py). Off = no gate; spend is still counted.
+    "AI_SPEND_GATE": True,
     # API key required by the Anthropic-compatible LLM-router proxy (/v1/*, see
     # llm_proxy.py). Empty = proxy is open (a warning is logged per request).
     # The AB_PROXY_KEY env var overrides this when set.
