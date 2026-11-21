@@ -74,9 +74,10 @@ class _WS:
                 return default
             return object() if self._has_verified_tls else None
 
-    def __init__(self, proof, has_verified_tls=False):
+    def __init__(self, proof, has_verified_tls=False, frames=None):
         self.sent, self.closed = [], None
         self._proof = proof
+        self._frames = iter(frames) if frames is not None else None
         self.transport = self._Transport(has_verified_tls)
 
     async def send(self, d):
@@ -95,12 +96,17 @@ class _WS:
         return self
 
     async def __anext__(self):
+        if self._frames is not None:
+            try:
+                return next(self._frames)
+            except StopIteration:
+                raise StopAsyncIteration from None
         await asyncio.sleep(0.05)
         raise asyncio.CancelledError
 
 
-def _handshake(c, proof, has_verified_tls=False):
-    ws = _WS(proof, has_verified_tls=has_verified_tls)
+def _handshake(c, proof, has_verified_tls=False, frames=None):
+    ws = _WS(proof, has_verified_tls=has_verified_tls, frames=frames)
 
     class _Conn:
         async def __aenter__(self_inner):
@@ -213,3 +219,93 @@ def test_recovery_psk_command_persists(monkeypatch):
            "header": {}}
     asyncio.run(c._handle_message(msg)) if hasattr(c, "_handle_message") else pytest.skip("handler name")
     assert saved == ["p"] and c.recovery_psk == "p"
+
+
+def _inbound_frame(command, signing_secret=None, **data):
+    """Build a hub frame using the real wire encoder and synthetic keys."""
+    msg = {"header": {}, "payload": {"type": command, "data": data}}
+    signer = hub_agent.MessageSigner(signing_secret) if signing_secret else None
+    return hub_agent.encode_frame(signer, msg)
+
+
+def _receive_frames(monkeypatch, frames, secret="s", missing_signer=False):
+    """Run the real receive loop, capturing both dispatch paths and key rotation."""
+    c = _client(monkeypatch, False, hub_secret="cur")
+    c.secret = secret
+    c.signer = hub_agent.MessageSigner(secret) if secret else None
+    if missing_signer:
+        c.signer = None
+    received = []
+    original = c._handle_message
+
+    async def capture(msg):
+        """Apply real session-key rotation but capture other dispatched commands."""
+        if msg["payload"]["type"] == "SPOKE_UPDATE_SESSION_KEY":
+            await original(msg)
+        else:
+            received.append(msg["payload"]["type"])
+
+    c._handle_message = capture
+    c._dispatch_slow = lambda msg: received.append(msg["payload"]["type"])
+    _, error = _handshake(c, _proof(signature=_sig("cur", "ch")), frames=frames)
+    assert error is None
+    return c, received
+
+
+@pytest.mark.parametrize("command", ["TEST_COMMAND", "HELP_ASK"])
+@pytest.mark.parametrize("wire", ["unsigned", "bare", "invalid", "tampered", "valid"])
+def test_active_session_requires_valid_frame_signature(monkeypatch, command, wire):
+    """Neither fast nor slow dispatch accepts absent, invalid or altered signatures."""
+    frame = _inbound_frame(command, "s" if wire in {"tampered", "valid"} else None)
+    if wire == "bare":
+        frame = frame[1:]
+    elif wire == "invalid":
+        frame = "0" * 64 + frame
+    elif wire == "tampered":
+        frame = frame.replace('"data":{}', '"data":{"changed":true}')
+    _, received = _receive_frames(monkeypatch, [frame])
+    assert received == ([command] if wire == "valid" else [])
+
+
+def test_active_session_without_signer_fails_closed(monkeypatch):
+    """An inconsistent established session must not fall back to unsigned dispatch."""
+    _, received = _receive_frames(
+        monkeypatch, [_inbound_frame("TEST_COMMAND", "s")], missing_signer=True)
+    assert received == []
+
+
+def test_bootstrap_key_immediately_enables_signature_requirement(monkeypatch):
+    """Initial unsigned provisioning is allowed, but later frames need the new key."""
+    c, received = _receive_frames(monkeypatch, [
+        _inbound_frame("SPOKE_UPDATE_SESSION_KEY", secret="initial"),
+        _inbound_frame("UNSIGNED"),
+        _inbound_frame("SIGNED", "initial"),
+    ], secret="")
+    assert c.secret == "initial"
+    assert received == ["SIGNED"]
+
+
+def test_rotation_must_use_old_key_then_switches_to_new_key(monkeypatch):
+    """A signed rotation changes the required key for the very next frame."""
+    rotation = hub_agent.encode_frame(hub_agent.MessageSigner("s"), {
+        "header": {}, "payload": {"type": "SPOKE_UPDATE_SESSION_KEY",
+                                 "data": {"secret": "next"}}})
+    c, received = _receive_frames(monkeypatch, [
+        rotation,
+        _inbound_frame("OLD_KEY", "s"),
+        _inbound_frame("UNSIGNED"),
+        _inbound_frame("NEW_KEY", "next"),
+    ])
+    assert c.secret == "next"
+    assert received == ["NEW_KEY"]
+
+
+def test_unsigned_rotation_cannot_replace_active_key(monkeypatch):
+    """Unsigned provisioning is never a rotation exemption for an active session."""
+    c, received = _receive_frames(monkeypatch, [
+        _inbound_frame("SPOKE_UPDATE_SESSION_KEY", secret="replacement"),
+        _inbound_frame("ORIGINAL", "s"),
+        _inbound_frame("REPLACEMENT", "replacement"),
+    ])
+    assert c.secret == "s"
+    assert received == ["ORIGINAL"]

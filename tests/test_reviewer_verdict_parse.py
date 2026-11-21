@@ -28,7 +28,7 @@ _FE_FUNCS = {
 _FE_ASSIGNS = {
     "_JSON_NEXT_MEMBER_RE", "_FIX_CODE_KEY_RE", "_REVIEW_TEXT_KEY_RE",
     "_REVIEW_NEXT_MEMBER_RE", "_JSON_BAD_ESCAPE_RE", "_REVIEWER_RETRY_NOTE",
-    "_LOCAL_PROVIDERS", "DEFAULT_PANEL_ALLOWLIST",
+    "DEFAULT_PANEL_ALLOWLIST",
 }
 
 
@@ -274,17 +274,18 @@ def test_vote_cloud_hard_failure_escalates_to_other_cloud_candidate(fe):
     assert cands[0] is cloud1 and cands[1] is cloud2
 
 
-def test_vote_cloud_hard_failure_falls_back_to_local_ollama_backfill(fe):
+@pytest.mark.parametrize("provider", ["ollama", "ollama-local", "lmstudio"])
+def test_vote_cloud_hard_failure_does_not_backfill_local(fe, provider):
     cloud = _cloud_cand()
-    local = _local_cand()
+    local = {**_local_cand(), "provider": provider}
     fe["llm_client"] = _FakeLlmClient([cloud, local])
     reviewer = {"name": "rev-1", "candidate": cloud}
     (vote, failed), prompts, cands = _vote(
-        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer, config={})
+        fe, [ConnectionError("network blip"), JSON], reviewer=reviewer,
+        config={"pr_review_panel_allowlist": [cloud["model"], local["model"]]})
     assert failed is None and vote["reviewer"] == "rev-1"
-    assert vote["escalated_to"] == fe["_reviewer_name"](local)
-    assert len(cands) == 2
-    assert cands[0] is cloud and cands[1] is local
+    assert "escalated_to" not in vote
+    assert cands == [cloud, cloud]
 
 
 def test_vote_cooldown_on_local_reviewer_still_not_retried(fe):

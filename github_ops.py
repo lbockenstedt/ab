@@ -11,10 +11,9 @@ from main import (
     _in_update_cooldown,
     call_llm,
     load_config,
-    load_processed,
     logger,
     resolve_self_diagnosis_repo,
-    save_processed,
+    update_processed,
 )
 
 
@@ -55,6 +54,30 @@ def get_monitored_repos(config):
 
     # De-duplicate.
     return list(set(monitored_repos))
+
+
+def repo_in_fix_scope(config, repo_name):
+    """The configured 'owner/repo' spelling of repo_name if it is a monitored or
+    trusted repo, else None. A chat-proposed fix clones the repo, runs its tests
+    and pushes with AB's token, so the repo must be one AB already manages, never
+    whatever name the model (or text injected into its context) supplies.
+    GitHub names are case-insensitive, so the match is too.
+
+    When the same repo is configured in two spellings, the trusted spelling
+    wins, then the self-diagnosis one: fix_engine decides trust with an exact
+    ``repo_name in config["trusted_repos"]`` / ``== self-diagnosis repo`` check,
+    so returning the monitored spelling would silently demote a trusted repo
+    to the PR path."""
+    # Normalise a URL or padded name, then look it up among the managed repos.
+    wanted = clean_repo_name(str(repo_name or "")).lower()
+    if not wanted:
+        return None
+    trusted = [clean_repo_name(str(r)) for r in (config.get("trusted_repos") or []) if r]
+    sd_repo = resolve_self_diagnosis_repo(config)
+    for name in trusted + ([sd_repo] if sd_repo else []) + sorted(get_monitored_repos(config)):
+        if name and name.lower() == wanted:
+            return name
+    return None
 
 
 def resolve_module_repo(module, monitored_repos, config):
@@ -525,7 +548,11 @@ def upsert_recurrence_comment(issue, repo_name, body_text, now=None):
     Older per-repeat comments are counted (and stripped of identity data)
     once, when the comment is created."""
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M UTC")
-    comments = list(issue.get_comments())
+    # Only comments from authors with write access are AppBuilder's: anyone can
+    # comment on a public repo's issue, and a copied marker would otherwise
+    # steer the counts or make AB edit a stranger's comment.
+    from pr_review_score import is_trusted_comment
+    comments = [c for c in issue.get_comments() if is_trusted_comment(c)]
     mine = next((c for c in comments if (c.body or "").startswith(_RECURRENCE_MARKER)), None)
     legacy = [c for c in comments if _LEGACY_RECURRENCE in (c.body or "")]
     if mine is None:
@@ -560,13 +587,17 @@ def upsert_recurrence_comment(issue, repo_name, body_text, now=None):
 def note_recurrence(issue_id, now=None):
     """Stamp last_recurrence_at on an issue's AB record (if it has one), so
     RepoScan can retry a failed issue whose error keeps coming back."""
-    processed = load_processed()
-    rec = processed.get(issue_id)
-    if not isinstance(rec, dict):
-        return False
-    rec["last_recurrence_at"] = (now or datetime.now()).isoformat()
-    save_processed(processed)
-    return True
+    stamp = (now or datetime.now()).isoformat()
+
+    def stamp_record(processed):
+        """Only stamp a record that still exists at commit time."""
+        rec = processed.get(issue_id)
+        if not isinstance(rec, dict):
+            return False
+        rec["last_recurrence_at"] = stamp
+        return True
+
+    return update_processed(stamp_record)
 
 
 def _redact_existing_issue(issue):
@@ -585,6 +616,10 @@ def _mentions_security_monitor(text):
     return any(m in low for m in _SECURITY_MONITOR_MARKERS)
 
 
+class IssueReopenError(RuntimeError):
+    """Raised when a closed duplicate issue cannot be reopened."""
+
+
 def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, labels=None, raw=False):
     """Creates a GitHub issue for a log-detected error, deduplicating globally across monitored repos.
 
@@ -594,6 +629,7 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
 
     Additionally validates that error_data is a dict and that both 'title' and
     'body' are present and non-empty strings before any GitHub API call is made.
+    A failed reopen raises IssueReopenError, distinct from a deliberate None/no-op.
     """
     try:
         # Shortly after an update, suppress new issues (restart noise).
@@ -748,6 +784,8 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                     existing_issue.edit(state='open')
                 except Exception as reopen_err:
                     logger.warning(f"Could not reopen issue #{existing_issue.number}: {reopen_err}")
+                    raise IssueReopenError(f"Could not reopen issue #{getattr(existing_issue, 'number', '?')}") from reopen_err
+                logger.info(f"Reopened issue #{existing_issue.number} for {current_repo_name}")
                 try:
                     existing_issue.create_comment(
                         f"🔁 **Recurrence detected — reopening instead of filing a duplicate**\n\n"
@@ -755,7 +793,6 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
                         f"issue was closed.\n\n"
                         f"```\n{body_text}\n```"
                     )
-                    logger.info(f"Reopened issue #{existing_issue.number} for {current_repo_name}")
                 except Exception as comment_err:
                     logger.warning(f"Could not add recurrence comment to #{existing_issue.number}: {comment_err}")
                 return existing_issue
@@ -820,7 +857,9 @@ def create_automated_issue(gh_current, monitored_repos, gh_repo, error_data, lab
         except Exception:
             pass
         return issue
-    # Any error: log it and return None.
+    # Keep a failed reopen distinct from benign suppression and legacy failures.
+    except IssueReopenError:
+        raise
     except Exception as e:
         logger.error(f"Failed to handle automated issue creation: {e}")
         logger.debug(f"create_automated_issue error_data was: {error_data!r}")
@@ -896,6 +935,7 @@ __all__ = [
     'trigger_infrastructure_update',
     'find_global_duplicate_issue',
     'create_automated_issue',
+    'IssueReopenError',
     'redact_identity',
     'upsert_recurrence_comment',
     'note_recurrence',

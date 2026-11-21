@@ -26,10 +26,10 @@ import requests
 # PyGithub's error type, inspected to classify merge failures.
 from github import GithubException
 
-# Shared app logger and in-memory state (holds PR review records).
-from main import logger, state
+# Shared app logger.
+from main import logger
 # Persists merge/approval facts onto the stored PR review record.
-from app_state import update_pr_review
+from app_state import update_pr_review, pr_approval_snapshot, mark_pr_approved
 # Creates the approval label in a repo if it does not exist yet.
 from github_ops import _ensure_label
 # Allowlist deciding which branches may be deleted after a merge.
@@ -236,7 +236,7 @@ def head_ci_conclusion(repo_name, head_sha, token, *, timeout=10.0):
         import gh_actions_health
         stuck = gh_actions_health.infra_failed_runs(repo_name, head_sha, token)
         if stuck:
-            gh_actions_health.note_infra_failure(len(stuck))
+            gh_actions_health.note_infra_failure(repo_name, stuck)
             return "infra", "%d workflow run(s) never started (GitHub Actions outage)" % len(stuck)
         _remember_ci(repo_name, head_sha, [], [])
         return "unknown", ""
@@ -566,7 +566,7 @@ def _delete_pr_branch(repo, pr):
                     f"(already gone or protected): {e}")
 
 
-def merge_pr(gh, repo_name, number):
+def merge_pr(gh, repo_name, number, *, expected_head=None):
     """Returns (status_code, response_dict) — the exact shape routes.py's
     prior _do_merge closure returned, just relocated so both the human route
     and the auto path share one implementation instead of routes.py owning
@@ -588,15 +588,25 @@ def merge_pr(gh, repo_name, number):
         return 409, {"status": "error", "closed": True,
             "message": f"PR #{number} is closed on GitHub (not merged) — its changes may have "
                        f"merged under another PR. Marked CLOSED."}
-    # Look up AppBuilder's own review record for this PR.
-    rec = (state.get("pr_reviews") or {}).get("%s#%s" % (repo_name, number)) or {}
-    # Must be approved first; this is the guard that keeps unattended merges safe.
-    if not rec.get("approved"):
+    # Snapshot both fields atomically; never transfer approval to a newer review.
+    rec = pr_approval_snapshot(repo_name, number)
+    reviewed_head = rec["head"]
+    current_head = getattr(getattr(pr, "head", None), "sha", None)
+    # Auto-merge's decision is itself head-scoped: do not let an in-flight
+    # decision for X merge Y merely because Y has since been reviewed/approved.
+    if expected_head is not None and reviewed_head != expected_head:
+        return 409, {"status": "error", "needs_approval": True, "head_moved": True,
+                     "message": f"PR #{number} review changed; the merge must be reconsidered."}
+    if not reviewed_head or not current_head or reviewed_head != current_head:
+        mark_pr_approved(repo_name, number, False, expected_head=reviewed_head)
+        return 409, {"status": "error", "needs_approval": True, "head_moved": True,
+                     "message": f"PR #{number} needs a fresh review and approval for its current head."}
+    if not rec["approved"]:
         return 409, {"status": "error", "needs_approval": True,
             "message": f"PR #{number} must be Approved before it can be merged."}
-    # Try the merge.
+    # GitHub compares the SHA atomically with the merge, closing the fetch/merge race.
     try:
-        res = pr.merge()  # default merge commit; raises if not mergeable
+        res = pr.merge(sha=reviewed_head)
     # The merge failed.
     except GithubException as e:
         # Another AppBuilder thread, or a retried request, may have merged it
@@ -609,6 +619,14 @@ def merge_pr(gh, repo_name, number):
             update_pr_review(repo_name, number, merged=True, merge_blocked_reason=None)
             logger.info(f"pr_actions: {repo_name} #{number} already merged by a concurrent attempt")
             return 200, {"status": "success", "message": "already merged"}
+        # A changed head (or GitHub's explicit SHA mismatch) is not a policy
+        # refusal or a conflict to repair. Leave a newer review untouched.
+        current_head = getattr(getattr(pr, "head", None), "sha", None)
+        if (current_head != reviewed_head or
+                (e.status == 409 and "head branch was modified" in _github_message(e).lower())):
+            mark_pr_approved(repo_name, number, False, expected_head=reviewed_head)
+            return 409, {"status": "error", "needs_approval": True, "head_moved": True,
+                         "message": f"PR #{number} head changed; a fresh review and approval are required."}
         # A check still running or a merge already in flight clears by itself:
         # retry on the next poll instead of recording a refusal.
         if _merge_is_transient(e):
@@ -669,7 +687,7 @@ def merge_pr(gh, repo_name, number):
                 token = _github_token()
                 stuck = gh_actions_health.infra_failed_runs(repo_name, pr.head.sha, token)
                 if stuck:
-                    gh_actions_health.note_infra_failure(len(stuck))
+                    gh_actions_health.note_infra_failure(repo_name, stuck)
                     down, _ = gh_actions_health.outage(load_config())
                     rerun = 0 if down else gh_actions_health.rerun_infra_failed(
                         repo_name, pr.head.sha, token)
@@ -688,7 +706,7 @@ def merge_pr(gh, repo_name, number):
                             "message": f"PR #{number}: {why}"}
         # The base advanced under a stale branch. Try the same recovery a human
         # would: merge the base into the branch, auto-resolve only cosmetic
-        # (VERSION) conflicts, push, then retry the merge once. Any real code
+        # (VERSION) conflicts and push. Any real code
         # conflict aborts and is handed back to a human.
         logger.info(f"pr_actions: {repo_name} #{number} has merge conflicts — "
                     f"attempting auto-resolve")
@@ -705,16 +723,27 @@ def merge_pr(gh, repo_name, number):
             return 409, {"status": "error", "conflict": True,
                 "message": f"PR #{number} has merge conflicts AppBuilder could not "
                            f"auto-resolve ({detail}). Resolve them manually, then merge."}
-        # Branch updated: reload the PR and wait for GitHub to recompute mergeability.
+        # The push changes the reviewed tree. The scanner must review it anew;
+        # never rebind rec.head or retry the merge on this old approval.
         logger.info(f"pr_actions: {repo_name} #{number} branch updated ({detail}); "
-                    f"re-checking mergeability")
-        pr = repo.get_pull(number)
-        _wait_mergeable(pr)
-        res = pr.merge()  # retry once, now that the branch carries the base
-        logger.info(f"pr_actions: {repo_name} #{number} merged after auto-resolving conflicts")
+                    f"awaiting a fresh review")
+        mark_pr_approved(repo_name, number, False, expected_head=reviewed_head)
+        return 409, {"status": "error", "needs_approval": True, "head_moved": True,
+                     "message": f"PR #{number} conflicts resolved; a fresh review and approval are required."}
+    # A successful HTTP response can still explicitly say nothing was merged.
+    if not getattr(res, "merged", False):
+        try:
+            pr.update()
+        except GithubException:
+            pass
+        if pr.merged:
+            update_pr_review(repo_name, number, merged=True, merge_blocked_reason=None)
+            return 200, {"status": "success", "message": "already merged"}
+        return 409, {"status": "error", "retryable": True, "deferred": True,
+                     "message": f"PR #{number} was not merged: {getattr(res, 'message', '') or 'GitHub did not confirm the merge'}. Retry later."}
     # Merged: record it, clean up the branch and report success.
     update_pr_review(repo_name, number, merged=True, merge_blocked_reason=None)
     _delete_pr_branch(repo, pr)
     logger.info(f"pr_actions: {repo_name} #{number} MERGED")
-    return 200, {"status": "success", "merged": bool(getattr(res, "merged", True)),
+    return 200, {"status": "success", "merged": True,
                 "message": getattr(res, "message", "merged")}

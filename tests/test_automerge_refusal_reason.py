@@ -71,6 +71,8 @@ class _Logger:
 
 
 class _Comment:
+    author_association = "OWNER"  # AB posts as the repo owner
+
     def __init__(self, body, fail=False):
         self.body, self.fail, self.edits = body, fail, []
 
@@ -93,6 +95,7 @@ class _PR:
 
     def __init__(self, comment):
         self.comment = comment
+        self.head = type("Head", (), {"sha": HEAD})()
 
     def get_files(self):
         return []
@@ -132,7 +135,7 @@ class _Env:
               "update_pr_review": update_pr_review, "feature_allowlist": _FA,
               "_automerge_decision": lambda *a, **k: self.decision,
               "approve_pr": lambda *a, **k: None,
-              "mark_pr_approved": lambda *a, **k: None,
+              "mark_pr_approved": lambda *a, **k: True,
               "merge_pr": lambda *a, **k: self.merge}
         exec(_extract("pr_review.py", _PR_WANT_ASSIGNS, _PR_WANT_FUNCS), ns)
         self.ns = ns
@@ -184,6 +187,39 @@ def test_cleared_pr_clears_blocked_reason_and_writes_cleared_note():
     assert e.rec["auto_merged"] is True
     lines = _note_lines(e.comment.body)
     assert len(lines) == 1 and "✅ **Auto-merge:** cleared" in lines[0]
+
+
+def test_head_moved_defers_auto_merge_without_permanent_refusal():
+    e = _Env()
+    e.decision = (True, "cleared")
+    e.merge = (409, {"status": "error", "head_moved": True,
+                     "needs_approval": True, "message": "review again"})
+    heads = []
+    merge_heads = []
+    e.ns["mark_pr_approved"] = lambda *a, **k: heads.append(k["expected_head"]) or True
+    e.ns["merge_pr"] = lambda *a, **k: merge_heads.append(k["expected_head"]) or e.merge
+    e.run()
+    assert heads == [HEAD] and merge_heads == [HEAD]
+    assert not e.rec.get("auto_merged") and not e.rec.get("auto_merge_refusal")
+
+
+def test_auto_approval_cas_failure_never_calls_merge():
+    e = _Env()
+    e.decision = (True, "cleared")
+    e.ns["mark_pr_approved"] = lambda *a, **k: False
+    e.ns["merge_pr"] = lambda *a, **k: (_ for _ in ()).throw(AssertionError("merged"))
+    e.run()
+    assert not e.rec.get("auto_merged") and not e.rec.get("auto_merge_refusal")
+    assert any("review head changed" in msg for msg in e.logger.at("info"))
+
+
+def test_unmerged_response_does_not_record_auto_merged():
+    e = _Env()
+    e.decision = (True, "cleared")
+    e.merge = (409, {"status": "error", "retryable": True, "deferred": True,
+                     "message": "GitHub did not merge"})
+    e.run()
+    assert not e.rec.get("auto_merged") and not e.rec.get("auto_merge_refusal")
 
 
 def test_comment_body_otherwise_preserved_and_summary_and_cache_check_intact():

@@ -19,7 +19,9 @@ class _Ref:
 
 
 class _Comment:
-    """A PR comment: just its body."""
+    """A PR comment: its body, posted by AB as the repo owner."""
+
+    author_association = "OWNER"
 
     def __init__(self, body):
         """Store the body."""
