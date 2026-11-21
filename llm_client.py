@@ -31,6 +31,7 @@ import requests
 
 import main  # lazy access to the shared app_state dict via main.state
 from main import logger, load_config
+import ai_spend
 import claude_cli_native_tools
 import config_store
 import llm_perf
@@ -1093,6 +1094,8 @@ def _any_provider_available(config):
                 rem = _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(cand["provider"], cand["base_url"]))
             elif reason == "rate_limited":
                 rem = _cb_remaining(_MODEL_RATE_CB, cand["key"])
+            elif reason == "spend_gate":
+                rem = ai_spend.seconds_left_today()
             else:
                 rem = 0.0  # dead_model / unknown: not a timed recovery
             if rem > 0:
@@ -1734,6 +1737,10 @@ def _usage_from_openai_json(data, usage_out):
         in_tok = usage.get("prompt_tokens")
         if out_tok is not None or in_tok is not None:
             usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
+            # Cached input is part of prompt_tokens; the spend gate prices it lower.
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+            if cached:
+                usage_out["cached_input_tokens"] = cached
     except Exception:  # noqa: BLE001 — telemetry is never fatal
         pass
 
@@ -2453,6 +2460,10 @@ def _usage_from_responses_json(data, usage_out):
         in_tok = usage.get("input_tokens")
         if out_tok is not None or in_tok is not None:
             usage_out.update({"output_tokens": out_tok, "input_tokens": in_tok, "source": "api"})
+            # Cached input is part of input_tokens; the spend gate prices it lower.
+            cached = (usage.get("input_tokens_details") or {}).get("cached_tokens")
+            if cached:
+                usage_out["cached_input_tokens"] = cached
     except Exception:  # noqa: BLE001 — telemetry is never fatal
         pass
 
@@ -2900,6 +2911,12 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
     # Extract timeout from config, defaulting to 900 seconds if not present
     timeout_s = int(config.get("LLM_TIMEOUT", 900))
 
+    # Fleet rule 1.10: no paid call once today's AI spend gate is closed. This
+    # also stops a candidate chain or tool loop that began while it was open.
+    # Checked before the try, so a closed gate does not mark the entry failing.
+    if ai_spend.blocks(provider, model, config):
+        raise ai_spend.GateClosed(f"spend_gate: today's AI spend gate is closed; {provider}/{model} is paid")
+
     try:
         # Wrap the actual LLM call with a timeout to prevent hanging
         # This catches cases where the provider never responds (stuck network,
@@ -2966,6 +2983,11 @@ def _call_provider_timed(provider, model, api_key, base_url, messages, tools, ef
                 llm_perf.save(config_store.LLM_PERF_FILE, store)
     except Exception:  # noqa: BLE001 — telemetry must never fail an LLM call
         pass
+    # Count a paid call's estimated cost toward today's AI spend gate.
+    try:
+        ai_spend.record(provider, model, usage_out, config, messages, result)
+    except Exception:  # noqa: BLE001 — telemetry must never fail an LLM call
+        logger.exception("AI spend gate: could not record %s/%s", provider, model)
     return result
 
 
@@ -3136,9 +3158,10 @@ def _apply_capability_floor(candidates, config):
 
 
 #: The unavailable_reason values _enumerate_candidates sets that end on their
-#: own: the model is back in the pool once the cooldown or back-off elapses.
+#: own: the model is back in the pool once the cooldown or back-off elapses,
+#: or, for "spend_gate", at local midnight or when a person reopens the gate.
 #: "dead_model" is not one: a routed 404 is kept until AppBuilder restarts.
-TIMED_UNAVAILABLE = frozenset({"credit_cooldown", "rate_limited", "hard_failing"})
+TIMED_UNAVAILABLE = frozenset({"credit_cooldown", "rate_limited", "hard_failing", "spend_gate"})
 
 
 def _enumerate_candidates(config):
@@ -3151,6 +3174,8 @@ def _enumerate_candidates(config):
     row and a legacy env var is one candidate, not two."""
     candidates = []
     seen_keys = set()
+    # Fleet rule 1.10: is today's AI spend gate closed? Then paid models wait.
+    gate_closed = ai_spend.closed(config)
     # Skip unconfigured endpoints and duplicates.
     for entry_id, provider, api_key, model, base_url, rpm in _iter_configured_endpoints(config):
         if not _provider_configured(provider, api_key, model):
@@ -3161,9 +3186,11 @@ def _enumerate_candidates(config):
         seen_keys.add(key)
         # Look up its capabilities.
         caps = model_registry.resolve(provider, model, config)
-        # Mark it unavailable if cooling down, dead or failing.
+        # Mark it unavailable if gated, cooling down, dead or failing.
         available, unavailable_reason = True, None
-        if _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url)) > 0:
+        if gate_closed and ai_spend.metered(provider, model, config):
+            available, unavailable_reason = False, "spend_gate"
+        elif _cb_remaining(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url)) > 0:
             available, unavailable_reason = False, "credit_cooldown"
         elif _cb_remaining(_MODEL_RATE_CB, key) > 0:
             available, unavailable_reason = False, "rate_limited"
@@ -3246,6 +3273,10 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
             result = _call_provider_timed(provider, model, api_key, base_url, messages, tools, effective_stream,
                                           task_id, config, **kwargs)
             return result, None
+        # The AI spend gate closed: not a provider fault, so no breaker trips
+        # and a person's Continue takes effect at once.
+        except ai_spend.GateClosed:
+            return None, "spend_gate"
         # Out of credit: pause the whole account.
         except LLMCreditExhausted as ce:
             _cb_trip(_ENDPOINT_CREDIT_CB, _endpoint_key(provider, base_url), str(ce), None, "credit", provider)
@@ -3568,7 +3599,7 @@ def is_llm_cooldown_error(e) -> bool:
     # Match any cooldown marker.
     s = str(e).lower()
     return any(k in s for k in ("credit_cooldown", "credit_exhausted",
-                                "rate_limited", "providers cooling down"))
+                                "rate_limited", "providers cooling down", "spend_gate"))
 
 
 # Text and status-code markers of an auth failure.

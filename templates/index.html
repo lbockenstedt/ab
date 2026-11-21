@@ -416,6 +416,12 @@
             {% if _np %}<span class="hdr-pill hdr-pill-idle hidden xl:flex" title="When the scheduler next checks for issues">{{ _np }}</span>{% endif %}
             <span id="hdr-blackout-chip" class="{{ '' if state.blackout else 'hidden ' }}hdr-pill hdr-pill-warn" title="Triage only — no fix commits pushed">Blackout ON</span>
             <span id="hdr-paused-chip" class="{{ '' if state.paused else 'hidden ' }}hdr-pill hdr-pill-warn" title="AppBuilder is stopped — Actions → Resume">Stopped</span>
+            <!-- Fleet rule 1.10: today's paid AI spend against the daily gate; Continue reopens a closed gate. -->
+            {% set _ai = ai_spend_status() %}
+            {% if _ai.enabled %}
+            <span id="hdr-ai-spend" class="hdr-pill {{ 'hdr-pill-warn' if not _ai.open else 'hdr-pill-idle hidden lg:flex' }} tabular-nums" title="Estimated paid AI spend today against the daily gate (fleet rule 1.10). At the gate, paid models wait until midnight or until a person clicks Continue; free and self-hosted models keep working.">AI ${{ '%.0f' % _ai.spent_usd }}/${{ '%.0f' % _ai.gate_usd }}</span>
+            <button type="button" onclick="continueAiSpend()" id="hdr-ai-continue" title="Reopen the AI spend gate for ${{ '%.0f' % _ai.step_usd }} more today" class="hdr-btn{{ ' hidden' if _ai.open else '' }}">Continue</button>
+            {% endif %}
             <!-- Fleet rule 7.6: the version and the Update button are always visible. -->
             <span id="hdr-version" class="text-white/90 font-semibold whitespace-nowrap ml-1" title="AppBuilder version">v{{ state.version }}</span>
             <form action="/update_now" method="post" onsubmit="handleFormSubmit(event, '/update_now')" class="inline">
@@ -1644,6 +1650,11 @@
                                 <label class="text-sm font-medium text-slate-600">LLM Timeout (Seconds)</label>
                                 <input type="number" name="LLM_TIMEOUT" value="{{ settings.LLM_TIMEOUT }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
+                        </div>
+                        <!-- Daily AI spend gate (fleet rule 1.10, ai_spend.py) -->
+                        <div class="flex items-center gap-2 mt-4">
+                            <input type="checkbox" name="AI_SPEND_GATE" id="AI_SPEND_GATE" {{ 'checked' if settings.AI_SPEND_GATE else '' }} title="Once today's estimated spend on paid models reaches the gate in .github/ai-budget.json, paid models wait until midnight or until a person clicks Continue in the topbar. Free and self-hosted models keep working. A runaway stop, not a budget." class="w-4 h-4 text-primary-text focus:ring-brand">
+                            <label for="AI_SPEND_GATE" class="text-xs font-medium text-slate-700">Daily AI spend gate (stop paid models at the fleet's daily gate until a person continues)</label>
                         </div>
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
@@ -4290,6 +4301,43 @@
                 document.getElementById('hdr-blackout-chip').classList.toggle('hidden', !data.blackout);
             } catch (e) {
                 showToast('Failed to toggle blackout', 'error');
+            }
+        }
+
+        // Topbar AI spend pill (fleet rule 1.10): today's spend against the gate,
+        // amber with a Continue button once the gate closes. Takes GET /ai_spend's reply.
+        function renderAiSpend(d) {
+            const pill = document.getElementById('hdr-ai-spend');
+            const btn = document.getElementById('hdr-ai-continue');
+            if (!pill || !btn) return;
+            // open is true whenever the gate is off, so closed means on and reached.
+            const closed = !d.open;
+            pill.textContent = 'AI $' + Math.round(d.spent_usd) + '/$' + Math.round(d.gate_usd);
+            pill.classList.toggle('hdr-pill-warn', closed);
+            pill.classList.toggle('hdr-pill-idle', !closed);
+            // Open: wide screens only. Off: not shown.
+            pill.classList.toggle('hidden', !closed);
+            pill.classList.toggle('lg:flex', d.enabled && d.open);
+            btn.classList.toggle('hidden', !closed);
+        }
+
+        // Re-read the gate, so the pill turns amber when a background call closes it.
+        function refreshAiSpend() {
+            fetch('/ai_spend').then(r => r.ok ? r.json() : Promise.reject(r.status)).then(renderAiSpend)
+                .catch(() => { /* keep the last state on a transient fetch failure */ });
+        }
+        if (document.getElementById('hdr-ai-spend')) { setInterval(refreshAiSpend, 30000); }
+
+        // A person reopens a closed gate for step_usd more today; the pill updates without a reload.
+        async function continueAiSpend() {
+            try {
+                const resp = await fetch('/ai_spend/continue', { method: 'POST' });
+                const data = await resp.json();
+                if (!resp.ok || data.status !== 'ok') throw new Error(data.message || resp.status);
+                showToast(data.message, 'success');
+                refreshAiSpend();
+            } catch (e) {
+                showToast('Could not reopen the AI spend gate: ' + e.message, 'error');
             }
         }
 

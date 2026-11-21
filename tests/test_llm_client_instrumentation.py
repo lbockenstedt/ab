@@ -125,6 +125,11 @@ def _load_timed_ns(perf_path):
         "_TIMEOUT_AVAILABLE": False,
         "timeout": None,
         "logger": _StubLogger(),
+        # The daily spend gate stays open and counts nothing here; tests/test_ai_spend.py covers it.
+        "ai_spend": type("OpenSpendGate", (), {
+            "blocks": staticmethod(lambda provider, model, config: False),
+            "record": staticmethod(lambda *a, **k: 0.0),
+        })(),
     }
     exec("\n\n".join(segs), ns)
     ns["_test_calls"] = calls
