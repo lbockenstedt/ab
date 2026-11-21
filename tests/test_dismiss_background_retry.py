@@ -20,6 +20,7 @@ import ast
 import asyncio
 import threading
 import time as real_time
+from _history import bind_history, bind_issue_actions
 
 
 def _load_ns():
@@ -31,7 +32,7 @@ def _load_ns():
     for node in routes_tree.body:
         if isinstance(node, ast.AsyncFunctionDef) and node.name in want:
             segs.append(ast.get_source_segment(routes_src, node))
-        if isinstance(node, ast.FunctionDef) and node.name == "_close_issue_on_github_with_retry":
+        if isinstance(node, ast.FunctionDef) and node.name in ("_close_issue_on_github_with_retry", "_history_failure"):
             segs.append(ast.get_source_segment(routes_src, node))
         if isinstance(node, ast.Assign):
             for t in node.targets:
@@ -41,18 +42,6 @@ def _load_ns():
     class _NoLog:
         def __getattr__(self, _):
             return lambda *a, **k: None
-
-    _store = {}
-
-    def load_processed():
-        return dict(_store)
-
-    def save_processed(d):
-        _store.clear()
-        _store.update(d)
-
-    def recompute_issue_counters(processed):
-        pass
 
     class _FakeTime:
         # Real time.sleep would make a 5-attempt backoff (1+2+4+8s) run for
@@ -76,15 +65,14 @@ def _load_ns():
 
     ns = {
         "logger": _NoLog(), "state": state,
-        "load_processed": load_processed, "save_processed": save_processed,
-        "recompute_issue_counters": recompute_issue_counters,
         "threading": threading, "time": _FakeTime(),
         "asyncio": asyncio, "JSONResponse": _JSONResponse,
         "Request": _FakeRequest,
     }
     exec("\n\n".join(segs), ns)
     ns["_FakeRequest"] = _FakeRequest
-    ns["_store"] = _store
+    bind_history(ns)
+    bind_issue_actions(ns)
     return ns
 
 

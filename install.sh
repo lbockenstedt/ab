@@ -359,11 +359,28 @@ set -euo pipefail
 image="${1:?usage: ab-sandbox <image> <cwd> <command>}"
 cwd="${2:?missing cwd}"
 cmd="${3:?missing command}"
-case "$cwd" in
-    /opt/ab/*) : ;;
-    *) echo "cwd must be under /opt/ab (got $cwd)" >&2; exit 2 ;;
+# Resolve '..' and symlinks first: `/opt/ab/../../etc` or a symlink under
+# /opt/ab would otherwise pass the prefix check and mount a host directory.
+real=$(readlink -f -- "$cwd" 2>/dev/null) || real=""
+case "$real" in
+    /opt/ab/?*) : ;;
+    *) echo "cwd must be a directory under /opt/ab (got $cwd)" >&2; exit 2 ;;
 esac
-exec docker run --rm -v "$cwd:/app" -w /app "$image" sh -c "$cmd"
+[ -d "$real" ] || { echo "cwd must be a directory under /opt/ab (got $cwd)" >&2; exit 2; }
+# ':' and ',' are separators in docker's -v syntax.
+case "$real" in
+    *:*|*,*) echo "cwd may not contain ':' or ',' (got $cwd)" >&2; exit 2 ;;
+esac
+# An image starting with '-' would be read by docker as an option (--privileged).
+image_re='^[A-Za-z0-9][A-Za-z0-9._/:@-]*$'
+[[ "$image" =~ $image_re ]] || { echo "invalid image name: $image" >&2; exit 2; }
+# Run as the sudo caller, not container root: root in the container could
+# leave a setuid-root file in the writable mount for the caller to run on the
+# host. HOME=/tmp gives pip and npm a writable home for that uid.
+uid="${SUDO_UID:-$(id -u)}"
+gid="${SUDO_GID:-$(id -g)}"
+exec docker run --rm --user "$uid:$gid" --security-opt no-new-privileges \
+    --cap-drop ALL -e HOME=/tmp -v "$real:/app" -w /app "$image" sh -c "$cmd"
 HELPER
 
 # Ollama privileged setup: install ollama if absent, write the CPU-tuning
@@ -389,6 +406,14 @@ max_loaded="${2:-3}"    # OLLAMA_MAX_LOADED_MODELS — how many models stay resi
 bind_host="${3:-0.0.0.0:11434}"
 
 say() { echo "$1"; }
+
+# The three values are written into a root systemd unit override, so a newline
+# or quote in any of them would add directives (ExecStartPre=...). Accept only
+# the shapes they really have before doing anything.
+host_re='^[][A-Za-z0-9.:-]{1,253}$'
+[[ "$num_thread" =~ ^[0-9]{1,4}$ ]] || { say "ERROR: num_thread must be a number"; exit 2; }
+[[ "$max_loaded" =~ ^[0-9]{1,3}$ ]] || { say "ERROR: max_loaded must be a number"; exit 2; }
+[[ "$bind_host" =~ $host_re ]] || { say "ERROR: bind address must be host:port"; exit 2; }
 
 # zstd is required by the ollama installer's tarball extraction.
 if ! command -v zstd >/dev/null 2>&1; then

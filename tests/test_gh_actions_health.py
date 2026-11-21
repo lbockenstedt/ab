@@ -13,7 +13,7 @@ import gh_actions_health as gha
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     gha._state.update(status_at=0.0, status_down=False, status_text="",
-                      symptoms=[], backoff_until=0.0, backoff_s=0.0, reason="")
+                      symptoms={}, backoff_until=0.0, backoff_s=0.0, reason="")
     clock = {"t": 1_000_000.0}
     monkeypatch.setattr(gha.time, "time", lambda: clock["t"])
     page = {"status": "operational"}
@@ -54,17 +54,40 @@ def test_status_page_outage_backs_off_and_grows_then_resets(_reset):
 
 
 def test_zero_job_failures_alone_trigger_backoff():
-    gha.note_infra_failure(1)
+    gha.note_infra_failure("o/a", [101])
     assert gha.outage({}) == (False, "")
-    gha.note_infra_failure(1)
+    gha.note_infra_failure("o/b", [202])
     down, why = gha.outage({})
     assert down and "zero jobs" in why
 
 
 def test_old_sightings_expire(_reset):
     clock, _ = _reset
-    gha.note_infra_failure(2)
+    gha.note_infra_failure("o/a", [101, 102])
     _advance(clock, 16)
+    assert gha.outage({}) == (False, "")
+
+
+def test_one_stuck_run_polled_repeatedly_is_not_an_outage(_reset):
+    """A run that can never start (e.g. a workflow YAML error) is seen on every
+    poll; counting each sighting made it an outage on the second poll."""
+    clock, _ = _reset
+    for _ in range(5):
+        gha.note_infra_failure("o/a", [101])
+        assert gha.outage({}) == (False, "")
+        _advance(clock, 1)
+    # Same id in another case, or as an int vs str, is still the same run.
+    gha.note_infra_failure("O/A", ["101"])
+    assert gha.outage({}) == (False, "")
+
+
+def test_a_stuck_run_is_not_recounted_after_the_window(_reset):
+    """Re-seeing an old stuck run must not pair with one new run to fake an outage."""
+    clock, _ = _reset
+    gha.note_infra_failure("o/a", [101])
+    _advance(clock, 30)
+    gha.note_infra_failure("o/a", [101])
+    gha.note_infra_failure("o/b", [202])
     assert gha.outage({}) == (False, "")
 
 

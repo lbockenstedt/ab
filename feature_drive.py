@@ -43,8 +43,7 @@ from main import (
     logger,
     load_config,
     load_processed,
-    save_processed,
-    recompute_issue_counters,
+    update_processed,
     get_monitored_repos,
     call_llm,
     state,
@@ -316,13 +315,16 @@ def _flag_classifier_exhausted(gh_repo, issue, rec):
 
 
 def _already_commented(issue, marker_prefix):
-    """True if a comment carrying `marker_prefix` already exists — the
+    """True if a trusted comment carrying `marker_prefix` already exists — the
     idempotency check shared by _flag_issue and _clarify_issue so a repeat
     scan of the same still-open issue doesn't re-comment every cycle."""
     # Look through existing comments for the marker; on API errors assume none.
+    # A stranger's copied marker (anyone can comment on a public repo) must not
+    # stop AB's own comment, so only authors with write access count.
+    from pr_review_score import is_trusted_comment
     try:
         for c in issue.get_comments():
-            if marker_prefix in (c.body or ""):
+            if marker_prefix in (c.body or "") and is_trusted_comment(c):
                 return True
     except Exception as e:
         logger.debug(f"feature_drive: comment scan failed, proceeding as not-yet-commented: {e}")
@@ -466,8 +468,16 @@ def scan_feature_requests(gh, config):
                 prior = processed.get(issue_id) or {}
                 if prior and not prior.get("title"):
                     # Backfill records written before titles were stored.
-                    prior = processed[issue_id] = {**prior, **_meta(issue)}
-                    save_processed(processed)
+                    metadata = _meta(issue)
+
+                    def backfill(current, issue_id=issue_id, metadata=metadata):
+                        """Backfill only a still-existing record that lacks identity."""
+                        rec = current.get(issue_id)
+                        if rec and not rec.get("title"):
+                            rec.update(metadata)
+                        return rec or {}
+
+                    prior = update_processed(backfill)
                 retrying = _is_classifier_error_record(prior)
                 # Finished issues are skipped unless they are retrying a classifier error.
                 if prior.get("status") in _TERMINAL_STATUSES and not retrying:
@@ -501,7 +511,6 @@ def scan_feature_requests(gh, config):
                 # Classifier failed: record a retry, or park for a human after too many attempts.
                 if result.get("classifier_error"):
                     max_attempts = max(1, int(config.get("feature_classify_max_attempts") or 3))
-                    attempts = int(prior.get("attempts") or 0) + 1 if retrying else 1
                     rec = {
                         **_meta(issue),
                         "status": _CLASSIFY_RETRY_STATUS,
@@ -509,24 +518,29 @@ def scan_feature_requests(gh, config):
                         "last_error": result["classifier_error"],
                         "model": result.get("model") or "",
                         "raw_excerpt": result.get("raw_excerpt") or "",
-                        "attempts": attempts,
                         "max_attempts": max_attempts,
                         "timestamp": datetime.now().isoformat(),
                     }
-                    if attempts >= max_attempts:
-                        rec["status"] = "feature_flagged"
-                        rec["flag_kind"] = "classifier_error"
-                        rec["boundary_ids"] = []
+                    def classify_failure(current, issue_id=issue_id, rec=rec, max_attempts=max_attempts):
+                        """Charge the classifier attempt from the current retry record."""
+                        fresh = current.get(issue_id) or {}
+                        attempts = int(fresh.get("attempts") or 0) + 1 if _is_classifier_error_record(fresh) else 1
+                        saved = {**rec, "attempts": attempts}
+                        if attempts >= max_attempts:
+                            saved.update(status="feature_flagged", flag_kind="classifier_error", boundary_ids=[])
+                        current[issue_id] = saved
+                        return saved
+
+                    rec = update_processed(classify_failure)
+                    processed[issue_id] = rec
+                    attempts = rec["attempts"]
+                    if rec["status"] == "feature_flagged":
                         _flag_classifier_exhausted(repo_obj, issue, rec)
                         logger.warning(f"feature_drive: {issue_id} classifier failed {attempts}x — "
                                        f"parked for a human (not a boundary decision)")
                     else:
                         logger.info(f"feature_drive: {issue_id} classifier error, attempt "
                                     f"{attempts}/{max_attempts} — will retry next cycle")
-                    # Save the record and move on.
-                    processed[issue_id] = rec
-                    save_processed(processed)
-                    recompute_issue_counters(processed)
                     continue
 
                 if retrying and result["verdict"] != "flag":
@@ -542,7 +556,7 @@ def scan_feature_requests(gh, config):
                 # Act on the verdict: flag, ask questions, or build.
                 if result["verdict"] == "flag":
                     _flag_issue(repo_obj, issue, result, force_comment=retrying)
-                    processed[issue_id] = {
+                    record = {
                         **_meta(issue),
                         "status": "feature_flagged",
                         "flag_kind": "boundary",
@@ -552,18 +566,26 @@ def scan_feature_requests(gh, config):
                         "confidence": result.get("confidence"),
                         "timestamp": datetime.now().isoformat(),
                     }
-                    save_processed(processed)
-                    recompute_issue_counters(processed)
+                    def replace_flagged(current, issue_id=issue_id, record=record):
+                        """Intentionally replace this classification outcome."""
+                        current[issue_id] = record
+
+                    update_processed(replace_flagged)
+                    processed[issue_id] = record
                 elif result["verdict"] == "clarify":
                     _clarify_issue(repo_obj, issue, result)
-                    processed[issue_id] = {
+                    record = {
                         **_meta(issue),
                         "status": "feature_needs_info",
                         "questions": result["questions"],
                         "timestamp": datetime.now().isoformat(),
                     }
-                    save_processed(processed)
-                    recompute_issue_counters(processed)
+                    def replace_clarification(current, issue_id=issue_id, record=record):
+                        """Intentionally replace this request for more information."""
+                        current[issue_id] = record
+
+                    update_processed(replace_clarification)
+                    processed[issue_id] = record
                 else:  # "build"
                     logger.info(
                         f"feature_drive: {issue_id} classified BUILD "

@@ -15,7 +15,7 @@ Covers:
    llm_proxy_agent_model_ids entry opts in.
 2. _proxy_fix_proposal: with autofix DISABLED (default) it never triggers a fix
    and says so; with autofix ENABLED it launches process_single_issue exactly
-   once with the proposal's repo/number/preference.
+   once with the proposal's repo/number and automatic routing.
 3. _proxy_fix_proposal: the pre-build boundary PRE-FLIGHT note appears when the
    issue text matches a configured core-systems boundary.
 """
@@ -24,6 +24,8 @@ import sys
 import threading
 import time
 import types
+
+import pytest
 
 
 def _load_ns(names):
@@ -51,6 +53,37 @@ def _load_ns(names):
 def _check(label, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
     return bool(cond)
+
+
+@pytest.mark.parametrize("model_preference", ["local", "cloud", None])
+def test_autonomous_proxy_ignores_model_generated_preference(monkeypatch, model_preference):
+    """A model-generated preference cannot override automatic fix dispatch."""
+    ns = _load_ns({"_proxy_fix_proposal"})
+    calls = []
+
+    def run_fix(repo, number, llm_preference=None):
+        """Record dispatch without running the fix pipeline."""
+        calls.append((repo, number, llm_preference))
+        return True, "ok"
+
+    class InlineThread:
+        def __init__(self, *, target, daemon):
+            """Capture the callback without starting a thread."""
+            self.target = target
+
+        def start(self):
+            """Run the callback synchronously for deterministic assertions."""
+            self.target()
+
+    monkeypatch.setitem(sys.modules, "fix_engine", types.SimpleNamespace(process_single_issue=run_fix))
+    monkeypatch.setitem(sys.modules, "feature_boundary", types.SimpleNamespace(prefilter=lambda *_: {}))
+    ns["threading"] = types.SimpleNamespace(Thread=InlineThread)
+    out = ns["_proxy_fix_proposal"](
+        {"repo": "o/r", "number": 42, "llm_preference": model_preference},
+        "", {"llm_proxy_autofix_enabled": True}, None,
+    )
+    assert calls == [("o/r", 42, None)]
+    assert "LLM preference: auto" in out
 
 
 def main():
@@ -100,7 +133,7 @@ def main():
     ev.wait(timeout=3)
     time.sleep(0.05)
     ok &= _check("autofix ENABLED -> process_single_issue called exactly once",
-                 triggered["calls"] == [("o/r", 42, "cloud")])
+                 triggered["calls"] == [("o/r", 42, None)])
     ok &= _check("autofix ENABLED -> message confirms the pipeline was triggered",
                  "Triggered" in out2 and "review panel" in out2)
 

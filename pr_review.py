@@ -74,7 +74,8 @@ from datetime import timedelta
 
 # AppBuilder helpers: repos, shared state, guardrails, PR actions and the deterministic checks.
 from github_ops import get_monitored_repos
-from app_state import update_task_state, set_task_step, record_pr_review, update_pr_review, mark_pr_approved, state
+from app_state import (ReviewPersistenceError, update_task_state, set_task_step, record_pr_review,
+                       update_pr_review, mark_pr_approved, state)
 import feature_boundary
 import feature_allowlist
 import fix_failures
@@ -1335,9 +1336,14 @@ def _render(findings, head_sha, summary="", review=None, state_review=None,
 
 
 def _find_marker_comment(pr):
-    """Return our existing review comment on the PR, or None."""
+    """Return our existing review comment on the PR, or None.
+
+    Only a comment from an author with write access counts: anyone can comment
+    on a public repo, and a copied marker plus head line would otherwise make
+    AB skip the review as already current, or edit the wrong comment."""
+    from pr_review_score import is_trusted_comment
     for c in pr.get_issue_comments():
-        if PR_REVIEW_MARKER in (c.body or ""):
+        if PR_REVIEW_MARKER in (c.body or "") and is_trusted_comment(c):
             return c
     return None
 
@@ -1997,24 +2003,33 @@ def _maybe_auto_merge(gh, repo, pr, config):
         # Cleared: approve the PR, record it, and note it on the comment.
         logger.info("pr_review: auto-merging %s — %s", key, reason)
         approve_pr(gh, repo.full_name, pr.number, actor="ab-auto")
-        mark_pr_approved(repo.full_name, pr.number, True)
+        try:
+            approved = mark_pr_approved(repo.full_name, pr.number, True,
+                                        expected_head=pr_meta.get("head_sha"))
+        except ReviewPersistenceError:
+            logger.warning("pr_review: auto-merge deferred for %s — review storage unavailable", key)
+            return
+        if not approved:
+            logger.info("pr_review: auto-merge deferred for %s — review head changed", key)
+            return
         update_pr_review(repo.full_name, pr.number, auto_merge_score=min(
             rec.get("panel_confidence") or 0.0, rec.get("panel2_confidence") or 0.0),
             auto_merge_reason=reason, auto_merge_blocked_reason=None)
         _update_automerge_comment(pr, key, _automerge_note(reason, True))
         # Merge, then record the result.
-        status_code, result = merge_pr(gh, repo.full_name, pr.number)
+        status_code, result = merge_pr(gh, repo.full_name, pr.number,
+                                       expected_head=pr_meta.get("head_sha"))
         if status_code == 200 and result.get("status") == "success":
             update_pr_review(repo.full_name, pr.number, auto_merged=True,
                              auto_merge_refusal=None)
             logger.info("pr_review: auto-merge succeeded for %s", key)
-        elif result.get("released_checks") or result.get("infra") or result.get("deferred"):
+        elif result.get("head_moved") or result.get("released_checks") or result.get("infra") or result.get("deferred"):
             # Not a refusal to record: the PR was blocked on a check that had
             # never reported because its workflow run was parked, and merge_pr
             # just released it. Stay quiet and let the next poll merge it --
             # recording this as auto_merge_refusal would suppress that retry.
-            # Same for "infra": GitHub Actions never started the checks, and
-            # "deferred": a check still running or a merge already in flight.
+            # "infra" and "deferred" likewise retry, while "head_moved" waits
+            # for the scanner to review the new commit instead.
             logger.info("pr_review: auto-merge deferred for %s — %s",
                         key, result.get("message"))
         elif result.get("retryable") is False:
@@ -2757,13 +2772,15 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     continue
 
                 # Apply the edits to the checkout.
-                success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                parse_feedback = {}
+                success_applied, fixes, confidence = parse_and_apply(
+                    fix_code, path, feedback_out=parse_feedback)
                 if not success_applied:
                     # Classify WHY, exactly as the issue loop does. Telling a
                     # model to "fix its JSON" when the JSON was valid but the
                     # search anchors missed is what stops retries converging.
-                    _reason = getattr(parse_and_apply, "last_reason", None) or "invalid_json"
-                    _misses = getattr(parse_and_apply, "last_failures", None) or []
+                    _reason = parse_feedback.get("last_reason") or "invalid_json"
+                    _misses = parse_feedback.get("last_failures") or []
                     if _reason == "edit_anchor_miss":
                         last_failure = (
                             "The JSON was valid, but the edits' \"search\" text was not found in the "
@@ -2793,7 +2810,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                             "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
                             "budget: %s | model said: %r", repo_full_name, number, barren,
                             max_barren, last_failure,
-                            getattr(parse_and_apply, "last_raw_prefix", "") or "<nothing>")
+                            parse_feedback.get("last_raw_prefix") or "<nothing>")
                         continue
                     if is_last:
                         return False, last_failure

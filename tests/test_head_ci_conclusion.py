@@ -57,8 +57,8 @@ class _FakeGha:
         return list(cls.stuck)
 
     @classmethod
-    def note_infra_failure(cls, n=1):
-        cls.noted += n
+    def note_infra_failure(cls, repo, run_ids):
+        cls.noted += len(run_ids)
 
 
 class _Resp:

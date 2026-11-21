@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 
 
 def _load_ns():
@@ -41,15 +42,18 @@ def _load_ns():
 
     want_funcs = {
         "_atomic_write_json", "_read_persistent_config", "_remember_good_config",
-        "save_config", "load_config",
+        "_apply_config_defaults", "_config_view", "_save_config",
+        "save_config", "load_config", "update_config",
+        "ConfigUnreadableError", "ConfigConflictError",
         "save_processed", "load_processed",
+        "_read_processed_file", "_validate_processed", "_read_processed_authority",
+        "_write_processed", "ProcessedStoreError", "ProcessedUnreadableError",
         "save_pr_reviews", "load_pr_reviews",
         "save_update_state", "load_update_state",
     }
     segs = []
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and (
-                node.name in want_funcs or node.name == "ConfigUnreadableError"):
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in want_funcs:
             segs.append(ast.get_source_segment(src, node))
         if isinstance(node, ast.Assign):
             for t in node.targets:
@@ -57,7 +61,7 @@ def _load_ns():
                 if name in ("CONFIG_DIR", "CONFIG_FILE", "STATE_FILE",
                             "PR_REVIEWS_FILE", "UPDATE_STATE_FILE",
                             "CHAT_CONFIG_DEFAULTS",
-                            "_last_good_config", "_unreadable_logged"):
+                            "_config_lock", "_processed_lock", "_last_good_config", "_unreadable_logged"):
                     segs.append(ast.get_source_segment(src, node))
 
     module_src = "\n\n".join(segs)
@@ -71,7 +75,7 @@ def _load_ns():
         def warning(self, *a, **k): pass
         def error(self, msg, *a, **k): self.errors.append(msg)
 
-    ns = {"os": os, "json": json, "copy": copy, "logger": _FakeLogger()}
+    ns = {"os": os, "json": json, "copy": copy, "threading": threading, "logger": _FakeLogger()}
     exec(compile(module_src, "config_store_extract", "exec"), ns)
     return ns
 
@@ -186,11 +190,11 @@ def main():
         ns["PR_REVIEWS_FILE"] = os.path.join(missing_dir, "pr_reviews.json")
         ns["UPDATE_STATE_FILE"] = os.path.join(missing_dir, "update_state.json")
 
-        ns["save_processed"]({"o/r": [7]})
+        ns["save_processed"]({"o/r:7": {}})
         ok &= _check("save_processed creates missing dir (no ENOENT)",
                       os.path.exists(ns["STATE_FILE"]))
         ok &= _check("save_processed round-trips into created dir",
-                      ns["load_processed"]() == {"o/r": [7]})
+                      ns["load_processed"]() == {"o/r:7": {}})
         ok &= _check("save_processed did NOT fall back to cwd",
                       not os.path.exists(os.path.join(tmpdir, "processed_issues.json")))
 

@@ -97,7 +97,6 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
     # Issue details and the text to show before our message.
     repo = descriptor.get("repo")
     number = descriptor.get("number")
-    pref = descriptor.get("llm_preference")
     prefix = (text + "\n\n") if text else ""
 
     # Look up the issue's title and body when possible.
@@ -146,7 +145,9 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
             """Run the fix pipeline for the issue and log the result."""
             # Run the fix and log the outcome.
             try:
-                ok, msg = process_single_issue(repo, number, llm_preference=pref)
+                # The tool's preference came from the model, not the operator.
+                # Use automatic cloud routing and keep confidence escalation.
+                ok, msg = process_single_issue(repo, number)
                 logger.info("Router-triggered fix %s#%s -> ok=%s msg=%s", repo, number, ok, msg)
             except Exception as e:  # noqa: BLE001
                 logger.error("Router-triggered fix %s#%s failed: %s", repo, number, e)
@@ -158,7 +159,7 @@ def _proxy_fix_proposal(descriptor: Dict[str, Any], text: str,
 
     # Report that the fix was triggered.
     return (prefix + f"✅ Triggered the automated fix pipeline for {repo}#{number} "
-            f"(LLM preference: {pref or 'auto'}). It will clone, generate the fix, run "
+            "(LLM preference: auto). It will clone, generate the fix, run "
             "tests, then the review panel gates the merge — direct-push only when a "
             "trusted+owned repo is Approved AND the diff doesn't touch a core-systems "
             "boundary; otherwise it comes back as a human-reviewed PR." + preflight)
