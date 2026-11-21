@@ -607,7 +607,7 @@
                         </div>
                         <div class="flex-none flex flex-row flex-wrap sm:flex-col items-stretch gap-1.5 w-full sm:w-36">
                             {% if it.kind == 'pr' and it.split %}
-                                <button type="button" data-mc="approve-merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Side with the approving panel: approve on GitHub, then merge">Approve &amp; merge</button>
+                                <button type="button" data-mc="approve-merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" data-head="{{ it.head }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Side with the approving panel: approve on GitHub, then merge">Approve &amp; merge</button>
                                 <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Run both review panels again">Retry review</button>
                                 {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
                                 <button type="button" data-mc="deny" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="text-xs text-red-600 hover:underline py-1" title="Deny this PR (closes it on GitHub)">Deny</button>
@@ -618,7 +618,7 @@
                                     <summary class="cursor-pointer text-slate-500 hover:text-navy py-1 list-none" title="More actions for this PR">More ▾</summary>
                                     <div class="absolute right-0 z-20 mt-1 w-40 bg-white border border-slate-200 rounded-md shadow-lg py-1">
                                         {% if it.approved %}<button type="button" data-mc="merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Merge this approved PR">Merge</button>
-                                        {% else %}<button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>{% endif %}
+                                        {% else %}<button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" data-head="{{ it.head }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>{% endif %}
                                         {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
                                         <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs hover:bg-slate-50" title="Re-run the full review now instead of waiting for the next poll">Re-review</button>
                                         <button type="button" data-mc="deny" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="block w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50" title="Deny this PR (closes it on GitHub)">Deny</button>
@@ -628,7 +628,7 @@
                                 {% if it.approved %}
                                 <button type="button" data-mc="merge" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Merge this approved PR">Merge</button>
                                 {% else %}
-                                <button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>
+                                <button type="button" data-mc="approve" data-repo="{{ _repo }}" data-num="{{ it.number }}" data-head="{{ it.head }}" class="btn-go px-3 py-1.5 rounded-md text-xs" title="Approve this PR on GitHub; Merge unlocks after">Approve</button>
                                 {% endif %}
                                 {% if it.findings %}<button type="button" data-mc="fix" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Generate a fix for the findings, gate it through the reviewer panel and push it onto this PR">Fix</button>{% endif %}
                                 <button type="button" data-mc="reprocess" data-repo="{{ _repo }}" data-num="{{ it.number }}" class="btn-sec px-3 py-1.5 rounded-md text-xs" title="Re-run the full review now instead of waiting for the next poll">Re-review</button>
@@ -712,12 +712,12 @@
              status chip, age, a primary action and a ⋯ menu for the rest); the long
              detail sits in a collapsed "Details" expander under each row. Buttons
              carry data-mc="<action>" for the one delegated listener (MC_ACTIONS). -->
-        {% macro act_button(action, label, title, primary=False, id='', repo='', num='', href='') -%}
+        {% macro act_button(action, label, title, primary=False, id='', repo='', num='', href='', head='') -%}
         {%- set _cls = 'bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold whitespace-nowrap' if primary else 'block w-full text-left px-3 py-1.5 text-xs whitespace-nowrap hover:bg-slate-100 ' ~ ('text-red-600' if action in ('dismiss', 'deny') else 'text-slate-700') -%}
         {%- if href -%}
         <a href="{{ href }}" target="_blank" class="{{ _cls }}" title="{{ title }}">{{ label }}</a>
         {%- else -%}
-        <button type="button" data-mc="{{ action }}"{% if id %} data-id="{{ id }}"{% endif %}{% if repo %} data-repo="{{ repo }}" data-num="{{ num }}"{% endif %} class="{{ _cls }}" title="{{ title }}">{{ label }}</button>
+        <button type="button" data-mc="{{ action }}"{% if id %} data-id="{{ id }}"{% endif %}{% if repo %} data-repo="{{ repo }}" data-num="{{ num }}"{% endif %}{% if action in ('approve', 'approve-merge') %} data-head="{{ head or '' }}"{% endif %} class="{{ _cls }}" title="{{ title }}">{{ label }}</button>
         {%- endif -%}
         {%- endmacro %}
         {% macro act_menu(title='More actions') -%}
@@ -820,7 +820,11 @@
                                 <div class="text-slate-600 text-xs">
                                     {% if info.status == 'fixed' %}AI fix pushed / PR opened
                                     {% elif info.status == 'verified' %}Verified clean in production
-                                    {% elif info.status == 'pending_verification' %}Pending verification — auto-committed; confirm the issue is gone, then Resolve (or Re-open)
+                                    {% elif info.status == 'pending_verification' %}
+                                        {% if info.commit_type == 'Published branch (PR unconfirmed)' %}Branch pushed; PR could not be confirmed. Complete publication before resolving.
+                                        {% elif info.commit_type == 'Pull Request' %}Fix PR published; confirm merge and verify before resolving.
+                                        {% else %}Pending verification — auto-committed; confirm the issue is gone, then Resolve (or Re-open){% endif %}
+                                        {% if info.error %}<div class="text-orange-700">Completion incomplete: {{ info.error }}</div>{% endif %}
                                     {% elif info.status == 'resolved' %}Resolved (human-confirmed)
                                     {% elif info.status == 'closed' %}Closed on GitHub (resolved)
                                     {% elif info.status == 'awaiting_prod_verification' %}Awaiting production verification
@@ -850,14 +854,15 @@
                                 </div>
                                 {% endif %}
                                 <div class="flex items-center flex-wrap gap-x-2 text-slate-500 text-xs italic">
-                                    {% if info.status == 'fixed' or info.status == 'verified' or info.status == 'closed' %}
-                                        <span class="font-semibold">Fixed:</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
+                                    {% if info.status in ('fixed', 'verified', 'closed', 'pending_verification') %}
+                                        <span class="font-semibold">{{ 'Published:' if info.status == 'pending_verification' else 'Fixed:' }}</span> {{ info.commit_msg if info.commit_msg else 'N/A' }}
                                         <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Method:</span> {{ info.commit_type if info.commit_type else 'N/A' }}
                                         <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Reason:</span> {{ info.decision_reason if info.decision_reason else 'N/A' }}
                                         <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Commit:</span> {{ info.commit[:7] if info.commit else 'N/A' }}
+                                        {% if info.branch %}<span class="mx-2 text-slate-500">|</span><span class="font-semibold">Branch:</span> {{ info.branch }}{% endif %}
                                         <span class="mx-2 text-slate-500">|</span>
                                         <span class="font-semibold">Date:</span> {{ info.timestamp }}
                                     {% elif info.status == 'non-actionable' %}
@@ -940,7 +945,7 @@
                             {% else %}
                             {# Approved: Merge is unlocked. Not approved: only Approve (or Deny). #}
                             {% if pr.approved %}{{ act_button('merge', 'Merge', 'Merge this approved PR', True, repo=pr.repo, num=pr.number) }}
-                            {% else %}{{ act_button('approve', 'Approve', 'Approve this PR on GitHub; Merge unlocks after', True, repo=pr.repo, num=pr.number) }}{% endif %}
+                            {% else %}{{ act_button('approve', 'Approve', 'Approve this PR on GitHub; Merge unlocks after', True, repo=pr.repo, num=pr.number, head=pr.head) }}{% endif %}
                             {% call act_menu() %}
                             {# Fix is human-triggered only: generate a fix for the findings, gate it
                                through the skeptical panel, push it onto THIS PR's branch. #}
@@ -4184,11 +4189,11 @@
                 const allValue = (data && data.all_value) || '';
                 const opts = [];
                 if (allValue) {
-                    opts.push(`<option value="${allValue}"${data.default === allValue ? ' selected' : ''}>` +
+                    opts.push(`<option value="${_bfEsc(allValue)}"${data.default === allValue ? ' selected' : ''}>` +
                               `All repositories (${repos.length})</option>`);
                 }
                 opts.push(...repos.map(r =>
-                    `<option value="${r}"${r === data.default ? ' selected' : ''}>${r.split('/').pop()}</option>`
+                    `<option value="${_bfEsc(r)}"${r === data.default ? ' selected' : ''}>${_bfEsc(r.split('/').pop())}</option>`
                 ));
                 sel.innerHTML = opts.join('');
                 sel.dataset.allValue = allValue;
@@ -4329,7 +4334,7 @@
             try {
                 const resp = await fetch('/api/pr-review/approve', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ repo: repo, number: number })
+                    body: JSON.stringify({ repo: repo, number: number, head: btn && btn.dataset.head })
                 });
                 const d = await resp.json();
                 if (resp.ok && d.status === 'success') {
@@ -4339,7 +4344,7 @@
                     // one (Reprocess + this + Deny), so the badge would just cost space
                     // for no new information.
                     if (btn) btn.outerHTML =
-                        `<button type="button" data-mc="merge" data-repo="${repo}" data-num="${number}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold whitespace-nowrap" title="Merge this approved PR">Merge</button>`;
+                        `<button type="button" data-mc="merge" data-repo="${_bfEsc(repo)}" data-num="${_bfEsc(number)}" class="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-bold whitespace-nowrap" title="Merge this approved PR">Merge</button>`;
                     showToast('Approved ' + repo + ' #' + number, 'success');
                 } else {
                     showToast('Approve failed: ' + (d.message || resp.status), 'error');
@@ -4523,7 +4528,7 @@
             try {
                 const resp = await fetch('/api/pr-review/approve', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ repo: repo, number: number })
+                    body: JSON.stringify({ repo: repo, number: number, head: btn.dataset.head })
                 });
                 const d = await resp.json();
                 if (!resp.ok || d.status !== 'success') {
@@ -4680,8 +4685,8 @@
 
         function _diagPill(ok, label) {
             return ok
-                ? '<span class="status-pill pill-online">' + label + '</span>'
-                : '<span class="status-pill pill-offline">' + label + '</span>';
+                ? '<span class="status-pill pill-online">' + _bfEsc(label) + '</span>'
+                : '<span class="status-pill pill-offline">' + _bfEsc(label) + '</span>';
         }
         function _fmtUptime(s) {
             if (s == null) return '—';
@@ -4740,11 +4745,11 @@
                     const procs = s.processes || [];
                     pb.innerHTML = procs.length ? procs.map(p =>
                         '<tr class="border-t border-slate-100">'
-                        + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + p.pid + '</td>'
-                        + '<td class="py-2 pr-3 text-slate-700">' + (p.name || '—')
+                        + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + _bfEsc(p.pid) + '</td>'
+                        + '<td class="py-2 pr-3 text-slate-700">' + _bfEsc(p.name || '—')
                             + (p.self ? ' <span class="text-xs text-primary-text font-bold">(self)</span>' : '') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.rss_mb != null ? p.rss_mb : '—') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + (p.cpu_percent != null ? p.cpu_percent : '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + _bfEsc(p.rss_mb != null ? p.rss_mb : '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600">' + _bfEsc(p.cpu_percent != null ? p.cpu_percent : '—') + '</td>'
                         + '</tr>').join('')
                         : '<tr><td colspan="4" class="py-2 text-xs text-slate-500">psutil not installed — process list unavailable</td></tr>';
                 }
@@ -4801,18 +4806,18 @@
                         : _diagPill(true, 'available');
                     const lat = p.latency_ms != null ? Math.round(p.latency_ms) + ' ms' : '—';
                     return '<tr class="border-t border-slate-100">'
-                        + '<td class="py-2 pr-3 text-slate-700">' + (p.provider || '—') + '</td>'
-                        + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + (p.model || '—') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-500">' + (p.tier || '—') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs ' + (p.speed === 'fast' ? 'text-emerald-600' : 'text-slate-500') + '">' + (p.speed || '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-slate-700">' + _bfEsc(p.provider || '—') + '</td>'
+                        + '<td class="py-2 pr-3 font-mono text-xs text-slate-600">' + _bfEsc(p.model || '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-500">' + _bfEsc(p.tier || '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs ' + (p.speed === 'fast' ? 'text-emerald-600' : 'text-slate-500') + '">' + _bfEsc(p.speed || '—') + '</td>'
                         // Throughput for THIS endpoint, keyed by ModelKey — the
                         // same (provider, base_url, model) reachable two ways is
                         // one figure. '—' when never measured, never 0.
                         + '<td class="py-2 pr-3 text-xs tabular-nums ' + (_tpsFor(p.key) ? 'font-semibold text-slate-700' : 'text-slate-500') + '">'
-                          + (_tpsFor(p.key) || '—') + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + lat + '</td>'
+                          + _bfEsc(_tpsFor(p.key) || '—') + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + _bfEsc(lat) + '</td>'
                         + '<td class="py-2 pr-3">' + status + '</td>'
-                        + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + (p.n || 0) + '</td>'
+                        + '<td class="py-2 pr-3 text-xs text-slate-600 tabular-nums">' + _bfEsc(p.n || 0) + '</td>'
                         + '</tr>';
                 }).join('');
                 body.innerHTML = rows;
@@ -4883,8 +4888,8 @@
                     const renderCert = (elId, c, selfSignedIsBad) => {
                         const el = document.getElementById(elId);
                         if (!el) return;
-                        if (!c || !c.exists) { el.innerHTML = '<span class="text-red-600">not present (' + ((c && c.path) || '—') + ')</span>'; return; }
-                        if (c.parse_error) { el.innerHTML = 'present at ' + c.path + ' <span class="text-slate-500">(unparsed: ' + c.parse_error + ')</span>'; return; }
+                        if (!c || !c.exists) { el.innerHTML = '<span class="text-red-600">not present (' + _bfEsc((c && c.path) || '—') + ')</span>'; return; }
+                        if (c.parse_error) { el.innerHTML = 'present at ' + _bfEsc(c.path) + ' <span class="text-slate-500">(unparsed: ' + _bfEsc(c.parse_error) + ')</span>'; return; }
                         const ss = c.self_signed
                             ? '<span class="' + (selfSignedIsBad ? 'text-red-600' : 'text-amber-600') + ' font-bold">self-signed</span>'
                             : '<span class="text-primary-text font-bold">CA-issued</span>';
@@ -4892,7 +4897,7 @@
                         // only holds roots (the LE intermediate is missing) — flag it.
                         const cl = c.chain_len;
                         const chainNote = (cl != null)
-                            ? '<div>chain: ' + cl + ' cert' + (cl === 1 ? ' <span class="text-red-600 font-bold">(leaf only — intermediate missing)</span>' : 's (leaf + intermediate)') + '</div>'
+                            ? '<div>chain: ' + _bfEsc(cl) + ' cert' + (cl === 1 ? ' <span class="text-red-600 font-bold">(leaf only — intermediate missing)</span>' : 's (leaf + intermediate)') + '</div>'
                             : '';
                         // Full chain: leaf → intermediate(s) → root. The ROOT
                         // (self-signed, last entry) answers the crux question — is
@@ -4912,8 +4917,8 @@
                                     : '';
                                 return '<div class="pl-2 border-l-2 border-slate-200 mt-1">'
                                      + '<div>' + role + pub + '</div>'
-                                     + '<div>subj: ' + (lk.subject || '—') + '</div>'
-                                     + '<div>iss: ' + (lk.issuer || '—') + '</div></div>';
+                                     + '<div>subj: ' + _bfEsc(lk.subject || '—') + '</div>'
+                                     + '<div>iss: ' + _bfEsc(lk.issuer || '—') + '</div></div>';
                             }).join('');
                             chainBlock = '<div class="mt-1 text-slate-500 font-semibold">chain (leaf → root):</div>' + rows;
                         }
@@ -4926,16 +4931,16 @@
                             const ca = (c.client_auth === false)
                                 ? ' <span class="text-red-600 font-bold">✗ no clientAuth — cannot be an mTLS client cert</span>'
                                 : ' <span class="text-primary-text font-bold">✓ clientAuth</span>';
-                            ekuBlock = '<div>EKU: ' + list + ca + '</div>';
+                            ekuBlock = '<div>EKU: ' + _bfEsc(list) + ca + '</div>';
                         }
                         el.innerHTML =
                             '<div>' + ss + '</div>' +
-                            '<div>subject: ' + (c.subject || '—') + '</div>' +
-                            '<div>issuer: ' + (c.issuer || '—') + '</div>' +
+                            '<div>subject: ' + _bfEsc(c.subject || '—') + '</div>' +
+                            '<div>issuer: ' + _bfEsc(c.issuer || '—') + '</div>' +
                             chainNote +
                             ekuBlock +
-                            (c.sans && c.sans.length ? '<div>SANs: ' + c.sans.join(', ') + '</div>' : '') +
-                            (c.not_after ? '<div>expires: ' + c.not_after + '</div>' : '') +
+                            (c.sans && c.sans.length ? '<div>SANs: ' + _bfEsc(c.sans.join(', ')) + '</div>' : '') +
+                            (c.not_after ? '<div>expires: ' + _bfEsc(c.not_after) + '</div>' : '') +
                             chainBlock;
                     };
                     renderCert('diag-hc-client-cert', hc.client_cert, false);
@@ -4977,11 +4982,11 @@
                 const logEl = document.getElementById('diag-restart-log');
                 const log = (up.restart_log || []).slice().reverse();
                 logEl.innerHTML = log.length
-                    ? log.map(e => '<div>' + (e.at || '') + ' &nbsp; <span class="text-slate-500">' + e.kind + '</span> &nbsp; ' + (e.message || '') + '</div>').join('')
+                    ? log.map(e => '<div>' + _bfEsc(e.at || '') + ' &nbsp; <span class="text-slate-500">' + _bfEsc(e.kind) + '</span> &nbsp; ' + _bfEsc(e.message || '') + '</div>').join('')
                     : '<div class="text-slate-500">No recent events.</div>';
             } catch (e) {
                 const logEl = document.getElementById('diag-restart-log');
-                if (logEl) logEl.innerHTML = '<div class="text-red-500">Error loading diagnostics: ' + e + '</div>';
+                if (logEl) logEl.innerHTML = '<div class="text-red-500">Error loading diagnostics: ' + _bfEsc(e) + '</div>';
             }
         }
         // Copy the full raw /api/diagnostics JSON to the clipboard so it can be
@@ -5148,11 +5153,16 @@
             return `  ·  ${r.tps} tok/s${r.n > 1 ? ` (n=${r.n})` : ''}`;
         }
 
-        // Local HTML escaper — this template has no global one (the only other
-        // escaper is function-scoped at the Diagnostics raw-copy helper). Provider
-        // error text is interpolated below and can contain markup/URLs.
-        const _bfEsc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
-                                          .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        // HTML escaper for text and quoted attribute values put into innerHTML.
+        // A function declaration, so it is hoisted: Diagnostics (above) renders
+        // with it on page load. Provider errors, cert subjects, process names
+        // and log messages are interpolated and can contain markup. It is NOT
+        // safe inside an inline on*= handler: the browser decodes the entities
+        // before the JS runs, so pass values through data-* attributes instead.
+        function _bfEsc(s) {
+            return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
 
 
         // Model Performance panel. Reads the same /api/system-stats the header
@@ -5265,8 +5275,13 @@
                     '<span class="font-mono text-slate-700">' + _bfEsc(u.username) + '</span>' +
                     '<span class="text-slate-500">last login: ' + _bfEsc(u.last_login || 'never') + '</span>' +
                     '<button type="button" class="text-red-600 hover:text-red-700 font-bold" ' +
-                    'onclick="authDeleteUser(\'' + _bfEsc(u.username) + '\')">Remove</button></div>'
+                    'data-auth-delete="' + _bfEsc(u.username) + '">Remove</button></div>'
                 ).join('') : '<span class="italic">No accounts.</span>';
+                // The username reaches the handler through a data-* attribute:
+                // entity-escaping it inside an inline onclick is undone by the
+                // browser before the JS runs, so a quote in an SSO name broke out.
+                el.querySelectorAll('[data-auth-delete]').forEach(b =>
+                    b.addEventListener('click', () => authDeleteUser(b.dataset.authDelete)));
             } catch (e) {
                 el.innerHTML = '<span class="text-red-600">Could not load users: ' + _bfEsc(String(e && e.message || e)) + '</span>';
             }
@@ -6515,23 +6530,36 @@
             if (msg) msg.textContent = message || '';
         }
 
+        // Report whether current status was observed; a setup acknowledgement is not status.
         async function hubAgentRefresh() {
             try {
                 const r = await fetch('/api/hub-agent/status');
-                if (!r.ok) return;
+                if (!r.ok) throw new Error('Hub agent status request failed (HTTP ' + r.status + ')');
                 const d = await r.json();
+                if (!d || typeof d.status !== 'string' || !d.status) throw new Error('Invalid Hub agent status response');
                 _renderHubAgentBadge(d.status, d.message);
-            } catch (e) { console.warn('hub agent refresh failed', e); }
+                return true;
+            } catch (e) {
+                console.warn('hub agent refresh failed', e);
+                return false;
+            }
         }
 
+        // An acknowledged setup can still be failed, unconfigured, pending or already approved.
         async function hubAgentReregister() {
             if (!confirm('Re-register the Hub agent? This clears the stored session key and restarts zero-touch onboarding (you must re-approve ab in the Hub WebUI).')) return;
             try {
                 const r = await fetch('/api/hub-agent/reregister', {method: 'POST'});
-                const d = await r.json().catch(() => ({}));
-                _renderHubAgentBadge('pending', d.message || 're-registering…');
+                const d = await r.json();
+                if (!r.ok || d.status !== 'restarted') {
+                    showToast(d.message || 'Hub agent re-registration was not confirmed', 'error');
+                    return;
+                }
+                if (!await hubAgentRefresh()) {
+                    showToast('Re-registration acknowledged, but current Hub agent status could not be refreshed', 'error');
+                }
             } catch (e) {
-                _renderHubAgentBadge('error', String(e));
+                showToast('Hub agent re-registration failed: ' + String(e), 'error');
             }
         }
 
@@ -6647,10 +6675,15 @@
                 list.innerHTML = models.map(m => {
                     const n = _mmEsc(m.name);
                     return `<div class="flex items-center justify-between py-1.5 border-b border-slate-100">
-                        <span class="font-mono text-slate-700">${n} <span class="text-slate-500">(${m.size_gb} GB)</span></span>
-                        <button onclick="mmDelete('${n}')" class="btn-danger text-xs px-2 py-1 rounded-full font-bold">Delete</button>
+                        <span class="font-mono text-slate-700">${n} <span class="text-slate-500">(${_mmEsc(m.size_gb)} GB)</span></span>
+                        <button type="button" data-mm-delete="${n}" class="btn-danger text-xs px-2 py-1 rounded-full font-bold">Delete</button>
                     </div>`;
                 }).join('');
+                // Model names come from whatever endpoint the admin typed in. They
+                // reach mmDelete through a data-* attribute, because entity-escaping
+                // inside an inline onclick is decoded before the JS runs.
+                list.querySelectorAll('[data-mm-delete]').forEach(b =>
+                    b.addEventListener('click', () => mmDelete(b.dataset.mmDelete)));
             } catch (e) { list.innerHTML = '<span class="text-red-600">Failed to list: ' + _mmEsc(String(e)) + '</span>'; }
         }
 

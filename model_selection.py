@@ -4,10 +4,10 @@ picker. No I/O, no config reads: given a candidate list (already resolved by
 the impure caller, llm_client.py's enumerate_candidates) and a performance
 snapshot (from llm_perf.py), decides which model to use for one call.
 
-Pipeline: availability -> restriction -> capability filter -> group by cost
+Pipeline: availability -> routing policy -> capability filter -> group by cost
 tier (free < cheap < frontier < unknown) -> within-tier performance ranking
-(cold-start neutral; reqs.deprioritize_local pushes local/no-key endpoints to
-the bottom of their tier so offloadable work prefers a free cloud peer) ->
+(cold-start neutral; reqs.deprioritize_local ranks explicitly eligible local
+endpoints below cloud peers in the same tier) ->
 relative-exhaustion check (never empties a tier) -> first surviving tier's
 best candidate wins. Two-pass: a strict pass excludes
 unclassified ("unknown" cost_tier) models; if that yields nothing, a
@@ -28,7 +28,7 @@ MIN_SAMPLES = 3
 # A model more than 4x slower than its fastest tier peer is treated as exhausted.
 DEFAULT_SLOW_FACTOR = 4.0
 
-# Intra-tier score penalty applied to no-key/local endpoints when a call sets
+# Intra-tier score penalty applied to opted-in local endpoints when a call sets
 # reqs.deprioritize_local. Far larger than the [0, ~1.1] score range so ANY
 # non-local peer in the same tier outranks every local one — yet applied
 # uniformly, so a tier that is all-local keeps its internal order and still
@@ -66,13 +66,8 @@ class LlmRequirements:
                                                # money, plain cheapest-first would take the fastest
                                                # weakest model in the free tier. Log analysis wants
                                                # neither — it wants the best FREE model.
-    deprioritize_local: bool = False           # SOFT within-tier bias: rank no-key/local endpoints
-                                               # (self-hosted GPU, LM Studio, claude_cli session) LAST
-                                               # so offloadable work (log review, batch) prefers a
-                                               # capable FREE CLOUD peer and leaves the GPU idle for
-                                               # the coordinator. Never excludes: if the GPU is the
-                                               # only free option it still wins its tier (paid stays
-                                               # a fallback, reached only when nothing free qualifies).
+    deprioritize_local: bool = False           # SOFT: rank opted-in local endpoints last within a tier
+    explicit_local_keys: tuple = ()            # exact endpoint keys opted into by reviewer seat policy
 
 
 @dataclass
@@ -123,20 +118,35 @@ def _passes_restriction(candidate, restrict):
     # No restriction requested: every candidate passes.
     if not restrict:
         return True
-    # The provider name and capability record decide the restriction checks.
+    # Provider location is independent of cost tier and authentication.
     provider = candidate.get("provider")
-    caps = candidate.get("caps") or {}
-    # "local" means a free, no-API-key (self-hosted) endpoint.
     if restrict == "local":
-        return caps.get("cost_tier") == "free" and registry.is_nokey_provider(provider)
-    # "cloud" means anything that needs an API key.
+        return registry.is_local_provider(provider)
     if restrict == "cloud":
-        return not registry.is_nokey_provider(provider)
-    # "claude" means the local Claude CLI only.
+        return not registry.is_local_provider(provider)
+    # "claude" means Claude CLI session auth only.
     if restrict == "claude":
         return (provider or "").lower().strip() == "claude_cli"
     # Unknown restriction values do not filter anything out.
     return True
+
+
+def _routing_exclusion(c, reqs):
+    """First failed routing gate, shared by ranking, the safety floor and diagnostics."""
+    if not c.get("available", True):
+        return "unavailable: " + str(c.get("unavailable_reason") or "cooldown")
+    if is_excluded(c, reqs.exclude_models):
+        return "excluded this run (already tried/burned)"
+    key = _canon_key(c.get("key"))
+    if reqs.pin_key and key != _canon_key(reqs.pin_key):
+        return "not the pinned endpoint (chat_pin)"
+    if not _passes_restriction(c, reqs.restrict):
+        return "restrict=" + str(reqs.restrict)
+    if (registry.is_local_provider(c.get("provider")) and not reqs.pin_key
+            and reqs.restrict != "local"
+            and not any(key == _canon_key(k) for k in reqs.explicit_local_keys)):
+        return "self-hosted model requires explicit selection"
+    return None
 
 
 def _passes_capability(caps, reqs):
@@ -221,16 +231,10 @@ def _rank_tier(tier_candidates, perf, reqs, min_samples):
             bonus += 0.05
         s["score"] += bonus
 
-    # Offload bias: push no-key/local endpoints (self-hosted GPU, LM Studio,
-    # claude_cli session auth) to the BOTTOM of their tier so offloadable work
-    # (log review, batch summaries) prefers a capable free CLOUD peer and the
-    # GPU stays idle for the coordinator/planner. This is intra-tier only — the
-    # penalty is applied equally to every local candidate, so an all-local tier
-    # keeps its relative order and still resolves (never empties a tier), and a
-    # paid tier is never promoted over it.
+    # Offload bias applies only to local endpoints that passed the opt-in gate.
     if reqs.deprioritize_local:
         for s in stats:
-            if registry.is_nokey_provider(s["c"].get("provider")):
+            if registry.is_local_provider(s["c"].get("provider")):
                 s["score"] -= _LOCAL_OFFLOAD_PENALTY
 
     # Capability ordering. Perf scores are min-max normalised WITHIN the tier,
@@ -314,17 +318,7 @@ def _select_pass(reqs, candidates, perf, slow_factor, min_samples, allow_unknown
     pool = []
     # Apply each hard filter in turn; a candidate failing any of them is skipped.
     for c in candidates or []:
-        # Unavailable (cooldown, missing from the live catalog, ...).
-        if not c.get("available", True):
-            continue
-        # Already tried and failed during this run.
-        if is_excluded(c, reqs.exclude_models):
-            continue
-        # A pin is set and this is not the pinned endpoint.
-        if reqs.pin_key and _canon_key(c.get("key")) != _canon_key(reqs.pin_key):
-            continue
-        # Outside the local/cloud/claude restriction.
-        if not _passes_restriction(c, reqs.restrict):
+        if _routing_exclusion(c, reqs):
             continue
         # Missing a required capability.
         caps = c.get("caps") or {}
@@ -413,21 +407,13 @@ def select_model(reqs, candidates, perf=None, tuning=None):
     return _select_pass(reqs, candidates, perf, slow_factor, min_samples, allow_unknown=True)
 
 
-def safety_floor(entries):
-    """The rule-based last resort (never a hardcoded model ID — see
-    model_registry.py's module docstring for why): the first entry, in
-    `entries` order, that's already been established as configured
-    (`_configured: True`, set by the impure caller), preferring a no-key
-    local provider. `entries` mirrors config["llm_entries"]' shape. Returns
-    the chosen entry dict, or None if nothing at all is configured."""
-    # Only entries the caller has confirmed are configured are eligible.
-    configured = [e for e in (entries or []) if e.get("_configured")]
-    # Nothing configured at all: there is no fallback.
-    if not configured:
-        return None
-    # Prefer a local no-key provider; otherwise take the first configured entry.
-    local = [e for e in configured if registry.is_nokey_provider(e.get("provider"))]
-    return (local or configured)[0]
+def safety_floor(candidates, reqs=None):
+    """Return the first configured candidate that passes the routing gates.
+
+    Only capability and ranking requirements are relaxed; no hardcoded model ID.
+    """
+    reqs = reqs or LlmRequirements()
+    return next((c for c in candidates or [] if not _routing_exclusion(c, reqs)), None)
 
 
 def _exclusion_reason(c, reqs, allow_unknown):
@@ -435,15 +421,9 @@ def _exclusion_reason(c, reqs, allow_unknown):
     applies them, as human-readable text — or None if the candidate passes
     every filter (i.e. it reached tier ranking). Pure; used by
     explain_selection to make the dry-run picker legible."""
-    # Same checks, in the same order, as _select_pass, each returning a readable reason.
-    if not c.get("available", True):
-        return "unavailable: " + str(c.get("unavailable_reason") or "cooldown")
-    if is_excluded(c, reqs.exclude_models):
-        return "excluded this run (already tried/burned)"
-    if reqs.pin_key and _canon_key(c.get("key")) != _canon_key(reqs.pin_key):
-        return "not the pinned endpoint (chat_pin)"
-    if not _passes_restriction(c, reqs.restrict):
-        return "restrict=" + str(reqs.restrict)
+    reason = _routing_exclusion(c, reqs)
+    if reason:
+        return reason
     # The capability checks mirror _passes_capability, but say which check failed.
     caps = c.get("caps") or {}
     if reqs.needs_tools and not caps.get("supports_tools"):
@@ -514,9 +494,8 @@ def explain_selection(reqs, candidates, perf=None, tuning=None):
         # A fallback candidate; explain whether it was pushed down for being local.
         elif key in alt_rank:
             row["status"] = "alternative"
-            if reqs.deprioritize_local and registry.is_nokey_provider(c.get("provider")):
-                row["reason"] = ("local/GPU deprioritized for offloadable work — "
-                                 "fallback if no free cloud (tier=%s)" % (caps.get("cost_tier") or "?"))
+            if reqs.deprioritize_local and registry.is_local_provider(c.get("provider")):
+                row["reason"] = "explicitly eligible local fallback (tier=%s)" % (caps.get("cost_tier") or "?")
             else:
                 row["reason"] = "capable fallback (tier=%s)" % (caps.get("cost_tier") or "?")
         # Neither winner nor fallback: name the first filter it failed.

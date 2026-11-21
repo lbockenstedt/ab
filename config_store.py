@@ -19,6 +19,7 @@ main module's file instead.
 import os
 import copy
 import json
+import threading
 import git
 from datetime import datetime
 
@@ -152,6 +153,12 @@ class ConfigUnreadableError(RuntimeError):
     """
 
 
+class ConfigConflictError(RuntimeError):
+    """A settings snapshot no longer matches the current config."""
+
+
+# Serialize read-modify-write transactions and legacy full-snapshot writes.
+_config_lock = threading.RLock()
 # Last config that loaded cleanly from CONFIG_FILE; served while the file is unreadable.
 _last_good_config = None
 # The unreadable-file error already logged, so the 5-second heartbeat poll logs it once.
@@ -180,20 +187,22 @@ def _read_persistent_config():
         raise ConfigUnreadableError(f"{CONFIG_FILE}: {e}") from e
 
 
-def _remember_good_config(config):
-    """Keep a copy of a config that is on disk, with the defaults load_config adds.
-
-    Callers mutate the dict they get from load_config, so the cache holds its own copy.
-    """
-    global _last_good_config
-    good = copy.deepcopy(config)
-    good.setdefault("enabled_models", [])
+def _apply_config_defaults(config):
+    """Fill missing defaults without sharing mutable values across snapshots."""
+    config.setdefault("enabled_models", [])
     # Apply chat-agent defaults for any keys the stored config does not set, so
     # every caller (chat agent loop, index builder, settings form) sees a complete
     # config regardless of how old the persisted config.json is.
     for _k, _v in CHAT_CONFIG_DEFAULTS.items():
-        good.setdefault(_k, _v)
-    _last_good_config = good
+        if _k not in config:
+            config[_k] = copy.deepcopy(_v)
+    return config
+
+
+def _remember_good_config(config):
+    """Keep an independent, defaulted copy of a config that is on disk."""
+    global _last_good_config
+    _last_good_config = _apply_config_defaults(copy.deepcopy(config))
 
 
 def save_config(config):
@@ -216,7 +225,12 @@ def save_config(config):
     stale/default config, losing whatever was persisted. os.replace is atomic
     on POSIX, so readers only ever see the fully-written old or new file.
     """
-    existing = _read_persistent_config()
+    with _config_lock:
+        _save_config(config, _read_persistent_config())
+
+
+def _save_config(config, existing):
+    """Write under the caller's lock, using the validated primary to gate fallback."""
     try:
         # No pre-flight existence/access check: os.access(CONFIG_DIR, W_OK) is
         # False for a directory that merely does not exist yet, so the old guard
@@ -249,6 +263,25 @@ def save_config(config):
         _remember_good_config(config)
         logger.info(f"Config saved to persistent storage: {CONFIG_FILE}")
 
+
+def update_config(mutator, *, expected=None):
+    """Apply a synchronous, in-memory edit to the latest config and return its result.
+
+    The settings form can supply its original defaulted view as ``expected`` to
+    reject stale whole-form edits. A callback runs once, only after validation,
+    and must not perform I/O or suspend. Unchanged config is not written.
+    """
+    with _config_lock:
+        current, _ = _config_view(_read_persistent_config())
+        if expected is not None and current != expected:
+            raise ConfigConflictError("Settings changed while saving. Reload the Settings page and retry.")
+        edited = copy.deepcopy(current)
+        result = mutator(edited)
+        if edited != current:
+            save_config(edited)
+        return result
+
+
 def load_config():
     """Load settings from /etc/ab/config.json, else ./config.json, else built-in defaults.
 
@@ -270,9 +303,6 @@ def load_config():
             else:
                 logger.info(f"Persistent config {CONFIG_FILE} is readable again")
             _unreadable_logged = None
-        # Ensure enabled_models exists
-        if config is not None:
-            config.setdefault("enabled_models", [])
     except ConfigUnreadableError as e:
         if _unreadable_logged != str(e):
             logger.error(f"Persistent config is unreadable; not using defaults and not "
@@ -280,13 +310,16 @@ def load_config():
             _unreadable_logged = str(e)
         if _last_good_config is not None:
             return copy.deepcopy(_last_good_config)
-    # A config read from a file (CONFIG_FILE, else ./config.json) is what AB runs on, so it
-    # becomes the last good one. The built-in defaults never do: a file that is deleted or
-    # emptied and then turns unreadable (e.g. a root script rewriting it) keeps serving the
-    # last config read from a file, not the defaults.
+    config, from_file = _config_view(config)
+    # Only a config read from disk replaces the last good one, not built-in defaults.
+    if from_file:
+        _remember_good_config(config)
+    return config
+
+
+def _config_view(config):
+    """Default the primary, or use the cwd file and then built-in defaults."""
     from_file = config is not None
-    # Built-in defaults used when no config file can be read at all.
-    # Fallback to local config
     if config is None:
         try:
             with open("config.json", "r") as f:
@@ -307,60 +340,112 @@ def load_config():
                 "enabled_models": [],
                 "self_diagnosis_repo": ""
             }
-    # Apply chat-agent defaults for any keys the stored config does not set, so
-    # every caller (chat agent loop, index builder, settings form) sees a complete
-    # config regardless of how old the persisted config.json is.
-    for _k, _v in CHAT_CONFIG_DEFAULTS.items():
-        if _k not in config:
-            config[_k] = _v
-    if from_file:
-        _remember_good_config(config)
-    return config
+    return _apply_config_defaults(config), from_file
+
+class ProcessedStoreError(RuntimeError):
+    """History persistence failed; never retry a fix or report success for this."""
+
+
+class ProcessedUnreadableError(ProcessedStoreError):
+    """The authoritative history exists but cannot safely be read."""
+
+
+# Single-interpreter coordination, not a process-shared/file lock. The application
+# layer holds this same RLock through committed feed/counter publication.
+_processed_lock = threading.RLock()
+
+
+def _read_processed_file(path):
+    """Read one history, preserving the legacy list-of-issue-ids conversion."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            data = {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()}
+                    for issue_id in data}
+        _validate_processed(data)
+        return data
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError, TypeError) as e:
+        raise ProcessedUnreadableError(f"{path}: {e}") from e
+
+
+def _validate_processed(data):
+    """Require records, not mandatory fields/statuses; older records remain valid."""
+    if not isinstance(data, dict) or any(not isinstance(v, dict) for v in data.values()):
+        raise ValueError("expected an issue-history object containing record objects")
+
+
+def _read_processed_authority():
+    """Return (fresh history, primary exists); only absence permits cwd authority."""
+    try:
+        return _read_processed_file(STATE_FILE), True
+    except FileNotFoundError:
+        try:
+            return _read_processed_file("processed_issues.json"), False
+        except FileNotFoundError:
+            return {}, False
+
 
 def load_processed():
-    # Persistent location first.
-    # Try persistent state first
-    if os.path.exists(STATE_FILE):
+    """Return a detached advisory snapshot; degraded reads never authorize writes."""
+    with _processed_lock:
+        for path in (STATE_FILE, "processed_issues.json"):
+            try:
+                return _read_processed_file(path)
+            except FileNotFoundError:
+                continue
+            except ProcessedStoreError as e:
+                logger.error(f"Could not read processed history (snapshot only): {e}")
+        return {}
+
+
+def _write_processed(processed, primary_exists):
+    """Publish validated history, never falling back behind an existing primary."""
+    try:
+        _validate_processed(processed)
+        # Validate before attempting either destination, including for no-op/raw saves.
+        json.dumps(processed)
         try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-                # Old format was a plain list of issue ids; convert to the dict format, marking them
-                # fixed.
-                if isinstance(data, list):
-                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
-                return data
-        # Unreadable file: try the fallback location.
-        except: pass
-    # Fallback to local state
-    if os.path.exists("processed_issues.json"):
+            _atomic_write_json(STATE_FILE, processed)
+        except OSError:
+            if primary_exists:
+                raise
+            _atomic_write_json("processed_issues.json", processed)
+    except Exception as e:
+        raise ProcessedStoreError(f"Could not publish processed history: {e}") from e
+
+
+def _update_processed(mutator):
+    """Mutate fresh authority once; return its committed snapshot and callback result.
+
+    Callbacks do local dictionary work only: no network, application-state changes
+    or nested transactions. RLock reentrancy is for the application/storage layers.
+    """
+    with _processed_lock:
+        current, primary_exists = _read_processed_authority()
+        before = copy.deepcopy(current)
+        result = mutator(current)
         try:
-            with open("processed_issues.json", "r") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    return {issue_id: {"status": "fixed", "timestamp": datetime.now().isoformat()} for issue_id in data}
-                return data
-        except: pass
-    # No history anywhere.
-    return {}
+            _validate_processed(current)
+            json.dumps(current)
+        except (ValueError, TypeError) as e:
+            raise ProcessedStoreError(f"Invalid processed history mutation: {e}") from e
+        if current != before:
+            _write_processed(current, primary_exists)
+        return current, result
+
 
 def save_processed(processed):
-    """Saves processed issues to persistent storage, with fallback to local file.
+    """Legacy explicit replacement, not a safe stale-snapshot update API.
 
-    Written via a temp file + os.replace (see save_config) so a crash mid-write
-    can't leave a truncated/empty STATE_FILE for the next load_processed() to
-    choke on.
+    Production writers use app_state.update_processed. Even this compatibility
+    writer refuses to overwrite an unreadable primary OR cwd-only authority.
     """
-    try:
-        # Primary: Persistent storage
-        _atomic_write_json(STATE_FILE, processed)
-    except Exception as e:
-        logger.error(f"Error saving to persistent state file {STATE_FILE}: {e}")
-        # Persistent location failed: fall back to the working directory.
-        try:
-            # Fallback: Local directory
-            _atomic_write_json("processed_issues.json", processed)
-        except Exception as fe:
-            logger.error(f"Critical failure saving processed history to both locations: {fe}")
+    with _processed_lock:
+        _, primary_exists = _read_processed_authority()
+        _write_processed(processed, primary_exists)
 
 def load_pr_reviews():
     """Load the persisted PR pre-review store (keyed 'repo#number').
@@ -388,12 +473,14 @@ def save_pr_reviews(pr_reviews):
 
     Written via a temp file + os.replace (see save_config) so a crash mid-write
     can't leave a truncated/empty PR_REVIEWS_FILE for the next load to choke on.
+    Errors propagate: callers must not treat a failed approval write as success.
     """
-    # Atomic write; failures are logged, not raised.
+    # Log and propagate failure to the review-state caller.
     try:
         _atomic_write_json(PR_REVIEWS_FILE, pr_reviews)
     except Exception as e:
         logger.error(f"Error saving PR reviews to {PR_REVIEWS_FILE}: {e}")
+        raise
 
 
 def load_pr_merge_ledger():
@@ -567,9 +654,13 @@ __all__ = [
     "CHAT_CONFIG_DEFAULTS",
     "STARTUP_STAMP_FILE",
     "save_config",
+    "update_config",
+    "ConfigConflictError",
     "load_config",
     "load_processed",
     "save_processed",
+    "ProcessedStoreError",
+    "ProcessedUnreadableError",
     "load_pr_reviews",
     "save_pr_reviews",
     "load_pr_merge_ledger",

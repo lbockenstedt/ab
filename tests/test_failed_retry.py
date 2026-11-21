@@ -7,6 +7,7 @@ from types import SimpleNamespace as N
 
 import main  # noqa: F401 - loads workers in import order
 import workers
+from _history import patch_history
 
 CFG = {"failed_retry_hours": 24, "failed_retry_max": 2}
 NOW = datetime(2026, 5, 3, 12, 0, 0)
@@ -52,11 +53,9 @@ class _Issue:
 
 
 def _store(monkeypatch, rec):
-    store = {"data": {"o/lm:1": rec}}
-    monkeypatch.setattr(workers, "load_processed", lambda: copy.deepcopy(store["data"]))
-    monkeypatch.setattr(workers, "save_processed", lambda p: store.update(data=copy.deepcopy(p)))
+    ns = patch_history(monkeypatch, workers, {"o/lm:1": rec})
     monkeypatch.setattr(main, "_ensure_label", lambda repo, name: None)
-    return store
+    return {"data": ns["_store"]}
 
 
 def test_a_retry_is_charged_only_when_dispatched(monkeypatch):
@@ -102,6 +101,6 @@ def test_every_unfinished_record_write_keeps_the_retry_budget():
             continue
         seen.add(status[0])
         spreads = [ast.unparse(v) for k, v in zip(d.keys, d.values) if k is None]
-        assert any(s.startswith("_retry_budget(") or s in ("prev", "issue_info") for s in spreads), (
+        assert any(s.startswith("_retry_budget(") or s == "current.get(issue_id, {})" for s in spreads), (
             f"fix_engine.py:{d.lineno} writes {status[0]} without the retry budget")
     assert seen == unfinished

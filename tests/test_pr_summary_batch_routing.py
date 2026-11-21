@@ -200,6 +200,8 @@ def main():
     segs.insert(0, ast.get_source_segment(src2, marker_node))
 
     class _Comment:
+        author_association = "OWNER"  # AB posts as the repo owner
+
         def __init__(self, body):
             self.body = body
             self.edited_to = None

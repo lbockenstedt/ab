@@ -239,7 +239,10 @@ def integration_branch(config=None, repo_obj=None):
     never returns the default/production branch while a dev branch exists.
     The only fallback is a repo that genuinely has no dev branch, where the
     alternative would be to fail outright; that case is reported so it can be
-    fixed by creating the branch.
+    fixed by creating the branch. "Genuinely" means GitHub answered 404: a
+    rate limit, a 5xx or a network error says nothing about the branch, and
+    falling back on it would aim AppBuilder's work at production during a
+    GitHub hiccup, so any other error keeps ``dev``.
     """
     # The dev branch name from config, defaulting to "dev".
     cfg = config or {}
@@ -249,8 +252,13 @@ def integration_branch(config=None, repo_obj=None):
     if repo_obj is not None:
         try:
             repo_obj.get_branch(dev)
-        # No dev branch: fall back to the default branch and explain how to fix it.
-        except Exception:
+        except Exception as exc:
+            # Only a 404 proves dev is missing; any other error keeps dev.
+            if getattr(exc, "status", None) != 404:
+                return dev, (f"'{dev}' is the integration branch (dev -> qa -> main); "
+                             f"could not confirm it exists ({type(exc).__name__}), "
+                             f"so not falling back to the default branch")
+            # No dev branch: fall back to the default branch and explain how to fix it.
             fallback = (cfg.get("default_branch")
                         or getattr(repo_obj, "default_branch", None) or "main")
             return fallback, (f"'{dev}' does not exist in "
