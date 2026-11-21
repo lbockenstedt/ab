@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import time
+from threading import RLock
 
 import jwt
 import pytest
@@ -30,11 +31,17 @@ def ab_env(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "CONFIG_DIR", str(tmp_path), raising=False)
     monkeypatch.setattr(auth, "USERS_FILE", os.path.join(str(tmp_path), "users.json"), raising=False)
     store = {"config": {}}
+    lock = RLock()
     def _fake_load():
         return json.loads(json.dumps(store["config"]))
-    def _fake_save(cfg):
-        store["config"] = json.loads(json.dumps(cfg))
-    monkeypatch.setattr(oidc, "_config_store", lambda: (_fake_load, _fake_save))
+    def _fake_update(edit):
+        with lock:
+            current = _fake_load()
+            result = edit(current)
+            if current != store["config"]:
+                store["config"] = json.loads(json.dumps(current))
+            return result
+    monkeypatch.setattr(oidc, "_config_store", lambda: (_fake_load, _fake_update))
     return store, auth, oidc
 
 
@@ -163,6 +170,10 @@ def test_provision_entra_user_creates_passwordless_account(ab_env):
     # second login refreshes, does not duplicate
     oidc.provision_entra_user({"oid": "o1", "email": "sso@x.com", "name": "SSO2"})
     assert len([u for u in auth.list_users() if u["username"] == "sso@x.com"]) == 1
+    username, token = oidc.provision_entra_user_and_issue_session(
+        {"oid": "o1", "email": "sso@x.com", "name": "SSO3"})
+    assert username == "sso@x.com"
+    assert token and auth.verify_session(token) == username
 
 
 def test_local_account_not_converted_to_sso(ab_env):

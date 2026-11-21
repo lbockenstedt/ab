@@ -282,6 +282,14 @@ def test_usage_uses_responses_field_names():
     assert out == {"input_tokens": 28, "output_tokens": 7, "source": "api"}
 
 
+def test_usage_keeps_cached_input_for_the_spend_gate():
+    """Cached input (part of input_tokens) is kept so the AI spend gate prices it at the cache-read rate."""
+    out = {}
+    _usage_from_responses_json({"usage": {"input_tokens": 28, "output_tokens": 7,
+                                          "input_tokens_details": {"cached_tokens": 20}}}, out)
+    assert out == {"input_tokens": 28, "output_tokens": 7, "source": "api", "cached_input_tokens": 20}
+
+
 def test_usage_is_never_fatal():
     out = {}
     _usage_from_responses_json({"usage": "broken"}, out)

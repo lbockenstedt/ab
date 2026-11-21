@@ -22,7 +22,7 @@ def _clone_calls(filename, function):
 
 def test_fix_and_feature_builds_clone_the_integration_branch():
     for filename, function in (("fix_engine.py", "process_single_issue"),
-                               ("feature_build.py", "build_feature")):
+                               ("feature_build.py", "_build_feature")):
         calls = _clone_calls(filename, function)
         assert calls, (filename, function)
         for call in calls:

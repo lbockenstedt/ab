@@ -2,8 +2,8 @@
 
 fix_one_pr used to make ONE blind attempt. A parse failure, a skeptical-panel
 rejection or a verification failure each returned immediately, and the reason —
-which fix_engine already computes precisely (parse_and_apply.last_reason /
-.last_failures, and the panel's critique) — was flattened into a UI string and
+which fix_engine already computes precisely (per-call parser reasons, missed
+anchors, and the panel's critique) — was flattened into a UI string and
 discarded. fix_engine's ISSUE loop has always fed that reason back into
 apply_ai_fix(error_context=...); the PR path never did, so every "Fix" click
 regenerated the same fix from identical inputs and the panel rejected it again
@@ -130,26 +130,22 @@ class Harness:
         return "<<fix-%d>>" % len(self.error_contexts)
 
     def _make_parse_and_apply(self):
-        """A plain function, not a bound method: the production code reads
-        parse_and_apply.last_reason / .last_failures as FUNCTION attributes, and
-        those cannot be set on a bound method."""
+        """Return a parser fake that fills caller-owned retry feedback."""
         harness = self
 
-        def parse_and_apply(fix_code, path):
+        def parse_and_apply(fix_code, path, *, feedback_out=None):
             i = len(harness.error_contexts) - 1
             res = harness.parse_results[min(i, len(harness.parse_results) - 1)]
             if isinstance(res, tuple):
                 ok, reason, misses = res
             else:
                 ok, reason, misses = res, None, []
-            parse_and_apply.last_reason = reason
-            parse_and_apply.last_failures = misses
+            if feedback_out is not None:
+                feedback_out.update(last_reason=reason, last_failures=misses, last_raw_prefix="")
             if not ok:
                 return False, None, 0.0
             return True, {"a.py": "x"}, 0.9
 
-        parse_and_apply.last_reason = None
-        parse_and_apply.last_failures = []
         return parse_and_apply
 
     def review_fix(self, *a, **kw):

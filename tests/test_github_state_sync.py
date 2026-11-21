@@ -7,6 +7,7 @@ from github import GithubException
 
 import main  # noqa: F401 - loads workers in import order
 import workers
+from _history import patch_history
 
 
 class Repo:
@@ -34,13 +35,9 @@ def _issue(state, *labels):
 
 
 def _run(monkeypatch, processed, gh, **kw):
-    store = {"data": copy.deepcopy(processed)}
-    recomputed = []
-    monkeypatch.setattr(workers, "load_processed", lambda: copy.deepcopy(store["data"]))
-    monkeypatch.setattr(workers, "save_processed", lambda p: store.update(data=copy.deepcopy(p)))
-    monkeypatch.setattr(workers, "recompute_issue_counters", lambda p: recomputed.append(p))
+    ns = patch_history(monkeypatch, workers, processed)
     changed = workers.sync_github_issue_state(gh, **kw)
-    return changed, store["data"], recomputed
+    return changed, ns["load_processed"](), ns["state"]
 
 
 def test_closed_gone_and_ops_alert_issues_leave_the_failed_buckets(monkeypatch):
@@ -75,7 +72,7 @@ def test_lookups_are_bounded_and_rotate_oldest_first(monkeypatch):
     gh = Gh({n: _issue("open") for n in range(1, 6)})
     _, saved, recomputed = _run(monkeypatch, processed, gh, limit=2)
     assert sorted(k for k, v in saved.items() if v.get("github_checked_at")) == ["o/lm:1", "o/lm:2"]
-    assert not recomputed
+    assert recomputed["processed"] == saved
 
     _, saved, _ = _run(monkeypatch, saved, gh, limit=2)
     assert sorted(k for k, v in saved.items() if v.get("github_checked_at")) == \
@@ -86,8 +83,6 @@ def test_sync_updates_the_cycles_shared_store(monkeypatch):
     # RepoScan's in-memory store is saved again later in the cycle; without
     # the shared update that save put the stale "failed" status back.
     shared = {"o/r:1": {"status": "failed", "timestamp": "2026-11-01"}}
-    monkeypatch.setattr(workers, "load_processed", lambda: copy.deepcopy(shared))
-    monkeypatch.setattr(workers, "save_processed", lambda p: None)
-    monkeypatch.setattr(workers, "recompute_issue_counters", lambda p: None)
+    patch_history(monkeypatch, workers, shared)
     workers.sync_github_issue_state(Gh({1: _issue("closed")}), shared=shared)
     assert shared["o/r:1"]["status"] == "closed"

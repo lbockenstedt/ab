@@ -105,6 +105,26 @@ def test_storage_dependencies_npm_hardcode_version():
     assert fc.check_version_file(files, "promote/dev-to-qa") == []
 
 
+def _storage(*lines):
+    """(level, title) of each storage finding for one added .py file."""
+    return [(f["level"], f["title"]) for f in fc.check_storage_format([_file("x/gate.py", *lines)])]
+
+
+def test_read_only_sqlite_import_is_a_warning_not_an_error():
+    """Reading another tool's SQLite file (the AI spend gate reads Copilot CLI's
+    usage log) needs the marker AND a mode=ro open; either alone stays an error,
+    and so does any other database module."""
+    marked = "import sqlite3  # read-only: Copilot CLI's usage log"
+    ro_open = "    return sqlite3.connect(uri + '?mode=ro', uri=True)"
+    error = [("error", "Database storage in `x/gate.py`")]
+    assert _storage(marked, ro_open) == [("warning", "Read-only SQLite in `x/gate.py`")]
+    assert _storage(marked, "    return sqlite3.connect(path)") == error
+    assert _storage("import sqlite3", ro_open) == error
+    assert _storage("import shelve  # read-only", "x = 'mode=ro'") == error
+    # A warning still blocks AB's own pre-push gate: AB may not add one itself.
+    assert fc.blocking(fc.check_storage_format([_file("x/gate.py", marked, ro_open)]))
+
+
 def test_docstrings_on_new_functions():
     patch = "\n".join(["@@ -1 +1,9 @@",
                        "+def documented(a,",

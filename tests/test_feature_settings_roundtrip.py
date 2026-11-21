@@ -25,11 +25,15 @@ import json
 import os
 import sys
 import tempfile
+from copy import deepcopy
+from threading import RLock
+
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from branch_policy import parse_names as _parse_branch_names
 
 
-def _load_ns():
+def _load_ns(env_path=None):
     src = open("routes.py").read()
     tree = ast.parse(src)
 
@@ -45,12 +49,24 @@ def _load_ns():
             return lambda *a, **k: None
 
     _config_holder = {"config": {}}
+    lock = RLock()
+
+    class ConfigConflictError(RuntimeError):
+        pass
 
     def load_config():
-        return dict(_config_holder["config"])
+        return deepcopy(_config_holder["config"])
 
-    def save_config(cfg):
-        _config_holder["config"] = dict(cfg)
+    def update_config(edit, *, expected=None):
+        with lock:
+            current = load_config()
+            if expected is not None and current != expected:
+                raise ConfigConflictError
+            draft = deepcopy(current)
+            result = edit(draft)
+            if draft != current:
+                _config_holder["config"] = deepcopy(draft)
+            return result
 
     def clean_repo_name(r):
         return (r or "").strip()
@@ -69,12 +85,15 @@ def _load_ns():
             self.url = url
             self.status_code = status_code
 
-    _env_fd, env_path = tempfile.mkstemp(prefix="bf_test_env_")
-    os.close(_env_fd)
+    if env_path is None:
+        _env_fd, env_path = tempfile.mkstemp(prefix="bf_test_env_")
+        os.close(_env_fd)
 
     ns = {
         "logger": _NoLog(),
-        "load_config": load_config, "save_config": save_config,
+        "load_config": load_config, "update_config": update_config,
+        "asyncio": asyncio, "deepcopy": deepcopy, "ConfigConflictError": ConfigConflictError,
+        "HTMLResponse": HTMLResponse, "JSONResponse": JSONResponse,
         "clean_repo_name": clean_repo_name, "parse_module_repo_map": parse_module_repo_map,
         # Real implementation on purpose: the branch-policy parsing is shared
         # with pr_actions, so the settings form must be tested against it.
@@ -125,7 +144,7 @@ def _check(label, cond):
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # The full field set a real save always submits (one shared <form>, hidden

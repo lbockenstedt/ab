@@ -32,7 +32,8 @@ from main import (
     recompute_issue_counters,
     logger,
     resolve_self_diagnosis_repo,
-    save_processed,
+    update_processed,
+    ProcessedStoreError,
     state,
     update_task_state,
 )
@@ -839,8 +840,11 @@ def _regression_triage_context(repo_git, issue, prior_commit=None, prior_files=N
     sha = (prior_commit or "").strip()
     if not sha:
         try:
+            # Only AB's (or a maintainer's) comments: anyone can comment on a
+            # public repo's issue and name an unrelated commit.
+            from pr_review_score import is_trusted_comment
             for c in issue.get_comments():
-                m = _FIX_COMMIT_RE.search(c.body or "")
+                m = is_trusted_comment(c) and _FIX_COMMIT_RE.search(c.body or "")
                 if m:
                     sha = m.group(1)  # keep the LAST (most recent) fix commit cited
         except Exception:  # noqa: BLE001
@@ -3136,15 +3140,11 @@ def _last_turn_fix_exclusions(config, existing=()):
     return tuple(sorted(exclude, key=str))
 
 
-#: Self-hosted Ollama registry providers (model_registry.py's "ollama-local"/"ollama2-local"
-#: entries) -- NOT "ollama_cloud", which is a hosted service, not local.
-_LOCAL_PROVIDERS = frozenset({"ollama", "ollama2"})
-
-
 def _is_local_provider(provider):
-    """True if the provider is a self-hosted Ollama instance."""
-    # Case-insensitive match against the local provider names.
-    return (provider or "").lower().strip() in _LOCAL_PROVIDERS
+    """Use the same self-hosted provider classification as the model picker."""
+    from model_registry import is_local_provider
+
+    return is_local_provider(provider)
 
 
 def _reviewer_name(candidate):
@@ -3229,6 +3229,13 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
                                  # own model can also be picked as a reviewer.
             logger.debug(f"_select_review_panel: could not resolve builder slot {builder_n}: {e}")
 
+    # A model-name glob (including the built-in frontier patterns) isn't an
+    # explicit local seat. Only a literal model name in the allowlist opts in.
+    local_keys = tuple(c["key"] for c in candidates if _is_local_provider(c.get("provider"))
+                       and (c.get("model") or "").lower().split("/")[-1] in patterns)
+    candidates = [c for c in candidates
+                  if not _is_local_provider(c.get("provider")) or c["key"] in local_keys]
+
     # Keywords that identify each model vendor family.
     _FAMILY_KEYWORDS = (
         ("anthropic", ("claude", "opus", "sonnet", "haiku")),
@@ -3292,7 +3299,8 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
         # (Allowlist mode: the allowlist already guarantees capability, so the floor
         # is relaxed to seat every allowlisted model the registry doesn't tag large.)
         reqs = LlmRequirements(complexity="small" if patterns else "large",
-                               needs_structured_output=True, exclude_models=tuple(excluded))
+                               needs_structured_output=True, exclude_models=tuple(excluded),
+                               explicit_local_keys=local_keys)
         # Start from every candidate.
         pool = candidates
         if panel:
@@ -3402,7 +3410,7 @@ def _cloud_frontier_fallback(exclude_keys, config):
         return None
     # First cloud (non-local), allowlisted candidate that is not excluded.
     for c in llm_client._enumerate_candidates(config):
-        if c.get("key") in exclude_keys:
+        if c.get("key") in exclude_keys or not c.get("available", True):
             continue
         if _is_local_provider(c.get("provider")):
             continue
@@ -3426,8 +3434,8 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
     is for a different failure mode (the call itself raised).
 
     A call that raises (cooldown excepted) is retried once too — escalated to a
-    cloud frontier candidate when the failed reviewer was local (self-hosted
-    Ollama), otherwise against the same candidate. Either way the vote/failure is
+    cloud candidate if one qualifies, otherwise against the same candidate.
+    A retry never adds a new self-hosted reviewer. The vote/failure is
     reported under the ORIGINAL reviewer's name, so the panel seat's identity is
     stable regardless of which model actually answered it. When escalated to cloud,
     `escalated_to` records the fallback model's name in the vote dictionary."""
@@ -3518,30 +3526,23 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
         if _is_local_provider(orig_candidate.get("provider")):
             fallback_candidate = _cloud_frontier_fallback(exclude_keys, config)
         else:
-            # Otherwise: another panel candidate not already seated.
+            # Otherwise: another cloud panel candidate not already seated.
             if panel_candidates:
                 for c in panel_candidates:
-                    if c.get("key") not in exclude_keys:
+                    if (c.get("available", True) and c.get("key") not in exclude_keys
+                            and not _is_local_provider(c.get("provider"))):
                         fallback_candidate = c
                         break
             # Then any cloud allowlisted model.
             if fallback_candidate is None:
                 fallback_candidate = _cloud_frontier_fallback(exclude_keys, config)
             # Then (only with no allowlist) any cloud model.
-            if fallback_candidate is None:
-                if not _panel_allowlist(config):
-                    for c in llm_client._enumerate_candidates(config):
-                        if c.get("key") not in exclude_keys and not _is_local_provider(c.get("provider")):
-                            fallback_candidate = c
-                            break
-            # Last resort: a local model.
-            if fallback_candidate is None:
-                local_candidates = [
-                    c for c in llm_client._enumerate_candidates(config)
-                    if _is_local_provider(c.get("provider")) and c.get("key") not in exclude_keys
-                ]
-                if local_candidates:
-                    fallback_candidate = local_candidates[0]
+            if fallback_candidate is None and not _panel_allowlist(config):
+                for c in llm_client._enumerate_candidates(config):
+                    if (c.get("available", True) and c.get("key") not in exclude_keys
+                            and not _is_local_provider(c.get("provider"))):
+                        fallback_candidate = c
+                        break
 
         # Log which kind of fallback is used for the retry.
         if fallback_candidate is not None:
@@ -3550,9 +3551,6 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
                               "seated_panel_keys": panel_keys}
             if _is_local_provider(orig_candidate.get("provider")):
                 logger.info("%s failed (%s); retrying via cloud frontier escalation: %s",
-                            r["name"], e, fallback_name)
-            elif _is_local_provider(fallback_candidate.get("provider")):
-                logger.info("%s failed (%s); retrying via local Ollama backfill: %s",
                             r["name"], e, fallback_name)
             else:
                 logger.info("%s failed (%s); retrying via cloud fallback: %s",
@@ -4233,8 +4231,7 @@ def _resolve_as_already_fixed(issue, issue_id, repo_name, issue_num, verdict,
     # so it can `return` instead of falling through into fix attempts on an
     # issue it just closed.
     try:
-        processed = load_processed()
-        processed[f"{repo_name}:{issue_num}"] = {
+        record = {
             "status": "resolved",
             "timestamp": datetime.now().isoformat(),
             "resolution": "already_fixed",
@@ -4243,13 +4240,20 @@ def _resolve_as_already_fixed(issue, issue_id, repo_name, issue_num, verdict,
             "attempts": attempts,
             "original_body": issue.body,
         }
-        save_processed(processed)
-        state["processed"] = processed
+        def resolved(current):
+            """Record this intentional already-fixed replacement in fresh history."""
+            current[f"{repo_name}:{issue_num}"] = record
+
+        update_processed(resolved)
+    except ProcessedStoreError as ce:
+        logger.error(f"GitHub resolution attempted but history was not persisted for {issue_id}: {ce}")
+        update_task_state(task_id=issue_id, action="end")
+        return False, f"Resolution attempted on GitHub; history persistence failed: {ce}"
     except Exception as ce:  # noqa: BLE001
         logger.warning(f"could not persist already-resolved state for {issue_id}: {ce}")
     # Refresh the issue counters, then end the task.
     try:
-        recompute_issue_counters(processed)
+        recompute_issue_counters()
     except Exception:  # noqa: BLE001
         pass
     update_task_state(task_id=issue_id, action="end")
@@ -4476,6 +4480,26 @@ def _targeted_file_context(content, identifiers, max_chars, window=60, max_hits_
             covered.append((s, e))
             total += len(seg)
     return "\n".join(parts) if parts else None
+
+
+def _publication_boundary_requirement(repo_git, config, repo_name):
+    """Require a human PR when the staged tree hits a boundary or cannot be checked."""
+    try:
+        paths = [p for p in repo_git.git.diff("--cached", "--name-only").splitlines()
+                 if p.strip()]
+        hits = feature_boundary.boundary_hits(paths, config.get("feature_boundaries") or [])
+    except Exception as error:
+        reason = (f"Core-systems boundary check failed ({type(error).__name__}); "
+                  "human-reviewed PR required")
+        logger.warning(f"Boundary check failed for {repo_name} ({error}); fail-closed to human-reviewed PR.")
+        return True, reason
+    if not hits:
+        return False, ""
+
+    ids = ", ".join(hit.get("id", "?") for hit in hits)
+    reason = f"Diff touches core-systems boundary path(s): {ids}; human-reviewed PR required"
+    logger.info(f"Direct push blocked for {repo_name}: {reason}")
+    return True, reason
 
 
 def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None):
@@ -4779,19 +4803,20 @@ def _syntax_regressed(rel_path, old_text, new_text):
         return False
 
 
-def parse_and_apply(content, repo_path):
+def parse_and_apply(content, repo_path, *, feedback_out=None):
     """Parse a model's fix JSON (targeted edits or whole files) and apply it under repo_path.
-    Returns (ok, fixes, confidence); sets last_reason/last_failures for the retry loop.
+    Return (ok, fixes, confidence); write diagnostics to optional caller-owned feedback_out.
     """
     import re as _re, ast as _ast
-    parse_and_apply.last_failures = []   # reset per call; read by the retry loop
+    feedback = {} if feedback_out is None else feedback_out
+    feedback["last_failures"] = []   # reset per call; read by the retry loop
     # Coarse reason for the LAST return, read by the retry loop so it can give
     # the model accurate feedback. "invalid_json" is NOT a catch-all: a valid
     # JSON object whose edit anchors simply didn't match the file is a
     # different failure ("edit_anchor_miss") that needs different feedback —
     # conflating them made the model keep repeating a well-formed but
     # non-matching edit while being told its JSON was malformed.
-    parse_and_apply.last_reason = "unknown"
+    feedback["last_reason"] = "unknown"
     # What the model ACTUALLY said, for the caller's barren log line. A barren
     # reply (empty / no_json / invalid_json) is the one failure mode that
     # carries no structured signal, so the raw prefix is the only evidence of
@@ -4801,11 +4826,11 @@ def parse_and_apply(content, repo_path):
     # a model that was replying in prose indistinguishable from one that was not
     # being called at all. Bounded hard: this is untrusted model output on its
     # way into the log.
-    parse_and_apply.last_raw_prefix = (content or "")[:240]
+    feedback["last_raw_prefix"] = (content or "")[:240]
     # --- Locate a JSON / Python-dict object in the LLM response ---
     if not content or not content.strip():
         logger.debug("parse_and_apply: empty content — expected retry case.")
-        parse_and_apply.last_reason = "empty"
+        feedback["last_reason"] = "empty"
         return False, {}, 0.0
 
     # Take the outermost {...} block from the reply.
@@ -4828,7 +4853,7 @@ def parse_and_apply(content, repo_path):
                 # LLM returned prose / "None" / refusal — no JSON object present.
                 # This is a non-error transient failure; caller will retry.
                 logger.debug(f"parse_and_apply: no JSON object in response (first 120 chars: {content[:120]!r})")
-                parse_and_apply.last_reason = "no_json"
+                feedback["last_reason"] = "no_json"
                 return False, {}, 0.0
             raw = content[brace:]
 
@@ -4928,7 +4953,7 @@ def parse_and_apply(content, repo_path):
                                     f"{'response truncated mid-object' if truncated else ast_err} — "
                                     f"raw content ({len(content)} chars): {content[:1500]!r}"
                                 )
-                                parse_and_apply.last_reason = (
+                                feedback["last_reason"] = (
                                     "truncated_json" if truncated else "invalid_json")
                                 return False, {}, 0.0
 
@@ -4945,13 +4970,13 @@ def parse_and_apply(content, repo_path):
             for ed in edits:
                 if isinstance(ed, dict) and ed.get("search") == "":
                     filepath = ed.get("file") or ed.get("filepath") or ed.get("path")
-                    parse_and_apply.last_failures.append(
+                    feedback["last_failures"].append(
                         f"{filepath}: search must be non-empty exact text from the file; "
                         "to create a new file, provide its full content under 'fixes'")
-            if parse_and_apply.last_failures:
-                parse_and_apply.last_reason = "edit_anchor_miss"
+            if feedback["last_failures"]:
+                feedback["last_reason"] = "edit_anchor_miss"
                 logger.warning("Rejected edit batch before writing: %s",
-                               "; ".join(parse_and_apply.last_failures))
+                               "; ".join(feedback["last_failures"]))
                 return False, {}, 0.0
 
         # --- 1) Targeted search/replace edits (preferred) -------------------
@@ -4961,11 +4986,11 @@ def parse_and_apply(content, repo_path):
         # applied) files whose content actually changed.
         if isinstance(edits, list) and edits:
             orig_contents, file_contents = {}, {}
-            # Reasons an edit could not be applied, published on the function
-            # attribute below so the retry loop can tell the model exactly which
+            # Reasons an edit could not be applied, captured in caller-owned
+            # feedback so the retry loop can tell the model exactly which
             # anchor missed. Kept off the return value to preserve the existing
             # (ok, fixes, confidence) contract used by three call sites.
-            _miss = parse_and_apply.last_failures = []
+            _miss = feedback["last_failures"] = []
             # Apply each edit in turn.
             for ed in edits:
                 # Skip edits that are not objects.
@@ -5098,7 +5123,7 @@ def parse_and_apply(content, repo_path):
                         f"marker — the model did not reproduce the whole file; applying it would delete "
                         f"real code."
                     )
-                    parse_and_apply.last_reason = "unsafe_rewrite"
+                    feedback["last_reason"] = "unsafe_rewrite"
                     return False, {}, 0.0
                 # Reject rewrites that shrink a sizeable file by more than 60%.
                 old_lines = existing.count("\n") + 1
@@ -5109,7 +5134,7 @@ def parse_and_apply(content, repo_path):
                         f"{new_lines} lines (>60% deleted) — almost certainly a truncated rewrite, "
                         f"not a targeted fix."
                     )
-                    parse_and_apply.last_reason = "unsafe_rewrite"
+                    feedback["last_reason"] = "unsafe_rewrite"
                     return False, {}, 0.0
                 # Reject rewrites that break Python syntax.
                 if _syntax_regressed(filepath, existing, new_code):
@@ -5117,7 +5142,7 @@ def parse_and_apply(content, repo_path):
                         f"ABORTING fix: the rewritten {filepath} does not parse, but the file it "
                         f"replaces did — the model's output was truncated or malformed."
                     )
-                    parse_and_apply.last_reason = "unsafe_rewrite"
+                    feedback["last_reason"] = "unsafe_rewrite"
                     return False, {}, 0.0
             # Write the new file contents.
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -5127,18 +5152,18 @@ def parse_and_apply(content, repo_path):
             logger.info(f"Applied fix to file: {filepath}")
         # Nothing applied: log why and fail.
         if not applied:
-            _detail = "; ".join(parse_and_apply.last_failures or []) or \
+            _detail = "; ".join(feedback["last_failures"] or []) or \
                       "all edits rejected as unsafe or out-of-repo"
             logger.error(f"No fixes could be applied ({_detail}).")
             # Valid JSON that produced no change. Distinguish the two shapes so
             # the retry can give targeted feedback: edits present but every
             # anchor missed the file (requote the exact text) vs no edits/fixes
             # at all (return a non-empty edits array).
-            parse_and_apply.last_reason = (
-                "edit_anchor_miss" if parse_and_apply.last_failures else "no_edits")
+            feedback["last_reason"] = (
+                "edit_anchor_miss" if feedback["last_failures"] else "no_edits")
             return False, {}, 0.0
         # Success: clear the failure reason.
-        parse_and_apply.last_reason = None
+        feedback["last_reason"] = None
         return True, applied, confidence
     # Any unexpected error: log the raw reply and fail.
     except Exception as e:
@@ -5146,7 +5171,7 @@ def parse_and_apply(content, repo_path):
             f"Error parsing or applying JSON fix: {e} — "
             f"raw content ({len(content)} chars): {content[:1500]!r}"
         )
-        parse_and_apply.last_reason = "exception"
+        feedback["last_reason"] = "exception"
         return False, {}, 0.0
 
 
@@ -5346,22 +5371,81 @@ _inflight_lock = threading.Lock()
 _inflight_issues = set()
 
 
-def _claim_issue(issue_id):
-    """Atomically claim *issue_id* for processing. Returns False if another worker
-    already holds it (caller should skip — do NOT release what it didn't claim)."""
-    # Under the lock: fail if already claimed, otherwise claim it.
+def _issue_claim_key(issue_id):
+    """Share claims across case/numeric aliases of a GitHub repo:number identity."""
+    repo, separator, number = issue_id.rpartition(":")
+    if not separator or "/" not in repo:
+        return issue_id
+    try:
+        number = int(number)
+    except ValueError:
+        return issue_id
+    return f"{repo.strip().casefold()}:{number}"
+
+
+def _claim_issues(issue_ids):
+    """Claim every identity or none, returning the conflicting identities on failure."""
+    keys = {_issue_claim_key(issue_id) for issue_id in issue_ids}
     with _inflight_lock:
-        if issue_id in _inflight_issues:
-            return False
-        _inflight_issues.add(issue_id)
-        return True
+        busy = sorted(keys & _inflight_issues)
+        if busy:
+            return False, busy
+        _inflight_issues.update(keys)
+        return True, []
+
+
+def _claim_issue(issue_id):
+    """Claim one issue, never releasing a claim owned by another operation."""
+    claimed, _ = _claim_issues([issue_id])
+    return claimed
+
+
+def _release_issues(issue_ids):
+    """Release one owned batch atomically, including duplicate identity aliases."""
+    keys = {_issue_claim_key(issue_id) for issue_id in issue_ids}
+    with _inflight_lock:
+        _inflight_issues.difference_update(keys)
 
 
 def _release_issue(issue_id):
     """Release the in-flight claim on issue_id."""
-    # Under the lock, drop the claim.
-    with _inflight_lock:
-        _inflight_issues.discard(issue_id)
+    _release_issues([issue_id])
+
+
+def _push_fix_with_evidence(repo_git, refspec, publication, *, branch, commit_type, force=False):
+    """Capture the exact pre-push HEAD and retain only an acknowledged publication."""
+    commit_hash = repo_git.head.commit.hexsha
+    push_or_raise(repo_git.remotes.origin, refspec, force=force)
+    publication.update(commit=commit_hash, branch=branch, commit_type=commit_type)
+
+
+def _fix_publication_outcome(publication):
+    """Describe only the branch, commit and PR that this attempt actually confirmed."""
+    kind = publication["commit_type"].removeprefix("Published ")
+    outcome = f"{kind} {publication['branch']} at {publication['commit']}"
+    if publication.get("pr_url"):
+        outcome += f" ({publication['pr_url']})"
+    return outcome
+
+
+def _record_fix_publication(issue_id, publication, context, was_reopened, error=None):
+    """Commit a known published phase without reading lazy external metadata."""
+    record = {
+        **context, **publication, "status": "pending_verification",
+        "timestamp": datetime.now().isoformat(),
+    }
+    if publication["commit_type"] != "Published branch (PR unconfirmed)":
+        record["fixed_at"] = datetime.now().isoformat(timespec="seconds")
+    if error:
+        record["error"] = error
+
+    # Do not replace a newer operator-reopened flag with the pre-push snapshot.
+    def fixed(current):
+        """Replace the outcome while retaining a fresh operator-reopened flag."""
+        prior = current.get(issue_id) or {}
+        current[issue_id] = {**record, "reopened": prior.get("reopened", was_reopened)}
+
+    update_processed(fixed)
 
 
 def process_single_issue(repo_name, issue_num, llm_preference=None):
@@ -5372,6 +5456,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
     if not _claim_issue(issue_id):
         logger.info(f"{issue_id}: already being processed by another worker — skipping duplicate.")
         return False, "Already being processed"
+    publication, publication_context = {}, {}
+    publication_counted = False
     # Load settings; a GitHub token is required.
     try:
         config = load_config()
@@ -5379,6 +5465,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         if not token:
             logger.error(f"Manual trigger failed: No GitHub Token configured.")
             return False, "No GitHub Token configured"
+        if llm_preference == "claude" and _find_claude_cli_slot(config) is None:
+            logger.error("Claude CLI fix requested but no claude_cli provider is configured.")
+            return False, "Claude CLI is not configured in the LLM Vault."
 
         # Fetch the issue; if it was deleted or not found, drop it from history.
         gh_current = Github(token)
@@ -5388,11 +5477,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         except GithubException as ge:
             if ge.status == 410 or ge.status == 404:
                 logger.warning(f"Issue {repo_name}:{issue_num} was deleted or not found. Removing from history.")
-                processed = load_processed()
-                if issue_id in processed:
-                    del processed[issue_id]
-                    save_processed(processed)
-                    state["processed"] = processed
+                update_processed(lambda current: current.pop(issue_id, None))
                 return False, "Issue deleted"
             raise ge
 
@@ -5419,18 +5504,21 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         # Surface the issue in the Status table AS SOON AS work starts, so a long CPU
         # fix isn't invisible there (it's otherwise only an Active Task until it reaches
         # a terminal status). Terminal handlers + the exception path overwrite this.
-        try:
-            processed[issue_id] = {
-                **issue_info,
-                "status": "processing",
-                "title": getattr(issue, "title", "") or issue_info.get("title", ""),
-                "original_body": issue_info.get("original_body") or (getattr(issue, "body", "") or "")[:2000],
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        title = getattr(issue, "title", "")
+        body = (getattr(issue, "body", "") or "")[:2000]
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        def mark_processing(current):
+            """Preserve the current record, rather than a pre-GitHub snapshot."""
+            prior = current.get(issue_id) or {}
+            current[issue_id] = {
+                **prior, "status": "processing",
+                "title": title or prior.get("title", ""),
+                "original_body": prior.get("original_body") or body,
+                "timestamp": stamp,
             }
-            save_processed(processed)
-            state["processed"] = processed
-        except Exception:  # noqa: BLE001
-            pass
+
+        update_processed(mark_processing)
 
         # Show the task as active and check whether the issue is actionable.
         update_task_state(task_id=issue_id, task_name=f"Triaging {issue_id}", action="start", stage="triage")
@@ -5444,21 +5532,24 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             except Exception as ce:
                 logger.warning(f"Could not post non-actionable comment to {issue_id}: {ce}")
             # Record the non-actionable status, keeping feature hand-off markers.
-            processed = load_processed()
-            _prior = processed.get(f"{repo_name}:{issue_num}") or {}
-            processed[f"{repo_name}:{issue_num}"] = {
-                # Keep a feature hand-off's markers so the UI/route can send
-                # it back to the feature drive (Re-evaluate).
-                **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
-                                          "classifier_reason") if k in _prior},
-                **_retry_budget(_prior),
-                "status": "non-actionable",
-                "timestamp": datetime.now().isoformat(),
-                "reason": request_msg,
-                "original_body": issue.body.strip() if issue.body else ""
-            }
-            save_processed(processed)
-            state["processed"] = processed
+            original_body = issue.body.strip() if issue.body else ""
+            stamp = datetime.now().isoformat()
+
+            def non_actionable(current):
+                """Replace the outcome, retaining only current handoff and retry fields."""
+                _prior = current.get(issue_id) or {}
+                current[issue_id] = {
+                    # Preserve hand-off context for the Re-evaluate action.
+                    **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
+                                             "classifier_reason") if k in _prior},
+                    **_retry_budget(_prior),
+                    "status": "non-actionable",
+                    "timestamp": stamp,
+                    "reason": request_msg,
+                    "original_body": original_body,
+                }
+
+            update_processed(non_actionable)
             update_task_state(task_id=issue_id, action="end")
             return False, f"Non-actionable: {request_msg}"
 
@@ -5470,19 +5561,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
         # Turn the user's provider preference into a picker restriction.
         # llm_preference maps straight onto the picker's restrict= hard filter —
         # "cloud"/"local"/"claude" narrow WHICH tier is eligible, same meaning as
-        # the old force_cloud/force_provider pins, but without needing to resolve
-        # a specific slot number up front (claude_cli's slot is looked up here only
-        # to fail fast with a clear message when none is configured).
+        # the old force_cloud/force_provider pins, without pinning a specific slot.
+        # Claude CLI availability was checked before issue work began.
         restrict = None
         if llm_preference == "cloud":
             restrict = "cloud"
         elif llm_preference == "local":
             restrict = "local"
         elif llm_preference == "claude":
-            if _find_claude_cli_slot(config) is None:
-                logger.error("Claude CLI fix requested but no claude_cli provider is configured.")
-                update_task_state(task_id=issue_id, action="end")
-                return False, "Claude CLI is not configured in the LLM Vault."
             restrict = "claude"
             logger.info(f"Claude CLI fix requested for {issue_id} — restricting the picker to claude_cli")
 
@@ -5667,21 +5753,26 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
 
                     # --- Resume from awaiting_review ---
                     pending_fix = issue_info.get("pending_fix") if attempt == 1 and issue_info.get("status") == "awaiting_review" else None
+                    parse_feedback = {}
                     if pending_fix:
                         logger.info(f"Resuming from queued review for {issue_id} using saved fix.")
-                        success_applied, fixes, confidence = parse_and_apply(json.dumps(pending_fix), path)
+                        success_applied, fixes, confidence = parse_and_apply(
+                            json.dumps(pending_fix), path, feedback_out=parse_feedback)
                         # Clear the pending status now that we're processing it
-                        processed = load_processed()
-                        if issue_id in processed:
-                            processed[issue_id]["status"] = "processing"
-                            save_processed(processed)
+                        def resume_review(current):
+                            """A deleted record must not be restored by a stale resume."""
+                            if issue_id in current:
+                                current[issue_id]["status"] = "processing"
+
+                        update_processed(resume_review)
                     # Otherwise generate a new fix (re-targeting after a review rejection) and apply
                     # it.
                     elif not pending_fix:
                         fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out,
                                                 retarget=(last_failure.get("kind") == "review_rejected"),
                                                 avoid_paths=sorted(modified_paths))
-                        success_applied, fixes, confidence = parse_and_apply(fix_code, path)
+                        success_applied, fixes, confidence = parse_and_apply(
+                            fix_code, path, feedback_out=parse_feedback)
                     # Remember which model built this fix.
                     built_key = used_model_out.get("key")
                     if isinstance(built_key, tuple) and built_key:
@@ -5697,8 +5788,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         # #834 fail 3× : the JSON was valid, but the edits' search
                         # anchors didn't match the file, and the model was told to
                         # fix its JSON instead of to requote the file text.
-                        _reason = getattr(parse_and_apply, "last_reason", None) or "invalid_json"
-                        _misses = getattr(parse_and_apply, "last_failures", None) or []
+                        _reason = parse_feedback.get("last_reason") or "invalid_json"
+                        _misses = parse_feedback.get("last_failures") or []
                         if _reason == "edit_anchor_miss":
                             _detail = "; ".join(_misses)[:800]
                             failure_msg = (
@@ -5745,7 +5836,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             failure_msg = "AI generated invalid JSON format"
                             _kind = "invalid_json"
                         # Log the start of the raw reply and which model produced it.
-                        _raw_prefix = getattr(parse_and_apply, "last_raw_prefix", "") or ""
+                        _raw_prefix = parse_feedback.get("last_raw_prefix") or ""
                         _model = "/".join(str(p) for p in built_key if p) if built_key else "unknown"
                         # The only evidence of WHY an unusable reply happened —
                         # it was captured but never logged, leaving "invalid JSON"
@@ -5799,16 +5890,21 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             if isinstance(review, dict) and review.get("status") == "queue_for_retry":
                                 _q_reason = review.get("reason") or "reviewers unavailable"
                                 logger.info(f"Review queued for {issue_id}: {_q_reason}. Saving fix for retry in 1 hour.")
-                                processed = load_processed()
-                                processed[issue_id] = {
-                                    **_retry_budget(issue_info),
-                                    "status": "awaiting_review",
-                                    "timestamp": datetime.now().isoformat(),
-                                    "pending_fix": {"confidence": confidence, "fixes": fixes},
-                                    "original_body": issue.body.strip() if issue.body else ""
-                                }
-                                save_processed(processed)
-                                state["processed"] = processed
+                                original_body = issue.body.strip() if issue.body else ""
+                                stamp = datetime.now().isoformat()
+
+                                def queue_review(current, stamp=stamp, confidence=confidence,
+                                                 fixes=fixes, original_body=original_body):
+                                    """Replace pending review, retaining the fresh retry budget."""
+                                    current[issue_id] = {
+                                        **_retry_budget(current.get(issue_id)),
+                                        "status": "awaiting_review",
+                                        "timestamp": stamp,
+                                        "pending_fix": {"confidence": confidence, "fixes": fixes},
+                                        "original_body": original_body,
+                                    }
+
+                                update_processed(queue_review)
                                 update_task_state(task_id=issue_id, action="end")
                                 return False, f"Review queued for retry in 1 hour ({_q_reason})."
 
@@ -5911,7 +6007,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             # Accept the fix.
                             success = True
                             _progress(issue_id, "fix accepted — committing and pushing")
-                            state["success_count"] += 1
                             final_verdict = review_verdict
                             break
                         else:
@@ -5953,20 +6048,26 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     except Exception as ce:  # noqa: BLE001
                         logger.warning(f"human-review note failed for {issue_id}: {ce}")
                     # Record the issue as awaiting a human.
-                    processed = load_processed()
-                    processed[issue_id] = {
-                        **_retry_budget(issue_info),
-                        "status": "awaiting_human",
-                        "timestamp": datetime.now().isoformat(),
-                        "reason": "no configured model meets this fix's requirements",
-                        "original_body": issue.body or "",
-                    }
-                    save_processed(processed)
-                    state["processed"] = processed
-                    recompute_issue_counters(processed)
+                    original_body = issue.body or ""
+                    stamp = datetime.now().isoformat()
+
+                    def await_human(current, stamp=stamp, original_body=original_body):
+                        """Retain the fresh retry budget while replacing the outcome."""
+                        current[issue_id] = {
+                            **_retry_budget(current.get(issue_id)),
+                            "status": "awaiting_human",
+                            "timestamp": stamp,
+                            "reason": "no configured model meets this fix's requirements",
+                            "original_body": original_body,
+                        }
+
+                    update_processed(await_human)
                     update_task_state(task_id=issue_id, action="end")
                     return False, "Held for human review (no model meets this fix's requirements)"
                 # Other errors: stop if no LLM providers exist at all.
+                except ProcessedStoreError:
+                    # A storage failure cannot be repaired by another LLM attempt.
+                    raise
                 except Exception as inner_e:
                     if "No LLM providers" in str(inner_e):
                         logger.error(f"No LLM providers configured for issue {issue_id}: {inner_e}")
@@ -6002,7 +6103,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             max_attempts, state, how="after %d attempt(s)" % max_attempts)
 
                 # Count the failure and build a cause-first reason.
-                state["failure_count"] += 1
                 # Lead with the CAUSE. This string is shown truncated in the
                 # status table, and the old form spent its first 72 characters on
                 # "AI failed to find a verified fix after max attempts. Last
@@ -6022,30 +6122,32 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     logger.warning(f"Could not post failure comment to {issue_id}: {ce}")
 
                 # Record the failure with structured details, keeping feature hand-off markers.
-                processed = load_processed()
-                _prior = processed.get(f"{repo_name}:{issue_num}") or {}
-                processed[f"{repo_name}:{issue_num}"] = {
-                    # Keep a feature request's hand-off context (feature_build ->
-                    # this pipeline) so the failed row still says how it got here.
-                    **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
-                                              "classifier_reason") if k in _prior},
-                    **_retry_budget(_prior),
-                    "status": "failed",
-                    "timestamp": datetime.now().isoformat(),
-                    "error": failure_reason,
-                    # Structured so the UI can render the cause as a label plus
-                    # numbers rather than parsing it back out of a sentence.
-                    "failure_kind": last_failure.get("kind") or "unknown",
-                    "failure_detail": (last_failure.get("detail") or "")[:1000],
-                    "failure_confidence": last_failure.get("confidence"),
-                    "failure_threshold": last_failure.get("threshold"),
-                    "failure_model": last_failure.get("model"),
-                    "failure_raw_excerpt": last_failure.get("raw_excerpt"),
-                    "attempts": max_attempts,
-                    "original_body": issue.body
-                }
-                save_processed(processed)
-                state["processed"] = processed
+                original_body = issue.body
+                stamp = datetime.now().isoformat()
+
+                def failed(current):
+                    """Replace failed outcome with retained fields from fresh authority."""
+                    _prior = current.get(issue_id) or {}
+                    current[issue_id] = {
+                        # Keep a hand-off's context so the row says how it got here.
+                        **{k: _prior[k] for k in ("pipeline", "handoff_reason", "feature_skill",
+                                                 "classifier_reason") if k in _prior},
+                        **_retry_budget(_prior),
+                        "status": "failed",
+                        "timestamp": stamp,
+                        "error": failure_reason,
+                        # Structured cause fields are rendered directly by the UI.
+                        "failure_kind": last_failure.get("kind") or "unknown",
+                        "failure_detail": (last_failure.get("detail") or "")[:1000],
+                        "failure_confidence": last_failure.get("confidence"),
+                        "failure_threshold": last_failure.get("threshold"),
+                        "failure_model": last_failure.get("model"),
+                        "failure_raw_excerpt": last_failure.get("raw_excerpt"),
+                        "attempts": max_attempts,
+                        "original_body": original_body,
+                    }
+
+                update_processed(failed)
                 update_task_state(task_id=issue_id, action="end")
                 return False, failure_reason
 
@@ -6069,16 +6171,20 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                 except Exception as ce:
                     logger.warning(f"Could not post triage comment to {issue_id}: {ce}")
                 # Record the issue as triaged.
-                processed = load_processed()
-                processed[f"{repo_name}:{issue_num}"] = {
-                    **_retry_budget(issue_info),
-                    "status": "triaged",
-                    "timestamp": datetime.now().isoformat(),
-                    "reason": "Fix identified; commit deferred (triage-only mode)",
-                    "original_body": issue.body or "",
-                }
-                save_processed(processed)
-                state["processed"] = processed
+                original_body = issue.body or ""
+                stamp = datetime.now().isoformat()
+
+                def triaged(current):
+                    """Replace triage outcome while retaining the current retry budget."""
+                    current[issue_id] = {
+                        **_retry_budget(current.get(issue_id)),
+                        "status": "triaged",
+                        "timestamp": stamp,
+                        "reason": "Fix identified; commit deferred (triage-only mode)",
+                        "original_body": original_body,
+                    }
+
+                update_processed(triaged)
                 update_task_state(task_id=issue_id, action="end")
                 return True, "Triaged — fix identified, commit deferred"
 
@@ -6103,26 +6209,12 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             # check is against the actual staged diff (repo_git.git.add(A=True)
             # ran above), never a prediction. Fail-closed: any error forcing a
             # PR is the safe direction for this invariant.
-            boundary_forced_pr = False
-            boundary_pr_reason = ""
-            if can_direct_push:
-                # List the staged files and check them against the configured boundaries.
-                try:
-                    _changed_for_boundary = [p for p in repo_git.git.diff("--cached", "--name-only").splitlines() if p.strip()]
-                    _b_hits = feature_boundary.boundary_hits(_changed_for_boundary, config.get("feature_boundaries") or [])
-                except Exception as be:
-                    _b_hits = None
-                    boundary_forced_pr = True
-                    boundary_pr_reason = f"Core-systems boundary check failed ({type(be).__name__}); human-reviewed PR required"
-                    logger.warning(f"Boundary check failed for {repo_name} ({be}); fail-closed to human-reviewed PR.")
-                # Any boundary hit forces a pull request.
-                if _b_hits:
-                    _b_ids = ", ".join(h.get("id", "?") for h in _b_hits)
-                    boundary_forced_pr = True
-                    boundary_pr_reason = f"Diff touches core-systems boundary path(s): {_b_ids}; human-reviewed PR required"
-                    logger.info(f"Direct push blocked for {repo_name}: {boundary_pr_reason}")
-                if boundary_forced_pr:
-                    can_direct_push = False
+            # The low-confidence fallback can also push to a shared branch, so
+            # evaluate boundaries even when trusted direct push is unavailable.
+            boundary_forced_pr, boundary_pr_reason = _publication_boundary_requirement(
+                repo_git, config, repo_name)
+            if boundary_forced_pr:
+                can_direct_push = False
 
             # Log the direct-push decision and its inputs.
             logger.info(f"Deployment decision for {repo_name}: DirectPushSetting={direct_push_setting}, IsTrusted={is_trusted}, IsOwner={is_owner}, BoundaryForcedPR={boundary_forced_pr} -> can_direct_push={can_direct_push}")
@@ -6172,25 +6264,48 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             if version_bumped:
                 commit_msg += f" (Version Bump to {new_v})"
             repo_git.git.add(A=True)  # re-stage so a version bump made after the earlier add(A=True) is included
+            # Late publication mutations must pass the same gate as the fix itself.
+            if not boundary_forced_pr:
+                boundary_forced_pr, boundary_pr_reason = _publication_boundary_requirement(
+                    repo_git, config, repo_name)
+                if boundary_forced_pr:
+                    can_direct_push = False
             repo_git.index.commit(f'{commit_msg}')
+
+            # Snapshot lazy metadata before any external publication can succeed.
+            publication_context = {
+                "title": issue.title, "issue_url": getattr(issue, "html_url", "") or "",
+                "commit_msg": commit_msg, "files": list(fixes.keys()),
+                "original_body": issue.body, "opened_at": _opened_at(issue),
+            }
 
             # Push straight to the integration branch; on rejection, rebase and try once more.
             if can_direct_push and final_verdict == "Approve":
                 try:
+                    publication_context["decision_reason"] = "Trusted repo & approved"
                     with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
-                        push_or_raise(repo_git.remotes.origin, f"HEAD:{base_branch}")
+                        _push_fix_with_evidence(
+                            repo_git, f"HEAD:{base_branch}", publication,
+                            branch=base_branch, commit_type="Direct Commit")
                     can_actually_direct_push = True
                     decision_reason = "Trusted repo & approved"
                 except Exception as pe:
+                    if publication:
+                        raise
                     logger.warning(f"Direct push failed for {repo_name} ({pe}). Attempting rebase...")
                     try:
+                        publication_context["decision_reason"] = "Trusted repo & approved (after rebase)"
                         with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
                             repo_git.remotes.origin.pull(base_branch, rebase=True)
-                            push_or_raise(repo_git.remotes.origin, f"HEAD:{base_branch}")
+                            _push_fix_with_evidence(
+                                repo_git, f"HEAD:{base_branch}", publication,
+                                branch=base_branch, commit_type="Direct Commit")
                         can_actually_direct_push = True
                         decision_reason = "Trusted repo & approved (after rebase)"
                         logger.info(f"Push successful after rebase for {repo_name}")
                     except Exception as re_err:
+                        if publication:
+                            raise
                         logger.warning(f"Direct push failed even after rebase: {re_err}. Falling back to PR.")
                         # A half-done rebase would make the PR fallback's checkout fail.
                         try:
@@ -6201,26 +6316,25 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         can_actually_direct_push = False
 
             # Pushed: report it and get spokes to update.
+            pr_url = None
             if can_actually_direct_push:
                 logger.info(f"Decision: Direct Commit to {base_branch}. Reason: {decision_reason}")
                 commit_type = "Direct Commit"
                 _progress(issue_id, "committed to %s — updating spokes" % base_branch, stage="commit")
                 detail_msg = f"The fix was verified and pushed directly to the {base_branch} branch. Avg Confidence: {final_confidence:.2%}"
-                # Fix is live on main — tell every spoke to pull and restart, then let
-                # the QA service verify against the updated code.
-                _trigger_spoke_updates(config)
-                _wait_for_spokes_online(config, min_count=1, timeout=90)
             else:
                 # Otherwise open a pull request; explain why there was no direct push.
                 reason = "Skeptical Reviewer rejected" if final_verdict != "Approve" else (boundary_pr_reason if boundary_forced_pr else (direct_push_refused_reason if direct_push_refused_reason else (decision_reason if decision_reason is not None else "Trust/Ownership requirements not met")))
                 decision_reason = reason
+                publication_context["decision_reason"] = reason
                 logger.info(f"Decision: Pull Request. Reason: {reason}.")
-                # Low confidence goes to the dev branch; high confidence to its own bug branch.
-                target_branch = config.get("dev_branch", "dev") if final_confidence < confidence_threshold else auto_branch_name("bug", issue=issue)
-                try:
-                    repo_git.git.checkout(target_branch)
-                except:
-                    repo_git.create_head(target_branch).checkout()
+                # A required human PR always needs a topic branch, regardless of confidence.
+                target_branch = (config.get("dev_branch", "dev")
+                                 if final_confidence < confidence_threshold and not boundary_forced_pr
+                                 else auto_branch_name("bug", issue=issue))
+                # Preserve the just-created fix even when this branch already
+                # exists from a prior attempt; a plain checkout restores its old HEAD.
+                repo_git.git.checkout("-B", target_branch)
                 # A low-confidence fix targets the shared dev branch, so this
                 # push is NOT always to a throwaway AppBuilder branch. Force-
                 # pushing a shared branch rewrites it to whatever this working
@@ -6234,10 +6348,14 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     repo_default_branch=getattr(repo_obj, "default_branch", None))
                 if not force_ok:
                     logger.info(f"fix_engine: pushing {target_branch} without --force — {force_why}")
-                with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
-                    push_or_raise(repo_git.remotes.origin, target_branch, force=force_ok)
-                # Reuse an open PR for this branch, or create one.
                 base_branch, _ = integration_branch(config, repo_obj)
+                published_type = (f"Commit to {base_branch}" if target_branch == base_branch
+                                  else "Published branch (PR unconfirmed)")
+                with _authenticated_remote(repo_git.remotes.origin, repo_obj.clone_url, token):
+                    _push_fix_with_evidence(
+                        repo_git, target_branch, publication, branch=target_branch,
+                        commit_type=published_type, force=force_ok)
+                # Reuse an open PR for this branch, or create one.
 
                 existing_pr = (None if target_branch == base_branch
                                else find_existing_pull_request(repo_obj, target_branch, base_branch))
@@ -6250,7 +6368,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     pr = None
                 elif existing_pr:
                     pr = existing_pr
-                    logger.info(f"Found existing open PR for {target_branch} -> {base_branch}: {pr.html_url}")
+                    publication.update(pr_url=pr.html_url, commit_type="Pull Request")
+                    logger.info(f"Found existing open PR for {target_branch} -> {base_branch}: {publication['pr_url']}")
                 else:
                     # Create the PR; on a 422 (it probably already exists), look it up again.
                     try:
@@ -6261,7 +6380,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             head=target_branch,
                             base=base_branch
                         )
-                        logger.info(f"Created new PR for {target_branch} -> {base_branch}: {pr.html_url}")
+                        publication.update(pr_url=pr.html_url, commit_type="Pull Request")
+                        logger.info(f"Created new PR for {target_branch} -> {base_branch}: {publication['pr_url']}")
                     except GithubException as ge:
                         if ge.status == 422:
                             logger.warning(
@@ -6272,8 +6392,9 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                             existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
                             if existing_pr:
                                 pr = existing_pr
+                                publication.update(pr_url=pr.html_url, commit_type="Pull Request")
                                 logger.info(
-                                    f"Found existing open PR after 422 error: {pr.html_url}"
+                                    f"Found existing open PR after 422 error: {publication['pr_url']}"
                                 )
                             else:
                                 logger.error(
@@ -6292,14 +6413,24 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                   f"(confidence below the direct-merge threshold, so it is promoted "
                                   f"{base_branch} -> qa -> main rather than via a PR).")
                 else:
+                    pr_url = publication["pr_url"]
                     commit_type = "Pull Request"
                     _progress(issue_id, "opened PR #%s" % pr.number, stage="pr")
-                    detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr.html_url}"
+                    detail_msg = f"The fix was verified and a Pull Request has been created on branch {target_branch}: {pr_url}"
 
 
-            # Summarise the change for the success comment.
+            # Persist the known phase before notifications, fan-out or issue closure.
+            _record_fix_publication(
+                issue_id, publication, publication_context, was_reopened)
+            state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
+            publication_counted = True
+            if can_actually_direct_push:
+                _trigger_spoke_updates(config)
+                _wait_for_spokes_online(config, min_count=1, timeout=90)
+
+            # Summarise the change for the optional success comment.
             files_list = ", ".join(fixes.keys()) if fixes else "No files changed"
-            commit_hash = repo_git.head.commit.hexsha
+            commit_hash = publication["commit"]
 
             # Post the success comment to the issue.
             comment_body = (
@@ -6314,7 +6445,6 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             except Exception as ce:
                 logger.warning(f"Could not post success comment to {issue_id}: {ce}")
 
-            issue_id = f"{repo_name}:{issue_num}"
             # Auto-committed → close on GitHub, then hold in PENDING VERIFICATION: a
             # human opens AppBuilder, confirms the issue is actually gone and clicks
             # Resolved (→ Resolved bucket), or clicks Re-open if it's still there.
@@ -6322,35 +6452,20 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             issue.edit(state='closed')
             _notify_bug_fixed(issue)  # LM "File a Bug" → hub → UI shows "Fixed"
             _apply_closed_label(repo_obj, issue, issue_id)
-            new_status = "pending_verification"
-
-            # Record the fix (commit, files, how it landed) and update counters.
-            processed = load_processed()
-            processed[issue_id] = {
-                "status": new_status,
-                "timestamp": datetime.now().isoformat(),
-                "commit": commit_hash,
-                "commit_msg": commit_msg,
-                "files": list(fixes.keys()),
-                "commit_type": commit_type,
-                "decision_reason": decision_reason,
-                "reopened": was_reopened,
-                "original_body": issue.body,
-                # When the issue was opened and the fix landed, for the dashboard's
-                # Median fix time (timestamp moves when a person clicks Resolved).
-                "opened_at": _opened_at(issue),
-                "fixed_at": datetime.now().isoformat(timespec="seconds"),
-            }
-
-            save_processed(processed)
-            state["processed"] = processed
-            recompute_issue_counters(processed)
-            state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
 
             # End the task.
             update_task_state(task_id=issue_id, action="end")
             return True, f"Fixed via {commit_type}"
 
+    except ProcessedStoreError as e:
+        message = (f"Published {_fix_publication_outcome(publication)}; History persistence failed: {e}"
+                   if publication else f"History persistence failed (external actions may have completed): {e}")
+        logger.error(f"{issue_id}: {message}")
+        try:
+            update_task_state(task_id=issue_id, action="end")
+        except Exception as cleanup_err:
+            logger.error(f"Failed to clean up task state for {issue_id}: {cleanup_err}")
+        return False, message
     except Exception as e:
         # Flatten embedded newlines into the single ERROR line — the self-log
         # scanner captures single ERROR-level lines verbatim with no
@@ -6376,21 +6491,35 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
             update_task_state(task_id=issue_id, action="end")
         except Exception as cleanup_err:
             logger.error(f"Failed to clean up task state for {issue_id}: {cleanup_err}")
+        if publication:
+            message = f"Published {_fix_publication_outcome(publication)}; completion failed: {_flat}"
+            logger.error(f"{issue_id}: {message}")
+            try:
+                _record_fix_publication(
+                    issue_id, publication, publication_context, was_reopened, error=_flat[:500])
+                # Completion can fail after this attempt was already recorded and counted.
+                if not publication_counted:
+                    state["daily_fixes_count"] = state.get("daily_fixes_count", 0) + 1
+            except Exception as store_error:
+                logger.error(f"Could not persist published outcome for {issue_id}: {store_error}")
+                message += f"; History persistence failed: {store_error}"
+            return False, message
         # Record the errored issue as `failed` so it stays VISIBLE in the Status table
         # (Failed) and remains retryable. An unhandled exception (e.g. an ollama 400 /
         # timeout mid-fix) otherwise never lands in the processed store, so the issue
         # silently vanishes from the UI — which is exactly what happened to #103.
         try:
-            processed = load_processed()
-            prev = processed.get(issue_id, {})
-            processed[issue_id] = {
-                **prev,
-                "status": "failed",
-                "error": str(e)[:500],
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            save_processed(processed)
-            state["processed"] = processed
+            error = str(e)[:500]
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            def record_error(current):
+                """Patch current fields, not the snapshot held by the failed attempt."""
+                current[issue_id] = {
+                    **current.get(issue_id, {}), "status": "failed",
+                    "error": error, "timestamp": stamp,
+                }
+
+            update_processed(record_error)
         except Exception as rec_err:  # noqa: BLE001
             logger.error(f"Failed to record failed status for {issue_id}: {rec_err}")
         return False, str(e)

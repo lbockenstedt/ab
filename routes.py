@@ -2,14 +2,18 @@
 # Standard modules, FastAPI, GitHub and AppBuilder PR/branch helpers.
 import asyncio, fnmatch, git, json, os, re, shutil, subprocess, threading, time, traceback, uuid
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import Request, HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from github import Github
-from app_state import activity_feed_items, mark_pr_approved, update_pr_review
+from app_state import (ReviewPersistenceError, activity_feed_items, mark_pr_approved,
+                       pr_approval_snapshot, update_pr_review)
 from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
+from fix_engine import _claim_issues, _release_issues
+import ai_spend
 import mission_control
 from fastapi import APIRouter
 
@@ -32,6 +36,7 @@ def _model_stage_rows(config, model_options):
 from log_scan import _explicit_log_level  # main re-exports only public names
 from main import (
     CHAT_CONFIG_DEFAULTS,
+    ConfigConflictError,
     CONFIG_DIR,
     ENV_FILE,
     STARTUP_STAMP_FILE,
@@ -71,7 +76,6 @@ from main import (
     load_chats,
     load_config,
     load_processed,
-    recompute_issue_counters,
     load_update_state,
     logger,
     parse_module_repo_map,
@@ -85,11 +89,12 @@ from main import (
     OLLAMA_BASE_URL,
     run_scan_cycle,
     save_chats,
-    save_config,
-    save_processed,
+    update_processed,
+    ProcessedStoreError,
     set_active_chat,
     state,
     templates,
+    update_config,
     update_task_state,
     validate_llm_config_on_startup,
 )
@@ -118,8 +123,16 @@ async def hub_agent_reregister():
     """Force re-onboarding: clear the stored session secret and restart the agent.
 
     Used after a key revoke/re-approval, or to re-trigger the pending-approval
-    flow. Returns immediately; the agent reconnects zero-touch in the background.
+    flow. Local setup finishes before the response; approval remains background work.
     """
+    # The worker must retain admission if the HTTP await is cancelled.
+    return await asyncio.to_thread(
+        _run_issue_action, "hub-agent:reregister", _reregister_hub_agent,
+        busy_message="Hub agent re-registration already in progress")
+
+
+def _reregister_hub_agent():
+    """Finish the original local stop/pause/setup workflow under its worker-owned claim."""
     try:
         # Clear the secret and stop the running client.
         _persist_config_key("HUB_AGENT_SECRET", "")
@@ -143,6 +156,15 @@ async def hub_agent_reregister():
 # session. Note /api/health is exempt too — the watchdog polls it to verify a
 # restart, and gating it would make every restart look like a failure.
 
+def _login_redirect_path(value: str) -> str:
+    """Keep redirects local, rejecting browser-normalized separators and controls."""
+    target = value.strip() if isinstance(value, str) else ""
+    if (not target.startswith("/") or target.startswith("//") or "\\" in target
+            or any(ord(char) < 32 or ord(char) == 127 for char in target)):
+        return "/"
+    return target
+
+
 @router.get("/login")
 async def login_page(request: Request, next: str = "", error: str = ""):
     """Show the login page (or setup, or go straight in if already signed in)."""
@@ -153,10 +175,10 @@ async def login_page(request: Request, next: str = "", error: str = ""):
         return RedirectResponse("/setup-admin", status_code=303)
     # Already signed in: go on.
     if _a.verify_session(request.cookies.get(_a.SESSION_COOKIE) or ""):
-        return RedirectResponse(next or "/", status_code=303)
+        return RedirectResponse(_login_redirect_path(next), status_code=303)
     # Show the login form.
     return templates.TemplateResponse(request=request, name="login.html", context={
-        "setup_mode": False, "error": error, "next_url": next,
+        "setup_mode": False, "error": error, "next_url": _login_redirect_path(next),
         "min_len": _a.MIN_PASSWORD_LEN})
 
 
@@ -169,15 +191,12 @@ async def login_submit(request: Request):
     form = await request.form()
     username = (form.get("username") or "").strip()
     password = form.get("password") or ""
-    nxt = (form.get("next") or "/").strip() or "/"
-    # Only ever redirect to a path on THIS host — a user-supplied absolute URL
-    # would turn the login form into an open redirect.
-    if not nxt.startswith("/") or nxt.startswith("//"):
-        nxt = "/"
+    nxt = _login_redirect_path(form.get("next"))
     # Where the request came from, for the logs.
     src = (request.client.host if request.client else "?")
     # Wrong user or password: log it, report it, and show the form again.
-    if not _a.verify_credentials(username, password):
+    session_token = await asyncio.to_thread(_a.authenticate_session, username, password)
+    if not session_token:
         logger.warning("auth: failed login for %r from %s", username, src)
         # Relay to the hub's threat monitor so repeat attempts against THIS
         # box count toward the same brute-force threshold/NSG block as the
@@ -195,7 +214,7 @@ async def login_submit(request: Request):
     # Success: set the session cookie and redirect.
     logger.info("auth: %r signed in from %s", username, src)
     resp = RedirectResponse(nxt, status_code=303)
-    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+    resp.set_cookie(_a.SESSION_COOKIE, session_token,
                     max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https", path="/")
     return resp
@@ -248,14 +267,17 @@ async def setup_admin_submit(request: Request):
     # Passwords must match and the account must be valid.
     if p1 != p2:
         return _again("Passwords do not match.")
-    ok, msg = _a.create_user(username, p1)
+    ok, msg, session_token = await asyncio.to_thread(
+        _a.create_first_user_and_issue_session, username, p1)
     if not ok:
+        if msg == "Setup already completed.":
+            raise HTTPException(status_code=404, detail="Setup already completed")
         return _again(msg)
     # Log the new account, then sign the user in.
     logger.warning("auth: FIRST ACCOUNT %r created from %s — setup is now closed.",
                    username, request.client.host if request.client else "?")
     resp = RedirectResponse("/", status_code=303)
-    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+    resp.set_cookie(_a.SESSION_COOKIE, session_token,
                     max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https", path="/")
     return resp
@@ -354,19 +376,20 @@ async def oidc_callback(request: Request, code: str = "", state: str = "",
         jwks = await _o.fetch_jwks(doc.get("jwks_uri"))
         claims = _o.verify_id_token(cfg, id_token, nonce, jwks)
         _o.enforce_allowed_group(cfg.allowed_group, _o.extract_member_groups(claims))
-        username = _o.provision_entra_user(claims)
+        username, session_token = await asyncio.to_thread(
+            _o.provision_entra_user_and_issue_session, claims)
     except _o.OidcError as e:
         logger.warning("oidc: login rejected — %s", e)
         return _sso_error_page(str(e), status=403)
     except Exception as e:  # noqa: BLE001
         logger.exception("oidc: callback failed")
         return _sso_error_page(f"Microsoft sign-in failed: {e}", status=502)
-    # Open a session and clear the state cookie.
+    # Use only the token signed in the account-store provisioning transaction.
     import auth as _a
     src = (request.client.host if request.client else "?")
     logger.info("auth: %r signed in via Entra from %s", username, src)
     resp = RedirectResponse("/", status_code=303)
-    resp.set_cookie(_a.SESSION_COOKIE, _a.issue_session(username),
+    resp.set_cookie(_a.SESSION_COOKIE, session_token,
                     max_age=_a.SESSION_TTL_S, httponly=True, samesite="lax",
                     secure=request.url.scheme == "https", path="/")
     resp.delete_cookie(_o.STATE_COOKIE, path="/")
@@ -448,7 +471,7 @@ async def oidc_config_set(request: Request):
         body = {}
     # Save it and return the stored copy.
     try:
-        stored = _o.save_oidc_config(body or {})
+        stored = await asyncio.to_thread(_o.save_oidc_config, body or {})
     except Exception as e:  # noqa: BLE001
         logger.exception("oidc: could not save config")
         return {"status": "error", "message": str(e)}
@@ -469,7 +492,17 @@ async def auth_create_user(request: Request):
     """Create an account from the JSON body."""
     import auth as _a
     data = await request.json()
-    ok, msg = _a.create_user((data.get("username") or "").strip(), data.get("password") or "")
+    try:
+        ok, msg = await asyncio.to_thread(
+            _a.create_user_for_actor,
+            (data.get("username") or "").strip(), data.get("password") or "",
+            request.cookies.get(_a.SESSION_COOKIE) or "")
+    except _a.SessionExpiredError:
+        response = JSONResponse(
+            {"status": "error", "message": "Session expired; sign in again."},
+            status_code=401)
+        response.delete_cookie(_a.SESSION_COOKIE, path="/")
+        return response
     return {"status": "ok" if ok else "error", "message": msg}
 
 
@@ -478,25 +511,54 @@ async def auth_set_password(request: Request):
     """Change an account's password."""
     import auth as _a
     data = await request.json()
-    ok, msg = _a.set_password((data.get("username") or "").strip(), data.get("password") or "")
-    return {"status": "ok" if ok else "error", "message": msg}
+    try:
+        ok, msg, session_token = await asyncio.to_thread(
+            _a.set_password_and_issue_actor_session,
+            (data.get("username") or "").strip(), data.get("password") or "",
+            request.cookies.get(_a.SESSION_COOKIE) or "")
+    except _a.SessionExpiredError:
+        response = JSONResponse(
+            {"status": "error", "message": "Session expired; sign in again."},
+            status_code=401)
+        response.delete_cookie(_a.SESSION_COOKIE, path="/")
+        return response
+    result = {"status": "ok" if ok else "error", "message": msg}
+    # Mutation and caller refresh shared a lock; no later key lookup can revive a stale cookie.
+    if ok and session_token:
+        result_response = JSONResponse(result)
+        result_response.set_cookie(
+            _a.SESSION_COOKIE, session_token, max_age=_a.SESSION_TTL_S,
+            httponly=True, samesite="lax", secure=request.url.scheme == "https", path="/")
+        return result_response
+    return result
 
 
 @router.post("/api/auth/users/delete")
 async def auth_delete_user(request: Request):
     """Delete an account (but not your own)."""
     import auth as _a
-    # Read the user to delete and who is asking.
+    # Read the requested target; the mutation validates the original cookie atomically.
     data = await request.json()
     username = (data.get("username") or "").strip()
-    me = getattr(request.state, "user", None)
-    if username and username == me:
-        # Deleting the account you are signed in as would log you out mid-action
-        # and is almost never what was meant.
-        return {"status": "error", "message": "You cannot delete the account you are signed in as."}
-    # Delete it.
-    ok, msg = _a.delete_user(username)
-    return {"status": "ok" if ok else "error", "message": msg}
+    try:
+        ok, msg, session_token = await asyncio.to_thread(
+            _a.delete_user_and_issue_actor_session, username,
+            request.cookies.get(_a.SESSION_COOKIE) or "")
+    except _a.SessionExpiredError:
+        response = JSONResponse(
+            {"status": "error", "message": "Session expired; sign in again."},
+            status_code=401)
+        response.delete_cookie(_a.SESSION_COOKIE, path="/")
+        return response
+    result = {"status": "ok" if ok else "error", "message": msg}
+    # Deletion and caller refresh share a lock; self/final-user checks are in that transaction.
+    if ok and session_token:
+        result_response = JSONResponse(result)
+        result_response.set_cookie(
+            _a.SESSION_COOKIE, session_token, max_age=_a.SESSION_TTL_S,
+            httponly=True, samesite="lax", secure=request.url.scheme == "https", path="/")
+        return result_response
+    return result
 
 
 @router.get("/api/health")
@@ -605,8 +667,16 @@ async def pr_review_approve(request: Request):
         data = await request.json()
         repo_name = (data.get("repo") or "").strip()
         number = int(data.get("number"))
+        rendered_head = data.get("head")
     except Exception:
         return JSONResponse(status_code=400, content={"status": "error", "message": "repo + number required"})
+    # The click authorizes exactly the head displayed, not a later review.
+    expected_head = (await asyncio.to_thread(pr_approval_snapshot, repo_name, number))["head"]
+    if (not isinstance(rendered_head, str) or not rendered_head.strip() or
+            rendered_head != expected_head):
+        return JSONResponse(status_code=409, content={"status": "error", "needs_approval": True,
+                            "head_moved": True,
+                            "message": "The displayed review is stale or missing; refresh and review again."})
     # Need a GitHub token.
     config = load_config()
     token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN", "")
@@ -618,7 +688,8 @@ async def pr_review_approve(request: Request):
         # see pr_actions.py's module docstring for why there is exactly one
         # approve implementation, not two.
         """Approve the PR on GitHub."""
-        approve_pr(Github(token), repo_name, number, actor="human")
+        _, pr = approve_pr(Github(token), repo_name, number, actor="human")
+        return getattr(getattr(pr, "head", None), "sha", None)
 
     # Approve off the event loop, then record and log it.
     try:
@@ -629,10 +700,24 @@ async def pr_review_approve(request: Request):
         # class of bug as hub_logs_raw's request_sync. A slow GitHub response
         # (or a client-side timeout mid-stall) surfaced as a network failure
         # ("TypeError: Load failed" in Safari) rather than a slow success.
-        await asyncio.get_event_loop().run_in_executor(None, _do_approve)
-        mark_pr_approved(repo_name, number, True)
+        github_head = await asyncio.get_event_loop().run_in_executor(None, _do_approve)
+        if github_head != expected_head:
+            await asyncio.to_thread(mark_pr_approved, repo_name, number, False,
+                                    expected_head=expected_head)
+            return JSONResponse(status_code=409, content={"status": "error", "needs_approval": True,
+                                "head_moved": True,
+                                "message": "The PR head changed; review and approve again."})
+        if not await asyncio.to_thread(mark_pr_approved, repo_name, number, True,
+                                       expected_head=expected_head):
+            return JSONResponse(status_code=409, content={"status": "error", "needs_approval": True,
+                                "head_moved": True,
+                                "message": "The review or PR head changed; review and approve again."})
         logger.info("pr_review: %s #%s APPROVED via UI", repo_name, number)
         return {"status": "success", "repo": repo_name, "number": number}
+    except ReviewPersistenceError:
+        logger.warning("pr_review approve deferred for %s#%s: review storage unavailable", repo_name, number)
+        return JSONResponse(status_code=503, content={"status": "error",
+                            "message": "Approval could not be saved: review storage unavailable. Try again."})
     # Report any failure.
     except Exception as e:  # noqa: BLE001
         logger.error("pr_review approve failed for %s#%s: %s", repo_name, number, e)
@@ -1580,7 +1665,7 @@ async def system_stats():
 
 
 @router.get("/api/diagnostics")
-async def diagnostics():
+def diagnostics():
     """Surfaces running-vs-disk-vs-origin versions, stale-code state, per-provider
     status (including the previously-silent skip reasons), and update/restart state,
     so the user can see what is wrong from the UI instead of reading CLI logs."""
@@ -2090,19 +2175,16 @@ async def toggle_model(request: Request):
         if not model_name or enabled is None:
             return JSONResponse(status_code=400, content={"error": "Missing model or enabled status"})
 
-        # Add or remove it from the enabled list.
-        config = load_config()
-        enabled_list = config.get("enabled_models", [])
+        def edit(config):
+            """Set membership in the current enabled-model list."""
+            enabled_list = config.setdefault("enabled_models", [])
+            if enabled and model_name not in enabled_list:
+                enabled_list.append(model_name)
+            elif not enabled and model_name in enabled_list:
+                enabled_list.remove(model_name)
+            return enabled_list
 
-        if enabled and model_name not in enabled_list:
-            enabled_list.append(model_name)
-        elif not enabled and model_name in enabled_list:
-            enabled_list.remove(model_name)
-
-        # Save.
-        config["enabled_models"] = enabled_list
-        save_config(config)
-
+        enabled_list = await asyncio.to_thread(update_config, edit)
         return {"status": "success", "enabled_models": enabled_list}
     except Exception as e:
         logger.error(f"Error toggling model: {e}")
@@ -2972,7 +3054,7 @@ async def settings_page(request: Request):
     # Shared credentials, used to find each entry's URL.
     _llm_creds = config.get("llm_credentials") or {}
     _safe_llm_entries = [
-        {**e, "api_key": "", "has_key": bool(e.get("api_key")),
+        {**_public_llm_entry(e),
          "health": _llm_client.get_llm_entry_health(
              e.get("provider") or "openai", e.get("base_url") or (_llm_creds.get((e.get("provider") or "openai").lower().strip()) or {}).get("base_url", ""),
              e.get("model") or "")}
@@ -3127,6 +3209,7 @@ async def save_settings(request: Request):
     data = dict(form_data)
 
     config_data = load_config()
+    baseline = deepcopy(config_data)
 
     # Labels: any, none, or the chosen ones.
     labels_mode = data.get("label_mode", "SPECIFIC")
@@ -3717,7 +3800,6 @@ async def save_settings(request: Request):
         if _vm and _size:
             _allowed.setdefault(_vm, []).append(_size)
     config_data["autoscale_allowed"] = _allowed
-    _have = load_config()
     for _k, _dv in {**_hc.DEFAULTS, **_gha.DEFAULTS, **_as.DEFAULTS}.items():
         if _k in ("health_check_enabled", "gh_outage_backoff_enabled", "autoscale_enabled"):
             continue
@@ -3728,7 +3810,7 @@ async def save_settings(request: Request):
                 raise ValueError
             config_data[_k] = _n if isinstance(_dv, float) else int(_n)
         except ValueError:
-            config_data[_k] = _have.get(_k, _dv)
+            config_data[_k] = baseline.get(_k, _dv)
     # Per-module hub-log auto-filing: only CHECKED modules have their errors
     # filed as issues. Empty = OFF for every module (the default) → enable one at
     # a time. getlist so repeated checkbox values aren't collapsed by dict(form_data).
@@ -3743,6 +3825,8 @@ async def save_settings(request: Request):
     config_data["self_log_scan_enabled"] = data.get("self_log_scan_enabled") == "on"
     # Chat tools on or off.
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
+    # Daily AI spend gate on or off (fleet rule 1.10).
+    config_data["AI_SPEND_GATE"] = data.get("AI_SPEND_GATE") == "on"
     # Azure fleet access (chat tools + the Azure VM health check) and its mutation gate.
     config_data["CHAT_AZURE_ENABLED"] = data.get("CHAT_AZURE_ENABLED") == "on"
     config_data["CHAT_AZURE_ALLOW_MUTATION"] = data.get("CHAT_AZURE_ALLOW_MUTATION") == "on"
@@ -3775,8 +3859,23 @@ async def save_settings(request: Request):
                 new_tests[repo.strip()] = cmd.strip()
         config_data["repo_tests"] = new_tests
 
-    # Save the config.
-    save_config(config_data)
+    # Commit the whole validated form only if nothing changed since parsing began.
+    def replace(latest):
+        """Replace the matching snapshot with the validated form."""
+        latest.clear()
+        latest.update(config_data)
+
+    wants_json = "application/json" in (request.headers.get("accept") or "")
+    try:
+        await asyncio.to_thread(update_config, replace, expected=baseline)
+    except ConfigConflictError as exc:
+        if wants_json:
+            return JSONResponse(status_code=409, content={"status": "error", "message": str(exc)})
+        return HTMLResponse(status_code=409, content="""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Settings changed — AppBuilder</title></head>
+<body><main><h1>Settings changed</h1>
+<p>Your changes were not saved. <a href="/settings">Reload the Settings page</a> and retry.</p>
+</main></body></html>""")
 
     # Read the current .env file.
     env_vars = {}
@@ -3810,7 +3909,7 @@ async def save_settings(request: Request):
     _save_msg = "Settings saved"
     if _save_warnings:
         _save_msg += " (" + "; ".join(_save_warnings) + ")"
-    if "application/json" in (request.headers.get("accept") or ""):
+    if wants_json:
         return {"status": "ok", "message": _save_msg}
     return RedirectResponse(url="/settings", status_code=303)
 
@@ -3823,22 +3922,18 @@ async def save_llm_credential(request: Request):
     provider = (data.get("provider") or "").lower().strip()
     if not provider:
         return JSONResponse(status_code=400, content={"error": "provider required"})
-    # Load the stored credentials.
-    config = load_config()
-    creds = config.setdefault("llm_credentials", {})
-    existing = creds.get(provider) or {}
-    # api_key is only present in the payload when the operator actually typed
-    # into the (never-populated-with-the-real-value) key field on the
-    # Settings page — see settings_page's redaction + saveCredential's JS.
-    # Absent means "leave the stored key alone", not "clear it"; an empty
-    # string IS a legitimate value here (an explicit clear when the operator
-    # types into the field then deletes it).
-    creds[provider] = {
-        "api_key": (data.get("api_key") if "api_key" in data else existing.get("api_key")) or "",
-        "base_url": (data.get("base_url") or "").strip(),
-    }
-    # Save.
-    save_config(config)
+    def edit(config):
+        """Upsert this provider's credential without clearing an omitted key."""
+        creds = config.setdefault("llm_credentials", {})
+        existing = creds.get(provider) or {}
+        # The key field isn't populated in the UI. Omission keeps the fresh
+        # stored key; an explicit blank clears it.
+        creds[provider] = {
+            "api_key": (data.get("api_key") if "api_key" in data else existing.get("api_key")) or "",
+            "base_url": (data.get("base_url") or "").strip(),
+        }
+
+    await asyncio.to_thread(update_config, edit)
     return {"status": "ok", "provider": provider}
 
 
@@ -3857,22 +3952,24 @@ async def delete_llm_credential(request: Request):
     provider = (data.get("provider") or "").lower().strip()
     if not provider:
         return JSONResponse(status_code=400, content={"error": "provider required"})
-    # Remove its credential.
-    config = load_config()
-    creds = config.get("llm_credentials") or {}
-    removed = provider in creds
-    creds.pop(provider, None)
-    config["llm_credentials"] = creds
+    def edit(config):
+        """Remove the provider credential and count its remaining references."""
+        creds = config.get("llm_credentials") or {}
+        removed = provider in creds
+        creds.pop(provider, None)
+        config["llm_credentials"] = creds
+        if provider == "copilot":
+            config.pop("copilot_device", None)
+        entries_using = sum(1 for e in (config.get("llm_entries") or [])
+                            if (e.get("provider") or "").lower().strip() == provider)
+        return removed, entries_using
+
+    removed, entries_using = await asyncio.to_thread(update_config, edit)
     # Copilot stores an OAuth token, not a pasted key — clear the in-flight
     # device code + cached API token too so a deconfigure is a full sign-out.
     if provider == "copilot":
-        config.pop("copilot_device", None)
         state.pop("copilot_auth", None)
         state.pop("copilot_device", None)
-    # Save and count the entries still using it.
-    save_config(config)
-    entries_using = sum(1 for e in (config.get("llm_entries") or [])
-                        if (e.get("provider") or "").lower().strip() == provider)
     logger.info("LLM credential deconfigured for '%s' (removed=%s, %d entr%s still reference it).",
                 provider, removed, entries_using, "y" if entries_using == 1 else "ies")
     return {"status": "ok", "provider": provider, "removed": removed, "entries_using": entries_using}
@@ -3908,15 +4005,17 @@ def _copilot_poll_loop(device_code, interval, provider):
             continue
         # Got a token: save it and finish.
         if d.get("access_token"):
-            cfg = load_config()
-            cfg.setdefault("llm_credentials", {})[provider] = {"api_key": d["access_token"], "base_url": ""}
-            cfg.pop("copilot_device", None)
+            def edit(cfg):
+                """Store the authorized token and remove the pending device code."""
+                cfg.setdefault("llm_credentials", {})[provider] = {"api_key": d["access_token"], "base_url": ""}
+                cfg.pop("copilot_device", None)
+
             # An unsaveable config.json (unreadable, or no space / read-only) makes
-            # save_config raise. This thread has no caller to report that to, so the
+            # update_config raise. This thread has no caller to report that to, so the
             # UI would sit on "pending" for a token GitHub already issued, or show
             # "authorized" for one that was never stored; end the flow with an error.
             try:
-                save_config(cfg)
+                update_config(edit)
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Copilot device flow: authorized, but the credential could not be stored: {e}")
                 state["copilot_auth"] = {"status": "error",
@@ -3987,14 +4086,15 @@ async def copilot_signout(request: Request):
     except Exception:
         body = {}
     provider = (body.get("provider") or "copilot").lower().strip() or "copilot"
-    # Remove its credential and any pending device code.
-    config = load_config()
-    creds = config.get("llm_credentials") or {}
-    gh = (creds.get(provider) or {}).get("api_key")
-    creds.pop(provider, None)
-    config["llm_credentials"] = creds
-    config.pop("copilot_device", None)
-    save_config(config)
+    def edit(config):
+        """Remove the authorization and return the token for cache eviction."""
+        creds = config.get("llm_credentials") or {}
+        gh = (creds.pop(provider, None) or {}).get("api_key")
+        config["llm_credentials"] = creds
+        config.pop("copilot_device", None)
+        return gh
+
+    gh = await asyncio.to_thread(update_config, edit)
     # Clear the auth state.
     state.pop("copilot_auth", None)
     state.pop("copilot_device", None)
@@ -4034,6 +4134,11 @@ async def copilot_models(provider: str = "copilot"):
         return {"models": models}
     except Exception as e:  # noqa: BLE001
         return {"models": [], "error": str(e)}
+
+
+def _public_llm_entry(entry: dict) -> dict:
+    """Expose endpoint metadata and key presence without returning the stored key."""
+    return {**entry, "api_key": "", "has_key": bool(entry.get("api_key"))}
 
 
 def _refresh_llm_endpoints():
@@ -4079,23 +4184,26 @@ async def create_llm_entry(request: Request):
     if not entry["model"]:
         return JSONResponse(status_code=400, content={"error": "model required"})
     # Add it, save and re-probe.
-    config = load_config()
-    config.setdefault("llm_entries", []).append(entry)
-    save_config(config)
+    def edit(config):
+        """Append the new entry to the current endpoint list."""
+        config.setdefault("llm_entries", []).append(entry)
+
+    await asyncio.to_thread(update_config, edit)
     _refresh_llm_endpoints()
-    return {"status": "ok", "entry": entry}
+    return {"status": "ok", "entry": _public_llm_entry(entry)}
 
 
 @router.put("/api/llm/entries/{entry_id}")
 async def update_llm_entry(entry_id: str, request: Request):
     """Update an existing named provider/model entry."""
-    # Read the changes and load the entries.
+    # Read the changes; find the matching entry in the transaction's fresh list.
     data = await request.json()
-    config = load_config()
-    entries = config.get("llm_entries") or []
-    # Update the matching entry, save and re-probe.
-    for e in entries:
-        if e.get("id") == entry_id:
+
+    def edit(config):
+        """Update the matching entry and return it, or None if absent."""
+        for e in config.get("llm_entries") or []:
+            if e.get("id") != entry_id:
+                continue
             e["label"] = (data.get("label") or e.get("label") or "").strip()
             e["provider"] = (data.get("provider") or e.get("provider") or "openai").lower().strip()
             e["model"] = (data.get("model") or e.get("model") or "").strip()
@@ -4116,21 +4224,31 @@ async def update_llm_entry(entry_id: str, request: Request):
                 e["api_key"] = (data.get("api_key") or "").strip()
             if "enabled" in data:
                 e["enabled"] = bool(data.get("enabled"))
-            save_config(config)
-            _refresh_llm_endpoints()
-            return {"status": "ok", "entry": e}
-    # No such entry.
-    return JSONResponse(status_code=404, content={"error": "entry not found"})
+            return e
+        return None
+
+    entry = await asyncio.to_thread(update_config, edit)
+    if entry is None:
+        return JSONResponse(status_code=404, content={"error": "entry not found"})
+    _refresh_llm_endpoints()
+    return {"status": "ok", "entry": _public_llm_entry(entry)}
 
 
 @router.delete("/api/llm/entries/{entry_id}")
 async def delete_llm_entry(entry_id: str):
     """Delete a named endpoint entry."""
     # Remove it, save and re-probe.
-    config = load_config()
-    config["llm_entries"] = [e for e in (config.get("llm_entries") or []) if e.get("id") != entry_id]
-    save_config(config)
-    _refresh_llm_endpoints()
+    def edit(config):
+        """Remove the entry if present and report whether it was removed."""
+        entries = config.get("llm_entries") or []
+        remaining = [e for e in entries if e.get("id") != entry_id]
+        if len(remaining) == len(entries):
+            return False
+        config["llm_entries"] = remaining
+        return True
+
+    if await asyncio.to_thread(update_config, edit):
+        _refresh_llm_endpoints()
     return {"status": "ok"}
 
 
@@ -4201,7 +4319,7 @@ async def get_llm_config():
                   for p, v in creds.items()}
     # SECURITY: entries carry a per-entry plaintext api_key override — never
     # return it. Mirrors safe_creds' configured-flag treatment above.
-    safe_entries = [{**e, "api_key": "", "has_key": bool(e.get("api_key"))}
+    safe_entries = [_public_llm_entry(e)
                     for e in (config.get("llm_entries") or [])]
     # Return both.
     return {
@@ -4250,10 +4368,11 @@ async def save_console_accounts(request: Request):
             content={"error": f"Invalid usernames: {', '.join(invalid)}"},
         )
 
-    # Save to config
-    config = load_config()
-    config["console_accounts"] = selected
-    save_config(config)
+    def edit(config):
+        """Save the validated console account selection."""
+        config["console_accounts"] = selected
+
+    await asyncio.to_thread(update_config, edit)
 
     # Relay to the LM hub, which owns the console module. Persisted above, so a
     # dropped relay is never data loss — the next save re-pushes it.
@@ -4362,16 +4481,99 @@ async def local_llm_delete(request: Request):
 @router.post("/clear_history")
 async def clear_history():
     """Clears all processed issues and resets success/failure counters."""
-    # Changes the shared state.
-    global state
-    logger.info("Clearing all issue history and resetting counters.")
+    return await asyncio.to_thread(_clear_issue_history, False)
 
-    # Empty the history and reset the counters.
-    state["processed"] = {}
-    save_processed({})
-    recompute_issue_counters({})
 
-    return {"status": "success", "message": "All history and tasks have been cleared."}
+class _IssueActionBusy(RuntimeError):
+    """Abort a history mutation before writing when one of its issues is claimed."""
+
+
+def _issue_busy_response(issue_ids, *, message=None):
+    """Report refused operator work without pretending it was queued or applied."""
+    if message is None:
+        message = "Issue action refused; still being processed: " + ", ".join(issue_ids)
+    logger.info(message)
+    return JSONResponse(status_code=409, content={"status": "error", "message": message})
+
+
+def _run_issue_action(issue_id, operation, *args, busy_message=None):
+    """Own the whole synchronous operator workflow, even if its HTTP await is cancelled."""
+    claimed, busy = _claim_issues([issue_id])
+    if not claimed:
+        return _issue_busy_response(busy, message=busy_message)
+    try:
+        return operation(*args)
+    finally:
+        _release_issues([issue_id])
+
+
+def _clear_issue_history(close_on_github):
+    """Reserve committed-current rows through clearing and any background dismissals."""
+    claimed = []
+    transferred = False
+
+    def clear(current):
+        """Reserve all current identities or abort without a local write."""
+        issue_ids = list(current)
+        acquired, busy = _claim_issues(issue_ids)
+        if not acquired:
+            raise _IssueActionBusy(busy)
+        claimed.extend(issue_ids)
+        current.clear()
+        return issue_ids
+
+    try:
+        try:
+            removed = update_processed(clear)
+        except _IssueActionBusy as conflict:
+            return _issue_busy_response(conflict.args[0])
+        except ProcessedStoreError as e:
+            return _history_failure(e)
+        if not close_on_github:
+            logger.info("Cleared all issue history and reset counters.")
+            return {"status": "success", "message": "All history and tasks have been cleared."}
+        if not removed:
+            return {"status": "no_issues", "message": "No issues in history to delete."}
+
+        def bulk_close():
+            """Keep the batch reserved until its final GitHub side effect finishes."""
+            closed = failed = 0
+            try:
+                for issue_id in removed:
+                    try:
+                        ok, _msg = _close_issue_on_github(issue_id)
+                        if ok:
+                            closed += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        failed += 1
+                        logger.warning(f"delete_all: could not close {issue_id} on GitHub: {e}")
+                logger.info(f"delete_all_issues: closed {closed}/{len(removed)} on GitHub, {failed} failed.")
+            finally:
+                _release_issues(claimed)
+
+        # Transfer only after a successful start; otherwise the local finally releases.
+        try:
+            threading.Thread(target=bulk_close, daemon=True).start()
+        except Exception as e:
+            logger.error(f"History cleared, but GitHub dismissal thread could not start: {e}")
+            return JSONResponse(status_code=500, content={
+                "status": "error", "message": f"History cleared, but GitHub closes could not start: {e}"})
+        transferred = True
+        return {"status": "success", "message":
+                f"Cleared {len(removed)} issue(s) from history. Closing them on GitHub in the background."}
+    finally:
+        # A failed write/start must never strand a process-local reservation.
+        if not transferred:
+            _release_issues(claimed)
+
+
+def _history_failure(error, external=""):
+    """Report failed local persistence without concealing completed external actions."""
+    logger.error(f"Processed history persistence failed: {error}")
+    return JSONResponse(status_code=500, content={
+        "status": "error", "message": f"{external}History persistence failed: {error}"})
 
 
 def _close_issue_on_github(issue_id: str):
@@ -4476,27 +4678,51 @@ async def delete_issue(request: Request):
         issue_num = int(issue_num_str)
     except ValueError:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue number"})
+    return await asyncio.to_thread(_delete_issue_and_close, issue_id)
 
-    # Remove from local processed history.
-    processed = load_processed()
-    was_in_history = issue_id in processed
-    if was_in_history:
-        processed.pop(issue_id)
-        state["processed"] = processed
-        save_processed(processed)
-        recompute_issue_counters(processed)
 
-    # Close it on GitHub in the background.
-    state["dismiss_jobs"][issue_id] = {"status": "pending", "message": ""}
-    threading.Thread(target=_close_issue_on_github_with_retry, args=(issue_id,), daemon=True).start()
+def _delete_issue_and_close(issue_id):
+    """Transfer an admitted dismissal's claim through its background retries."""
+    claimed, busy = _claim_issues([issue_id])
+    if not claimed:
+        return _issue_busy_response(busy)
+    transferred = False
+    try:
+        def remove(current):
+            """Return whether the committed-current history contained the dismissed row."""
+            was_present = issue_id in current
+            current.pop(issue_id, None)
+            return was_present
 
-    # Reply straight away.
-    return {
-        "status": "success",
-        "message": f"{'Removed from history. ' if was_in_history else ''}Closing on GitHub in the background…",
-        "issue_id": issue_id,
-        "background": True,
-    }
+        try:
+            was_in_history = update_processed(remove)
+        except ProcessedStoreError as e:
+            return _history_failure(e)
+        state["dismiss_jobs"][issue_id] = {"status": "pending", "message": ""}
+
+        def close():
+            """Release only after every background dismissal effect has stopped."""
+            try:
+                _close_issue_on_github_with_retry(issue_id)
+            finally:
+                _release_issues([issue_id])
+
+        try:
+            threading.Thread(target=close, daemon=True).start()
+        except Exception as e:
+            message = f"Local history removed, but GitHub dismissal could not start: {e}"
+            logger.error(f"{issue_id}: {message}")
+            state["dismiss_jobs"][issue_id] = {"status": "error", "message": message}
+            return JSONResponse(status_code=500, content={"status": "error", "message": message})
+        transferred = True
+        return {
+            "status": "success",
+            "message": f"{'Removed from history. ' if was_in_history else ''}Closing on GitHub in the background…",
+            "issue_id": issue_id, "background": True,
+        }
+    finally:
+        if not transferred:
+            _release_issues([issue_id])
 
 
 # Statuses of a parked feature request (feature_needs_info: the requester was
@@ -4520,32 +4746,33 @@ async def reevaluate_feature(request: Request):
     issue_id = (data.get("issue_id") or "").strip()
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
-    # Find its record.
-    processed = load_processed()
-    rec = processed.get(issue_id)
-    # A feature request handed off to the fix pipeline (feature_build's
-    # no-build-agent fallback) can also come back to the feature drive once
-    # that pipeline is done with it.
-    handed_off = bool(rec) and rec.get("pipeline") == "fix_engine" and rec.get("status") not in (
-        "processing", "awaiting_review")
-    # Only parked or handed-off feature requests.
-    if not rec or (rec.get("status") not in _REEVALUATE_FEATURE_STATUSES and not handed_off):
+    stamp = datetime.now().isoformat()
+
+    def requeue(current):
+        """Check eligibility and intentionally replace the parked record together."""
+        rec = current.get(issue_id)
+        handed_off = bool(rec) and rec.get("pipeline") == "fix_engine" and rec.get("status") not in (
+            "processing", "awaiting_review")
+        if not rec or (rec.get("status") not in _REEVALUATE_FEATURE_STATUSES and not handed_off):
+            return False, (rec or {}).get("status") or "none"
+        current[issue_id] = {
+            "status": "feature_classify_retry",
+            "reason": "Re-evaluation requested from the AppBuilder UI.",
+            "previous_status": rec.get("status"),
+            "previous_reason": str(rec.get("reason") or "")[:1000],
+            "attempts": 0, "timestamp": stamp,
+        }
+        return True, rec.get("status")
+
+    try:
+        queued, previous = await asyncio.to_thread(update_processed, requeue)
+    except ProcessedStoreError as e:
+        return _history_failure(e)
+    if not queued:
         return JSONResponse(status_code=409, content={
             "status": "error",
-            "message": f"{issue_id} is not a parked feature request (status: {(rec or {}).get('status') or 'none'})."})
-    # Mark it for re-classification and save.
-    processed[issue_id] = {
-        "status": "feature_classify_retry",
-        "reason": "Re-evaluation requested from the AppBuilder UI.",
-        "previous_status": rec.get("status"),
-        "previous_reason": str(rec.get("reason") or "")[:1000],
-        "attempts": 0,
-        "timestamp": datetime.now().isoformat(),
-    }
-    state["processed"] = processed
-    save_processed(processed)
-    recompute_issue_counters(processed)
-    logger.info(f"Feature request {issue_id} re-queued for classification (was {rec.get('status')})")
+            "message": f"{issue_id} is not a parked feature request (status: {previous})."})
+    logger.info(f"Feature request {issue_id} re-queued for classification (was {previous})")
     return {"status": "success", "issue_id": issue_id,
             "message": "Re-queued — it will be re-classified on the next feature-drive cycle."}
 
@@ -4571,41 +4798,7 @@ async def delete_all_issues(request: Request):
     can't time out the request. Mirrors the retry_all_failed background
     pattern. Each issue is closed best-effort — one failure doesn't abort
     the sweep."""
-    # Changes the shared state.
-    global state
-    # Snapshot the ids to close.
-    processed = load_processed()
-    to_close = list(processed.keys())
-    if not to_close:
-        return {"status": "no_issues", "message": "No issues in history to delete."}
-
-    # Clear local history + counters now; close on GitHub in the background
-    # against the snapshot so the clear doesn't race the sweep.
-    state["processed"] = {}
-    save_processed({})
-    recompute_issue_counters({})
-
-    def _bulk_close():
-        """Close each issue on GitHub, counting successes and failures."""
-        closed = failed = 0
-        for issue_id in to_close:
-            try:
-                ok, _msg = _close_issue_on_github(issue_id)
-                if ok:
-                    closed += 1
-                else:
-                    failed += 1
-            except Exception as e:
-                failed += 1
-                logger.warning(f"delete_all: could not close {issue_id} on GitHub: {e}")
-        logger.info(f"delete_all_issues: closed {closed}/{len(to_close)} on GitHub, {failed} failed.")
-
-    # Run it in the background and reply straight away.
-    threading.Thread(target=_bulk_close, daemon=True).start()
-    return {
-        "status": "success",
-        "message": f"Cleared {len(to_close)} issue(s) from history. Closing them on GitHub in the background.",
-    }
+    return await asyncio.to_thread(_clear_issue_history, True)
 
 
 @router.post("/resolve_issue")
@@ -4618,7 +4811,11 @@ async def resolve_issue(request: Request):
     issue_id = data.get("issue_id", "").strip()
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid issue_id"})
+    return await asyncio.to_thread(_run_issue_action, issue_id, _resolve_issue_claimed, issue_id)
 
+
+def _resolve_issue_claimed(issue_id):
+    """Resolve remotely and locally while its worker owns the issue reservation."""
     # The number must be numeric.
     repo_name, issue_num_str = issue_id.rsplit(":", 1)
     try:
@@ -4674,10 +4871,7 @@ async def resolve_issue(request: Request):
         return msg
 
     try:
-        # PyGithub is synchronous — every call inside _do_resolve blocks, same
-        # note as pr_review_approve. Offloaded so a slow GitHub response can't
-        # stall the whole app.
-        github_msg = await asyncio.get_event_loop().run_in_executor(None, _do_resolve)
+        github_msg = _do_resolve()
         logger.info(f"Resolved issue {issue_id}: status -> closed, {github_msg}")
     except Exception as e:
         logger.warning(f"Could not close {issue_id} on GitHub: {e}")
@@ -4689,17 +4883,24 @@ async def resolve_issue(request: Request):
     # GitHub close succeeded — clicking Resolved is a HUMAN sign-off, so the issue
     # moves into the RESOLVED bucket (status "resolved"), NOT Closed. Counters are
     # re-derived from the store so it lands in exactly one bucket.
-    processed = load_processed()
     local_msg = "No local history entry to update, but "
-    if issue_id in processed:
-        entry = processed[issue_id]
+    stamp = datetime.now().isoformat()
+
+    def resolve(current):
+        """Human sign-off patches only a row that still exists."""
+        entry = current.get(issue_id)
+        if entry is None:
+            return False
         entry["status"] = "resolved"
-        entry["timestamp"] = datetime.now().isoformat()
+        entry["timestamp"] = stamp
         entry["decision_reason"] = "Human-confirmed resolved."
-        processed[issue_id] = entry
-        save_processed(processed)
-        recompute_issue_counters(processed)
-        state["processed"] = processed
+        return True
+
+    try:
+        resolved = update_processed(resolve)
+    except ProcessedStoreError as e:
+        return _history_failure(e, f"{github_msg} Local update failed. ")
+    if resolved:
         local_msg = "Marked resolved (human-confirmed). "
 
     return {
@@ -4711,7 +4912,7 @@ async def resolve_issue(request: Request):
 @router.post("/update_now")
 async def update_now():
     """Check for an AppBuilder update now."""
-    updated, msg = check_for_updates()
+    updated, msg = await asyncio.to_thread(check_for_updates)
     logger.info(f"Manual update check: {msg}")
     return {"status": "success", "message": msg}
 
@@ -4763,13 +4964,23 @@ async def trigger_fix(request: Request):
 @router.post("/scan_now")
 async def scan_now():
     """Start a scan cycle in the background."""
-    def trigger():
-        """Mark the status and run a scan."""
-        state["status"] = "Manual Scan"
-        run_scan_cycle()
     # Run it in the background.
-    threading.Thread(target=trigger, daemon=True).start()
-    return {"status": "triggered", "message": "Manual scan cycle started in background."}
+    threading.Thread(target=run_scan_cycle, daemon=True).start()
+    return {"status": "triggered", "message": "Manual scan requested; an active cycle continues without duplication."}
+
+
+@router.get("/ai_spend")
+async def get_ai_spend():
+    """Today's estimated paid AI spend and the daily gate (fleet rule 1.10)."""
+    return await asyncio.to_thread(ai_spend.status)
+
+
+@router.post("/ai_spend/continue")
+async def continue_ai_spend():
+    """A person reopens the daily AI spend gate for step_usd more, today only."""
+    gate, spent = await asyncio.to_thread(ai_spend.reopen)
+    return {"status": "ok", "gate_usd": round(gate, 2), "spent_usd": round(spent, 2),
+            "message": "AI spend gate open until $%.0f today ($%.0f used)." % (gate, spent)}
 
 
 @router.post("/retry_issue")
@@ -4782,7 +4993,14 @@ async def retry_issue(request: Request):
     # It must look like "repo:number".
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
+    return await asyncio.to_thread(_retry_issue_when_idle, issue_id)
 
+
+def _retry_issue_when_idle(issue_id):
+    """Reject an active retry explicitly, then queue only after releasing admission."""
+    result = _run_issue_action(issue_id, lambda: None)
+    if isinstance(result, JSONResponse):
+        return result
     # Split it.
     repo_name, issue_num = issue_id.split(":")
 
@@ -4832,6 +5050,33 @@ async def reopen_issue(request: Request):
     issue_id = data.get("issue_id")
     if not issue_id or ":" not in issue_id:
         return JSONResponse(status_code=400, content={"message": "Invalid issue_id format. Expected 'repo:num'"})
+    return await asyncio.to_thread(_reopen_issue_and_queue, issue_id)
+
+
+def _reopen_issue_and_queue(issue_id):
+    """Finish the claimed reopen before letting its new fix acquire the same claim."""
+    result = _run_issue_action(issue_id, _reopen_issue_claimed, issue_id)
+    if isinstance(result, JSONResponse):
+        return result
+    repo_name, issue_num = result
+    logger.info(f"Manual reopen: {issue_id}")
+
+    def run_fix():
+        """Fix the issue again after the operator workflow has released its claim."""
+        success, msg = process_single_issue(repo_name, issue_num)
+        logger.info(f"Reopen re-fix {'ok' if success else 'FAILED'} for {issue_id}: {msg}")
+
+    try:
+        threading.Thread(target=run_fix, daemon=True).start()
+    except Exception as e:
+        message = f"GitHub issue reopened and recorded, but the fix thread could not start: {e}"
+        logger.error(f"{issue_id}: {message}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": message})
+    return {"status": "triggered", "message": f"Reopened + re-queued {issue_id}"}
+
+
+def _reopen_issue_claimed(issue_id):
+    """Reopen GitHub and commit the operator's intent under one worker-owned claim."""
     # The number must be numeric.
     repo_name, issue_num_str = issue_id.rsplit(":", 1)
     try:
@@ -4868,10 +5113,7 @@ async def reopen_issue(request: Request):
             pass
 
     try:
-        # PyGithub is synchronous — every call inside _do_reopen blocks, same
-        # note as pr_review_approve. Offloaded so a slow GitHub response can't
-        # stall the whole app.
-        await asyncio.get_event_loop().run_in_executor(None, _do_reopen)
+        _do_reopen()
     except Exception as e:  # noqa: BLE001
         if _issue_is_deleted(e):
             # Gone for good. Drop our record so the UI stops offering Reopen for
@@ -4880,13 +5122,9 @@ async def reopen_issue(request: Request):
             logger.warning(f"Reopen skipped for {issue_id}: the issue was deleted on GitHub — "
                            f"removing it from AppBuilder's records")
             try:
-                processed = load_processed()
-                if processed.pop(issue_id, None) is not None:
-                    save_processed(processed)
-                    recompute_issue_counters(processed)
-                    state["processed"] = processed
-            except Exception as e2:  # noqa: BLE001
-                logger.warning(f"Reopen: could not drop record for deleted {issue_id}: {e2}")
+                update_processed(lambda current: current.pop(issue_id, None))
+            except ProcessedStoreError as e2:
+                return _history_failure(e2, f"{issue_id} was deleted on GitHub. Local removal failed. ")
             return JSONResponse(status_code=410, content={
                 "deleted": True,
                 "message": f"{issue_id} was deleted on GitHub and cannot be reopened. "
@@ -4900,34 +5138,23 @@ async def reopen_issue(request: Request):
     # double-counted in the base "Issues Closed" total. Status "reopened" is not a
     # terminal status the scanner skips, and the direct re-queue below drives the fix.
     try:
-        processed = load_processed()
-        prior = processed.get(issue_id, {})
-        processed[issue_id] = {
-            "status": "reopened",
-            "reopened": True,
-            "original_body": prior.get("original_body", ""),
-            # Preserve the prior fix so the re-fix can diff "what changed since" and
-            # triage the regression (falls back to parsing the issue's Commit: comment).
-            "prior_fix_commit": prior.get("commit"),
-            "prior_fix_files": prior.get("files"),
-            "timestamp": datetime.now().isoformat(),
-        }
-        save_processed(processed)
-        recompute_issue_counters(processed)
-        state["processed"] = processed
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Reopen: could not update processed state for {issue_id}: {e}")
-    # Log the reopen.
-    logger.info(f"Manual reopen: {issue_id}")
+        stamp = datetime.now().isoformat()
 
-    def run_fix():
-        """Fix the issue again and log the result."""
-        success, msg = process_single_issue(repo_name, issue_num)
-        logger.info(f"Reopen re-fix {'ok' if success else 'FAILED'} for {issue_id}: {msg}")
+        def reopen(current):
+            """Replace the record, retaining regression context from current authority."""
+            prior = current.get(issue_id, {})
+            current[issue_id] = {
+                "status": "reopened", "reopened": True,
+                "original_body": prior.get("original_body", ""),
+                "prior_fix_commit": prior.get("commit"),
+                "prior_fix_files": prior.get("files"),
+                "timestamp": stamp,
+            }
 
-    # Run it in the background.
-    threading.Thread(target=run_fix, daemon=True).start()
-    return {"status": "triggered", "message": f"Reopened + re-queued {issue_id}"}
+        update_processed(reopen)
+    except ProcessedStoreError as e:
+        return _history_failure(e, "GitHub issue reopened, but it was not re-queued. ")
+    return repo_name, issue_num
 
 
 @router.post("/retry_all_failed")
@@ -5172,8 +5399,21 @@ async def chat_confirm_fix(request: Request):
     # The proposal must name a repo and issue.
     repo_name = prop.get("repo")
     issue_num = prop.get("number")
-    pref = prop.get("llm_preference")
     if not repo_name or issue_num is None:
+        return JSONResponse(status_code=400, content={"message": "Invalid proposal"})
+    # Checked again here: the repo may have left the managed list since the
+    # proposal, or the proposal may predate the check in propose_fix.
+    from chat import positive_issue_number
+    from github_ops import repo_in_fix_scope
+    scoped = repo_in_fix_scope(config, repo_name)
+    if not scoped:
+        return JSONResponse(status_code=403, content={
+            "message": f"{repo_name} is not a monitored or trusted repo"})
+    # Run under the configured spelling: a stored URL form passes the scope
+    # check but would fail in Github.get_repo.
+    repo_name = scoped
+    issue_num = positive_issue_number(issue_num)
+    if issue_num is None:
         return JSONResponse(status_code=400, content={"message": "Invalid proposal"})
 
     # Use the pipeline's own issue_id form so /api/task-details latches onto the
@@ -5183,7 +5423,8 @@ async def chat_confirm_fix(request: Request):
     def _run():
         """Run the fix and log the result."""
         try:
-            ok, msg = process_single_issue(repo_name, issue_num, llm_preference=pref)
+            # Generic confirmation approves the fix, not routing metadata in a legacy proposal.
+            ok, msg = process_single_issue(repo_name, issue_num)
             logger.info(f"Chat-triggered fix {repo_name}:{issue_num} -> ok={ok} msg={msg}")
         except Exception as e:
             logger.error(f"Chat-triggered fix {repo_name}:{issue_num} failed: {e}\n{traceback.format_exc()}")
@@ -5232,6 +5473,8 @@ __all__ = [
     'resolve_issue',
     'update_now',
     'clear_credit_cooldown',
+    'get_ai_spend',
+    'continue_ai_spend',
     'trigger_fix',
     'scan_now',
     'retry_issue',
