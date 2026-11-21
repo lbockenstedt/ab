@@ -15,6 +15,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta
+import threading
 import time
 from collections import Counter
 from typing import Any, Dict, List, Optional
@@ -396,6 +397,9 @@ def render_issue(f: Dict[str, Any]) -> Dict[str, str]:
 
 
 _last: Dict[str, Any] = {"ts": 0.0, "findings": [], "filed": [], "error": "", "report": {}, "running": False, "duration_s": 0.0}
+# Guards the check-and-set of _last["running"]: the Health page's "run now"
+# starts a forced scan on its own thread, which can race the worker's scan.
+_scan_lock = threading.Lock()
 _history: List[Dict[str, Any]] = []
 HISTORY_MAX = 96
 
@@ -472,9 +476,11 @@ def scan_health(config: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
             return last_result()
         if now - _last["ts"] < float(cfg["health_check_interval_s"]):
             return last_result()
-    if _last.get("running"):
-        return last_result()
-    _last.update(ts=now, running=True)
+    # Claim the run atomically: two overlapping scans would file the same findings twice.
+    with _scan_lock:
+        if _last.get("running"):
+            return last_result()
+        _last.update(ts=now, running=True)
     try:
         from log_scan import _get_hub_agent_client, file_escalated_issue, get_hub_logs
         client = _get_hub_agent_client()

@@ -26,11 +26,13 @@ Regression guards this pins:
 import ast
 import contextlib
 import sys
+from types import SimpleNamespace
 
 from github import GithubException
 
 import branch_policy as real_branch_policy
 import feature_boundary as real_feature_boundary
+from _history import bind_history
 
 
 def _load_ns():
@@ -41,7 +43,7 @@ def _load_ns():
     want_funcs = {
         "_build_prompt", "_materialize_skill", "_changed_files", "_docs_touched",
         "_non_doc_files", "_run_build_agent", "_mark_failed", "_mark_built",
-        "_identity", "_flag_incomplete", "build_feature", "_handoff_to_fix_pipeline",
+        "_identity", "_flag_incomplete", "build_feature", "_build_feature", "_handoff_to_fix_pipeline",
         "_build_mode", "_syntax_errors", "_run_guardrails", "_agents_block",
     }
     want_assigns = {"_FEATURE_DRIVE_MARKER", "_BUILD_JSON_SCHEMA", "_BUILD_SYSTEM", "_DOCS_NUDGE_TMPL",
@@ -58,18 +60,7 @@ def _load_ns():
         def __getattr__(self, _):
             return lambda *a, **k: None
 
-    _store = {}
     _handoffs = []
-
-    def load_processed():
-        return dict(_store)
-
-    def save_processed(d):
-        _store.clear()
-        _store.update(d)
-
-    def recompute_issue_counters(processed):
-        pass
 
     def _ensure_label(gh_repo, name):
         gh_repo.ensured_labels.append(name)
@@ -151,8 +142,6 @@ def _load_ns():
 
     ns = {
         "logger": _NoLog(),
-        "load_processed": load_processed, "save_processed": save_processed,
-        "recompute_issue_counters": recompute_issue_counters,
         "_ensure_label": _ensure_label,
         "llm_client": _FakeLlmClient(),
         "LlmRequirements": real_model_selection.LlmRequirements,
@@ -206,7 +195,7 @@ def _load_ns():
     ns["re"] = __import__("re")
 
     exec("\n\n".join(segs), ns)
-    ns["_store"] = _store
+    bind_history(ns)
     ns["_handoffs"] = _handoffs
     ns["_candidates_holder"] = _candidates_holder
     ns["_pr_holder"] = _pr_holder
@@ -235,6 +224,7 @@ class _FakeIndex:
         self._repo = repo
     def commit(self, msg):
         self._repo.commits.append(msg)
+        return SimpleNamespace(hexsha="0123456789abcdef0123456789abcdef01234567")
 
 
 class _FakeRemote:

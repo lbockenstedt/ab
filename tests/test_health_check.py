@@ -277,3 +277,44 @@ def test_old_traceback_bodies_age_out_and_a_traceback_is_named_by_its_exception(
                                                                   for ln in tb("2026-11-12 13:19:00")])}
     assert not any("recent call last" in t for t in titles)
     assert any("EOFError: connection closed" in t for t in titles)
+
+
+def test_a_scan_cannot_start_between_another_scans_check_and_claim(monkeypatch):
+    """The Health page's "run now" thread can race the worker. Scan A is paused
+    right after it reads `running` (False) and before it claims the run; scan B
+    starts in that gap. Without the lock B passes the same check and runs while
+    A is committed to running too, filing the same findings twice."""
+    import sys
+    import threading
+    import types
+
+    b_ran = threading.Event()
+
+    class _Client:
+        def request_sync(self, *a, **k):
+            if threading.current_thread().name == "B":
+                b_ran.set()
+
+    fake = types.SimpleNamespace(_get_hub_agent_client=lambda: _Client(),
+                                 file_escalated_issue=lambda *a, **k: (True, ""),
+                                 get_hub_logs=lambda **k: [])
+    monkeypatch.setitem(sys.modules, "log_scan", fake)
+    import azure_health
+    monkeypatch.setattr(azure_health, "findings", lambda cfg: [])
+    seen = {}
+
+    class _Last(dict):
+        """On A's first read of `running`, start B and see whether B gets through."""
+
+        def get(self, key, default=None):
+            val = super().get(key, default)
+            if key == "running" and "b" not in seen:
+                seen["b"] = threading.Thread(target=hc.scan_health, args=({}, True), name="B")
+                seen["b"].start()
+                seen["b_in_gap"] = b_ran.wait(0.5)
+            return val
+
+    monkeypatch.setattr(hc, "_last", _Last(hc._last, ts=0.0, running=False))
+    hc.scan_health({}, force=True)
+    seen["b"].join(5)
+    assert seen["b_in_gap"] is False, "scan B ran while scan A was already committed to run"

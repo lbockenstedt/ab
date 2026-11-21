@@ -26,6 +26,7 @@ import re
 import requests
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 # Thread pool, timestamps, .env loading and the GitHub API.
@@ -62,10 +63,9 @@ from main import (
     load_config,
     load_processed,
     load_update_state,
-    recompute_issue_counters,
-    save_processed,
+    update_processed,
     logger,
-    save_config,
+    update_config,
     save_update_state,
     state,
     update_task_state,
@@ -567,11 +567,13 @@ def _hub_agent_on_connection(connected):
 
 def _persist_config_key(key, value):
     """Callback helper: upsert a single key into config.json (agent-managed secrets)."""
-    # Load, update and save the config; a failure is only a warning.
-    try:
-        cfg = load_config()
+    def edit(cfg):
+        """Set only the requested key in the current config."""
         cfg[key] = value
-        save_config(cfg)
+
+    # Edit the latest config; a failure is only a warning.
+    try:
+        update_config(edit)
     except Exception as e:
         logger.warning(f"Could not persist {key} to config: {e}")
 
@@ -612,6 +614,9 @@ def _start_hub_agent():
     state reports "not_registered" — AppBuilder runs fine without Hub integration.
     """
     try:
+        # A new client's first callback must not inherit the previous client's cached approval.
+        state.update(hub_agent_status="not_registered", hub_agent_connected=False,
+                     hub_agent_message="Starting Hub agent")
         # Use HUB_WS_URL, else derive it from HUB_QUERY_URL.
         import hub_agent
         cfg = load_config()
@@ -692,11 +697,45 @@ def _wait_for_spokes_online(config, min_count=1, timeout=90):
 
 
 
+_UPDATE_CHECK_LOCK = threading.Lock()
+_UPDATE_RECOVERY_COMMIT = None
+
+
 def check_for_updates():
     """Checks GitHub for new versions, performs pre-flight syntax checks, and signals a restart if safe."""
+    global _UPDATE_RECOVERY_COMMIT
+    if not _UPDATE_CHECK_LOCK.acquire(blocking=False):
+        logger.info("Update check already in progress.")
+        return False, "Update check already in progress."
     try:
+        # The restart flag clears before restart; only watchdog verification
+        # retires this durable marker and makes the current HEAD a safe baseline.
+        try:
+            os.stat(os.path.join(CONFIG_DIR, "update_pending"))
+        except FileNotFoundError:
+            pass
+        else:
+            logger.info("Update deferred: previous update awaiting watchdog verification.")
+            return False, "Update deferred: previous update awaiting watchdog verification."
+
         # Remember the current commit as the last known good one.
         self_repo = git.Repo(os.getcwd())
+
+        def restore_checkout(commit):
+            """Release recovery ownership only after HEAD confirms the pinned baseline."""
+            global _UPDATE_RECOVERY_COMMIT
+            if self_repo.head.commit.hexsha != commit:
+                self_repo.git.reset("--hard", commit)
+            if self_repo.head.commit.hexsha != commit:
+                raise RuntimeError("Rollback did not restore the expected checkout")
+            _UPDATE_RECOVERY_COMMIT = None
+
+        if _UPDATE_RECOVERY_COMMIT is not None:
+            try:
+                restore_checkout(_UPDATE_RECOVERY_COMMIT)
+            except Exception as e:
+                logger.error("Unverified checkout recovery failed: %s", e)
+                return None, f"Update failed: unverified checkout recovery failed ({e})."
         old_commit = self_repo.head.commit.hexsha
 
         update_state = load_update_state()
@@ -721,6 +760,8 @@ def check_for_updates():
             logger.warning(f"Remote head {remote_head[:7]} is in failed_commits blocklist. Skipping pull.")
             return None, f"Update skipped: remote head {remote_head[:7]} is a known-bad commit."
 
+        # Pin before checkout mutation; failed rollback must never become the next baseline.
+        _UPDATE_RECOVERY_COMMIT = old_commit
         # Advance to the fetched remote head. /opt/ab is a DEPLOYMENT MIRROR,
         # not a dev tree — a plain `git pull` aborts with "local changes would be
         # overwritten" the moment any tracked file is dirtied at runtime, wedging
@@ -764,7 +805,7 @@ def check_for_updates():
             # Syntax error: roll back and blocklist the commit.
             if syntax_error:
                 logger.error(f"Syntax check failed for commit {new_commit[:7]}. Rolling back to {old_commit[:7]}...")
-                self_repo.git.reset("--hard", old_commit)
+                restore_checkout(old_commit)
                 update_state = load_update_state()
                 if new_commit not in update_state["failed_commits"]:
                     update_state["failed_commits"].append(new_commit)
@@ -789,16 +830,35 @@ def check_for_updates():
                     # retries it.
                     logger.error("Self-update: dependency sync failed (%s). Rolling back to %s.",
                                  pip_msg, old_commit[:7])
-                    self_repo.git.reset("--hard", old_commit)
+                    restore_checkout(old_commit)
                     return None, f"Update failed: dependency install failed ({pip_msg}). Rolled back to {old_commit[:7]}."
 
-            # Write the update_pending marker with the new commit.
+            # Publish only a closed, complete marker at the watchdog's observed pathname.
+            marker_tmp = None
             try:
-                with open(os.path.join(CONFIG_DIR, "update_pending"), "w") as f:
+                with tempfile.NamedTemporaryFile(
+                        mode="w", encoding="utf-8", dir=CONFIG_DIR,
+                        prefix="update_pending.", suffix=".tmp", delete=False) as f:
+                    marker_tmp = f.name
                     f.write(new_commit)
-                logger.info("Update pending signal created. Triggering restart...")
+                os.replace(marker_tmp, os.path.join(CONFIG_DIR, "update_pending"))
             except Exception as e:
-                logger.warning(f"Could not create update_pending signal: {e}")
+                logger.error("Could not publish update_pending signal: %s", e)
+                if marker_tmp is not None:
+                    try:
+                        os.remove(marker_tmp)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as cleanup_error:
+                        logger.error("Could not remove pending-update temp file: %s", cleanup_error)
+                try:
+                    restore_checkout(old_commit)
+                except Exception as rollback_error:
+                    logger.error("Pending-update rollback failed: %s", rollback_error)
+                    return None, f"Update failed: could not publish update_pending ({e}); rollback failed: {rollback_error}."
+                return None, f"Update failed: could not publish update_pending ({e}). Rolled back to {old_commit[:7]}."
+            _UPDATE_RECOVERY_COMMIT = None
+            logger.info("Update pending signal created. Triggering restart...")
 
             # Signal the dedicated restart_worker to apply the restart. This is decoupled
             # from the scan cycle (and from state["paused"]) so the running process reliably
@@ -808,11 +868,14 @@ def check_for_updates():
             return True, f"Update found: {cur_version} ({old_commit[:7]} -> {new_commit[:7]}). Restarting..."
 
         # Already up to date.
+        _UPDATE_RECOVERY_COMMIT = None
         return None, "No updates available."
     # Any other failure: report it.
     except Exception as e:
         logger.warning(f"Self-update check failed: {e}")
         return None, f"Update check failed: {e}"
+    finally:
+        _UPDATE_CHECK_LOCK.release()
 
 def _requirements_changed(self_repo, old_commit, new_commit):
     """True if requirements.txt differs between the two commits (best-effort:
@@ -883,7 +946,8 @@ def updater_worker():
         try:
             logger.info("Checking for self-updates...")
             updated, msg = check_for_updates()
-            _log_restart_event("auto_update", msg, ok=bool(updated))
+            if updated is not False:
+                _log_restart_event("auto_update", msg, ok=bool(updated))
         except Exception as e:
             logger.error(f"Updater worker error: {e}")
         # Always record the check time so the watchdog can see the thread is alive.
@@ -1111,30 +1175,30 @@ def sync_github_issue_state(gh_current, limit=GITHUB_SYNC_PER_CYCLE, shared=None
         except Exception as e:  # noqa: BLE001 - one bad record must not stop the sync
             logger.debug(f"GitHub state sync skipped {issue_id}: {e}")
 
-    # Reload: other workers may have saved while we were asking GitHub.
-    processed = load_processed()
     now = datetime.now().isoformat()
-    changed = []
-    for issue_id, gh_status in found.items():
-        rec = processed.get(issue_id)
-        if not rec or rec.get("status") not in _GITHUB_SYNC_STATUSES:
-            continue
-        rec["github_checked_at"] = now
-        if gh_status == "closed":
-            rec["status_before_close"] = rec["status"]
-            rec["status"] = "closed"
-            rec["closed_at"] = now
-            changed.append(issue_id)
-        elif gh_status == "ops-alert" and rec["status"] != "ops-alert":
-            rec["status_before_ops_alert"] = rec["status"]
-            rec["status"] = "ops-alert"
-            changed.append(issue_id)
-        if shared is not None:
-            shared[issue_id] = rec
-    save_processed(processed)
+
+    def apply_observations(current):
+        """Apply observations only to still-waiting records, never old snapshots."""
+        changed, applied = [], {}
+        for issue_id, gh_status in found.items():
+            rec = current.get(issue_id)
+            if not rec or rec.get("status") not in _GITHUB_SYNC_STATUSES:
+                continue
+            rec["github_checked_at"] = now
+            if gh_status == "closed":
+                rec.update(status_before_close=rec["status"], status="closed", closed_at=now)
+                changed.append(issue_id)
+            elif gh_status == "ops-alert" and rec["status"] != "ops-alert":
+                rec.update(status_before_ops_alert=rec["status"], status="ops-alert")
+                changed.append(issue_id)
+            applied[issue_id] = dict(rec)
+        return changed, applied
+
+    changed, applied = update_processed(apply_observations)
+    if shared is not None:
+        shared.update(applied)
     if changed:
         logger.info(f"GitHub state sync: updated {len(changed)} record(s): {', '.join(changed)}")
-        recompute_issue_counters(processed)
     return changed
 
 
@@ -1194,17 +1258,27 @@ def _hand_to_human(issue, rec):
 
 def _update_record(issue_id, processed, **fields):
     """Set fields on an issue's record in both the saved and the cycle's store."""
-    fresh = load_processed()
-    rec = {**(processed.get(issue_id) or {}), **(fresh.get(issue_id) or {}), **fields}
-    fresh[issue_id] = processed[issue_id] = rec
-    save_processed(fresh)
+    def patch(current):
+        """A missing record is not an invitation to restore the cycle's old copy."""
+        rec = current.get(issue_id)
+        if rec is None or rec.get("status") not in FAILED_RETRY_STATUSES:
+            return None
+        rec.update(fields)
+        return dict(rec)
+
+    rec = update_processed(patch)
+    if rec is None:
+        processed.pop(issue_id, None)
+    else:
+        processed[issue_id] = rec
+    return rec
 
 
 def _retry_failed_issue(issue, issue_id, processed, config):
     """True when a failed/non-actionable issue is due a re-run this cycle (see
     failed_retry_decision). The retry is only counted when it is dispatched
     (_count_retry), so a gate that drops it this cycle costs nothing."""
-    rec = load_processed().get(issue_id) or processed.get(issue_id) or {}
+    rec = load_processed().get(issue_id) or {}
     decision = failed_retry_decision(rec, config)
     if decision == "needs_human" and _hand_to_human(issue, rec):
         _update_record(issue_id, processed, needs_human_at=datetime.now().isoformat())
@@ -1213,11 +1287,23 @@ def _retry_failed_issue(issue, issue_id, processed, config):
 
 def _count_retry(issue_id, processed, config):
     """Charge one automatic retry to an issue that is being dispatched."""
-    rec = load_processed().get(issue_id) or processed.get(issue_id) or {}
-    n = int(rec.get("auto_retries") or 0) + 1
-    _update_record(issue_id, processed, auto_retries=n)
+    def charge(current):
+        """Increment from fresh authority, and skip removed or completed records."""
+        rec = current.get(issue_id)
+        if not rec or rec.get("status") not in FAILED_RETRY_STATUSES:
+            return None
+        rec["auto_retries"] = int(rec.get("auto_retries") or 0) + 1
+        return dict(rec)
+
+    rec = update_processed(charge)
+    if rec is None:
+        processed.pop(issue_id, None)
+        return False
+    processed[issue_id] = rec
+    n = rec["auto_retries"]
     logger.info(f"{issue_id}: error still recurring — automatic retry "
                 f"{n}/{config.get('failed_retry_max', 2)} with the previous feedback.")
+    return True
 
 
 # Fleet PRs merge into dev and are promoted to main later, and GitHub only
@@ -1268,22 +1354,29 @@ def close_shipped_features(gh_current, config, limit=SHIPPED_CHECK_PER_CYCLE, sh
         except Exception as e:  # noqa: BLE001 - one bad record must not stop the sweep
             logger.debug(f"Shipped-feature check skipped {issue_id}: {e}")
 
-    processed = load_processed()
     now = datetime.now().isoformat()
-    for issue_id in checked:
-        rec = processed.get(issue_id)
-        if not rec or rec.get("status") != "feature_built":
-            continue
-        rec["shipped_checked_at"] = now
-        if issue_id in shipped:
-            rec.update(status="resolved", resolution="feature_shipped", closed_at=now)
-        if shared is not None:
-            shared[issue_id] = rec
-    save_processed(processed)
-    if shipped:
-        logger.info(f"Closed {len(shipped)} shipped feature issue(s): {', '.join(shipped)}")
-        recompute_issue_counters(processed)
-    return sorted(shipped)
+
+    def apply_shipped(current):
+        """Do not resolve a deleted/replaced record or a different newly built PR."""
+        changed, applied = [], {}
+        for issue_id in checked:
+            rec = current.get(issue_id)
+            if (not rec or rec.get("status") != "feature_built"
+                    or rec.get("pr_url") != processed[issue_id].get("pr_url")):
+                continue
+            rec["shipped_checked_at"] = now
+            if issue_id in shipped:
+                rec.update(status="resolved", resolution="feature_shipped", closed_at=now)
+                changed.append(issue_id)
+            applied[issue_id] = dict(rec)
+        return changed, applied
+
+    changed, applied = update_processed(apply_shipped)
+    if shared is not None:
+        shared.update(applied)
+    if changed:
+        logger.info(f"Closed {len(changed)} shipped feature issue(s): {', '.join(changed)}")
+    return sorted(changed)
 
 
 def scan_repo_issues(gh_current, config, processed):
@@ -1356,7 +1449,7 @@ def scan_repo_issues(gh_current, config, processed):
                         if "<!-- report-type: feature -->" in (issue.body or ""):
                             continue
 
-                        # Skip issues already finished (awaiting_review may resume).
+                        # Skip finished or human-held work (awaiting_review may resume).
                         issue_id = f"{repo_name}:{issue.number}"
                         if issue_id in processed:
                             status = processed[issue_id].get("status")
@@ -1364,7 +1457,9 @@ def scan_repo_issues(gh_current, config, processed):
                                 if not _retry_failed_issue(issue, issue_id, processed, config):
                                     continue
                                 retrying.add(issue_id)
-                            elif status in ["fixed", "awaiting_prod_verification"]:
+                            elif status in ["fixed", "awaiting_prod_verification", "awaiting_human"]:
+                                continue
+                            elif status == "pending_verification" and processed[issue_id].get("commit"):
                                 continue
                             if status == "awaiting_local":
                                 pass
@@ -1442,9 +1537,9 @@ def scan_repo_issues(gh_current, config, processed):
                             logger.info(f"Found {len(all_to_fix)} issues to process in {repo_name} (max workers={max_workers}).")
                         # Fix the batch in parallel and wait for all of them.
                         batch = critical_to_fix + capped_bugs + capped_normal
-                        for r, n in batch:
-                            if f"{r}:{n}" in retrying:
-                                _count_retry(f"{r}:{n}", processed, config)
+                        batch = [(r, n) for r, n in batch
+                                 if f"{r}:{n}" not in retrying
+                                 or _count_retry(f"{r}:{n}", processed, config)]
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [executor.submit(main.process_single_issue, r, n) for r, n in batch]
                             for future in futures:
@@ -1836,10 +1931,16 @@ def _schedule_check(config):
     }
 
 
+_SCAN_CYCLE_LOCK = threading.Lock()
+
+
 def run_scan_cycle():
     """Performs a single complete cycle of: Auth -> Label Discovery -> Prod Verification -> Scanning."""
     global state
     # Reload .env and config, mark the cycle as started and load processed issues.
+    if not _SCAN_CYCLE_LOCK.acquire(blocking=False):
+        logger.info("Scan cycle already running; skipping duplicate request.")
+        return
     try:
         load_dotenv(override=True)
         config = load_config()
@@ -1940,6 +2041,8 @@ def run_scan_cycle():
                 update_task_state(task_id=cleanup_id, action="end")
             except Exception as cleanup_err:
                 logger.debug(f"Cleanup for {cleanup_id} failed: {cleanup_err}")
+    finally:
+        _SCAN_CYCLE_LOCK.release()
 
 # Captured at import (≈ process boot / post-restart). Used for the startup grace so
 # AppBuilder doesn't hammer a not-yet-ready ollama (404 /api/chat) right after a reboot.
@@ -2484,7 +2587,7 @@ __EXCLUDE = {"git", "json", "os", "py_compile", "requests", "time",
              "_llm_cb_snapshot", "_local_health_url", "_normalize_lmstudio_url",
              "_provider_configured", "_provider_credit_cb_snapshot",
              "_set_update_cooldown", "get_log_path", "get_version", "load_config",
-             "load_processed", "load_update_state", "logger", "save_config",
+             "load_processed", "load_update_state", "logger", "update_config",
              "save_update_state", "state", "update_task_state"}
 # Export every name defined here except the ones above.
 __all__ = [__n for __n in dir() if not __n.startswith("__") and __n not in __EXCLUDE]

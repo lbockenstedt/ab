@@ -547,12 +547,40 @@ templates.env.globals["feed_resolved_statuses"] = list(_app_state.FEED_BUCKETS["
 # can detect stale-running code and the Diagnostics panel can show running vs disk versions.
 write_startup_stamp()
 
+def _persist_llm_migration(migrate):
+    """Run one startup migration on fresh config; flush its logs outside the lock."""
+    messages = []
+
+    class BufferedLog:
+        """Collect migration log calls without emitting them under the lock."""
+
+        def info(self, *args):
+            """Buffer an informational message."""
+            messages.append((logger.info, args))
+
+        def warning(self, *args):
+            """Buffer a warning message."""
+            messages.append((logger.warning, args))
+
+    def edit(config):
+        """Apply the migration and adopt a replacement snapshot if returned."""
+        migrated, changed = migrate(config, log=BufferedLog())
+        if changed and migrated is not config:
+            config.clear()
+            config.update(migrated)
+        return changed
+
+    try:
+        return update_config(edit)
+    finally:
+        for emit, args in messages:
+            emit(*args)
+
+
 # Upgrade the stored LLM config to the current schema, saving it if it changed.
 try:
     import llm_migrate
-    _cfg, _migrated = llm_migrate.migrate(load_config())
-    if _migrated:
-        save_config(_cfg)
+    if _persist_llm_migration(llm_migrate.migrate):
         logger.info("LLM config migrated to schema v2 and persisted.")
     # Registry top-ups run UNCONDITIONALLY, outside migrate()'s version gate:
     # migrate() short-circuits once llm_config_version == CONFIG_VERSION, so on
@@ -561,9 +589,7 @@ try:
     # capability ladder shipped therefore kept resolving stale tiers — e.g.
     # Copilot Opus staying "cheap" — no matter how often AppBuilder restarted.
     # Each helper is append-only, idempotent, and skips operator-curated rules.
-    _cfg2, _upgraded = llm_migrate.upgrade_registry(_cfg)
-    if _upgraded:
-        save_config(_cfg2)
+    if _persist_llm_migration(llm_migrate.upgrade_registry):
         logger.info("LLM model registry topped up with new default rules and persisted.")
 except Exception as me:
     logger.warning(f"LLM config migration skipped (non-fatal): {me}")

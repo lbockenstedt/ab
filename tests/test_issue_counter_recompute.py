@@ -33,6 +33,7 @@ import asyncio
 import re
 import threading
 from datetime import datetime, timedelta
+from _history import bind_history, bind_issue_actions
 
 
 def _load_ns():
@@ -63,15 +64,6 @@ def _load_ns():
         def __getattr__(self, _):
             return lambda *a, **k: None
 
-    _store = {}  # in-memory stand-in for the processed.json file
-
-    def load_processed():
-        return dict(_store)
-
-    def save_processed(d):
-        _store.clear()
-        _store.update(d)
-
     def _close_issue_on_github(issue_id):
         return True, f"stub-closed {issue_id}"
 
@@ -101,15 +93,16 @@ def _load_ns():
 
     ns = {
         "logger": _NoLog(), "state": state,
-        "load_processed": load_processed, "save_processed": save_processed,
         "_close_issue_on_github": _close_issue_on_github,
         "_close_issue_on_github_with_retry": _close_issue_on_github_with_retry,
         "threading": threading, "JSONResponse": _JSONResponse,
         "Request": _FakeRequest, "datetime": datetime,
     }
+    ns["asyncio"] = asyncio
     exec("\n\n".join(segs), ns)
-    ns["_store"] = _store
     ns["_FakeRequest"] = _FakeRequest
+    bind_history(ns)
+    bind_issue_actions(ns)
     return ns
 
 

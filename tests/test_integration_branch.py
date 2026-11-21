@@ -32,9 +32,27 @@ class _Repo:
         return object()
 
 
+class _GithubError(Exception):
+    """Stands in for PyGithub's GithubException, which carries ``.status``."""
+
+    def __init__(self, status):
+        super().__init__(f"{status} error")
+        self.status = status
+
+
 class _RepoWithoutDev(_Repo):
     def get_branch(self, name):
-        raise Exception("404 Branch not found")
+        raise _GithubError(404)
+
+
+class _RepoFlaky(_Repo):
+    """GitHub could not answer: the error says nothing about the branch."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def get_branch(self, name):
+        raise self.exc
 
 
 def test_defaults_to_dev():
@@ -70,6 +88,16 @@ def test_missing_dev_branch_falls_back_and_says_so():
     assert branch == "main", "a PR into a non-existent branch would just fail"
     assert "does not exist" in why and "create" in why, (
         "the fallback must explain itself -- it is a silent policy bypass otherwise")
+
+
+def test_transient_github_errors_keep_dev():
+    """A rate limit, a 5xx or a network error must never aim work at main."""
+    for exc in (_GithubError(403), _GithubError(500), _GithubError(502),
+                ConnectionError("reset"), TimeoutError("timed out"),
+                Exception("404 in the message but no status")):
+        branch, why = integration_branch({"default_branch": "main"}, _RepoFlaky(exc))
+        assert branch == "dev", f"{exc!r} fell back to {branch}"
+        assert "could not confirm" in why
 
 
 # ── source guard: the call sites must keep using it ────────────────────────

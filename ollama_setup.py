@@ -7,7 +7,7 @@ no behavior change.
 
 main re-exports these via ``from ollama_setup import *`` (placed before routes,
 which imports run_local_llm_setup). All dependencies (state, update_task_state,
-_task_state_lock, load_config, save_config, logger) come from modules re-exported
+_task_state_lock, load_config, update_config, logger) come from modules re-exported
 into main before ollama_setup, so they are imported directly — no lazy refs.
 """
 # Standard modules for JSON, files, the helper process, timing, ids and timestamps.
@@ -26,7 +26,7 @@ from main import (
     _task_state_lock,
     load_config,
     logger,
-    save_config,
+    update_config,
     state,
     update_task_state,
     CONFIG_DIR,
@@ -520,30 +520,24 @@ def run_local_llm_setup(model, num_ctx, cores):
 
         # ---- Stage 6: register the model as an enabled endpoint ----
         _llm_setup_log("▶ Stage 6/7 — Registering the local model as an enabled endpoint…")
-        # Save the Ollama credentials (no key, local URL).
-        config = load_config()
-        config.setdefault("llm_credentials", {})["ollama"] = {"api_key": "", "base_url": base_url}
-        # Find an existing entry for this model, if any.
-        entries = config.setdefault("llm_entries", [])
-        entry = next((e for e in entries if e.get("provider") == "ollama" and e.get("model") == derived_tag), None)
-        # None yet: add a new enabled entry.
-        if entry is None:
-            entry = {
-                "id": str(uuid.uuid4())[:12],
-                "label": "Local Ollama (CPU)",
-                "provider": "ollama",
-                "model": derived_tag,
-                "rpm": 0,
-                "enabled": True,
-            }
-            entries.append(entry)
-        # Already there: refresh it and make sure it is enabled.
-        else:
+        entry_id = str(uuid.uuid4())[:12]
+
+        def register_endpoint(config):
+            """Save the local credential and enable the matching or new endpoint."""
+            config.setdefault("llm_credentials", {})["ollama"] = {"api_key": "", "base_url": base_url}
+            entries = config.setdefault("llm_entries", [])
+            entry = next((e for e in entries if e.get("provider") == "ollama"
+                          and e.get("model") == derived_tag), None)
+            if entry is None:
+                entry = {"id": entry_id, "provider": "ollama", "rpm": 0}
+                entries.append(entry)
             entry["label"] = "Local Ollama (CPU)"
             entry["model"] = derived_tag
             entry["enabled"] = True
+            return entry
+
         # Save the config and report.
-        save_config(config)
+        entry = update_config(register_endpoint)
         _llm_setup_log(f"✓ Endpoint enabled → {entry['label']} / {derived_tag}")
 
         # ---- Stage 7: verify ----
@@ -611,7 +605,7 @@ def run_local_llm_pull(model, base_url=OLLAMA_BASE_URL):
 
 # Names imported from elsewhere that `from ollama_setup import *` should not re-export.
 __EXCLUDE = {"json", "os", "time", "uuid", "datetime", "requests",
-             "_task_state_lock", "load_config", "logger", "save_config",
+             "_task_state_lock", "load_config", "logger", "update_config",
              "state", "update_task_state"}
 # Export every other public or private name defined here.
 __all__ = [__n for __n in dir() if not __n.startswith("__") and __n not in __EXCLUDE]

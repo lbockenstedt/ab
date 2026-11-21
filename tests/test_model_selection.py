@@ -27,7 +27,7 @@ def _caps(cost_tier="free", complexity="small", context_window=32768, **override
     return caps
 
 
-def _cand(key, provider="ollama", model="m", base_url="http://x", available=True, **caps_overrides):
+def _cand(key, provider="openrouter", model="m", base_url="http://x", available=True, **caps_overrides):
     return {
         "key": key, "provider": provider, "model": model, "base_url": base_url,
         "api_key": "", "rpm": 0, "available": available, "caps": _caps(**caps_overrides),
@@ -125,23 +125,22 @@ def main():
     result = sel.select_model(R(prefer_capable=False), [free_p, cheap_p, frontier_p])
     ok &= _check("default (prefer_capable off) still picks the cheapest tier (free)", result.key == "pf" and result.tier == "free")
 
-    # --- deprioritize_local: offloadable work (log review, batch) prefers a
-    # capable FREE CLOUD peer over the local GPU, but the GPU stays a fallback
-    # and paid is reached only when nothing free qualifies --------------------
+    # --- deprioritize_local applies only to explicitly eligible local models ---
     gpu_free = _cand("gpu", provider="ollama", cost_tier="free", complexity="medium")
     cloud_free = _cand("cloud", provider="openrouter", cost_tier="free", complexity="medium")
     frontier_paid = _cand("front", provider="anthropic", cost_tier="frontier", complexity="large")
-    result = sel.select_model(R(deprioritize_local=True), [gpu_free, cloud_free])
+    opt_in = {"explicit_local_keys": ("gpu",)}
+    result = sel.select_model(R(deprioritize_local=True, **opt_in), [gpu_free, cloud_free])
     ok &= _check("deprioritize_local prefers the free cloud peer over the local GPU", result.key == "cloud")
-    result = sel.select_model(R(deprioritize_local=False), [gpu_free, cloud_free])
+    result = sel.select_model(R(deprioritize_local=False, **opt_in), [gpu_free, cloud_free])
     # (cold-start: both share the tier-median score, so list order decides — the
     # point is only that WITHOUT the flag the GPU is not pushed to the bottom.)
     ok &= _check("without the flag the local GPU is NOT deprioritized (free tier still wins)",
                  result.tier == "free")
-    result = sel.select_model(R(deprioritize_local=True), [gpu_free])
+    result = sel.select_model(R(deprioritize_local=True, **opt_in), [gpu_free])
     ok &= _check("deprioritize_local never empties a tier — the GPU still wins when it is the only free option",
                  result is not None and result.key == "gpu")
-    result = sel.select_model(R(deprioritize_local=True), [gpu_free, frontier_paid])
+    result = sel.select_model(R(deprioritize_local=True, **opt_in), [gpu_free, frontier_paid])
     ok &= _check("deprioritize_local never promotes a paid tier over a free local GPU",
                  result.key == "gpu" and result.tier == "free")
 
@@ -276,21 +275,20 @@ def main():
     # --- safety_floor ----------------------------------------------------------
 
     entries = [
-        {"id": "e1", "provider": "anthropic", "_configured": True},
-        {"id": "e2", "provider": "ollama", "_configured": True},
-        {"id": "e3", "provider": "openai", "_configured": False},
+        {"id": "e2", "provider": "ollama"},
+        {"id": "e3", "provider": "openai", "available": False},
+        {"id": "e1", "provider": "anthropic"},
     ]
     floor = sel.safety_floor(entries)
-    ok &= _check("safety_floor prefers a no-key local provider over an earlier-listed cloud one",
-                floor is not None and floor["id"] == "e2")
+    ok &= _check("safety_floor skips local and unavailable providers",
+                floor is not None and floor["id"] == "e1")
 
     only_cloud = [{"id": "e1", "provider": "anthropic", "_configured": True}]
     ok &= _check("safety_floor falls back to the first configured entry when nothing local qualifies",
                 sel.safety_floor(only_cloud)["id"] == "e1")
 
-    none_configured = [{"id": "e1", "provider": "anthropic", "_configured": False}]
-    ok &= _check("safety_floor returns None when nothing at all is configured",
-                sel.safety_floor(none_configured) is None)
+    ok &= _check("safety_floor returns None when only local or unavailable entries are configured",
+                sel.safety_floor(entries[:2]) is None)
     ok &= _check("safety_floor handles an empty/None entries list without crashing",
                 sel.safety_floor([]) is None and sel.safety_floor(None) is None)
 
