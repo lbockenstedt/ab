@@ -65,6 +65,7 @@ proven, load them from `.claude/skills/dual-copy-guard/reference.md` (or a share
 machine-readable pairs file) so there is a single source of truth.
 """
 # Standard modules for logging, hashing, files, regexes and dates.
+import json
 import logging
 import hashlib
 import os
@@ -79,7 +80,7 @@ from app_state import (ReviewPersistenceError, update_task_state, set_task_step,
 import feature_boundary
 import feature_allowlist
 import fix_failures
-from branch_policy import AUTO_BRANCH_PREFIXES_BY_KIND, is_release_locked
+from branch_policy import AUTO_BRANCH_PREFIXES_BY_KIND, DEFAULT_AUTO_PREFIXES, DEFAULT_PROTECTED, is_release_locked, parse_names
 from pr_actions import approve_pr, merge_pr
 from secrets_scan import check_secrets
 from check_tooltips import find_missing_tooltips_in_files
@@ -2066,6 +2067,187 @@ def _maybe_auto_remediate(gh, repo, pr, config):
         return False
 
 
+_LOCAL_REVIEW_RE = re.compile(r"<!--\s*ab-local-review:\s*(\{.*?\})\s*-->", re.DOTALL)
+# PR authors with these permissions can push to dev directly (dev is not a
+# protected branch), so an attestation they write grants nothing they lack.
+_LOCAL_REVIEW_WRITERS = ("admin", "maintain", "write")
+
+
+def local_review_desc(title, body):
+    """Digest of the title and body a local review judged (scripts/local_review.py
+    writes it into the marker; _local_review recomputes it from the PR).
+
+    Every attestation marker is removed and line endings are normalised first,
+    so the digest covers the whole body except the marker itself, and a
+    GitHub web edit's CRLF does not change it."""
+    def norm(text):
+        """``text`` with markers removed, LF line endings and outer whitespace stripped."""
+        text = _LOCAL_REVIEW_RE.sub("", text or "")
+        return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    raw = norm(title) + "\x00" + norm(body)
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _reject_local_review(pr, why):
+    """Log why a local review attestation on ``pr`` is not used; the panels run as usual."""
+    logger.info(f"pr_review: local review attestation on #{getattr(pr, 'number', '?')} not used: {why}")
+
+
+def _local_review_author_ok(pr, repo):
+    """Why ``pr``'s author may not attest, or "" when they may.
+
+    The marker is not signed. It is trusted only as far as its writer could
+    already skip review: the PR author must have write access to the repo
+    (so could push straight to the unprotected dev branch), the PR must not
+    come from a fork, and AB's own bug/feature branches never qualify, since
+    their bodies hold LLM text a prompt-injected issue could steer into a
+    forged marker. AB's own description rewrite strips markers
+    (fix_pr_description)."""
+    head = getattr(pr, "head", None)
+    head_ref = str(getattr(head, "ref", "") or "")
+    if head_ref.startswith(DEFAULT_AUTO_PREFIXES):
+        return f"{head_ref!r} is an AppBuilder branch"
+    head_repo = getattr(getattr(head, "repo", None), "full_name", None)
+    if head_repo != getattr(repo, "full_name", None):
+        return "the PR comes from another repository"
+    login = getattr(getattr(pr, "user", None), "login", None)
+    if not login:
+        return "the PR author is unknown"
+    try:
+        perm = repo.get_collaborator_permission(login)
+    except Exception as e:  # noqa: BLE001 -- any API failure means "not proven", so the panels run
+        return f"could not read {login}'s permission: {e}"
+    if perm not in _LOCAL_REVIEW_WRITERS:
+        return f"{login} has {perm!r} access, not write"
+    return ""
+
+
+def _local_review_base_open(repo, base):
+    """"" when GitHub shows ``base`` unprotected, else why the marker is refused.
+
+    The unsigned marker is trusted only because a writer could push to an
+    unprotected base directly anyway; once the branch gains protection (or a
+    ruleset) that no longer holds, so the panels run again. An API error fails
+    closed."""
+    try:
+        protected = repo.get_branch(base).protected
+    except Exception as e:  # noqa: BLE001 -- any API failure means "not proven", so the panels run
+        return f"could not read protection of {base!r}: {e}"
+    return f"base {base!r} is protected on GitHub" if protected is not False else ""
+
+
+def _local_review_merge_base_ok(repo, base, head_sha, merge_base):
+    """"" when GitHub's merge base of ``base`` and the head is the attested
+    one (the diff the panels saw), else why the marker is refused. An API
+    error fails closed."""
+    try:
+        actual = repo.compare(base, head_sha).merge_base_commit.sha
+    except Exception as e:  # noqa: BLE001 -- any API failure means "not proven", so the panels run
+        return f"could not read the merge base with {base!r}: {e}"
+    return "" if merge_base and actual == merge_base else f"merge base {actual[:8]} is not the attested one"
+
+
+def _attested_panel(panel):
+    """A panel's attested (confidence, seats) when it is a valid Approve, else None."""
+    if not isinstance(panel, dict) or panel.get("verdict") != "Approve":
+        return None
+    conf, seats = panel.get("confidence"), panel.get("seats")
+    if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0 <= conf <= 1:
+        return None
+    if not isinstance(seats, list) or not all(isinstance(s, str) for s in seats):
+        return None
+    return conf, seats
+
+
+def _local_review(pr, head_sha, config, repo, force=False):
+    """(review, state_review) from a local review attested in the PR body, or None.
+
+    scripts/local_review.py --gate writes ``<!-- ab-local-review: {...} -->`` when
+    both of AB's panels Approve a clean committed head. Used only when the head
+    it names is exactly ``head_sha`` (a rebase or new push voids it), its
+    ``desc`` matches local_review_desc of the PR's current title and body, the
+    author passes _local_review_author_ok, GitHub shows the base unprotected
+    (_local_review_base_open), the attested base branch and merge base are
+    the PR's current ones (_local_review_merge_base_ok), and the PR targets an allowed
+    non-release branch (default dev, never the repo's default branch), and
+    the review is not a forced Reprocess; AB then skips its paid re-review. Only the last marker in the body counts. Result dicts use the
+    keys of _skeptical_review / _state_logic_review (verdict, confidence, critique).
+    """
+    markers = _LOCAL_REVIEW_RE.findall(getattr(pr, "body", "") or "")
+    if not markers:
+        return None
+    if force:
+        # Reprocess promises fresh panels, so an attestation never stands in for them.
+        _reject_local_review(pr, "Reprocess asked for the panels to run")
+        return None
+    if not config.get("pr_review_trust_local_review", True):
+        _reject_local_review(pr, "pr_review_trust_local_review is off")
+        return None
+    try:
+        att = json.loads(markers[-1])
+    except ValueError:
+        _reject_local_review(pr, "marker is not valid JSON")
+        return None
+    if not isinstance(att, dict):
+        _reject_local_review(pr, "marker is not an object")
+        return None
+    # Release branches (main, master, qa, staging, release, next, the default branch) never take it.
+    base = str(getattr(getattr(pr, "base", None), "ref", "") or "").strip().lower()
+    dev = str(config.get("dev_branch") or "dev").lower()
+    # Only the literal built-in "dev" is dropped. The configured default and dev
+    # branches, the repo's default branch and every operator-protected branch
+    # stay excluded, so a dev_branch named like a release branch keeps it out.
+    release = {n for n in DEFAULT_PROTECTED if n != "dev"}
+    release |= {n.lower() for n in parse_names(config.get("protected_branches"))}
+    for name in (getattr(repo, "default_branch", None), config.get("default_branch")):
+        release.add(str(name or "").strip().lower())
+    if dev in DEFAULT_PROTECTED and dev != "dev":
+        release.add(dev)
+    allowed = {n.lower() for n in (parse_names(config.get("pr_review_local_review_branches")) or ["dev"])}
+    if base in release or base not in allowed:
+        _reject_local_review(pr, f"base {base!r} is not an allowed review branch")
+        return None
+    # The panels judged the diff against this base; a retargeted PR is a different diff.
+    if str(att.get("base") or "").lower() != base:
+        _reject_local_review(pr, f"attested base {att.get('base')!r} is not the PR's base {base!r}")
+        return None
+    if att.get("head") != head_sha:
+        _reject_local_review(pr, f"attested head {str(att.get('head'))[:8]} is not the current head {head_sha[:8]}")
+        return None
+    # The panels judge the description too, so it must be the one reviewed.
+    if att.get("desc") != local_review_desc(getattr(pr, "title", ""), getattr(pr, "body", "")):
+        _reject_local_review(pr, "the PR title or body differs from the one reviewed")
+        return None
+    why = (_local_review_author_ok(pr, repo) or _local_review_base_open(repo, base)
+           or _local_review_merge_base_ok(repo, base, head_sha, att.get("merge_base")))
+    if why:
+        _reject_local_review(pr, why)
+        return None
+    p1, p2 = _attested_panel(att.get("panel1")), _attested_panel(att.get("panel2"))
+    if not (p1 and p2):
+        _reject_local_review(pr, "a panel is not an Approve with a confidence in 0..1")
+        return None
+    logger.info("pr_review: using local review attestation for #%s at %s (panels not re-run)",
+                pr.number, head_sha[:8])
+
+    def as_review(panel):
+        """A panel's attested result in the shape of _skeptical_review's dict."""
+        conf, seats = panel
+        return {"verdict": "Approve", "confidence": conf, "attested": True,
+                "critique": f"Reviewed locally by {', '.join(seats)} (attested, not re-run)"}
+    return as_review(p1), as_review(p2)
+
+
+def _attestation_still_holds(prior, pr, head_sha, config, repo):
+    """False when the cached panel results came from a local review attestation
+    (the persisted ``panel_attested`` flag, never the critique text) that no
+    longer holds (PR retargeted, branch protected, author's access or the trust
+    knob changed), so the cached head must not skip the panels."""
+    if prior.get("panel_attested") is not True:
+        return True
+    return _local_review(pr, head_sha, config, repo) is not None
+
+
 def _review_one(gh, repo, pr, config, force=False):
     """force=True (the "Reprocess" button) bypasses the already-current cache
     check below and regenerates the comment + panel(s) even when the head SHA
@@ -2130,7 +2312,9 @@ def _review_one(gh, repo, pr, config, force=False):
     _prior_queued = is_queued_for_retry_stale(_prior_review, head_sha)
     already_current = ((not force) and not _prior_queued and bool(existing)
                        and ("<!-- head: %s -->" % head_sha) in (existing.body or "")
-                       and _desc_is_current(existing.body if existing else "", _desc))
+                       and _desc_is_current(existing.body if existing else "", _desc)
+                       # An attested result is reused only while its attestation still holds.
+                       and _attestation_still_holds(_prior_review, pr, head_sha, config, repo))
     if (not force) and existing and not _prior_queued and not already_current \
             and ("<!-- head: %s -->" % head_sha) in (existing.body or ""):
         logger.info("pr_review: %s PR #%s re-reviewing — head unchanged but the PR "
@@ -2176,7 +2360,8 @@ def _review_one(gh, repo, pr, config, force=False):
         _prior = (state.get("pr_reviews") or {}).get("%s#%s" % (repo.full_name, pr.number)) or {}
         review = ({"status": _prior["panel_status"]} if _prior.get("panel_status") else
                   {"verdict": _prior.get("panel_verdict"), "confidence": _prior.get("panel_confidence"),
-                   "critique": _prior.get("panel_critique")}) if _prior.get("panel_verdict") or _prior.get("panel_status") else None
+                   "critique": _prior.get("panel_critique"),
+                   "attested": _prior.get("panel_attested") is True}) if _prior.get("panel_verdict") or _prior.get("panel_status") else None
         # Same recovery for the second (state-logic) panel — without this, a
         # cached re-scan would call record_pr_review with review2=None and
         # silently wipe the panel2_* fields a real scan had just persisted.
@@ -2203,10 +2388,14 @@ def _review_one(gh, repo, pr, config, force=False):
         _step("summarising the change (LLM)", stage="review")
         summary = _summarize_changes(pr, files, config, repo=repo)
         _step("running the skeptical reviewer panel (LLM)")
-        review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh,
-                                   undefined_verified=_undef_verified)
-        _step("running the state-logic reviewer panel (LLM) if panel 1 approved")
-        state_review = _state_panel_after(review, pr, files, config, repo=repo, head_sha=head_sha)
+        attested = _local_review(pr, head_sha, config, repo, force=force)
+        if attested:
+            review, state_review = attested
+        else:
+            review = _skeptical_review(pr, files, config, repo=repo, head_sha=head_sha, gh=gh,
+                                       undefined_verified=_undef_verified)
+            _step("running the state-logic reviewer panel (LLM) if panel 1 approved")
+            state_review = _state_panel_after(review, pr, files, config, repo=repo, head_sha=head_sha)
         # Build the comment text.
         _step("rendering and posting the review comment", stage="pr")
         body = _render(findings, head_sha, summary, review=review, state_review=state_review,
@@ -2394,6 +2583,8 @@ def fix_pr_description(repo_full_name, number, config=None):
                            "Intent & Problem Statement section.")
 
         # Save the new description and count it against this head's budget.
+        # Any local review marker is dropped: LLM text must never carry one (_local_review).
+        new_body = _LOCAL_REVIEW_RE.sub("", new_body)
         pr.edit(body=new_body)
         budget[head_sha] = done + 1
         try:
@@ -2724,6 +2915,20 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             attempt_succeeded = False
             barren = 0
 
+            # Which model wrote each attempt is recorded even when the caller passed no dict.
+            if used_model_out is None:
+                used_model_out = {}
+            # True when this attempt is a retry fed by the reviewer panel's critique.
+            # Every other failure replaces error_context with its own output, so the
+            # next attempt is no longer a feedback retry and the flag resets.
+            from_feedback = False
+            import ai_spend, fix_outcomes  # lazy, like this function's other imports
+
+            def _outcome(result, reasons=(), note=""):
+                """Record this attempt in the per-model fix ledger (fix_outcomes)."""
+                fix_outcomes.record(repo_full_name, number, attempt, used_model_out.get("model"),
+                                    result, reasons, ai_spend.tally(), from_feedback, note)
+
             # Try up to the attempt limit, feeding each failure back to the model.
             attempt = 0
             while attempt < max_attempts:
@@ -2743,7 +2948,10 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                                 repo_full_name, number, attempt, max_attempts,
                                 (error_context or "")[:200])
 
-                # Ask the model for a fix.
+                # Ask the model for a fix. Count this attempt's paid cost, and do not
+                # credit a failed generation to the previous attempt's model.
+                ai_spend.start_tally()
+                used_model_out.pop("model", None)
                 try:
                     fix_code = apply_ai_fix(path, fix_body, error_context, files_override=changed,
                                             task_id=lock_id, requirements=requirements,
@@ -2762,11 +2970,15 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     if barren < max_barren:
                         barren += 1
                         attempt -= 1
+                        # The barren message replaced the critique, so the next try is not a feedback retry.
+                        from_feedback = False
                         logger.warning(
                             "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
                             "budget: %s", repo_full_name, number, barren, max_barren, last_failure)
                         continue
                     # Out of attempts: give up.
+                    _outcome("fail", ["crash"], last_failure)
+                    from_feedback = False
                     if is_last:
                         return False, last_failure
                     continue
@@ -2806,12 +3018,17 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     if _reason in ("empty", "no_json", "invalid_json") and barren < max_barren:
                         barren += 1
                         attempt -= 1
+                        # The barren message replaced the critique, so the next try is not a feedback retry.
+                        from_feedback = False
                         logger.warning(
                             "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
                             "budget: %s | model said: %r", repo_full_name, number, barren,
                             max_barren, last_failure,
                             parse_feedback.get("last_raw_prefix") or "<nothing>")
                         continue
+                    _outcome("fail", [{"edit_anchor_miss": "tool_misuse", "no_edits": "incomplete"}.get(_reason, "crash")],
+                             last_failure)
+                    from_feedback = False
                     if is_last:
                         return False, last_failure
                     continue
@@ -2824,6 +3041,8 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                                    repo_full_name, number, attempt, max_attempts, _fleet[:400])
                     last_failure = "Generated fix broke fleet code rules: %s" % _fleet
                     error_context = FLEET_FEEDBACK % _fleet
+                    _outcome("fail", ["off_spec"], last_failure)
+                    from_feedback = False
                     if is_last:
                         return False, last_failure
                     continue
@@ -2832,7 +3051,9 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 if isinstance(review, dict) and review.get("status") == "queue_for_retry":
                     _q_reason = review.get("reason") or "reviewers unavailable"
                     # The panel being DOWN is not the fix's fault — regenerating
-                    # would burn tokens against the same outage.
+                    # would burn tokens against the same outage. The attempt's
+                    # cost is still recorded, as unscored.
+                    _outcome("unscored", ["other"], f"review not run: {_q_reason}")
                     return False, f"Reviewer panel could not run ({_q_reason}) — click Fix again shortly."
                 # Read the panel's confidence, verdict and critique.
                 review_conf = review.get("confidence", 0.0) if isinstance(review, dict) else 0.0
@@ -2843,9 +3064,11 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     logger.warning("fix_one_pr: panel REJECTED fix for %s#%s (attempt %s/%s): %s",
                                    repo_full_name, number, attempt, max_attempts, critique)
                     last_failure = "Reviewer panel rejected the generated fix: %s" % critique
+                    _outcome("fail", ["wrong_answer"], critique)
                     error_context = ("The skeptical reviewer panel rejected your previous fix. "
                                      "Address this critique specifically and do not repeat the same "
                                      "approach:\n%s" % (critique or "no critique given"))
+                    from_feedback = True
                     if is_last:
                         try:
                             pr.create_issue_comment(
@@ -2879,12 +3102,15 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         # chasing a defect that does not exist in the code.
                         logger.error("fix_one_pr: %s#%s — cannot verify: %s",
                                      repo_full_name, pr.number, failure_msg)
+                        _outcome("unscored", ["other"], f"not verified: {failure_msg}")
                         return False, "Fix not pushed: %s" % failure_msg
                     # Tests failed: feed that back; on the last attempt comment on the PR and stop.
                     if not verified:
                         last_failure = "Fix failed verification: %s" % failure_msg
                         error_context = ("Your previous fix was approved by review but FAILED "
                                          "verification:\n%s" % (failure_msg or "unknown failure"))
+                        _outcome("fail", ["corrupt_code"], last_failure)
+                        from_feedback = False
                         if is_last:
                             try:
                                 pr.create_issue_comment(
@@ -2898,6 +3124,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
                 # This attempt passed.
                 attempt_succeeded = True
+                _outcome("pass", (), "approved %s" % review_conf)
                 break
 
             # Every attempt failed.

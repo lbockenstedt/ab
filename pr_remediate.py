@@ -67,6 +67,110 @@ _LEVEL_COUNT_FIELD = {
 # so the PR never stabilises long enough to auto-merge.
 _PROMOTION_HEAD_RE = re.compile(r"^(promote|backmerge)/", re.IGNORECASE)
 
+# lm owns these files and sync-fleet-files.yml copies them into every other
+# fleet repo (fleet rule 2.7: edit them only in lm). Mirrors the "fleet"
+# section of lm/.github/twins.json ("files", "dirs" and agents_md's target),
+# which AB has no copy of. In a dir, a repo's own "<repo>-*" entries are that
+# repo's, not lm's. AGENTS.md also holds the repo's own text; only its rules
+# block is synced, and that block is fleet-rules.md's text, so AGENTS.md counts
+# as synced only when fleet-rules.md changes in the same PR. A repo counts as a
+# fleet repo only when its base branch has lm's synced fleet-rules.md
+# (_is_fleet_repo), since AB also watches repos outside the fleet.
+_FLEET_OWNED_FILES = (".github/fleet-rules.md", ".github/ai-budget.json",
+                      ".github/model-policy.json", ".github/copilot-instructions.md")
+_FLEET_OWNED_DIRS = (".github/agents/", ".claude/skills/", ".github/hooks/")
+# Every synced copy of fleet-rules.md carries this line (lm/.github/fleet-rules.md).
+_FLEET_RULES_MARKER = "Edit ONLY lm/.github/fleet-rules.md"
+# (repo full name, base ref) -> bool. Fleet membership does not change between
+# scans, so the answer is kept for the process lifetime to keep GitHub reads minimal.
+_FLEET_REPO_CACHE = {}
+
+
+def _only_fleet_owned(repo_full_name, paths):
+    """Does this PR change only files lm syncs into the repo (plus VERSION)?
+
+    Such a PR is fixed in lm, never here: an edit to the copy is overwritten by
+    the next sync. False for lm itself, when nothing but VERSION changed, and
+    when any other file changed."""
+    name = (repo_full_name or "").rsplit("/", 1)[-1].lower()
+    if name == "lm":
+        return False
+
+    def _synced(path):
+        """Is this path an lm-owned synced file (not the repo's own entry)?"""
+        if path in _FLEET_OWNED_FILES:
+            return True
+        if path == "AGENTS.md":
+            return ".github/fleet-rules.md" in paths
+        for d in _FLEET_OWNED_DIRS:
+            if path.startswith(d):
+                return not path[len(d):].lower().startswith(name + "-")
+        return False
+
+    paths = [p for p in paths if p != "VERSION"]
+    return bool(paths) and all(_synced(p) for p in paths)
+
+
+def _is_fleet_repo(pr):
+    """Does the PR's base branch carry lm's synced fleet-rules.md?
+
+    A repo is a fleet repo only when its base branch holds the copy lm syncs in,
+    recognised by _FLEET_RULES_MARKER, so nothing is hard-coded by repo name or
+    owner. The answer is cached per (repo full name, base ref) for the process
+    lifetime. A failed read is not cached, so a transient API error cannot
+    stick; it returns False for this scan only."""
+    base = getattr(pr, "base", None)
+    repo = getattr(base, "repo", None)
+    ref = getattr(base, "ref", None)
+    key = (getattr(repo, "full_name", None), ref)
+    if key in _FLEET_REPO_CACHE:
+        return _FLEET_REPO_CACHE[key]
+    try:
+        content = repo.get_contents(".github/fleet-rules.md", ref=ref)
+        text = content.decoded_content.decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("auto_remediate_pr: fleet-repo check failed for %s@%s: %s", key[0], ref, e)
+        return False
+    ok = _FLEET_RULES_MARKER in text
+    _FLEET_REPO_CACHE[key] = ok
+    return ok
+
+
+def _latch_fleet_owned(repo_full_name, pr, files, head_sha):
+    """Latch the PR for this head when it changes only lm-synced files.
+
+    Returns the reason when latched, else "". A rename's old path counts too:
+    moving a repo file into a synced dir is still a change to the repo's own
+    code. auto_remediate_failure is cleared because app_state carries it
+    across heads and no fix ran for this one. Only fleet repos qualify, and
+    the GitHub read for that happens only once the paths already look fleet-only."""
+    paths = [getattr(f, "filename", "") for f in files if getattr(f, "filename", "")]
+    paths += [f.previous_filename for f in files if getattr(f, "previous_filename", None)]
+    if not _only_fleet_owned(repo_full_name, paths):
+        return ""
+    if not _is_fleet_repo(pr):
+        return ""
+    reason = ("PR changes only fleet files synced from lm; fix them in lm "
+              "(fleet rule 2.7) and the next sync carries the fix here")
+    logger.info("auto_remediate_pr: %s#%s: %s", repo_full_name, pr.number, reason)
+    update_pr_review(repo_full_name, pr.number, auto_remediate_blocked=True,
+                     auto_remediate_blocked_head=head_sha,
+                     auto_remediate_reason=reason, auto_remediate_failure=None)
+    return reason
+
+
+def _fleet_owned_reason(repo_full_name, pr, head_sha, key):
+    """Latch the PR if its files are lm-synced and return the reason, else "".
+
+    Reads the PR's file list, so callers reach it only when no earlier check
+    already decided this head. A file-list error is logged and leaves the PR to
+    the remaining checks rather than failing the scan."""
+    try:
+        return _latch_fleet_owned(repo_full_name, pr, list(pr.get_files()), head_sha)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("maybe_auto_remediate: fleet-owned check skipped for %s: %s", key, e)
+        return ""
+
 
 def _promotion_evidence_is_actionable(rec) -> bool:
     """Is there something on the review record that editing a promotion branch could fix?
@@ -1120,6 +1224,12 @@ def _remediate(gh, repo, pr, config, fix_fn, deficit, rework):
             fields["auto_remediate_notice"] = stamp
         update_pr_review(repo_full_name, pr.number, **fields)
 
+    # lm's synced files are fixed in lm (rule 2.7); never remediate the copy.
+    # maybe_auto_remediate checks first; this covers direct callers.
+    reason = _latch_fleet_owned(repo_full_name, pr, files, head_sha)
+    if reason:
+        return False, reason
+
     # Never rewrite a promotion/backmerge PR — see _PROMOTION_HEAD_RE.
     head_ref = getattr(getattr(pr, "head", None), "ref", "") or ""
     if _PROMOTION_HEAD_RE.match(head_ref):
@@ -1612,7 +1722,26 @@ def maybe_auto_remediate(
                              auto_remediate_blocked_head=None)
             rec = (state.get("pr_reviews") or {}).get(key) or {}
         else:
-            return _skip("PR remediation is blocked by guardrail")
+            # A same-head latch from another path (promotion, guardrail) may
+            # predate the fleet-owned check, so re-check unless it already says
+            # so. This is the only path that reaches the check for a latched head.
+            latched = rec.get("auto_remediate_reason") or ""
+            if "fleet files synced from lm" not in latched:
+                fleet_reason = _fleet_owned_reason(repo_full_name, pr, head_sha, key)
+                if fleet_reason:
+                    return False, fleet_reason
+            # Keep the latch's own reason (guardrail, promotion or fleet-owned)
+            # rather than overwriting it with a generic one on every scan. _skip
+            # stores the message back, so never prefix it twice.
+            generic = "PR remediation is blocked by guardrail"
+            return _skip(latched if latched.startswith(generic)
+                         else generic + (": %s" % latched if latched else ""))
+    # lm-synced files only: fixed in lm, never here (rule 2.7). Checked before
+    # the attempt-limit and docs-only exits so this head records why no fix
+    # runs. A file-list error leaves the PR to the checks below.
+    fleet_reason = _fleet_owned_reason(repo_full_name, pr, head_sha, key)
+    if fleet_reason:
+        return False, fleet_reason
     # Out of attempts: a human has to take over.
     if rec.get("auto_remediate_status") == "exhausted_human_review":
         return _skip("PR remediation attempt limit reached")
