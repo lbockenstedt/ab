@@ -1661,6 +1661,16 @@
                             <input type="checkbox" name="FIX_MODEL_LADDER" id="FIX_MODEL_LADDER" {{ 'checked' if settings.FIX_MODEL_LADDER else '' }} title="Ordinary fixes try the cheapest model in the fleet's coding ladder first (.github/model-policy.json: Haiku, then Sonnet, then Opus) and climb one rung per failed attempt. Off: the cost-first frontier picker." class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="FIX_MODEL_LADDER" class="text-xs font-medium text-slate-700">Fix model ladder (try the cheapest coding model first, climb one rung per failed attempt)</label>
                         </div>
+                        <!-- Fix result recording (fix_outcomes.enabled) -->
+                        <div class="flex items-center gap-2 mt-2">
+                            <input type="checkbox" name="FIX_OUTCOMES_ENABLED" id="FIX_OUTCOMES_ENABLED" {{ 'checked' if settings.FIX_OUTCOMES_ENABLED else '' }} title="Record each PR fix attempt (model, pass or fail, reason, cost) for the table below. Off: nothing is recorded and the table stays empty." class="w-4 h-4 text-primary-text focus:ring-brand">
+                            <label for="FIX_OUTCOMES_ENABLED" class="text-xs font-medium text-slate-700">Record PR fix results per model</label>
+                        </div>
+                        <!-- Per-model PR fix results, last 30 days (fix_outcomes.py, GET /fix_outcomes); filled by loadFixOutcomes() when this tab opens -->
+                        <div class="mt-4">
+                            <div class="text-xs font-medium text-slate-700 mb-1" title="Every charged PR fix attempt, by the model that wrote it. 'After review' counts retries fed by the reviewer panel's critique. Cost is the attempt's paid-model estimate (ai_spend).">Fix results by model (last 30 days)</div>
+                            <div id="fix-outcomes-table" class="text-xs text-slate-500">Loading…</div>
+                        </div>
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
@@ -3534,7 +3544,73 @@
             // endpoint), so it has to fetch its own values when it becomes
             // visible rather than being server-rendered like the other tabs.
             if (secId === 'sec-sso') loadOidcConfig();
+            // The fix results table is fetched on open, not rendered by the server,
+            // so the page never reads the fix ledger file.
+            if (secId === 'sec-llm') loadFixOutcomes();
         };
+
+        // ---- Per-model PR fix results (Settings → LLM) ----
+        // Built with createElement/textContent rather than innerHTML: model names
+        // come from the fix ledger, so they are treated as text.
+        // Fetches the last 30 days from GET /fix_outcomes and draws the table.
+        async function loadFixOutcomes() {
+            const box = document.getElementById('fix-outcomes-table');
+            if (!box) return;
+            let rows;
+            try {
+                const r = await fetch('/fix_outcomes?days=30', {cache: 'no-store'});
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                rows = await r.json();
+                if (!Array.isArray(rows)) throw new Error('not a list');
+            } catch (e) {
+                box.textContent = 'Could not load fix results.';
+                return;
+            }
+            box.textContent = '';
+            if (!rows.length) {
+                const on = document.getElementById('FIX_OUTCOMES_ENABLED');
+                box.textContent = on && !on.checked ? 'Fix result recording is off.' : 'No PR fix attempts recorded yet.';
+                return;
+            }
+            const table = document.createElement('table');
+            table.className = 'text-xs whitespace-nowrap';
+            const head = document.createElement('tr');
+            head.className = 'text-slate-500';
+            ['Model', 'Attempts', 'Pass rate', 'After review', 'Cost', 'Cost per pass'].forEach((label, i) => {
+                const th = document.createElement('th');
+                th.className = i === 0 ? 'text-left pr-4' : (i === 5 ? 'text-right' : 'text-right pr-4');
+                th.textContent = label;
+                head.appendChild(th);
+            });
+            const thead = document.createElement('thead');
+            thead.appendChild(head);
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+            rows.forEach(row => {
+                const tr = document.createElement('tr');
+                const passRate = row.pass_rate == null ? '-' : Math.floor(row.pass_rate * 100) + '%';
+                const afterReview = row.feedback_attempts ? row.feedback_passes + '/' + row.feedback_attempts : '-';
+                const perPass = row.usd_per_pass == null ? '-' : '$' + row.usd_per_pass.toFixed(2);
+                _abFixCell(tr, row.model, 'pr-4 font-mono');
+                _abFixCell(tr, row.attempts, 'text-right pr-4');
+                _abFixCell(tr, passRate, 'text-right pr-4');
+                _abFixCell(tr, afterReview, 'text-right pr-4');
+                _abFixCell(tr, '$' + row.usd.toFixed(2), 'text-right pr-4');
+                _abFixCell(tr, perPass, 'text-right');
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            box.appendChild(table);
+        }
+
+        // Appends one <td> holding `text` (as text, never HTML) with the given classes.
+        function _abFixCell(tr, text, className) {
+            const td = document.createElement('td');
+            td.className = className;
+            td.textContent = String(text);
+            tr.appendChild(td);
+        }
+
         // On first paint, show only the first tab's section (the template renders
         // every section without `hidden` so the form is whole; this collapses the
         // rest). Mirrors LM's initial setSubView call.

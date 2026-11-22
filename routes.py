@@ -14,6 +14,7 @@ from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
 from fix_engine import _claim_issues, _release_issues
 import ai_spend
+import fix_outcomes
 import mission_control
 from fastapi import APIRouter
 
@@ -3829,6 +3830,8 @@ async def save_settings(request: Request):
     config_data["AI_SPEND_GATE"] = data.get("AI_SPEND_GATE") == "on"
     # Fix model ladder on or off (fix_engine._ladder_exclusions).
     config_data["FIX_MODEL_LADDER"] = data.get("FIX_MODEL_LADDER") == "on"
+    # Per-model PR fix result recording on or off (fix_outcomes.enabled).
+    config_data["FIX_OUTCOMES_ENABLED"] = data.get("FIX_OUTCOMES_ENABLED") == "on"
     # Azure fleet access (chat tools + the Azure VM health check) and its mutation gate.
     config_data["CHAT_AZURE_ENABLED"] = data.get("CHAT_AZURE_ENABLED") == "on"
     config_data["CHAT_AZURE_ALLOW_MUTATION"] = data.get("CHAT_AZURE_ALLOW_MUTATION") == "on"
@@ -4985,6 +4988,12 @@ async def continue_ai_spend():
             "message": "AI spend gate open until $%.0f today ($%.0f used)." % (gate, spent)}
 
 
+@router.get("/fix_outcomes")
+async def get_fix_outcomes(days: int = 30):
+    """Per-model PR fix results over the last `days` days (fix_outcomes.summary)."""
+    return await asyncio.to_thread(fix_outcomes.summary, max(1, min(int(days), 365)))
+
+
 @router.post("/retry_issue")
 async def retry_issue(request: Request):
     """Retry the fix for one issue in the background."""
@@ -5476,6 +5485,7 @@ __all__ = [
     'update_now',
     'clear_credit_cooldown',
     'get_ai_spend',
+    'get_fix_outcomes',
     'continue_ai_spend',
     'trigger_fix',
     'scan_now',

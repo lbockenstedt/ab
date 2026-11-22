@@ -2724,6 +2724,20 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
             attempt_succeeded = False
             barren = 0
 
+            # Which model wrote each attempt is recorded even when the caller passed no dict.
+            if used_model_out is None:
+                used_model_out = {}
+            # True when this attempt is a retry fed by the reviewer panel's critique.
+            # Every other failure replaces error_context with its own output, so the
+            # next attempt is no longer a feedback retry and the flag resets.
+            from_feedback = False
+            import ai_spend, fix_outcomes  # lazy, like this function's other imports
+
+            def _outcome(result, reasons=(), note=""):
+                """Record this attempt in the per-model fix ledger (fix_outcomes)."""
+                fix_outcomes.record(repo_full_name, number, attempt, used_model_out.get("model"),
+                                    result, reasons, ai_spend.tally(), from_feedback, note)
+
             # Try up to the attempt limit, feeding each failure back to the model.
             attempt = 0
             while attempt < max_attempts:
@@ -2743,7 +2757,10 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                                 repo_full_name, number, attempt, max_attempts,
                                 (error_context or "")[:200])
 
-                # Ask the model for a fix.
+                # Ask the model for a fix. Count this attempt's paid cost, and do not
+                # credit a failed generation to the previous attempt's model.
+                ai_spend.start_tally()
+                used_model_out.pop("model", None)
                 try:
                     fix_code = apply_ai_fix(path, fix_body, error_context, files_override=changed,
                                             task_id=lock_id, requirements=requirements,
@@ -2762,11 +2779,15 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     if barren < max_barren:
                         barren += 1
                         attempt -= 1
+                        # The barren message replaced the critique, so the next try is not a feedback retry.
+                        from_feedback = False
                         logger.warning(
                             "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
                             "budget: %s", repo_full_name, number, barren, max_barren, last_failure)
                         continue
                     # Out of attempts: give up.
+                    _outcome("fail", ["crash"], last_failure)
+                    from_feedback = False
                     if is_last:
                         return False, last_failure
                     continue
@@ -2806,12 +2827,17 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     if _reason in ("empty", "no_json", "invalid_json") and barren < max_barren:
                         barren += 1
                         attempt -= 1
+                        # The barren message replaced the critique, so the next try is not a feedback retry.
+                        from_feedback = False
                         logger.warning(
                             "fix_one_pr: %s#%s barren attempt (%s/%s) not charged to the fix "
                             "budget: %s | model said: %r", repo_full_name, number, barren,
                             max_barren, last_failure,
                             parse_feedback.get("last_raw_prefix") or "<nothing>")
                         continue
+                    _outcome("fail", [{"edit_anchor_miss": "tool_misuse", "no_edits": "incomplete"}.get(_reason, "crash")],
+                             last_failure)
+                    from_feedback = False
                     if is_last:
                         return False, last_failure
                     continue
@@ -2824,6 +2850,8 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                                    repo_full_name, number, attempt, max_attempts, _fleet[:400])
                     last_failure = "Generated fix broke fleet code rules: %s" % _fleet
                     error_context = FLEET_FEEDBACK % _fleet
+                    _outcome("fail", ["off_spec"], last_failure)
+                    from_feedback = False
                     if is_last:
                         return False, last_failure
                     continue
@@ -2832,7 +2860,9 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 if isinstance(review, dict) and review.get("status") == "queue_for_retry":
                     _q_reason = review.get("reason") or "reviewers unavailable"
                     # The panel being DOWN is not the fix's fault — regenerating
-                    # would burn tokens against the same outage.
+                    # would burn tokens against the same outage. The attempt's
+                    # cost is still recorded, as unscored.
+                    _outcome("unscored", ["other"], f"review not run: {_q_reason}")
                     return False, f"Reviewer panel could not run ({_q_reason}) — click Fix again shortly."
                 # Read the panel's confidence, verdict and critique.
                 review_conf = review.get("confidence", 0.0) if isinstance(review, dict) else 0.0
@@ -2843,9 +2873,11 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                     logger.warning("fix_one_pr: panel REJECTED fix for %s#%s (attempt %s/%s): %s",
                                    repo_full_name, number, attempt, max_attempts, critique)
                     last_failure = "Reviewer panel rejected the generated fix: %s" % critique
+                    _outcome("fail", ["wrong_answer"], critique)
                     error_context = ("The skeptical reviewer panel rejected your previous fix. "
                                      "Address this critique specifically and do not repeat the same "
                                      "approach:\n%s" % (critique or "no critique given"))
+                    from_feedback = True
                     if is_last:
                         try:
                             pr.create_issue_comment(
@@ -2879,12 +2911,15 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         # chasing a defect that does not exist in the code.
                         logger.error("fix_one_pr: %s#%s — cannot verify: %s",
                                      repo_full_name, pr.number, failure_msg)
+                        _outcome("unscored", ["other"], f"not verified: {failure_msg}")
                         return False, "Fix not pushed: %s" % failure_msg
                     # Tests failed: feed that back; on the last attempt comment on the PR and stop.
                     if not verified:
                         last_failure = "Fix failed verification: %s" % failure_msg
                         error_context = ("Your previous fix was approved by review but FAILED "
                                          "verification:\n%s" % (failure_msg or "unknown failure"))
+                        _outcome("fail", ["corrupt_code"], last_failure)
+                        from_feedback = False
                         if is_last:
                             try:
                                 pr.create_issue_comment(
@@ -2898,6 +2933,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
                 # This attempt passed.
                 attempt_succeeded = True
+                _outcome("pass", (), "approved %s" % review_conf)
                 break
 
             # Every attempt failed.
