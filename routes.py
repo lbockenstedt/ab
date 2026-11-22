@@ -2807,6 +2807,9 @@ async def settings_page(request: Request):
     # Panel 2 (state-logic) waits for panel 1's Approve (pr_review._state_panel_after);
     # off runs both panels on every pass.
     config.setdefault("pr_review_state_panel_waits", True)
+    # Attested local review (scripts/local_review.py) replaces AB's paid panels for dev PRs.
+    config.setdefault("pr_review_trust_local_review", True)
+    config.setdefault("pr_review_local_review_branches", ["dev"])
     config.setdefault("pr_fix_max_attempts", 3)
     # Batch API off, prompt caching on.
     config.setdefault("batch_enabled", False)
@@ -3466,6 +3469,10 @@ async def save_settings(request: Request):
     config_data["pr_review_state_logic_enabled"] = data.get("pr_review_state_logic_enabled") == "on"
     # Panel 2 waits for panel 1's Approve (pr_review._state_panel_after); default on.
     config_data["pr_review_state_panel_waits"] = data.get("pr_review_state_panel_waits") == "on"
+    # Trust a local review attested in the PR body (pr_review._local_review); branches default to dev.
+    config_data["pr_review_trust_local_review"] = data.get("pr_review_trust_local_review") == "on"
+    config_data["pr_review_local_review_branches"] = parse_branch_names(
+        data.get("pr_review_local_review_branches")) or ["dev"]
     # Test-regression sub-option (default OFF): actually clones + runs the repo's
     # test suite for a PR's head vs. base branch and flags NEW failures — real
     # code execution against PR-authored content, opt-in per install (see
