@@ -3837,6 +3837,8 @@ async def save_settings(request: Request):
     config_data["AI_SPEND_GATE"] = data.get("AI_SPEND_GATE") == "on"
     # Fix model ladder on or off (fix_engine._ladder_exclusions).
     config_data["FIX_MODEL_LADDER"] = data.get("FIX_MODEL_LADDER") == "on"
+    # Review model ladder on or off (fix_engine._review_ladder).
+    config_data["REVIEW_MODEL_LADDER"] = data.get("REVIEW_MODEL_LADDER") == "on"
     # Per-model PR fix result recording on or off (fix_outcomes.enabled).
     config_data["FIX_OUTCOMES_ENABLED"] = data.get("FIX_OUTCOMES_ENABLED") == "on"
     # Azure fleet access (chat tools + the Azure VM health check) and its mutation gate.

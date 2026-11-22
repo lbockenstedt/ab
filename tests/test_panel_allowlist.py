@@ -22,10 +22,13 @@ _PANEL_NAMES = {
     "_reviewer_name", "_reviewer_vote", "_extract_reviewer_verdict",
     "_has_verdict_key", "_canon_verdict_keys", "_balanced_brace_span",
     "_is_local_provider", "_cloud_frontier_fallback", "_progress",
+    "_resolve_builder", "_review_ladder", "_review_policy",
+    "_build_critique_reviews", "_ladder_result", "_run_review_ladder",
 }
 _PANEL_ASSIGNS = {
     "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN", "DEFAULT_PANEL_ALLOWLIST",
     "_REVIEWER_RETRY_NOTE", "SKIP_CONFIDENCE_THRESHOLD",
+    "MODEL_POLICY_FILE", "_REVIEW_PASS_FLOOR",
 }
 
 
@@ -54,7 +57,8 @@ def _load_fix_engine(extra_ns=None):
         if isinstance(node, ast.Assign) and any(
                 getattr(t, "id", None) in _PANEL_ASSIGNS for t in node.targets):
             segs.append(ast.get_source_segment(src, node))
-    ns = {"re": re, "json": json, "os": os, "fnmatch": fnmatch, "logger": _NoLog()}
+    ns = {"re": re, "json": json, "os": os, "fnmatch": fnmatch, "logger": _NoLog(),
+          "__file__": "fix_engine.py"}
     ns.update(extra_ns or {})
     exec("\n\n".join(segs), ns)
     return ns
@@ -97,7 +101,7 @@ class _FakeLlm:
 
 def _engine(candidates, **extra):
     ns = {"llm_client": _FakeLlm(candidates), "_get_provider_config": lambda n, c: (None,) * 4,
-          "load_config": lambda: {}}
+          "load_config": lambda: {"REVIEW_MODEL_LADDER": False}}
     ns.update(extra)
     return _load_fix_engine(ns)
 
@@ -281,6 +285,33 @@ def test_cloud_frontier_fallback_none_when_no_allowlisted_candidate_exists():
 def test_cloud_frontier_fallback_none_when_allowlist_empty():
     ns = _engine(_fallback_mix())
     assert ns["_cloud_frontier_fallback"](set(), {"pr_review_panel_allowlist": []}) is None
+
+
+# ---- 3d. _reviewer_vote retry model ----
+@pytest.mark.parametrize("allow_fallback, expect_models, escalated", [
+    (True, ["claude-opus-5", "claude-sonnet-5"], True),
+    (False, ["claude-opus-5", "claude-opus-5"], False),
+])
+def test_reviewer_vote_fallback_only_when_allowed(allow_fallback, expect_models, escalated):
+    """A ladder seat (allow_fallback=False) retries its own model, never another one."""
+    called = []
+
+    def _turn(prompt, system, cand, *a, **k):
+        called.append(cand["model"])
+        if len(called) == 1:
+            raise RuntimeError("transient")
+        return '{"confidence": 0.9, "verdict": "Approve", "critique": "ok"}'
+
+    opus, sonnet = _cand("copilot", "claude-opus-5", tier="frontier"), _cand("copilot", "claude-sonnet-5", tier="frontier")
+    ns = _engine([opus, sonnet], _run_reviewer_turn=_turn, _parse_reviewer_json=json.loads,
+                 _norm_confidence=float, is_llm_cooldown_error=lambda e: False,
+                 is_llm_auth_error=lambda e: False)
+    vote, failed = ns["_reviewer_vote"]({"name": "R", "candidate": opus}, "p", None, None, "r", "h", {},
+                                        panel_keys=set(), panel_candidates=[opus, sonnet],
+                                        allow_fallback=allow_fallback)
+    assert failed is None and vote["verdict"] == "Approve"
+    assert called == expect_models
+    assert ("escalated_to" in vote) is escalated
 
 
 # ---- 4. review_fix ----

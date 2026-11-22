@@ -195,6 +195,23 @@ or the file is missing, the existing allowlist picker runs. The seated rung's
 complexity is relaxed to `small`. Off switch: **Settings → LLM Configuration → Fix
 model ladder** (`FIX_MODEL_LADDER`, default on). The daily spend gate still applies.
 
+**Review model ladder**: when on, every review panel (PR review panel 1 and panel 2, and
+the fix pipeline's review) reads the `review` section of `.github/model-policy.json`
+(synced from lm) and runs its reviewers one at a time. First each cheap `review.ladder`
+model (today `mai-code-2-flash`) reviews as a filter: a filter Reject ends the panel with
+Reject and the frontier reviewer is not run; a filter that gives no reply is skipped. Then
+one frontier reviewer gives the final verdict: `review.frontier.anthropic_author` (today
+`gpt-5.6-sol`) when the code's author is a Claude model or unknown, otherwise
+`review.frontier.other_author` (today `claude-opus-5.5`). The panel Approves only when the
+frontier reviewer Approves at `review.pass_confidence` (0.90) or more; a cheap model's
+Approve never passes a panel. A frontier reviewer that gives no reply, or whose seat was
+answered by an escalated fallback model, is queued for retry, not judged. When the
+frontier model is not available, or the setting is off, the multi-reviewer allowlist
+panel (`pr_review_panel_allowlist`) runs instead. The PR comment names the frontier model
+whose verdict gated, or says the filter rejected and the frontier was not run. Off
+switch: **Settings → LLM Configuration → Review model ladder** (`REVIEW_MODEL_LADDER`,
+default on).
+
 **Fix results by model (`fix_outcomes.py`, `GET /fix_outcomes?days=30`)**: every PR fix attempt in `fix_one_pr` that counts against its attempt limit (free and self-hosted models included, at $0) appends one JSON line to `fix_outcomes.jsonl` in AB's config dir: the model that wrote it, pass or fail, the failure reason (panel rejected: `wrong_answer`; failed tests: `corrupt_code`; fleet rules: `off_spec`; search anchors missed: `tool_misuse`; no edits: `incomplete`; generation error or bad JSON: `crash`), its paid-model cost (a per-thread tally in `ai_spend`: every paid call made on the fixing thread during that attempt, so a panel review run on that thread is included, and one run on its own threads is not), and whether it was a retry fed by the reviewer panel's critique. Barren attempts that are not charged are not recorded. An attempt whose review panel could not run (`queue_for_retry`), or whose verification sandbox failed, is recorded as `unscored`: its cost counts, but it is neither a pass nor a fail, so it adds to cost and to the `unscored` count only, not to attempts, pass rate, feedback counts or reasons. The file is bounded: once it passes 20,000 lines, only the newest 10,000 attempts are kept. The record shape matches the fleet model ledger (`lm/.claude/skills/model-ledger`), so local and AB results can be compared. Settings → LLM shows the per-model table: attempts, pass rate, passes after review feedback, cost and cost per pass. The page does not read the file: the table loads from `GET /fix_outcomes?days=30` when the LLM tab opens. The **Record PR fix results per model** checkbox (`FIX_OUTCOMES_ENABLED`, default on) turns this off: nothing is written, `GET /fix_outcomes` returns `[]` and the table says "Fix result recording is off." Records with a result other than `pass`, `fail` or `unscored` are skipped, and only the known reasons are counted.
 
 Where the climb happens:
