@@ -87,6 +87,9 @@ CHAT_CONFIG_DEFAULTS = {
     # The AI_SPEND_GATE knob: the daily gate on paid AI spend (fleet rule 1.10,
     # ai_spend.py). Off = no gate; spend is still counted.
     "AI_SPEND_GATE": True,
+    # The FIX_MODEL_LADDER knob: fixes climb coding.ladder in .github/model-policy.json
+    # (cheapest rung first, one rung per failed attempt). Off = the cost-first picker.
+    "FIX_MODEL_LADDER": True,
     # API key required by the Anthropic-compatible LLM-router proxy (/v1/*, see
     # llm_proxy.py). Empty = proxy is open (a warning is logged per request).
     # The AB_PROXY_KEY env var overrides this when set.

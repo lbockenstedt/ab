@@ -184,6 +184,27 @@ full gate.
 - **Not counted yet.** The Simulation Build Assistant's Copilot CLI sessions
   (`sim_session.py`) bypass `llm_client`.
 
+## Fix model ladder
+
+Ordinary fixes (not diagnostic, not pinned, no explicit provider such as Retry with Claude) seat the first configured, available,
+untried rung of `coding.ladder` in `.github/model-policy.json` (fleet-owned, synced
+from lm), cheapest first. Each failed attempt marks that model tried, so the next
+attempt climbs one rung. Any endpoint of a tried model counts as tried. An
+unavailable rung (rate-limited, dead, gated) is skipped. Once every rung is used,
+or the file is missing, the existing allowlist picker runs. The seated rung's
+complexity is relaxed to `small`. Off switch: **Settings → LLM Configuration → Fix
+model ladder** (`FIX_MODEL_LADDER`, default on). The daily spend gate still applies.
+
+Where the climb happens:
+
+- **Issue fixes** (`process_single_issue`): each failed attempt climbs one rung,
+  and the climb never goes back down to a rung that has cooled down.
+- **PR remediation** (`pr_remediate`): each remediation turn climbs one rung,
+  because `next_remediation_requirements` excludes the model that was tried.
+  Inside one turn, `fix_one_pr`'s own retries keep the same model and feed it
+  the critique, as before. The Opus-only last turn and the premium turn bar
+  the lower rungs, so the ladder treats them as used.
+
 ## Key commands / handlers
 
 - **Closed-issue recurrence:** a failed GitHub reopen is reported as failure and remains retryable; no recurrence comment is posted.
