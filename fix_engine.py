@@ -2954,6 +2954,74 @@ def _fix_allowlist(config):
     return tuple(dict.fromkeys(base + _premium_allowlist(config)))
 
 
+#: The fleet coding ladder (cheapest rung first). Absent in many checkouts; that is normal.
+MODEL_POLICY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".github", "model-policy.json")
+
+
+def _ladder_models():
+    """The coding ladder's model ids from MODEL_POLICY_FILE, in order; () when the file is missing or unreadable."""
+    try:
+        with open(MODEL_POLICY_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return tuple(str(r["model"]) for r in data["coding"]["ladder"] if r.get("model"))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return ()
+
+
+def _ladder_exclusions(config, existing=()):
+    """Exclusions that seat the first coding-ladder rung still available, or None.
+
+    A rung is available when a configured candidate's model matches it and is
+    marked available (not rate-limited, dead or gated). A rung is used up once any
+    of its endpoints, or its rung id, is in `existing` (the models already tried or
+    barred by the caller, e.g. the last-turn or premium tier), so a second provider
+    endpoint of a tried model does not cost a second attempt. Walking the rungs in
+    order means each failed attempt moves the fix one rung up. None (knob off, no
+    policy, enumeration failed, or every rung used) means: keep the existing
+    cost-first picker.
+    """
+    # Knob off, or no policy file: nothing to climb.
+    if not (config or {}).get("FIX_MODEL_LADDER", True):
+        return None
+    models = _ladder_models()
+    if not models:
+        return None
+    # Enumeration failure must never block fixing; fall back to the cost-first picker.
+    try:
+        candidates = llm_client._enumerate_candidates(config)
+    except Exception as e:  # noqa: BLE001 -- never block fixing because enumeration broke
+        logger.debug("_ladder_exclusions: could not enumerate candidates: %s", e)
+        return None
+    # A candidate is "tried" when the caller listed its key or its model name.
+    existing_set = set(existing)
+    def tried(c):
+        """True when candidate `c` was already tried or barred, by key or model name."""
+        return c["key"] in existing_set or (c.get("model") or "") in existing_set
+    def rung_used(m):
+        """True when rung `m` (or any of its endpoints) was already tried or listed."""
+        pats = (m.lower(), m.lower() + "-20*")
+        return m.lower() in existing_set or any(
+            tried(c) for c in candidates if _model_allowed(c.get("model"), pats))
+    # Climb only upward: never seat a rung below the highest one already used, even if
+    # a lower rung that was cooling down has become available again.
+    start = max((i + 1 for i, m in enumerate(models) if rung_used(m)), default=0)
+    # Seat the first rung above that is not used up and has an available endpoint.
+    for m in models[start:]:
+        # A rung matches its id exactly or with a dated suffix (claude-sonnet-5.5-20260101).
+        pats = (m.lower(), m.lower() + "-20*")
+        matching = [c for c in candidates if _model_allowed(c.get("model"), pats)]
+        # Safety: a used rung is skipped even if a later scan reaches it.
+        if rung_used(m):
+            continue
+        # Only endpoints the router can use now; an unavailable rung is skipped, not seated.
+        rung = [c for c in matching if c.get("available", True)]
+        if rung:
+            exclude = set(existing) | {c["key"] for c in candidates if c not in rung}
+            logger.info("fix ladder: seating rung %s", m)
+            return tuple(sorted(exclude, key=str))
+    return None
+
+
 def _fix_model_exclusions(config, existing=()):
     """Model keys to exclude so only allowlisted models can write code.
 
@@ -4619,14 +4687,32 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
         # call, so the floor cannot be sidestepped by whichever caller built the
         # requirements.
         import stage_models
-        _fix_excl = _fix_model_exclusions(config, requirements.exclude_models or ())
-        if stage_models.is_diagnostic(issue_body):
-            # Health-check findings: the stage's own model list replaces the ordinary
-            # write floor until those models are used up, then the floor applies.
-            _fix_excl = stage_models.exclusions(config, "diag_fix", requirements.exclude_models or (),
-                                                fallback=_fix_excl)
-        if _fix_excl != tuple(requirements.exclude_models or ()):
-            requirements = dataclasses.replace(requirements, exclude_models=_fix_excl)
+        # The coding ladder goes first for ordinary fixes: it names the one cheapest
+        # untried rung, so the floor below is not applied on top of it. This is the
+        # owner's choice (fleet model policy): the allowlist bars Haiku, the ladder
+        # starts there. FIX_MODEL_LADDER off restores the allowlist floor, including
+        # an operator-set pr_fix_model_allowlist. Diagnostic fixes, pinned fixes and
+        # an explicit provider choice ("Retry with Claude", local) skip the ladder and
+        # keep the existing path: a rung outside the restriction would leave no model.
+        _ladder = None
+        if (not stage_models.is_diagnostic(issue_body) and not requirements.pin_key
+                and not requirements.restrict):
+            _ladder = _ladder_exclusions(config, requirements.exclude_models or ())
+        if _ladder is not None:
+            # The ladder already names the one model to use, so relax the complexity floor the
+            # way the allowlisted review panel does. Complexity is a minimum, so every rung still
+            # qualifies; escalation is the rung climb, and keeping "large" would bar Haiku (the
+            # registry caps it at "medium") and hold the fix for a human.
+            requirements = dataclasses.replace(requirements, exclude_models=_ladder, complexity="small")
+        else:
+            _fix_excl = _fix_model_exclusions(config, requirements.exclude_models or ())
+            if stage_models.is_diagnostic(issue_body):
+                # Health-check findings: the stage's own model list replaces the ordinary
+                # write floor until those models are used up, then the floor applies.
+                _fix_excl = stage_models.exclusions(config, "diag_fix", requirements.exclude_models or (),
+                                                    fallback=_fix_excl)
+            if _fix_excl != tuple(requirements.exclude_models or ()):
+                requirements = dataclasses.replace(requirements, exclude_models=_fix_excl)
         # Ask for the fix.
         return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", task_id=task_id,
                         repo_checkout_path=repo_path if _native else None,
@@ -4694,6 +4780,7 @@ def next_attempt_requirements(prev_reqs, failure_kind, tried_key, config):
         min_context_tokens=prev_reqs.min_context_tokens,
         restrict=prev_reqs.restrict,
         must_escalate_to_human=prev_reqs.must_escalate_to_human,
+        pin_key=prev_reqs.pin_key,
         exclude_models=tuple(exclude),
     )
 
@@ -5749,6 +5836,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     _progress(issue_id, "attempt %d/%d: generating the fix" % (attempt, max_attempts))
                     logger.info(f"AI Fix Attempt {attempt}/{max_attempts} for {repo_name}:{issue_num}...")
                     logger.info(f"Attempt {attempt}/{max_attempts}: requirements = {reqs!r}.")
+                    # A fresh attempt has not built anything yet.
+                    built_key = None
                     used_model_out = {}
 
                     # --- Resume from awaiting_review ---
@@ -5765,6 +5854,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 current[issue_id]["status"] = "processing"
 
                         update_processed(resume_review)
+                        # Restore the model that built the queued fix, so a rejection still
+                        # excludes it and the next attempt climbs (JSON stored the key as a list).
+                        if pending_fix.get("builder_key"):
+                            used_model_out["key"] = tuple(pending_fix["builder_key"])
                     # Otherwise generate a new fix (re-targeting after a review rejection) and apply
                     # it.
                     elif not pending_fix:
@@ -5894,13 +5987,15 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                 stamp = datetime.now().isoformat()
 
                                 def queue_review(current, stamp=stamp, confidence=confidence,
-                                                 fixes=fixes, original_body=original_body):
+                                                 fixes=fixes, original_body=original_body,
+                                                 builder_key=built_key):
                                     """Replace pending review, retaining the fresh retry budget."""
                                     current[issue_id] = {
                                         **_retry_budget(current.get(issue_id)),
                                         "status": "awaiting_review",
                                         "timestamp": stamp,
-                                        "pending_fix": {"confidence": confidence, "fixes": fixes},
+                                        "pending_fix": {"confidence": confidence, "fixes": fixes,
+                                                        "builder_key": list(builder_key) if builder_key else None},
                                         "original_body": original_body,
                                     }
 
@@ -6084,6 +6179,10 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                         repo_git.git.clean("-fd")
                     except Exception:  # noqa: BLE001
                         pass
+                    # Exclude the endpoints that just failed (used_model_out is set only on
+                    # success, so built_key may be the previous attempt's model).
+                    for _fk in (locals().get("used_model_out") or {}).get("failed_keys", []):
+                        reqs = next_attempt_requirements(reqs, "error", _fk, config)
                     reqs = next_attempt_requirements(reqs, last_failure["kind"], built_key, config)
                     continue
 

@@ -1656,6 +1656,11 @@
                             <input type="checkbox" name="AI_SPEND_GATE" id="AI_SPEND_GATE" {{ 'checked' if settings.AI_SPEND_GATE else '' }} title="Once today's estimated spend on paid models reaches the gate in .github/ai-budget.json, paid models wait until midnight or until a person clicks Continue in the topbar. Free and self-hosted models keep working. A runaway stop, not a budget." class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="AI_SPEND_GATE" class="text-xs font-medium text-slate-700">Daily AI spend gate (stop paid models at the fleet's daily gate until a person continues)</label>
                         </div>
+                        <!-- Fix model ladder (.github/model-policy.json coding.ladder, fix_engine._ladder_exclusions) -->
+                        <div class="flex items-center gap-2 mt-2">
+                            <input type="checkbox" name="FIX_MODEL_LADDER" id="FIX_MODEL_LADDER" {{ 'checked' if settings.FIX_MODEL_LADDER else '' }} title="Ordinary fixes try the cheapest model in the fleet's coding ladder first (.github/model-policy.json: Haiku, then Sonnet, then Opus) and climb one rung per failed attempt. Off: the cost-first frontier picker." class="w-4 h-4 text-primary-text focus:ring-brand">
+                            <label for="FIX_MODEL_LADDER" class="text-xs font-medium text-slate-700">Fix model ladder (try the cheapest coding model first, climb one rung per failed attempt)</label>
+                        </div>
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
