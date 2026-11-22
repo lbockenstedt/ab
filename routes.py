@@ -3827,6 +3827,8 @@ async def save_settings(request: Request):
     config_data["CHAT_TOOLS_ENABLED"] = data.get("CHAT_TOOLS_ENABLED") == "on"
     # Daily AI spend gate on or off (fleet rule 1.10).
     config_data["AI_SPEND_GATE"] = data.get("AI_SPEND_GATE") == "on"
+    # Fix model ladder on or off (fix_engine._ladder_exclusions).
+    config_data["FIX_MODEL_LADDER"] = data.get("FIX_MODEL_LADDER") == "on"
     # Azure fleet access (chat tools + the Azure VM health check) and its mutation gate.
     config_data["CHAT_AZURE_ENABLED"] = data.get("CHAT_AZURE_ENABLED") == "on"
     config_data["CHAT_AZURE_ALLOW_MUTATION"] = data.get("CHAT_AZURE_ALLOW_MUTATION") == "on"
