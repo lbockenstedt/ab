@@ -448,6 +448,10 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 "panel_confidence": panel_confidence,
                 "panel_status": panel_status,
                 "panel_critique": panel_critique,
+                # True only when the panels' results came from a local review
+                # attestation (pr_review._local_review), so a cached re-scan
+                # re-checks that attestation before reusing them.
+                "panel_attested": _r.get("attested") is True and not panel_status,
                 "panel2_verdict": panel2_verdict,
                 "panel2_confidence": panel2_confidence,
                 "panel2_status": panel2_status,

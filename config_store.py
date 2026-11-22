@@ -90,6 +90,9 @@ CHAT_CONFIG_DEFAULTS = {
     # The FIX_MODEL_LADDER knob: fixes climb coding.ladder in .github/model-policy.json
     # (cheapest rung first, one rung per failed attempt). Off = the cost-first picker.
     "FIX_MODEL_LADDER": True,
+    # The FIX_OUTCOMES_ENABLED knob: record each PR fix attempt per model
+    # (fix_outcomes.py). Off = nothing is written and /fix_outcomes is empty.
+    "FIX_OUTCOMES_ENABLED": True,
     # API key required by the Anthropic-compatible LLM-router proxy (/v1/*, see
     # llm_proxy.py). Empty = proxy is open (a warning is logged per request).
     # The AB_PROXY_KEY env var overrides this when set.
