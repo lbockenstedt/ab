@@ -1584,6 +1584,7 @@ def _remediate(gh, repo, pr, config, fix_fn, deficit, rework):
             pr.number,
             remediation_attempts=new_attempts,
             premium_attempts=_premium_used,
+            remediation_fail_streak=0,
             auto_remediate_status="success",
             last_remediation_complexity=reqs.complexity,
             last_remediation_model=used_model,
@@ -1630,11 +1631,40 @@ def _remediate(gh, repo, pr, config, fix_fn, deficit, rework):
         excluded = list(rec.get("excluded_models") or [])
         if used_model and used_model not in excluded:
             excluded.append(used_model)
+        # Loop guard: fixes that keep failing before a push never score a head, so
+        # the stall rule cannot see them. After pr_remediate_fail_limit in a row
+        # the PR is parked as failed; nothing here is written by a person, so
+        # "human review" means a CLI session that investigates it.
+        fail_streak = int(rec.get("remediation_fail_streak") or 0) + 1
+        limit = review_progress.fail_limit(config)
+        if limit and fail_streak >= limit:
+            note = ("Remediation failed %d times in a row without a usable fix (last: %s)"
+                    % (fail_streak, (msg or "no reason recorded")[:300]))
+            logger.warning("auto_remediate_pr: %s — %s; parked as failed for a CLI session", key, note)
+            _post_once(
+                "failed_loop",
+                "🤖 **AppBuilder — Remediation Failed, Needs a CLI Session**\n\n"
+                f"{note}. AppBuilder has stopped retrying this PR so it does not keep spending on "
+                "fixes that do not land. Open a CLI session on this PR to find out why the fixes "
+                "are rejected (read the panel critiques and the last failure above), then push a "
+                "fix or close the PR.",
+                remediation_attempts=new_attempts,
+                premium_attempts=_premium_used,
+                remediation_fail_streak=fail_streak,
+                auto_remediate_failure=msg,
+                last_remediation_complexity=reqs.complexity,
+                last_remediation_model=used_model,
+                excluded_models=excluded,
+                auto_remediate_status="exhausted_human_review",
+                auto_remediate_reason=note + " — needs a CLI session",
+            )
+            return False, note
         update_pr_review(
             repo_full_name,
             pr.number,
             remediation_attempts=new_attempts,
             premium_attempts=_premium_used,
+            remediation_fail_streak=fail_streak,
             auto_remediate_status="failed",
             auto_remediate_failure=msg,
             last_remediation_complexity=reqs.complexity,

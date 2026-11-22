@@ -2885,6 +2885,10 @@
                                     <label for="pr_remediate_rework_defer_hours" class="text-sm font-medium text-slate-600">Hours a rework waits for a model</label>
                                     <input type="number" name="pr_remediate_rework_defer_hours" id="pr_remediate_rework_defer_hours" min="0" max="168" step="any" value="{{ settings.get('pr_remediate_rework_defer_hours', 24) }}" title="When every model that can run a consolidated rework is cooling down (credits, rate limit, repeated failures), or the models cannot be listed, AppBuilder waits for one, checking on every scan, for at most this many hours from the first wait at the PR's current commit. After that it treats the rework as having no model: a thrashing PR waits for a new commit, and a PR out of attempts is left for a human. 0 never waits. Default 24, at most 168 (a week)." class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 </div>
+                                <div class="space-y-2">
+                                    <label for="pr_remediate_fail_limit" class="text-sm font-medium text-slate-600">Failed fixes before a CLI session</label>
+                                    <input type="number" name="pr_remediate_fail_limit" id="pr_remediate_fail_limit" min="0" max="5" step="1" value="{{ settings.get('pr_remediate_fail_limit', 2) }}" title="After this many failed fix attempts in a row on one PR (a fix rejected before it is pushed, no applicable edits, a model failing) AppBuilder stops retrying it, marks it failed and comments that it needs a CLI session, so a loop cannot keep spending. A fix that lands resets the count. 0 turns the guard off. Default 2, at most 5." class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                </div>
                             </div>
                         </div>
 
