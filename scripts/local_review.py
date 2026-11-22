@@ -28,7 +28,17 @@ Gate:
 DIR is the --out folder. Applies AB's panel verdict (fix_engine.panel_verdict)
 to the replies saved for each panel's seats in DIR/reviewers.json
 (DIR/votes/<panel>-<seat>.txt). Prints each panel's verdict and exits 0
-only when both panels Approve.
+only when both panels Approve. On a clean tree with both Approving, it also writes
+DIR/attestation.md: a marker AB reads from the PR body to skip its paid re-review of that exact head
+and description (DIR/pr-title.txt and DIR/pr-body.md are the PR to open).
+
+Attest (the review skill's reviewer ladder):
+    python scripts/local_review.py --attest DIR --frontier MODEL
+
+The ladder decides each panel on one frontier reviewer, whose reply is saved
+in DIR/<panel>-<MODEL>.out. Writes the same attestation when both panels'
+replies Approve at ATTEST_CONFIDENCE or more on a clean tree, and exits 0;
+otherwise removes any old one and exits 1.
 """
 import argparse
 import atexit
@@ -156,6 +166,11 @@ def _fresh_votes(folder):
     votes = os.path.join(folder, "votes")
     shutil.rmtree(votes, ignore_errors=True)
     os.makedirs(votes)
+    # Frontier replies for --attest are per round too: an old Approve must never
+    # attest a new head when the folder is reused.
+    for name in os.listdir(folder):
+        if name.startswith(("panel1-", "panel2-")) and name.endswith(".out"):
+            os.remove(os.path.join(folder, name))
 
 
 def vote_file(folder, panel, seat):
@@ -197,6 +212,48 @@ def _agents_context(text):
         return "", str(e) or type(e).__name__
 
 
+def _read_json(path):
+    """The JSON object in ``path``, or {} when the file is absent."""
+    if not os.path.exists(path):
+        return {}
+    with open(path) as fh:
+        return json.load(fh)
+
+
+# A frontier reviewer's Approve passes a panel only at AB's own bar (fleet rule 10.3).
+ATTEST_CONFIDENCE = 0.90
+
+
+def _write_attestation(folder, panels):
+    """Write the attestation for ``panels`` ({panel: (confidence, seats)} for
+    both panels, or None when they did not both Approve) on a clean tree, so AB
+    can take this review for the PR instead of re-running its panels
+    (pr_review._local_review).
+
+    DIR/attestation.md holds the marker alone; DIR/pr-title.txt and
+    DIR/pr-body.md hold the reviewed title and body with the marker appended,
+    for ``gh pr create --title "$(cat pr-title.txt)" --body-file pr-body.md``.
+    The marker binds the head SHA, the target branch and merge base, and the
+    title/body digest, so the PR must be opened with exactly those. A dirty tree, a failed gate or a missing
+    meta.json removes any files left by an earlier round."""
+    paths = [os.path.join(folder, n) for n in ("attestation.md", "pr-title.txt", "pr-body.md")]
+    meta = _read_json(os.path.join(folder, "meta.json"))
+    bound = all(meta.get(k) for k in ("head", "desc", "base", "merge_base"))
+    if not (panels and bound and meta.get("dirty") is False):
+        for path in paths:
+            if os.path.exists(path):
+                os.remove(path)
+        return
+    att = {k: meta[k] for k in ("head", "base", "merge_base", "desc")}
+    for panel, (confidence, seats) in panels.items():
+        att[panel] = {"verdict": "Approve", "confidence": confidence, "seats": seats}
+    marker = "<!-- ab-local-review: %s -->" % json.dumps(att, separators=(",", ":"))
+    for path, text in zip(paths, (marker, meta["title"], meta["body"].rstrip() + "\n\n" + marker)):
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+    print("attestation: %s (open the PR with pr-title.txt and pr-body.md)" % paths[0], file=sys.stderr)
+
+
 def gate(folder):
     """AB's verdict for each panel from the saved replies; True when both Approve.
 
@@ -204,11 +261,12 @@ def gate(folder):
     reviewers.json, the replies from vote_file(). A seat with no reply file,
     or a reply with no verdict, is a failed reviewer, as in AB. Panel 2 is
     "skipped" until panel 1 Approves, as in AB, then "pending" until any of
-    its reply files exist: run its reviewers then and gate again."""
+    its reply files exist: run its reviewers then and gate again. When both
+    Approve on a clean tree, the result is also attested (_write_attestation)."""
     import fix_engine
     with open(os.path.join(folder, "reviewers.json")) as fh:
         seats = json.load(fh)
-    result = {}
+    result, replied = {}, {}
     for panel in ("panel1", "panel2"):
         if panel == "panel2" and result["panel1"]["verdict"] != "Approve":
             # As in AB (pr_review._state_panel_after): panel 2 waits for panel 1.
@@ -218,6 +276,7 @@ def gate(folder):
             result[panel] = {"verdict": "pending", "reason": "panel 1 Approves: run panel 2's reviewers"}
             continue
         votes, failed = [], []
+        replied[panel] = []
         for seat in seats[panel]:
             path = vote_file(folder, panel, seat)
             vote = None
@@ -229,6 +288,7 @@ def gate(folder):
                 continue
             vote["confidence"] = fix_engine._norm_confidence(vote.get("confidence"))
             votes.append(vote)
+            replied[panel].append(seat.split("/", 1)[-1])
         if not votes:
             result[panel] = {"failed": failed, "verdict": "no replies"}
             continue
@@ -237,6 +297,29 @@ def gate(folder):
                          "confidence": round(conf, 2), "verdict": verdict}
     passed = all(r["verdict"] == "Approve" for r in result.values())
     print(json.dumps(dict(result, passed=passed)))
+    _write_attestation(folder, passed and {p: (result[p]["confidence"], replied[p]) for p in result})
+    return passed
+
+
+def attest(folder, model):
+    """Attest a review run on the skill's ladder: True, with the attestation
+    written, when the frontier ``model``'s reply on each panel
+    (DIR/<panel>-<model>.out) is an Approve at ATTEST_CONFIDENCE or more."""
+    import fix_engine
+    panels = {}
+    for panel in ("panel1", "panel2"):
+        path = os.path.join(folder, "%s-%s.out" % (panel, model))
+        vote = None
+        if os.path.exists(path):
+            with open(path) as fh:
+                vote = fix_engine._extract_reviewer_verdict(fh.read())
+        conf = fix_engine._norm_confidence((vote or {}).get("confidence"))
+        ok = bool(vote) and vote.get("verdict") == "Approve" and conf >= ATTEST_CONFIDENCE
+        print("%s: %s" % (panel, "Approve %.2f" % conf if ok else "not a passing Approve (%s)" % path))
+        if ok:
+            panels[panel] = (round(conf, 2), [model])
+    passed = len(panels) == 2
+    _write_attestation(folder, panels if passed else None)
     return passed
 
 
@@ -245,6 +328,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("repo", nargs="?")
     ap.add_argument("--gate", metavar="DIR")
+    ap.add_argument("--attest", metavar="DIR")
+    ap.add_argument("--frontier", metavar="MODEL")
     ap.add_argument("--base", default="origin/dev")
     ap.add_argument("--out", default="/tmp/review")
     ap.add_argument("--title")
@@ -253,7 +338,7 @@ def main():
 
     # Importing AB writes config.json and ab.log into the working directory;
     # run from a scratch folder so they never land in the repo under review.
-    for name in ("repo", "gate", "out", "body_file"):
+    for name in ("repo", "gate", "attest", "out", "body_file"):
         if getattr(args, name):
             setattr(args, name, os.path.abspath(getattr(args, name)))
     scratch = tempfile.mkdtemp(prefix="review-")
@@ -266,6 +351,10 @@ def main():
 
     if args.gate:
         sys.exit(0 if gate(args.gate) else 1)
+    if args.attest:
+        if not args.frontier:
+            ap.error("--attest needs --frontier MODEL")
+        sys.exit(0 if attest(args.attest, args.frontier) else 1)
     if not args.repo:
         ap.error("a repo path is required")
 
@@ -299,6 +388,16 @@ def main():
             fh.write(text)
     with open(os.path.join(args.out, "reviewers.json"), "w") as fh:
         json.dump(seats, fh)
+    # The attestation is only for a committed head: uncommitted edits were reviewed too.
+    # The target branch name (origin/dev -> dev) and merge base bind the
+    # attestation to the diff reviewed, so retargeting the PR voids it.
+    remote, _, branch = args.base.partition("/")
+    target = branch if branch and remote in _git(repo, "remote").split() else args.base
+    meta = {"head": _git(repo, "rev-parse", "HEAD").strip(), "base": target, "merge_base": base,
+            "dirty": bool(_git(repo, "status", "--porcelain").strip()),
+            "title": title, "body": body, "desc": pr_review.local_review_desc(title, body)}
+    with open(os.path.join(args.out, "meta.json"), "w") as fh:
+        json.dump(meta, fh)
     print(json.dumps({"repo": repo, "base": base[:8], "files": len(files),
                       "diff_chars": len(diff),
                       "reviewers": [{"panel": p, "seat": s, "model": s.split("/", 1)[1],

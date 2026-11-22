@@ -144,3 +144,79 @@ def test_a_run_puts_the_real_modules_back():
     before = {n: sys.modules.get(n) for n in ("fix_engine", "git", "github")}
     BarrenHarness([OK], [APPROVE], verify=[(True, "")]).run()
     assert {n: sys.modules.get(n) for n in before} == before
+
+
+# -- the fix ledger (fix_outcomes) ------------------------------------------
+
+class _FakeLedger:
+    """Stands in for the fix_outcomes module and keeps each record() call."""
+
+    def __init__(self):
+        self.records = []
+
+    def record(self, repo, number, attempt, model, result, reasons=(), usd=None,
+               from_feedback=False, note=""):
+        """Keep one attempt's outcome, using the same signature as fix_outcomes.record."""
+        self.records.append({"result": result, "reasons": list(reasons),
+                             "from_feedback": from_feedback, "note": note})
+
+
+@pytest.fixture
+def ledger(monkeypatch):
+    """Swap the fix_outcomes module for a fake that fix_one_pr's lazy import picks up."""
+    fake = _FakeLedger()
+    monkeypatch.setitem(sys.modules, "fix_outcomes", fake)
+    return fake
+
+
+class RaiseOnCallHarness(BarrenHarness):
+    """Harness whose apply_ai_fix raises on the given call numbers (1-based)."""
+
+    def __init__(self, *a, raise_on=(), **kw):
+        super().__init__(*a, **kw)
+        self.raise_on = set(raise_on)
+
+    def apply_ai_fix(self, repo_path, issue_body, error_context=None, **kw):
+        """Record the call, then raise on the scripted call numbers to mimic a failed generation."""
+        self.error_contexts.append(error_context)
+        if len(self.error_contexts) in self.raise_on:
+            raise RuntimeError("model unavailable")
+        return f"<<fix-{len(self.error_contexts)}>>"
+
+
+@pytest.mark.parametrize("barren_kind", ["generation", "parse"])
+def test_a_barren_retry_clears_the_feedback_flag(ledger, barren_kind):
+    """After a panel reject, a barren retry replaces the critique with its own message,
+    so the attempt that finally passes must not be recorded as a feedback retry."""
+    rejects = [_reject(), _reject(), APPROVE]
+    if barren_kind == "generation":
+        h = RaiseOnCallHarness([OK, OK, OK], rejects, verify=[(True, "")],
+                               max_attempts=3, max_barren=2, raise_on=[2])
+    else:
+        h = BarrenHarness([OK, EMPTY, OK], rejects, verify=[(True, "")],
+                          max_attempts=3, max_barren=2)
+    ok, _ = h.run()
+    assert ok is True
+    assert ledger.records[-1]["result"] == "pass"
+    assert ledger.records[-1]["from_feedback"] is False
+
+
+def test_a_panel_that_cannot_run_records_an_unscored_attempt(ledger):
+    """A queue_for_retry review was charged to the budget, so it must leave a ledger row."""
+    h = BarrenHarness([OK], [{"status": "queue_for_retry", "reason": "panel offline"}],
+                      max_attempts=2)
+    ok, _ = h.run()
+    assert ok is False
+    assert [r["result"] for r in ledger.records] == ["unscored"]
+    assert "panel offline" in ledger.records[0]["note"]
+
+
+def test_an_unverifiable_sandbox_records_an_unscored_attempt(ledger):
+    """A verification-infrastructure failure was charged to the budget, so it must leave a ledger row."""
+    h = BarrenHarness([OK], [APPROVE],
+                      verify=[(False, "Verification infrastructure unavailable: no python")],
+                      max_attempts=2, qa=True)
+    ok, _ = h.run()
+    assert ok is False
+    assert [r["result"] for r in ledger.records] == ["unscored"]
+

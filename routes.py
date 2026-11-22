@@ -14,6 +14,7 @@ from pr_actions import approve_pr, merge_pr
 from branch_policy import parse_names as parse_branch_names
 from fix_engine import _claim_issues, _release_issues
 import ai_spend
+import fix_outcomes
 import mission_control
 from fastapi import APIRouter
 
@@ -2806,6 +2807,9 @@ async def settings_page(request: Request):
     # Panel 2 (state-logic) waits for panel 1's Approve (pr_review._state_panel_after);
     # off runs both panels on every pass.
     config.setdefault("pr_review_state_panel_waits", True)
+    # Attested local review (scripts/local_review.py) replaces AB's paid panels for dev PRs.
+    config.setdefault("pr_review_trust_local_review", True)
+    config.setdefault("pr_review_local_review_branches", ["dev"])
     config.setdefault("pr_fix_max_attempts", 3)
     # Batch API off, prompt caching on.
     config.setdefault("batch_enabled", False)
@@ -3465,6 +3469,10 @@ async def save_settings(request: Request):
     config_data["pr_review_state_logic_enabled"] = data.get("pr_review_state_logic_enabled") == "on"
     # Panel 2 waits for panel 1's Approve (pr_review._state_panel_after); default on.
     config_data["pr_review_state_panel_waits"] = data.get("pr_review_state_panel_waits") == "on"
+    # Trust a local review attested in the PR body (pr_review._local_review); branches default to dev.
+    config_data["pr_review_trust_local_review"] = data.get("pr_review_trust_local_review") == "on"
+    config_data["pr_review_local_review_branches"] = parse_branch_names(
+        data.get("pr_review_local_review_branches")) or ["dev"]
     # Test-regression sub-option (default OFF): actually clones + runs the repo's
     # test suite for a PR's head vs. base branch and flags NEW failures — real
     # code execution against PR-authored content, opt-in per install (see
@@ -3829,6 +3837,8 @@ async def save_settings(request: Request):
     config_data["AI_SPEND_GATE"] = data.get("AI_SPEND_GATE") == "on"
     # Fix model ladder on or off (fix_engine._ladder_exclusions).
     config_data["FIX_MODEL_LADDER"] = data.get("FIX_MODEL_LADDER") == "on"
+    # Per-model PR fix result recording on or off (fix_outcomes.enabled).
+    config_data["FIX_OUTCOMES_ENABLED"] = data.get("FIX_OUTCOMES_ENABLED") == "on"
     # Azure fleet access (chat tools + the Azure VM health check) and its mutation gate.
     config_data["CHAT_AZURE_ENABLED"] = data.get("CHAT_AZURE_ENABLED") == "on"
     config_data["CHAT_AZURE_ALLOW_MUTATION"] = data.get("CHAT_AZURE_ALLOW_MUTATION") == "on"
@@ -4985,6 +4995,12 @@ async def continue_ai_spend():
             "message": "AI spend gate open until $%.0f today ($%.0f used)." % (gate, spent)}
 
 
+@router.get("/fix_outcomes")
+async def get_fix_outcomes(days: int = 30):
+    """Per-model PR fix results over the last `days` days (fix_outcomes.summary)."""
+    return await asyncio.to_thread(fix_outcomes.summary, max(1, min(int(days), 365)))
+
+
 @router.post("/retry_issue")
 async def retry_issue(request: Request):
     """Retry the fix for one issue in the background."""
@@ -5476,6 +5492,7 @@ __all__ = [
     'update_now',
     'clear_credit_cooldown',
     'get_ai_spend',
+    'get_fix_outcomes',
     'continue_ai_spend',
     'trigger_fix',
     'scan_now',
