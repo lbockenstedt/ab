@@ -35,6 +35,8 @@ DEFAULTS = {"gate_usd": 100.0, "step_usd": 100.0, "reserve_usd": 25.0}
 # table: an over-estimate closes the gate early, never late.
 FALLBACK_PRICE = {"input": 7.0, "cache_read": 0.7, "output": 35.0}
 _LOCK = threading.Lock()
+# Per-thread running cost of paid calls, for fix_outcomes' per-attempt cost.
+_tally = threading.local()
 # Today's {"day", "spent_usd", "calls", and "gate_usd" once reopened}; read from disk once.
 _ledger = None
 
@@ -156,6 +158,16 @@ def seconds_left_today():
     return (midnight - now).total_seconds()
 
 
+def start_tally():
+    """Start counting the cost of this thread's paid calls (fix_outcomes uses it per attempt)."""
+    _tally.usd = 0.0
+
+
+def tally():
+    """USD this thread has spent on paid calls since start_tally(); None when not started."""
+    return getattr(_tally, "usd", None)
+
+
 def record(provider, model, usage, config, messages=None, result=None):
     """Add one successful call's estimated cost (USD) to today's spend and return it.
 
@@ -181,6 +193,8 @@ def record(provider, model, usage, config, messages=None, result=None):
         led["calls"] = int(led.get("calls") or 0) + 1
         gate = _gate(pol, led)
         _save()
+    if getattr(_tally, "usd", None) is not None:
+        _tally.usd += usd
     # Say so once, on the call that closes the gate. WARNING, not ERROR: a
     # closed gate is the gate working, not a fault for the self-log scan to file.
     if before < gate <= before + usd and config.get("AI_SPEND_GATE", True):
