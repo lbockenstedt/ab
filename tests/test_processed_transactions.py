@@ -806,12 +806,15 @@ def test_actual_pipeline_replacements_use_fresh_retained_fields(history, name, s
     node = next(n for n in ast.walk(pipeline) if isinstance(n, ast.FunctionDef) and n.name == name)
     ns = dict(vars(fix_engine), issue_id="o/r:1", stamp="now", confidence=.95,
               fixes=[], original_body="body", request_msg="needs detail",
-              failure_reason="review rejected", last_failure={}, max_attempts=3)
+              failure_reason="review rejected", last_failure={}, max_attempts=3,
+              built_key=("copilot", "claude-haiku-4.5"))
     exec(compile(ast.Module(body=[node], type_ignores=[]), "pipeline_callback", "exec"), ns)
     app.update_processed(ns[name])
     rec = storage.load_processed()["o/r:1"]
     assert rec["status"] == status and rec["auto_retries"] == 7
     assert rec["needs_human_at"] == "fresh" and "unretained" not in rec
+    if name == "queue_review":
+        assert rec["pending_fix"]["builder_key"] == ["copilot", "claude-haiku-4.5"]
     if name in ("non_actionable", "failed"):
         assert rec["classifier_reason"] == "fresh" and rec["pipeline"] == "fix_engine"
     assert storage.load_processed()["other"] == {"status": "fixed"}

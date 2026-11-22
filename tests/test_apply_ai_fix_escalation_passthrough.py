@@ -64,6 +64,9 @@ def _load_apply_ai_fix(call_llm_stub, llm_client_stub):
         # model policy, so it stays a no-op here -- test_fix_model_floor owns the
         # real behaviour.
         "_fix_model_exclusions": lambda config, existing=(): tuple(existing),
+        # The coding ladder is off here too (None = use the floor above);
+        # test_fix_model_ladder owns its behaviour.
+        "_ladder_exclusions": lambda config, existing=(): None,
         "_FIX_GENERATION_JSON_SCHEMA": {},
     }
     exec(compile(seg, "fix_engine.py:apply_ai_fix", "exec"), ns)

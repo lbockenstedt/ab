@@ -3523,6 +3523,9 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
                     return result
                 except Exception as e:  # noqa: BLE001 - try the next routed candidate
                     last_err = e
+                    if used_model_out is not None:
+                        # Report a failed endpoint too, so a retry can exclude it.
+                        used_model_out.setdefault("failed_keys", []).append(candidate["key"])
                     continue
 
             # Plain call; on success report the winner and return.
@@ -3534,6 +3537,9 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
                 return result
             # Remember the error and move on; all failed if we get here.
             last_err = err
+            if used_model_out is not None:
+                # Report a failed endpoint too, so a retry can exclude it.
+                used_model_out.setdefault("failed_keys", []).append(candidate["key"])
         raise Exception(f"All LLM candidates failed. Last error: {last_err}")
     finally:
         sem.release()

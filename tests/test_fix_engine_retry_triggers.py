@@ -107,6 +107,9 @@ def main():
     ok &= _check("needs_structured_output carried through unchanged", r.needs_structured_output is True)
     ok &= _check("min_context_tokens carried through unchanged", r.min_context_tokens == 500)
     ok &= _check("must_escalate_to_human carried through unchanged", r.must_escalate_to_human is True)
+    pinned = LlmRequirements(complexity="large", pin_key="copilot||claude-opus-5.5")
+    r = next_attempt_requirements(pinned, "qa_failed", key1, {})
+    ok &= _check("pin_key carried through, so a pinned fix stays off the ladder", r.pin_key == pinned.pin_key)
 
     # ---- every failure branch resets the working tree before the next attempt ----
     # Regression guard (Phase 8): attempt N+1 must build against a pristine tree,
