@@ -45,6 +45,7 @@ def _load_ns():
         "_non_doc_files", "_run_build_agent", "_mark_failed", "_mark_built",
         "_identity", "_flag_incomplete", "build_feature", "_build_feature", "_handoff_to_fix_pipeline",
         "_build_mode", "_syntax_errors", "_run_guardrails", "_agents_block",
+        "reconcile_published_feature",
     }
     want_assigns = {"_FEATURE_DRIVE_MARKER", "_BUILD_JSON_SCHEMA", "_BUILD_SYSTEM", "_DOCS_NUDGE_TMPL",
                     "_BUILD_SYSTEM_TOOLS", "_GUARDRAIL_FEEDBACK_TMPL", "_GATE_LABELS"}
@@ -177,6 +178,10 @@ def _load_ns():
         "discard_verification_artifacts": lambda path, before: None,
         "repo_tools": _FakeRepoTools(),
         "push_or_raise": lambda remote, refspec, force=False: remote.push(refspec, force=force),
+        "_journal": {},
+        "load_feature_publications": lambda: ns["_journal"],
+        "record_feature_publication": lambda issue_id, details: ns["_journal"].update({issue_id: {**ns["_journal"].get(issue_id, {}), **details}}),
+        "clear_feature_publication": lambda issue_id: ns["_journal"].pop(issue_id, None),
     }
 
     # _robust_json_loads: the real one (fix_engine.py) needs `json` + a regex
