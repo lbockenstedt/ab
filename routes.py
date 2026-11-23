@@ -4986,6 +4986,23 @@ async def scan_now():
     return {"status": "triggered", "message": "Manual scan requested; an active cycle continues without duplication."}
 
 
+@router.post("/sync_github_issues")
+async def sync_github_issues():
+    """Manually trigger reconciliation of GitHub closed issue states into AppBuilder."""
+    config = load_config()
+    token = config.get("GITHUB_TOKEN") or os.getenv("GITHUB_TOKEN")
+    if not token:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No GitHub token configured"})
+    try:
+        import workers
+        gh = Github(token)
+        changed = await asyncio.to_thread(workers.sync_github_issue_state, gh, 100)
+        return {"status": "ok", "synced_count": len(changed), "updated_issues": changed}
+    except Exception as e:
+        logger.warning(f"Manual GitHub issue sync failed: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @router.get("/ai_spend")
 async def get_ai_spend():
     """Today's estimated paid AI spend and the daily gate (fleet rule 1.10)."""
