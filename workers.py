@@ -1130,11 +1130,24 @@ def restart_worker():
 
 
 # Stored statuses that wait on GitHub. RepoScan only reads OPEN issues, so
-# without this sync an issue closed on GitHub stays failed/non-actionable in
-# the AB feed forever. pending_verification is left out: those issues are
-# closed on GitHub by design while a person confirms the fix.
-_GITHUB_SYNC_STATUSES = ("failed", "non-actionable", "ops-alert")
-GITHUB_SYNC_PER_CYCLE = 30
+# without this sync an issue closed on GitHub stays failed/non-actionable/pending
+# in the AB feed forever. When closed on GitHub, any active/open status transitions
+# to closed so the local state reflects GitHub reality automatically.
+_GITHUB_SYNC_STATUSES = (
+    "failed",
+    "pending_verification",
+    "non-actionable",
+    "ops-alert",
+    "awaiting_human",
+    "triaged",
+    "feature_flagged",
+    "feature_classify_retry",
+    "feature_needs_info",
+    "feature_built",
+    "feature_failed",
+    "fixed",
+)
+GITHUB_SYNC_PER_CYCLE = 100
 
 
 def _github_issue_status(gh_current, issue_id, repos):

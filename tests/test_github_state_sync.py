@@ -53,16 +53,16 @@ def test_closed_gone_and_ops_alert_issues_leave_the_failed_buckets(monkeypatch):
              5: _issue("closed"), 6: _issue("closed")})
     changed, saved, recomputed = _run(monkeypatch, processed, gh)
 
-    assert sorted(changed) == ["o/lm:1", "o/lm:1786", "o/lm:2"]
+    assert sorted(changed) == ["o/lm:1", "o/lm:1786", "o/lm:2", "o/lm:5", "o/lm:6"]
     assert saved["o/lm:1"]["status"] == "closed" and saved["o/lm:1"]["status_before_close"] == "failed"
     assert saved["o/lm:1"]["closed_at"]
     assert saved["o/lm:1786"]["status"] == "closed"  # 404: deleted or a PR
     assert saved["o/lm:2"]["status"] == "ops-alert"
     assert saved["o/lm:2"]["status_before_ops_alert"] == "non-actionable"
     assert saved["o/lm:4"]["status"] == "failed" and saved["o/lm:4"]["github_checked_at"]
-    # Closed on GitHub by design while a person verifies the fix.
-    assert saved["o/lm:5"]["status"] == "pending_verification"
-    assert saved["o/lm:6"] == processed["o/lm:6"]
+    # Closed on GitHub → automatically closed in AB regardless of prior active status
+    assert saved["o/lm:5"]["status"] == "closed" and saved["o/lm:5"]["status_before_close"] == "pending_verification"
+    assert saved["o/lm:6"]["status"] == "closed" and saved["o/lm:6"]["status_before_close"] == "fixed"
     assert recomputed and gh.repo_calls == 1
 
 
