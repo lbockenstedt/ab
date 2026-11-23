@@ -259,7 +259,9 @@ class _FakeRepoGit:
         self._changed = changed if changed is not None else ["some/file.py"]
         self.commits = []
         self.current_branch = None
-    def create_head(self, name):
+        self.created_heads = []
+    def create_head(self, name, force=False):
+        self.created_heads.append((name, force))
         return _FakeHead(self, name)
 
 
@@ -431,7 +433,8 @@ def main():
     ok &= _check("commit message references the right issue number",
                 "AI Feature #7" in fake_repo_git.commits[0])
     ok &= _check("branch created is ai-feature/<N>-<slug> (load-bearing for pr_review's own-PR skip)",
-                fake_repo_git.current_branch == "ai-feature/7-add-a-clear-dongles-button")
+                fake_repo_git.current_branch == "ai-feature/7-add-a-clear-dongles-button"
+                and fake_repo_git.created_heads == [("ai-feature/7-add-a-clear-dongles-button", True)])
     ok &= _check("push happened on that branch", fake_repo_git.remotes.origin.pushed == [("ai-feature/7-add-a-clear-dongles-button", True)])
     ok &= _check("token was stripped back out after push (last set_url is the plain clone_url)",
                 fake_repo_git.remotes.origin.urls[-1] == repo.clone_url)
