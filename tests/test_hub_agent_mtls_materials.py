@@ -53,7 +53,7 @@ def _pair(cn="ab.example"):
     """A real self-signed (cert PEM, key PEM) pair, so load_cert_chain accepts it."""
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
-    now = datetime.datetime.now(datetime.UTC)
+    now = datetime.datetime.now(getattr(datetime, "UTC", datetime.timezone.utc))
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
             .public_key(key.public_key()).serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(days=1))
