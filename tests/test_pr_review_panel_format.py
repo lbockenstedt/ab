@@ -229,6 +229,19 @@ def main():
     check("state panel is structured too",
           "Recommendation: DENY" in sout and "Reviewer detail" in sout)
 
+    print("== review ladder notes ==")
+    ladder = dict(MIXED, panel_size=1, ladder_stage="frontier", panel_models=["gpt-5.6-sol"],
+                  pass_confidence=0.85,
+                  failed_reviewers=["Reviewer (copilot/mai-code-2-flash)"])
+    lout = render(ladder)
+    check("ladder names the gating frontier model", "verdict (gpt-5.6-sol) gates" in lout)
+    check("ladder shows the policy's pass confidence", "Approve at 85% or more" in lout)
+    check("ladder has no single-reviewer warning", "Single-reviewer panel" not in lout)
+    check("failed filter is not a unanimity rule", "skipped as filters" in lout
+          and "must be unanimous" not in lout)
+    fout = render(dict(MIXED, ladder_stage="filter"))
+    check("filter reject says the frontier did not run", "frontier reviewer was not run" in fout)
+
     print("\n%s" % ("FAILED: %s" % FAILURES if FAILURES else "all checks passed"))
     return 1 if FAILURES else 0
 

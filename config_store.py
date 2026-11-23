@@ -90,6 +90,11 @@ CHAT_CONFIG_DEFAULTS = {
     # The FIX_MODEL_LADDER knob: fixes climb coding.ladder in .github/model-policy.json
     # (cheapest rung first, one rung per failed attempt). Off = the cost-first picker.
     "FIX_MODEL_LADDER": True,
+    # The REVIEW_MODEL_LADDER knob: review panels run the cheap filter model first
+    # (.github/model-policy.json review.ladder); a filter Reject ends the panel.
+    # Then one frontier reviewer from another vendor gives the final verdict,
+    # which passes only at 0.90 or more. Off = the multi-reviewer allowlist panel.
+    "REVIEW_MODEL_LADDER": True,
     # The FIX_OUTCOMES_ENABLED knob: record each PR fix attempt per model
     # (fix_outcomes.py). Off = nothing is written and /fix_outcomes is empty.
     "FIX_OUTCOMES_ENABLED": True,

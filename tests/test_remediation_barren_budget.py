@@ -226,3 +226,21 @@ def test_barren_count_resets_on_a_new_head(pr_env):
     update("o/r", 1, remediation_barren=2)
     record("o/r", 1, "t", "u", [], "sha2")
     assert state["pr_reviews"]["o/r#1"]["remediation_barren"] == 0
+
+
+def test_fail_streak_survives_the_per_scan_rebuild(pr_env):
+    """The loop guard's streak must outlive the rebuild or its limit never binds."""
+    record, update, state = pr_env
+    record("o/r", 1, "t", "u", [], "sha1")
+    update("o/r", 1, remediation_fail_streak=1)
+    record("o/r", 1, "t", "u", [], "sha1")
+    assert state["pr_reviews"]["o/r#1"]["remediation_fail_streak"] == 1
+
+
+def test_fail_streak_resets_when_the_head_moves(pr_env):
+    """A CLI session's pushed fix is new code: it earns a fresh allowance."""
+    record, update, state = pr_env
+    record("o/r", 1, "t", "u", [], "sha1")
+    update("o/r", 1, remediation_fail_streak=1)
+    record("o/r", 1, "t", "u", [], "sha2")
+    assert state["pr_reviews"]["o/r#1"]["remediation_fail_streak"] == 0

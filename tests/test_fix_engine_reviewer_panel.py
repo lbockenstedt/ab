@@ -66,7 +66,7 @@ def _load_ns(want_funcs, extra_ns=None):
         "_PLAIN_FILE_HEADER_RE",
         "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN", "DEFAULT_PANEL_ALLOWLIST",
     }
-    want_funcs = set(want_funcs) | {"_panel_allowlist", "_model_allowed", "_is_local_provider"}
+    want_funcs = set(want_funcs) | {"_panel_allowlist", "_model_allowed", "_is_local_provider", "_resolve_builder", "_build_critique_reviews"}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in want_funcs:
             segs.append(ast.get_source_segment(src, node))
@@ -74,7 +74,11 @@ def _load_ns(want_funcs, extra_ns=None):
             for t in node.targets:
                 if getattr(t, "id", None) in want_assigns:
                     segs.append(ast.get_source_segment(src, node))
-    ns = {"re": re, "json": json, "fnmatch": fnmatch, "logger": _NoLog()}
+    # These checks cover the multi-reviewer panel; the review ladder (on by
+    # default, read from .github/model-policy.json) has its own tests in
+    # test_review_ladder.py, so it is stubbed off here.
+    ns = {"re": re, "json": json, "fnmatch": fnmatch, "logger": _NoLog(),
+          "_review_ladder": lambda *a, **k: None}
     if extra_ns:
         ns.update(extra_ns)
     exec("\n\n".join(segs), ns)

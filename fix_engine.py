@@ -2968,6 +2968,24 @@ def _ladder_models():
         return ()
 
 
+#: AB's fixed review bar; review.pass_confidence in the policy can only raise it.
+_REVIEW_PASS_FLOOR = 0.90
+
+
+def _review_policy():
+    """The ``review`` section from MODEL_POLICY_FILE, or ``{}`` on any error.
+
+    Reads the review ladder, pass_confidence, and frontier model ids.
+    Mirrors the try/except pattern of ``_ladder_models``.
+    """
+    try:
+        with open(MODEL_POLICY_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return dict(data.get("review", {}))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
 def _ladder_exclusions(config, existing=()):
     """Exclusions that seat the first coding-ladder rung still available, or None.
 
@@ -3224,6 +3242,36 @@ def _reviewer_name(candidate):
     return f"Reviewer ({label})"
 
 
+def _resolve_builder(config, candidates, builder_n=None, builder_key=None):
+    """Resolve the builder's model and exclusion key from ``builder_key`` or ``builder_n``.
+
+    Returns ``(excluded_set, builder_model)``.  ``builder_key`` is the
+    preferred, fully-resolved ModelKey; ``builder_n`` is the legacy provider
+    slot number.  When neither is given, returns ``(set(), None)``.
+    """
+    excluded = set()
+    builder_model = None
+    if builder_key is not None:
+        excluded.add(builder_key)
+        for c in candidates:
+            if c.get("key") == builder_key or c.get("model") == builder_key:
+                builder_model = c.get("model")
+                break
+        if builder_model is None:
+            logger.debug(f"_resolve_builder: builder {builder_key!r} not found among "
+                         f"candidates; vendor rules skipped (builder unknown)")
+    elif builder_n:
+        try:
+            b_provider, _b_key, b_model, b_url = _get_provider_config(builder_n, config)
+            if b_provider and b_model:
+                excluded.add(llm_client._model_key(b_provider, b_url, b_model))
+                builder_model = b_model
+        except Exception as e:  # noqa: BLE001 — best-effort; worst case the builder's
+                                 # own model can also be picked as a reviewer.
+            logger.debug(f"_resolve_builder: could not resolve builder slot {builder_n}: {e}")
+    return excluded, builder_model
+
+
 def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers=_REVIEW_PANEL_MAX):
     """Picks up to max_reviewers DISTINCT models for the reviewer panel via
     model_selection.select_model, replacing the old _REVIEW_SLOTS/_CODE_SLOTS
@@ -3272,30 +3320,7 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     perf = llm_client.get_llm_perf_snapshot()
 
     # Models that must not review (the builder and each model already picked).
-    excluded = set()
-    # The builder's MODEL, not just its key: the cross-vendor rule below needs to
-    # know which vendor authored the fix, and a ModelKey alone does not say.
-    builder_model = None
-    # Exclude the builder by its key and look up its model id.
-    if builder_key is not None:
-        excluded.add(builder_key)
-        for c in candidates:
-            if c.get("key") == builder_key or c.get("model") == builder_key:
-                builder_model = c.get("model")
-                break
-        if builder_model is None:
-            logger.debug(f"_select_review_panel: builder {builder_key!r} not found among "
-                         f"candidates; vendor rules skipped (builder unknown)")
-    # Legacy: resolve the builder from its provider slot number.
-    elif builder_n:
-        try:
-            b_provider, _b_key, b_model, b_url = _get_provider_config(builder_n, config)
-            if b_provider and b_model:
-                excluded.add(llm_client._model_key(b_provider, b_url, b_model))
-                builder_model = b_model
-        except Exception as e:  # noqa: BLE001 — best-effort; worst case the builder's
-                                 # own model can also be picked as a reviewer.
-            logger.debug(f"_select_review_panel: could not resolve builder slot {builder_n}: {e}")
+    excluded, builder_model = _resolve_builder(config, candidates, builder_n, builder_key)
 
     # A model-name glob (including the built-in frontier patterns) isn't an
     # explicit local seat. Only a literal model name in the allowlist opts in.
@@ -3444,6 +3469,78 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     return panel
 
 
+def _review_ladder(config, builder_n=None, builder_key=None):
+    """The review ladder panel from MODEL_POLICY_FILE, or ``None`` (use existing panel).
+
+    Returns ``None`` when the ``REVIEW_MODEL_LADDER`` knob is off, the policy
+    file has no ``frontier`` dict, or candidate enumeration fails.  Otherwise
+    returns ``{"filters": [...], "frontier": ..., "pass_confidence": ...}``
+    where ``filters`` are the ladder's cheap models (first matching candidate
+    for each id) and ``frontier`` is the single model that gives the final
+    verdict.
+    """
+    # Knob off: keep the existing panel unchanged.
+    if not (config or {}).get("REVIEW_MODEL_LADDER", True):
+        return None
+    # Read the review policy from the model-policy file.
+    policy = _review_policy()
+    frontier = policy.get("frontier")
+    if not isinstance(frontier, dict):
+        return None
+    # Enumerate candidates — an enumeration failure must never block review.
+    try:
+        candidates = llm_client._enumerate_candidates(config)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("_review_ladder: could not enumerate candidates: %s", e)
+        return None
+    # Pick the frontier model id based on the builder's vendor.
+    _, builder_model = _resolve_builder(config, candidates, builder_n, builder_key)
+    if builder_model is None or "claude" in builder_model.lower():
+        frontier_id = str(frontier.get("anthropic_author", ""))
+    else:
+        frontier_id = str(frontier.get("other_author", ""))
+    # Select filter candidates: first matching candidate for each ladder id.
+    filters = []
+    for lid in policy.get("ladder", []):
+        lid = str(lid)
+        for c in candidates:
+            if _model_allowed(c.get("model"), (lid.lower(), lid.lower() + "-20*")) \
+                    and c.get("available", True):
+                # Skip a candidate whose key equals the builder's key
+                # or whose model equals the builder model.
+                if builder_key is not None and c.get("key") == builder_key:
+                    continue
+                if builder_model is not None and c.get("model") == builder_model:
+                    continue
+                filters.append(c)
+                break
+    # Select the frontier candidate. It is never the builder and never the
+    # other vendor's model: cross-vendor review is the point, so when the
+    # chosen frontier is unavailable the existing panel is used instead.
+    def _is_builder(c):
+        """True when candidate ``c`` is the model that wrote the change."""
+        return ((builder_key is not None and c.get("key") == builder_key)
+                or (builder_model is not None and c.get("model") == builder_model))
+    frontier_cand = None
+    for c in candidates:
+        if _model_allowed(c.get("model"), (frontier_id.lower(), frontier_id.lower() + "-20*")) \
+                and c.get("available", True) and not _is_builder(c):
+            frontier_cand = c
+            break
+    if frontier_cand is None:
+        logger.warning("_review_ladder: no candidate found for frontier model %s", frontier_id)
+        return None
+    # AB never passes a review below 0.90 (fleet rule 10.3), so the policy can
+    # only raise the bar; a malformed value makes the policy unusable here.
+    try:
+        pass_confidence = max(_REVIEW_PASS_FLOOR, float(policy.get("pass_confidence", _REVIEW_PASS_FLOOR)))
+    except (TypeError, ValueError):
+        logger.warning("_review_ladder: invalid review.pass_confidence %r; using the panel",
+                       policy.get("pass_confidence"))
+        return None
+    return {"filters": filters, "frontier": frontier_cand, "pass_confidence": pass_confidence}
+
+
 def _truncate_diff(text, limit):
     """Cap a diff at `limit` chars on a LINE boundary, with a marker that tells the
     reviewer the cut is not a syntax error (a mid-hunk cut got reported as a phantom
@@ -3487,7 +3584,8 @@ def _cloud_frontier_fallback(exclude_keys, config):
     return None
 
 
-def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=None, panel_candidates=None):
+def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=None, panel_candidates=None,
+                   allow_fallback=True):
     """Run ONE reviewer turn. Returns (vote_dict|None, failed_name|None).
 
     Read-only: a reviewer only reads the diff and emits a JSON verdict, so
@@ -3506,7 +3604,11 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
     A retry never adds a new self-hosted reviewer. The vote/failure is
     reported under the ORIGINAL reviewer's name, so the panel seat's identity is
     stable regardless of which model actually answered it. When escalated to cloud,
-    `escalated_to` records the fallback model's name in the vote dictionary."""
+    `escalated_to` records the fallback model's name in the vote dictionary.
+
+    ``allow_fallback=False`` (the review ladder) always retries the same
+    candidate: a fallback vote cannot fill a ladder seat, so paying for
+    another, possibly frontier-class, model there would be wasted."""
     # Last raw reply (used in error logs).
     res = None
     # Keys of models already on the panel, and the panel's candidates.
@@ -3588,10 +3690,12 @@ def _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, pa
         orig_key = orig_candidate.get("key")
         exclude_keys = panel_keys | ({orig_key} if orig_key else set())
 
-        # Pick a different model for the retry.
+        # Pick a different model for the retry (never on the review ladder).
         fallback_candidate = None
+        if not allow_fallback:
+            pass
         # A failed local reviewer escalates to a cloud allowlisted model.
-        if _is_local_provider(orig_candidate.get("provider")):
+        elif _is_local_provider(orig_candidate.get("provider")):
             fallback_candidate = _cloud_frontier_fallback(exclude_keys, config)
         else:
             # Otherwise: another cloud panel candidate not already seated.
@@ -3726,6 +3830,91 @@ def reviewer_prompt(issue_body, fix_details):
     )
 
 
+def _build_critique_reviews(votes):
+    """The ``critique`` string and structured ``reviews`` list for ``votes``.
+
+    ``critique`` joins every reviewer's prose into one " | " string and drops each
+    reviewer's verdict and confidence; ``reviews`` keeps them, so the PR comment
+    and WebUI can say which reviewer objected and how strongly. Shared by the
+    panel and ladder paths of ``review_fix``.
+    """
+    critiques = " | ".join(
+        f"[{v.get('reviewer', '?')}] {v.get('critique', '')}" for v in votes
+    )
+    reviews = [
+        {
+            "reviewer": v.get("reviewer", "?"),
+            "verdict": v.get("verdict"),
+            "confidence": v.get("confidence"),
+            "critique": v.get("critique", ""),
+            **({"escalated_to": v["escalated_to"]} if "escalated_to" in v else {}),
+        }
+        for v in votes
+    ]
+    return critiques, reviews
+
+
+def _ladder_result(votes, reviewers, failed_reviewers, verdict, confidence, stage,
+                   pass_confidence=None):
+    """Build the panel-result dict used by ``review_fix``.
+
+    Same keys as the existing final return, plus ``ladder_stage``.
+    """
+    critiques, reviews = _build_critique_reviews(votes)
+    return {
+        "confidence": confidence,
+        "verdict": verdict,
+        "critique": critiques,
+        "reviews": reviews,
+        "failed_reviewers": failed_reviewers,
+        "panel_size": len(reviewers),
+        "panel_models": [(r["candidate"] or {}).get("model") or "" for r in reviewers],
+        "ladder_stage": stage,
+        "pass_confidence": pass_confidence,
+    }
+
+
+def _run_review_ladder(reviewers, review_one, pass_confidence):
+    """Run the review ladder one seat at a time and return review_fix's result.
+
+    ``reviewers`` is every cheap filter seat followed by the frontier seat;
+    ``review_one(r)`` returns ``(vote|None, failed_name|None)``. A filter that
+    fails is skipped; a filter Reject ends the panel before the frontier is
+    paid for. Only the frontier model's own verdict can Approve, and only at
+    ``pass_confidence`` or more. A frontier that gives no verdict (or whose
+    seat was answered by an escalated fallback model) is queued for retry.
+    """
+    votes, failed_reviewers = [], []
+    *filters, frontier_r = reviewers
+    # Cheap filters, in ladder order.
+    for r in filters:
+        vote, failed = review_one(r)
+        # A filter seat answered by an escalated fallback model is not the cheap
+        # filter's verdict, so it is skipped like a failed filter.
+        if failed is not None or vote is None or "escalated_to" in vote:
+            failed_reviewers.append(failed or r["name"])
+            continue
+        votes.append(vote)
+        if vote.get("verdict") == "Reject":
+            return _ladder_result(votes, reviewers, failed_reviewers, "Reject",
+                                  float(vote.get("confidence") or 0), "filter",
+                                  pass_confidence)
+    # The frontier reviewer's own verdict is the gate.
+    vote, _failed = review_one(frontier_r)
+    if vote is None or "escalated_to" in vote:
+        logger.warning("review_fix: frontier reviewer %s gave no verdict; queued for retry.",
+                       frontier_r["name"])
+        return {"status": "queue_for_retry",
+                "reason": "frontier_reviewer_failed: %s" % frontier_r["name"],
+                "seats": [r["name"] for r in reviewers]}
+    votes.append(vote)
+    confidence = float(vote.get("confidence") or 0)
+    passed = vote.get("verdict") == "Approve" and confidence >= pass_confidence
+    return _ladder_result(votes, reviewers, failed_reviewers,
+                          "Approve" if passed else "Reject", confidence, "frontier",
+                          pass_confidence)
+
+
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
                builder_n=None, builder_key=None, diff_override=None, repo=None, head_sha=None,
                progress=None):
@@ -3768,11 +3957,13 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     if builder_key is None and builder_n is None:
         builder_n = 2 if force_cloud is True else 1
 
-    # Build the reviewer panel via the capability/cost-aware picker: up to
-    # _REVIEW_PANEL_MAX DISTINCT models, excluding the builder's model.
-    # Replaces the old _REVIEW_SLOTS/_CODE_SLOTS pool iteration (a static,
-    # operator-curated list) — see _select_review_panel's docstring.
-    panel_candidates = _select_review_panel(config, builder_n=builder_n, builder_key=builder_key)
+    # Build the reviewer panel: try the review ladder first, fall back to the
+    # existing panel picker when the ladder is not active or not available.
+    ladder = _review_ladder(config, builder_n=builder_n, builder_key=builder_key)
+    if ladder is not None:
+        panel_candidates = ladder["filters"] + [ladder["frontier"]]
+    else:
+        panel_candidates = _select_review_panel(config, builder_n=builder_n, builder_key=builder_key)
 
     # One reviewer entry per seated candidate; each knows the whole panel's keys.
     reviewers = []
@@ -3867,10 +4058,11 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
     _progress(progress_task, "%s reviewing the diff — 0 of %d reviewers done" % (progress_label, len(reviewers)),
               stage="review")
 
-    def _review_one(r):
+    def _review_one(r, allow_fallback=True):
         """Run one reviewer from this panel and return (vote, failed_name)."""
         # Pass the shared prompt, checkout and panel details.
-        result = _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=panel_keys, panel_candidates=panel_candidates)
+        result = _reviewer_vote(r, prompt, checkout_path, task_id, repo, head_sha, config, panel_keys=panel_keys,
+                                panel_candidates=panel_candidates, allow_fallback=allow_fallback)
         # Count finished seats for the progress line (reviewers run in parallel).
         # list.append is atomic, so the count stays right without a lock.
         progress_done.append(r["name"])
@@ -3880,22 +4072,23 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
         return result
 
     try:
-        # Fan the panel out: reviewers are independent + read-only, so run them
-        # at once (distinct LLMs working in parallel) instead of one at a time.
-        # ex.map preserves panel order, so votes/critiques aggregate identically
-        # to the old sequential loop — this is a pure latency win.
-        if len(reviewers) <= 1:
-            results = [_review_one(r) for r in reviewers]
+        if ladder is not None:
+            # Ladder seats retry their own model only; see _reviewer_vote.
+            return _run_review_ladder(reviewers, lambda r: _review_one(r, allow_fallback=False),
+                                      ladder["pass_confidence"])
         else:
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=len(reviewers)) as ex:
-                results = list(ex.map(_review_one, reviewers))
-        # Split results into votes and failed reviewer names.
-        for vote, failed in results:
-            if vote is not None:
-                votes.append(vote)
-            if failed is not None:
-                failed_reviewers.append(failed)
+            # Existing panel path: run all reviewers in parallel.
+            if len(reviewers) <= 1:
+                results = [_review_one(r) for r in reviewers]
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=len(reviewers)) as ex:
+                    results = list(ex.map(_review_one, reviewers))
+            for vote, failed in results:
+                if vote is not None:
+                    votes.append(vote)
+                if failed is not None:
+                    failed_reviewers.append(failed)
     # Always delete a temporary review clone.
     finally:
         if checkout_is_temp and checkout_path:
@@ -3921,25 +4114,7 @@ def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=
 
     # Average confidence, the panel's verdict, and all critiques joined into one string.
     avg_conf, final_verdict = panel_verdict(votes, len(failed_reviewers))
-    critiques = " | ".join(
-        f"[{v.get('reviewer', '?')}] {v.get('critique', '')}" for v in votes
-    )
-    # Structured counterpart to `critiques`. That string flattens every
-    # reviewer's prose into one " | "-joined blob and DROPS each reviewer's own
-    # verdict and confidence, so anything rendering it (the GitHub PR comment,
-    # the WebUI row) could only show a wall of text and could not say which
-    # reviewer objected or how strongly. Callers that want to present the panel
-    # readably use this; `critique` is kept unchanged for every existing caller.
-    reviews = [
-        {
-            "reviewer": v.get("reviewer", "?"),
-            "verdict": v.get("verdict"),
-            "confidence": v.get("confidence"),
-            "critique": v.get("critique", ""),
-            **({"escalated_to": v["escalated_to"]} if "escalated_to" in v else {}),
-        }
-        for v in votes
-    ]
+    critiques, reviews = _build_critique_reviews(votes)
 
     # If some reviewers were skipped, decide whether to proceed or queue.
     if final_verdict == "Retry":

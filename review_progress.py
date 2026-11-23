@@ -15,6 +15,7 @@ a cycle."""
 STALL_LIMIT = 2      # pr_remediate_stall_limit: heads in a row without progress = thrash (0 = off)
 MIN_GAIN = 0.03      # pr_remediate_min_gain: confidence gain that counts as progress
 REWORK_LIMIT = 1     # pr_remediate_rework_limit: consolidated reworks before hand-off (0 = none, at most 3)
+FAIL_LIMIT = 2  # pr_remediate_fail_limit: consecutive failed fixes before the PR is parked for a CLI session (0 = off, at most 5)
 REWORK_DEFER_HOURS = 24  # pr_remediate_rework_defer_hours: how long a deferred rework waits for a model (0 = no wait, at most 168)
 HISTORY_KEEP = 6     # scored heads kept in a PR record's review_history
 CRITIQUE_CAP = 3000  # characters kept of each panel critique in review_history
@@ -44,6 +45,15 @@ def rework_limit(cfg=None):
     0..3. A rework is not charged as an attempt, so this cap is what bounds
     them (fleet rule 10.3), like the premium and barren budgets' 3."""
     return _knob(cfg, "pr_remediate_rework_limit", REWORK_LIMIT, int, 0, 3)
+
+
+def fail_limit(cfg=None):
+    """Consecutive failed fix attempts (a fix that never reached a push: rejected
+    by the pre-push review, no applicable edits, the model failing) before the
+    PR is parked as failed for a CLI session, 0..5 (0: off). The stall rule only
+    scores pushed heads, so a fix rejected before the push never advances it;
+    this count is what stops a PR looping through paid attempts that go nowhere."""
+    return _knob(cfg, "pr_remediate_fail_limit", FAIL_LIMIT, int, 0, 5)
 
 
 def rework_defer_hours(cfg=None):
