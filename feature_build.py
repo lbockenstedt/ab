@@ -35,6 +35,11 @@ from main import (
     ProcessedStoreError,
     call_llm,
 )
+from config_store import (
+    load_feature_publications,
+    record_feature_publication,
+    clear_feature_publication,
+)
 # Fix-pipeline helpers reused for pushing, PR lookup, review, tests and cleanup.
 from fix_engine import (_authenticated_remote, push_or_raise, find_existing_pull_request, _loads_llm_json_object,
                         process_single_issue, review_fix, prepare_environment, verify_fix,
@@ -420,6 +425,129 @@ def _handoff_to_fix_pipeline(repo_obj, issue, classify_result, why):
         return False, f"fix pipeline hand-off failed: {e}"
 
 
+def reconcile_published_feature(repo_obj, issue, config, processed=None):
+    """Reconcile deterministic remote branch and PR identity before classifier/build dispatch.
+
+    If an earlier cycle published a branch or PR but failed to persist the terminal
+    history record (e.g. transient ProcessedStoreError), recover the published outcome,
+    commit the record to processed history, and return (True, record) so the issue
+    is not re-classified, re-generated, or force-pushed over.
+
+    Returns:
+        (True, record) if a published outcome was recovered or already exists.
+        (False, None) if no published outcome exists remotely (safe to classify/build).
+    """
+    repo_name = getattr(repo_obj, "full_name", "") or getattr(repo_obj, "name", "owner/repo")
+    issue_number = getattr(issue, "number", 0)
+    issue_id = f"{repo_name}:{issue_number}"
+    target_branch = auto_branch_name("feature", issue=issue)
+    base_branch, _ = integration_branch(config, repo_obj)
+
+    journal = load_feature_publications().get(issue_id) or {}
+
+    # 1. Check for existing open PR
+    existing_pr = find_existing_pull_request(repo_obj, target_branch, base_branch)
+    if existing_pr:
+        pr_url = getattr(existing_pr, "html_url", "") or f"https://github.com/{repo_name}/pull/{getattr(existing_pr, 'number', '')}"
+        head = getattr(existing_pr, "head", None)
+        head_sha = getattr(head, "sha", None) or journal.get("commit") or ""
+        extra = {
+            "branch": target_branch,
+            "commit": head_sha,
+            "commit_type": "Pull Request",
+            **{k: v for k, v in journal.items() if k in (
+                "build_mode", "build_model", "guardrail_rounds", "review_confidence", "feature_skill"
+            )},
+            "recovered": True,
+        }
+        try:
+            _mark_built(issue_id, pr_url, extra=extra)
+            clear_feature_publication(issue_id)
+        except ProcessedStoreError as e:
+            logger.warning(f"reconcile_published_feature: recovered open PR {pr_url} for {issue_id}, "
+                           f"but persistence failed: {e}")
+        except Exception as e:
+            logger.warning(f"reconcile_published_feature: recording built PR failed: {e}")
+        return True, {"status": "feature_built", "pr_url": pr_url, **extra}
+
+    # 2. Check for closed/merged PR
+    try:
+        owner = getattr(getattr(repo_obj, "owner", None), "login", "") or repo_name.split("/")[0]
+        head_param = f"{owner}:{target_branch}"
+        closed_prs = repo_obj.get_pulls(state='closed', head=head_param, base=base_branch)
+        for pr in closed_prs:
+            pr_url = getattr(pr, "html_url", "") or f"https://github.com/{repo_name}/pull/{getattr(pr, 'number', '')}"
+            head = getattr(pr, "head", None)
+            head_sha = getattr(head, "sha", None) or journal.get("commit") or ""
+            if getattr(pr, "merged", False):
+                extra = {
+                    "branch": target_branch,
+                    "commit": head_sha,
+                    "commit_type": "Pull Request",
+                    "merged": True,
+                    "recovered": True,
+                }
+                try:
+                    _mark_built(issue_id, pr_url, extra=extra)
+                    clear_feature_publication(issue_id)
+                except ProcessedStoreError:
+                    pass
+                except Exception:
+                    pass
+                return True, {"status": "feature_built", "pr_url": pr_url, **extra}
+            else:
+                extra = {
+                    "branch": target_branch,
+                    "commit": head_sha,
+                    "commit_type": "Pull Request",
+                    "closed": True,
+                    "recovered": True,
+                }
+                try:
+                    _mark_failed(issue_id, f"PR {pr_url} was closed", extra=extra)
+                    clear_feature_publication(issue_id)
+                except ProcessedStoreError:
+                    pass
+                except Exception:
+                    pass
+                return True, {"status": "feature_failed", "pr_url": pr_url, **extra}
+    except Exception as e:
+        logger.warning(f"reconcile_published_feature: closed PR check failed for {target_branch}: {e}")
+
+    # 3. Check for branch-only publication
+    branch_obj = None
+    try:
+        branch_obj = repo_obj.get_branch(target_branch)
+    except Exception:
+        pass
+
+    if branch_obj:
+        commit_obj = getattr(branch_obj, "commit", None)
+        remote_sha = getattr(commit_obj, "sha", None) or (commit_obj if isinstance(commit_obj, str) else None) or journal.get("commit")
+        if remote_sha:
+            extra = {
+                "branch": target_branch,
+                "commit": remote_sha,
+                "commit_type": "branch",
+                **{k: v for k, v in journal.items() if k in (
+                    "build_mode", "build_model", "guardrail_rounds", "review_confidence", "feature_skill"
+                )},
+                "recovered": True,
+            }
+            reason = f"Published feature branch {target_branch} at {remote_sha}; completion failed"
+            try:
+                _mark_failed(issue_id, reason, extra=extra)
+                clear_feature_publication(issue_id)
+            except ProcessedStoreError as e:
+                logger.warning(f"reconcile_published_feature: recovered branch-only publication for {issue_id}, "
+                               f"but persistence failed: {e}")
+            except Exception as e:
+                logger.warning(f"reconcile_published_feature: recording failed branch failed: {e}")
+            return True, {"status": "feature_failed", "reason": reason, **extra}
+
+    return False, None
+
+
 def build_feature(gh, repo_obj, issue, classify_result, config):
     """Keep persistence failures on every build exit within the tuple-return contract."""
     try:
@@ -649,6 +777,7 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
                     push_or_raise(repo_git.remotes.origin, branch_name, force=_force_ok)
                     publication = {"branch": branch_name, "commit": commit_hash,
                                    "commit_type": "Published feature branch"}
+                    record_feature_publication(issue_id, publication)
             # A failed push marks the issue failed.
             except Exception as e:
                 if publication:
@@ -731,12 +860,15 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
             # Record success with build details and return the PR URL.
             pr_url = pr.html_url
             publication.update(pr_url=pr_url, commit_type="Pull Request")
+            extra_details = {
+                **publication,
+                "build_mode": mode, "build_model": used_model.get("model"),
+                "guardrail_rounds": guard_history, "review_confidence": review_conf,
+                "feature_skill": skill_name}
+            record_feature_publication(issue_id, extra_details)
             try:
-                _mark_built(issue_id, pr_url, extra={
-                    **publication,
-                    "build_mode": mode, "build_model": used_model.get("model"),
-                    "guardrail_rounds": guard_history, "review_confidence": review_conf,
-                    "feature_skill": skill_name})
+                _mark_built(issue_id, pr_url, extra=extra_details)
+                clear_feature_publication(issue_id)
             except ProcessedStoreError as e:
                 message = (f"Built feature PR {pr_url} ({branch_name} at {commit_hash}); "
                            f"History persistence failed: {e}")
@@ -754,9 +886,11 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
             if publication.get("pr_url"):
                 outcome += f" ({publication['pr_url']})"
             message = f"Published {outcome}; completion failed: {e}"
+            record_feature_publication(issue_id, {**publication, "status": "feature_failed", "reason": message})
         logger.exception(f"feature_build: {issue_id}: {message}")
         try:
             _mark_failed(issue_id, message, extra=publication)
+            clear_feature_publication(issue_id)
         except ProcessedStoreError as store_error:
             logger.error(f"feature_build: could not persist build failure for {issue_id}: {store_error}")
             return False, f"{message}; History persistence failed: {store_error}"
