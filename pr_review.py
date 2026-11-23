@@ -1156,8 +1156,17 @@ def _render_review_body(review, header, blurb):
             conf_str),
         "",
     ]
+    # The review ladder (fix_engine._run_review_ladder) gates on one frontier verdict.
+    stage = review.get("ladder_stage")
+    if stage == "filter":
+        out += ["_Review ladder: the cheap filter model rejected, so the frontier reviewer "
+                "was not run._", ""]
+    elif stage:
+        out += ["_Review ladder: only the frontier reviewer's verdict (%s) gates; it must "
+                "Approve at %s or more._" % ((review.get("panel_models") or ["?"])[-1],
+                                             _norm_conf_pct(review.get("pass_confidence")) or "the policy's pass confidence"), ""]
     # Note when only one reviewer was available.
-    if review.get("panel_size") == 1:
+    elif review.get("panel_size") == 1:
         _models = review.get("panel_models") or []
         out += ["_Single-reviewer panel: only 1 of 2 required frontier models was available (%s)._"
                 % (_models[0] if _models and _models[0] else "unknown model"), ""]
@@ -1166,8 +1175,9 @@ def _render_review_body(review, header, blurb):
     # "Reviewer (provider/model)" label (fix_engine._reviewer_name), so it
     # renders as **Reviewer (provider/model)** and the comment lists the whole panel.
     if review.get("failed_reviewers"):
-        out += ["_No reply from %s; counted as failed reviewers (the surviving panel must be "
-                "unanimous)._" % ", ".join("**%s**" % n for n in review["failed_reviewers"]), ""]
+        _rule = "skipped as filters" if stage else "the surviving panel must be unanimous"
+        out += ["_No reply from %s; counted as failed reviewers (%s)._" % (
+            ", ".join("**%s**" % n for n in review["failed_reviewers"]), _rule), ""]
 
     # ── concerns, up front ────────────────────────────────────────────────
     if dissenting:
@@ -3047,7 +3057,9 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                         return False, last_failure
                     continue
                 # Have the review panel judge the fix; an offline panel stops here.
-                review = review_fix(path, fix_body, fixes, task_id=lock_id, builder_n=0, repo=repo, head_sha=head_sha)
+                # Name the model that wrote this fix so it never reviews its own work.
+                review = review_fix(path, fix_body, fixes, task_id=lock_id, builder_n=0, repo=repo, head_sha=head_sha,
+                                    builder_key=used_model_out.get("key"))
                 if isinstance(review, dict) and review.get("status") == "queue_for_retry":
                     _q_reason = review.get("reason") or "reviewers unavailable"
                     # The panel being DOWN is not the fix's fault — regenerating

@@ -514,7 +514,7 @@ def _build_feature(gh, repo_obj, issue, classify_result, config):
 
             # Create and switch to the feature branch.
             try:
-                repo_git.create_head(branch_name).checkout()
+                repo_git.create_head(branch_name, force=True).checkout()
             except Exception as e:
                 logger.error(f"feature_build: could not create branch {branch_name} for {issue_id}: {e}")
                 _mark_failed(issue_id, f"Could not create build branch: {e}")
