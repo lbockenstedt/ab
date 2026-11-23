@@ -43,6 +43,7 @@ PR_REVIEWS_FILE = os.path.join(CONFIG_DIR, "pr_reviews.json")
 PR_MERGE_LEDGER_FILE = os.path.join(CONFIG_DIR, "pr_merge_ledger.json")
 # Update-recovery state, self-log scan position, chat conversations, and tok/s samples.
 UPDATE_STATE_FILE = os.path.join(CONFIG_DIR, "update_state.json")
+FEATURE_JOURNAL_FILE = os.path.join(CONFIG_DIR, "feature_publications.json")
 SELF_SCAN_OFFSET_FILE = os.path.join(CONFIG_DIR, "self_scan_offset.json")
 CHAT_HISTORY_FILE = os.path.join(CONFIG_DIR, "chat_history.json")
 LLM_TPS_FILE = os.path.join(CONFIG_DIR, "llm_tps.json")
@@ -611,6 +612,46 @@ def save_update_state(state):
         logger.error(f"Error saving update state: {e}")
 
 
+def load_feature_publications():
+    """Load unrecorded / pending feature publications for cross-cycle recovery."""
+    for path in (FEATURE_JOURNAL_FILE, "feature_publications.json"):
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except Exception as e:
+                logger.warning(f"Error reading feature publications journal from {path}: {e}")
+    return {}
+
+
+def save_feature_publications(publications):
+    """Atomically persist feature publications journal."""
+    try:
+        try:
+            _atomic_write_json(FEATURE_JOURNAL_FILE, publications)
+        except OSError:
+            _atomic_write_json("feature_publications.json", publications)
+    except Exception as e:
+        logger.warning(f"Error saving feature publications journal: {e}")
+
+
+def record_feature_publication(issue_id: str, details: dict):
+    """Record a publication in the journal for cross-cycle durability."""
+    current = load_feature_publications()
+    current[issue_id] = {**current.get(issue_id, {}), **details, "recorded_at": datetime.now().isoformat()}
+    save_feature_publications(current)
+
+
+def clear_feature_publication(issue_id: str):
+    """Clear an issue from the publication journal once terminal storage succeeds."""
+    current = load_feature_publications()
+    if issue_id in current:
+        current.pop(issue_id, None)
+        save_feature_publications(current)
+
+
 def get_version():
     """Return the contents of the VERSION file, or "Unknown" if it cannot be read."""
     # Read and trim the version string; any error gives "Unknown".
@@ -681,6 +722,11 @@ __all__ = [
     "save_pr_merge_ledger",
     "load_update_state",
     "save_update_state",
+    "FEATURE_JOURNAL_FILE",
+    "load_feature_publications",
+    "save_feature_publications",
+    "record_feature_publication",
+    "clear_feature_publication",
     "get_version",
     "write_startup_stamp",
 ]

@@ -482,6 +482,21 @@ def scan_feature_requests(gh, config):
                 # Finished issues are skipped unless they are retrying a classifier error.
                 if prior.get("status") in _TERMINAL_STATUSES and not retrying:
                     continue
+
+                # Reconcile deterministic remote branch and PR identity before classifier
+                # or build dispatch. If an earlier cycle published a branch or PR but hit
+                # a history storage failure (ProcessedStoreError), recover the published outcome
+                # without re-classifying or re-generating code over the published head.
+                try:
+                    from feature_build import reconcile_published_feature
+                    recovered, rec = reconcile_published_feature(repo_obj, issue, config, processed)
+                    if recovered:
+                        logger.info(f"feature_drive: {issue_id} reconciled published outcome ({rec.get('status')}) — skipping build")
+                        handled += 1
+                        processed = load_processed()
+                        continue
+                except Exception as e:
+                    logger.warning(f"feature_drive: could not reconcile published feature for {issue_id}: {e}")
                 if prior.get("pipeline") == "fix_engine" or (
                         prior.get("status") and not retrying
                         and prior.get("status") not in _RECLASSIFY_STATUSES):
@@ -593,8 +608,14 @@ def scan_feature_requests(gh, config):
                         f"dispatching to feature_build."
                     )
                     try:
-                        from feature_build import build_feature
-                        build_feature(gh, repo_obj, issue, result, config)
+                        from feature_build import build_feature, reconcile_published_feature
+                        recovered, rec = reconcile_published_feature(repo_obj, issue, config, processed)
+                        if recovered:
+                            logger.info(
+                                f"feature_drive: {issue_id} already published ({rec.get('status')}) — skipping build dispatch"
+                            )
+                        else:
+                            build_feature(gh, repo_obj, issue, result, config)
                     except Exception as e:
                         # build_feature is itself best-effort/never-raises by
                         # contract (see its own docstring) — this except is
