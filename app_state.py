@@ -557,6 +557,16 @@ def record_pr_review(repo, number, title, url, findings, head_sha, summary="", r
                 # restart or re-scan never repeats one (pr_remediate.rework_available).
                 "remediation_reworks": int(prev.get("remediation_reworks") or 0),
                 "remediation_rework_head": prev.get("remediation_rework_head"),
+                # Consecutive failed fix rounds (pr_remediate loop guard). Carried
+                # across same-head rescans or the limit never binds; reset when the
+                # head moves, since a failed fix pushes nothing, so a new head is
+                # new code (a CLI session's fix) that earns a fresh allowance.
+                # This is for a PR NOT yet parked: "exhausted_human_review" stays
+                # latched like the attempt limit (a CLI session owns a parked PR
+                # and clears or merges it), so a new head never re-arms AB on it.
+                "remediation_fail_streak": (
+                    int(prev.get("remediation_fail_streak") or 0)
+                    if prev.get("head") == head_sha else 0),
                 "remediation_rework_deferred": rework_deferred,
                 # The last notice pr_remediate posted, stamped "marker@head" by
                 # _post_once. Dropping it let a rework given back (it did no
