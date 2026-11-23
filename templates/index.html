@@ -1661,6 +1661,11 @@
                             <input type="checkbox" name="FIX_MODEL_LADDER" id="FIX_MODEL_LADDER" {{ 'checked' if settings.FIX_MODEL_LADDER else '' }} title="Ordinary fixes try the cheapest model in the fleet's coding ladder first (.github/model-policy.json: Haiku, then Sonnet, then Opus) and climb one rung per failed attempt. Off: the cost-first frontier picker." class="w-4 h-4 text-primary-text focus:ring-brand">
                             <label for="FIX_MODEL_LADDER" class="text-xs font-medium text-slate-700">Fix model ladder (try the cheapest coding model first, climb one rung per failed attempt)</label>
                         </div>
+                        <!-- Review model ladder (.github/model-policy.json review.ladder, fix_engine._review_ladder) -->
+                        <div class="flex items-center gap-2 mt-2">
+                            <input type="checkbox" name="REVIEW_MODEL_LADDER" id="REVIEW_MODEL_LADDER" {{ 'checked' if settings.REVIEW_MODEL_LADDER else '' }} title="Review panels run the cheap filter model first (.github/model-policy.json review.ladder); a filter Reject ends the panel. Then one frontier reviewer from another vendor gives the final verdict, which passes only at 0.90 or more. Off: the multi-reviewer allowlist panel." class="w-4 h-4 text-primary-text focus:ring-brand">
+                            <label for="REVIEW_MODEL_LADDER" class="text-xs font-medium text-slate-700">Review model ladder (cheap filter, then one frontier reviewer at 0.90+)</label>
+                        </div>
                         <!-- Fix result recording (fix_outcomes.enabled) -->
                         <div class="flex items-center gap-2 mt-2">
                             <input type="checkbox" name="FIX_OUTCOMES_ENABLED" id="FIX_OUTCOMES_ENABLED" {{ 'checked' if settings.FIX_OUTCOMES_ENABLED else '' }} title="Record each PR fix attempt (model, pass or fail, reason, cost) for the table below. Off: nothing is recorded and the table stays empty." class="w-4 h-4 text-primary-text focus:ring-brand">
@@ -2879,6 +2884,10 @@
                                 <div class="space-y-2">
                                     <label for="pr_remediate_rework_defer_hours" class="text-sm font-medium text-slate-600">Hours a rework waits for a model</label>
                                     <input type="number" name="pr_remediate_rework_defer_hours" id="pr_remediate_rework_defer_hours" min="0" max="168" step="any" value="{{ settings.get('pr_remediate_rework_defer_hours', 24) }}" title="When every model that can run a consolidated rework is cooling down (credits, rate limit, repeated failures), or the models cannot be listed, AppBuilder waits for one, checking on every scan, for at most this many hours from the first wait at the PR's current commit. After that it treats the rework as having no model: a thrashing PR waits for a new commit, and a PR out of attempts is left for a human. 0 never waits. Default 24, at most 168 (a week)." class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                </div>
+                                <div class="space-y-2">
+                                    <label for="pr_remediate_fail_limit" class="text-sm font-medium text-slate-600">Failed fixes before a CLI session</label>
+                                    <input type="number" name="pr_remediate_fail_limit" id="pr_remediate_fail_limit" min="0" max="5" step="1" value="{{ settings.get('pr_remediate_fail_limit', 2) }}" title="After this many failed fix attempts in a row on one PR (a fix rejected before it is pushed, no applicable edits, a model failing) AppBuilder stops retrying it, marks it failed and comments that it needs a CLI session, so a loop cannot keep spending. A fix that lands resets the count. 0 turns the guard off. Default 2, at most 5." class="w-28 p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                                 </div>
                             </div>
                         </div>

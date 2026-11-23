@@ -242,7 +242,7 @@ def _auto_remediate_source():
 
 def test_every_record_write_persists_the_counter():
     body = _auto_remediate_source()
-    assert body.count("premium_attempts=_premium_used") == 3, (
+    assert body.count("premium_attempts=_premium_used") == 4, (
         "a write path that omits the counter lets the premium attempt go unrecorded")
 
 
