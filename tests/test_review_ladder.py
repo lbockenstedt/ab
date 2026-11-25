@@ -28,6 +28,7 @@ _FIX_NAMES = {
     "_build_critique_reviews",
     "_ladder_result",
     "_run_review_ladder",
+    "_frontier_rework_local",
 }
 
 # Assignments we need from fix_engine.py.
@@ -322,3 +323,28 @@ def test_lm_filter_reject_never_reaches_the_frontier(ns):
     review_one, asked = _runner({"qwen": ({"verdict": "Reject", "confidence": 0.8}, None)})
     result = ns["_run_review_ladder"](seats, review_one, 0.9)
     assert asked == ["qwen"] and result["ladder_stage"] == "filter"
+
+
+def test_frontier_findings_go_to_the_local_coder_first(ns):
+    """A frontier reject sends the findings to the local coder once; a filter
+    reject, a first attempt, or an already-local builder does not."""
+    f = ns["_frontier_rework_local"]
+    frontier = {"kind": "review_rejected", "stage": "frontier"}
+    assert f(frontier, {"provider": "claude"}) is True
+    assert f(frontier, {}) is True
+    # Already written by the local coder: the next try climbs to the cloud.
+    assert f(frontier, {"provider": "lm"}) is False
+    # A local filter seat rejected it, or it failed for another reason.
+    assert f({"kind": "review_rejected", "stage": "filter"}, {}) is False
+    assert f({"kind": "qa_failed"}, {}) is False
+    assert f({}, None) is False
+
+
+def test_apply_ai_fix_tries_lm_before_the_cloud_when_local_first():
+    """apply_ai_fix asks lm_complete('fix') first only when local_first is set."""
+    src = open("fix_engine.py", encoding="utf-8").read()
+    body = src[src.index("def apply_ai_fix("):]
+    body = body[:body.index("\ndef ", 10)]
+    assert "local_first=False" in body
+    assert body.index("if local_first:") < body.index("return call_llm(")
+    assert 'llm_client.lm_complete("fix"' in body

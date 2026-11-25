@@ -241,6 +241,18 @@ The review ladder seats two LM passes ahead of the cloud filter: `review`
 the coder and skips the later seats; an unavailable pass is skipped. Only the
 cloud frontier reviewer's Approve at the pass confidence passes a panel.
 
+When the frontier reviewer rejects (or approves below the pass confidence), its
+findings go back to the coder and the change runs the same ladder again from the
+local seats; the frontier is only paid for once every local pass approves. The
+retry in `process_single_issue` and `fix_one_pr` tries the LM `coding` task first
+(`apply_ai_fix(local_first=True)`, set by `_frontier_rework_local` from the
+rejection's `ladder_stage`) and falls to the cloud coder if the LM has no answer.
+A fix the local coder already wrote that the frontier rejects again goes to the
+cloud coder. The loop stops by the existing rule: the attempt budget per run, and
+across heads `pr_remediate.remediation_stalled` (2 reviewed heads in a row without
+beating the best score of panels approved, then lowest confidence) with at most
+5 rounds, then a consolidated rework, then a human.
+
 ## Key commands / handlers
 
 - **Closed-issue recurrence:** a failed GitHub reopen is reported as failure and remains retryable; no recurrence comment is posted.

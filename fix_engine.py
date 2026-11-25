@@ -3936,6 +3936,17 @@ def _run_review_ladder(reviewers, review_one, pass_confidence):
                           pass_confidence)
 
 
+def _frontier_rework_local(last_failure, used_model_out):
+    """True when the coder should be the local model: the last attempt was
+    rejected (or approved below the bar) by the FRONTIER seat, and was not
+    already written by a local model. The findings then get one local try;
+    the review ladder restarts at its local seats either way, because the next
+    review_fix call always begins at the first seat."""
+    return (isinstance(last_failure, dict) and last_failure.get("kind") == "review_rejected"
+            and last_failure.get("stage") == "frontier"
+            and (used_model_out or {}).get("provider") != "lm")
+
+
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
                builder_n=None, builder_key=None, diff_override=None, repo=None, head_sha=None,
                progress=None):
@@ -4766,8 +4777,12 @@ def _publication_boundary_requirement(repo_git, config, repo_name):
     return True, reason
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None):
-    """files_override: skip the identify_files_to_fix guess and target exactly
+def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None, local_first=False):
+    """local_first: try the LM-hosted local coder (llm_client.lm_complete, task
+    "fix") before any cloud model -- used when the frontier reviewer's findings
+    go back to the coder, so the cheap models get the first go at them.
+
+    files_override: skip the identify_files_to_fix guess and target exactly
     these repo-relative paths instead — for callers (pr_review's fix_one_pr)
     that already know precisely which files are at issue (a PR's own changed-
     file set), where the identifier-grep heuristic has nothing reliable to
@@ -4909,6 +4924,14 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
                                                     fallback=_fix_excl)
             if _fix_excl != tuple(requirements.exclude_models or ()):
                 requirements = dataclasses.replace(requirements, exclude_models=_fix_excl)
+        # Frontier findings go to the local coder first; a miss (or an unusable
+        # reply, which the caller's retry handles) falls through to the cloud.
+        if local_first:
+            _local = llm_client.lm_complete("fix", prompt, "You are a master coder. Only return a JSON object.", config)
+            if _local is not None:
+                if isinstance(used_model_out, dict):
+                    used_model_out.update(provider="lm", model="lm:coding")
+                return _local
         # Ask for the fix.
         return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", task_id=task_id,
                         repo_checkout_path=repo_path if _native else None,
@@ -6059,7 +6082,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     elif not pending_fix:
                         fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out,
                                                 retarget=(last_failure.get("kind") == "review_rejected"),
-                                                avoid_paths=sorted(modified_paths))
+                                                avoid_paths=sorted(modified_paths),
+                                                local_first=_frontier_rework_local(last_failure, used_model_out))
                         success_applied, fixes, confidence = parse_and_apply(
                             fix_code, path, feedback_out=parse_feedback)
                     # Remember which model built this fix.
@@ -6222,6 +6246,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                     "kind": "review_rejected",
                                     "detail": str(critique or "").strip(),
                                     "confidence": review_conf,
+                                    "stage": review.get("ladder_stage"),
                                 }
                                 try:
                                     repo_git.git.reset("--hard", "HEAD")
