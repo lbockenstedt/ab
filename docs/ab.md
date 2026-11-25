@@ -475,3 +475,10 @@ an explicitly empty value still clears it.
 - **The test-regression check honours `repo_tests` too (`check_test_regressions._detect_test_cmd`)** — it keeps its own copy of the command-detection logic so the module stays importable from a lightweight scan context without dragging in fix_engine's LLM/GitHub stack, but that copy had only `verify_fix`'s **Priority 3** filesystem heuristic and not its **Priority 2** `config["repo_tests"]` lookup. Three fleet repos (`lm`, `cs`, `kvm`) have no root `requirements.txt`/`pyproject.toml`/`package.json`/`go.mod`/`Makefile`, so detection returned `None` and the check logged `no recognized test framework in this repo` and skipped — **silently disabling regression checking on `lm`, the largest repo in the fleet, even though an explicit per-component command was configured for it and `verify_fix` was using it**. The lookup now runs first, matches the full `owner/repo` and the bare repo name, and happens **before** `os.listdir`, so a configured command survives an unlistable path. A non-dict `repo_tests` degrades to the heuristic rather than raising: this is a best-effort check that must never break PR review. The skip reason stays honest — `cs` and `kvm` still report no framework, because they genuinely have neither.
 
 **LM pool for PR summaries.** In Settings, select the monitored repositories that may delegate advisory summaries to Lab Manager. LM must also allow each repository and bind it to an approved AppBuilder identity and tenant. An opted-in request can wait up to roughly 16 minutes for CPU inference; if LM is unavailable, AB omits the summary rather than retrying with its own provider. Review panels and verdicts still run through the normal AB path.
+
+### Replaying old work on the local models
+
+`scripts/lm_replay.py cases.jsonl --tenant <t> --token <admin token>` runs on the
+hub host and sends each saved prompt (`{id, task, prompt, expected_verdict}`)
+through LM's loopback `/admin/ops/llm-complete`, then reports how often the local
+model's verdict matches the recorded cloud verdict. It uses no cloud tokens.
