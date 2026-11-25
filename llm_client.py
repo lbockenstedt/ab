@@ -3546,7 +3546,7 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
 
 
 # Shared LLM Utility
-LM_COMPLETE_TIMEOUT_S = 945  # the hub's bounded CPU queue wait plus inference
+LM_COMPLETE_TIMEOUT_S = 7245  # the hub's bounded CPU queue wait plus inference
 # AB task -> LM task, tried before any cloud provider. Settings may replace the map;
 # an empty config["lm_llm_tasks"] turns local routing off. The hub still decides
 # which tasks it allows, so an unconfigured hub answers not_configured and AB falls on.
