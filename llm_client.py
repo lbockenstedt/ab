@@ -3546,10 +3546,47 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
 
 
 # Shared LLM Utility
+LM_COMPLETE_TIMEOUT_S = 945  # the hub's bounded CPU queue wait plus inference
+# AB task -> LM task, tried before any cloud provider. Settings may replace the map;
+# an empty config["lm_llm_tasks"] turns local routing off. The hub still decides
+# which tasks it allows, so an unconfigured hub answers not_configured and AB falls on.
+DEFAULT_LM_TASKS = {
+    "triage": "scout", "identify_files": "scout", "classify": "scout",
+    "log_review": "summary", "log_analysis": "summary",
+    "pr_summary": "pr_summary", "fix": "coding",
+}
+
+
+def lm_complete(lm_task, prompt, system_prompt, config):
+    """Try one prompt-only job on the LM-hosted local models; None means use the normal chain.
+
+    The AB task maps through config["lm_llm_tasks"] ({ab_task: lm_task}); the hub
+    decides the tenant and the allowed tasks from the AppBuilder client certificate.
+    """
+    mapping = (config or {}).get("lm_llm_tasks")
+    if not isinstance(mapping, dict):
+        mapping = DEFAULT_LM_TASKS
+    target = mapping.get(lm_task)
+    if not isinstance(target, str) or not target:
+        return None
+    try:
+        from workers import _get_hub_agent_client
+        client = _get_hub_agent_client()
+        reply = client.request_sync("LLM_COMPLETE", {
+            "task": target,
+            "prompt": ("%s\n\n%s" % (system_prompt, prompt)) if system_prompt else prompt,
+        }, timeout=LM_COMPLETE_TIMEOUT_S) if client else None
+    except Exception as e:  # noqa: BLE001
+        logger.info("LM %s unavailable: %s", target, e)
+        return None
+    text = reply.get("text") if isinstance(reply, dict) and reply.get("status") == "SUCCESS" else None
+    return text if isinstance(text, str) and text.strip() else None
+
+
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=None, messages=None, tools=None, stream=None,
              repo_checkout_path=None, json_schema=None, enable_native_tools=False, search_model=None, profile="readonly",
              extra_add_dirs=None, requirements=None, batch_kind=None, batch_context=None, used_model_out=None,
-             config=None):
+             config=None, lm_task=None):
     """Generic LLM caller. Routing is capability/cost-aware: the required
     ``requirements=<LlmRequirements>`` describes what the call needs (complexity,
     context size, structured output, restrict/exclude, escalation) and
@@ -3584,6 +3621,13 @@ def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=No
     # autonomous-engine defaults (LLM_TIMEOUT=900, LLM_MAX_RETRIES=5). Defaults
     # to the on-disk config for every existing caller.
     config = config if config is not None else load_config()
+    # Opt-in local models first, for plain prompts only; any miss falls through.
+    if lm_task and not (messages or tools or repo_checkout_path or enable_native_tools or stream):
+        text = lm_complete(lm_task, prompt, system_prompt, config)
+        if text is not None:
+            if isinstance(used_model_out, dict):
+                used_model_out.update(provider="lm", model="lm:" + str(lm_task))
+            return text
     # The picker path is the only one left.
     if requirements is None:
         raise ValueError("call_llm requires a requirements=LlmRequirements (the "
@@ -3693,7 +3737,7 @@ def analyze_logs(log_text, title="logs", task_id=None, requirements=None):
                                                         min_context_tokens=len(prompt) // 4)
     # Call the LLM; an empty reply counts as healthy.
     result = call_llm(prompt, system_prompt=LOG_ANALYSIS_SYSTEM_PROMPT, task_id=task_id,
-                      requirements=requirements)
+                      requirements=requirements, lm_task="log_analysis")
     return (result or "").strip() or "VERDICT: none\n(the LLM returned an empty analysis)"
 
 
