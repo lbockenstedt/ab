@@ -1585,7 +1585,7 @@ def analyze_issue(issue):
         reqs = LlmRequirements(complexity="trivial", needs_structured_output=True,
                                min_context_tokens=len(prompt) // 4)
         res = call_llm(prompt, system_prompt="You are a triage bot. Only return a JSON object.",
-                       requirements=reqs)
+                       requirements=reqs, lm_task="triage")
         # Pull the JSON object out of the reply and read its fields.
         import re
         match = re.search(r'\{.*\}', res, re.DOTALL)
@@ -1951,7 +1951,7 @@ def identify_files_to_fix(repo_path, issue_body, error_context=None, retarget=Fa
                 reqs, complexity="medium",
                 exclude_models=stage_models.exclusions(_cfg, "diag_identify", reqs.exclude_models))
         res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.",
-                       requirements=reqs)
+                       requirements=reqs, lm_task="identify_files")
         llm_files = _first_json_array_of_strings(res or "") or []
     except Exception as e:
         # Log the error (quieter for cooldowns).
@@ -2685,6 +2685,13 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
             raise err if isinstance(err, Exception) else Exception(str(err))
         return result
 
+    # LM seats are prompt-only: no tools, and a miss raises so the seat counts as failed.
+    if provider == "lm":
+        text = llm_client.lm_complete(reviewer_candidate["lm_task"], prompt, system_prompt,
+                                      {"lm_llm_tasks": {reviewer_candidate["lm_task"]: reviewer_candidate["lm_task"]}})
+        if text is None:
+            raise RuntimeError("LM review pass %s unavailable" % reviewer_candidate["lm_task"])
+        return text
     # claude_cli with a checkout: use its own native read/search tools and the JSON schema.
     if is_claude_cli and repo_checkout_path:
         native_prompt = prompt + (
@@ -3469,6 +3476,20 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     return panel
 
 
+# Local review passes ahead of the cloud ladder: Qwen first, then DeepSeek.
+_LM_REVIEW_PASSES = (("review", "Qwen"), ("review_deep", "DeepSeek"))
+
+
+def _lm_review_filters(config):
+    """Seats for the LM-hosted review passes the config maps, in order (Qwen, then DeepSeek)."""
+    mapping = (config or {}).get("lm_llm_tasks")
+    if not isinstance(mapping, dict):
+        mapping = {"review": "review", "review_deep": "review_deep"}
+    return [{"key": "lm|%s" % task, "provider": "lm", "model": "lm:%s" % task,
+             "label": label, "lm_task": mapping[task], "available": True}
+            for task, label in _LM_REVIEW_PASSES if mapping.get(task)]
+
+
 def _review_ladder(config, builder_n=None, builder_key=None):
     """The review ladder panel from MODEL_POLICY_FILE, or ``None`` (use existing panel).
 
@@ -3500,7 +3521,7 @@ def _review_ladder(config, builder_n=None, builder_key=None):
     else:
         frontier_id = str(frontier.get("other_author", ""))
     # Select filter candidates: first matching candidate for each ladder id.
-    filters = []
+    filters = _lm_review_filters(config)
     for lid in policy.get("ladder", []):
         lid = str(lid)
         for c in candidates:
@@ -3913,6 +3934,17 @@ def _run_review_ladder(reviewers, review_one, pass_confidence):
     return _ladder_result(votes, reviewers, failed_reviewers,
                           "Approve" if passed else "Reject", confidence, "frontier",
                           pass_confidence)
+
+
+def _frontier_rework_local(last_failure, used_model_out):
+    """True when the coder should be the local model: the last attempt was
+    rejected (or approved below the bar) by the FRONTIER seat, and was not
+    already written by a local model. The findings then get one local try;
+    the review ladder restarts at its local seats either way, because the next
+    review_fix call always begins at the first seat."""
+    return (isinstance(last_failure, dict) and last_failure.get("kind") == "review_rejected"
+            and last_failure.get("stage") == "frontier"
+            and (used_model_out or {}).get("provider") != "lm")
 
 
 def review_fix(repo_path, issue_body, proposed_fixes, force_cloud=None, task_id=None,
@@ -4745,8 +4777,12 @@ def _publication_boundary_requirement(repo_git, config, repo_name):
     return True, reason
 
 
-def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None):
-    """files_override: skip the identify_files_to_fix guess and target exactly
+def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_override=None, requirements=None, used_model_out=None, retarget=False, avoid_paths=None, local_first=False):
+    """local_first: try the LM-hosted local coder (llm_client.lm_complete, task
+    "fix") before any cloud model -- used when the frontier reviewer's findings
+    go back to the coder, so the cheap models get the first go at them.
+
+    files_override: skip the identify_files_to_fix guess and target exactly
     these repo-relative paths instead — for callers (pr_review's fix_one_pr)
     that already know precisely which files are at issue (a PR's own changed-
     file set), where the identifier-grep heuristic has nothing reliable to
@@ -4888,12 +4924,20 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
                                                     fallback=_fix_excl)
             if _fix_excl != tuple(requirements.exclude_models or ()):
                 requirements = dataclasses.replace(requirements, exclude_models=_fix_excl)
+        # Frontier findings go to the local coder first; a miss (or an unusable
+        # reply, which the caller's retry handles) falls through to the cloud.
+        if local_first:
+            _local = llm_client.lm_complete("fix", prompt, "You are a master coder. Only return a JSON object.", config)
+            if _local is not None:
+                if isinstance(used_model_out, dict):
+                    used_model_out.update(provider="lm", model="lm:coding")
+                return _local
         # Ask for the fix.
         return call_llm(prompt, system_prompt="You are a master coder. Only return a JSON object.", task_id=task_id,
                         repo_checkout_path=repo_path if _native else None,
                         enable_native_tools=_native,
                         json_schema=_FIX_GENERATION_JSON_SCHEMA,
-                        requirements=requirements, used_model_out=used_model_out)
+                        requirements=requirements, used_model_out=used_model_out, lm_task="fix")
     except (llm_client.LlmHumanEscalationNeeded, llm_client.LLMCreditExhausted):
         # Typed control-flow signals from the picker must reach the fix loop's
         # dedicated handlers with their type intact. Wrapping them in a bare
@@ -6038,7 +6082,8 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                     elif not pending_fix:
                         fix_code = apply_ai_fix(path, fix_body, error_context, task_id=issue_id, requirements=reqs, used_model_out=used_model_out,
                                                 retarget=(last_failure.get("kind") == "review_rejected"),
-                                                avoid_paths=sorted(modified_paths))
+                                                avoid_paths=sorted(modified_paths),
+                                                local_first=_frontier_rework_local(last_failure, used_model_out))
                         success_applied, fixes, confidence = parse_and_apply(
                             fix_code, path, feedback_out=parse_feedback)
                     # Remember which model built this fix.
@@ -6201,6 +6246,7 @@ def process_single_issue(repo_name, issue_num, llm_preference=None):
                                     "kind": "review_rejected",
                                     "detail": str(critique or "").strip(),
                                     "confidence": review_conf,
+                                    "stage": review.get("ladder_stage"),
                                 }
                                 try:
                                     repo_git.git.reset("--hard", "HEAD")

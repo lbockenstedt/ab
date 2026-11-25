@@ -2941,6 +2941,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
 
             # Try up to the attempt limit, feeding each failure back to the model.
             attempt = 0
+            last_stage = None  # ladder stage that rejected the last fix (fix_engine._ladder_result)
             while attempt < max_attempts:
                 attempt += 1
                 is_last = attempt == max_attempts
@@ -2962,10 +2963,17 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 # credit a failed generation to the previous attempt's model.
                 ai_spend.start_tally()
                 used_model_out.pop("model", None)
+                # Frontier findings go to the local coder first; consume the stage so a
+                # later failure of another kind does not repeat it.
+                # (Same rule as fix_engine._frontier_rework_local, inlined: the helper is
+                # not in the module stubs the retry tests install.)
+                _local_first = last_stage == "frontier" and used_model_out.get("provider") != "lm"
+                last_stage = None
                 try:
                     fix_code = apply_ai_fix(path, fix_body, error_context, files_override=changed,
                                             task_id=lock_id, requirements=requirements,
-                                            used_model_out=used_model_out)
+                                            used_model_out=used_model_out,
+                                            local_first=_local_first)
                 except Exception as e:
                     # No model may run it: the caller forbade the picker's safety
                     # floor (must_escalate_to_human) and the picker found none, so
@@ -3075,6 +3083,7 @@ def fix_one_pr(repo_full_name, number, config=None, requirements=None, used_mode
                 if review_verdict != "Approve":
                     logger.warning("fix_one_pr: panel REJECTED fix for %s#%s (attempt %s/%s): %s",
                                    repo_full_name, number, attempt, max_attempts, critique)
+                    last_stage = review.get("ladder_stage") if isinstance(review, dict) else None
                     last_failure = "Reviewer panel rejected the generated fix: %s" % critique
                     _outcome("fail", ["wrong_answer"], critique)
                     error_context = ("The skeptical reviewer panel rejected your previous fix. "

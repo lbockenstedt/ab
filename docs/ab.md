@@ -224,6 +224,35 @@ Where the climb happens:
   the critique, as before. The Opus-only last turn and the premium turn bar
   the lower rungs, so the ladder treats them as used.
 
+## Local models through LM
+
+AB tries the LM-hosted local models before any cloud provider, over the mTLS
+`LLM_COMPLETE` hub request. The map is `lm_llm_tasks` (`{ab_task: lm_task}`);
+the default routes `triage`, `identify_files` and `classify` to `scout`,
+`log_review` and `log_analysis` to `summary`, `pr_summary` to `pr_summary` and
+the fix generator (`fix`) to `coding`. An empty map turns it off. Only
+prompt-only calls go to LM (no tools, no native checkout, no message list). A
+hub that does not allow the task, or has no capacity, answers an error and AB
+continues with its normal providers. The hub owns the tenant and task allowlist
+(`llm_ab_work`, see `docs/llm.md` in lm).
+
+The review ladder seats two LM passes ahead of the cloud filter: `review`
+(Qwen), then `review_deep` (DeepSeek). A Reject from either returns the findings to
+the coder and skips the later seats; an unavailable pass is skipped. Only the
+cloud frontier reviewer's Approve at the pass confidence passes a panel.
+
+When the frontier reviewer rejects (or approves below the pass confidence), its
+findings go back to the coder and the change runs the same ladder again from the
+local seats; the frontier is only paid for once every local pass approves. The
+retry in `process_single_issue` and `fix_one_pr` tries the LM `coding` task first
+(`apply_ai_fix(local_first=True)`, set by `_frontier_rework_local` from the
+rejection's `ladder_stage`) and falls to the cloud coder if the LM has no answer.
+A fix the local coder already wrote that the frontier rejects again goes to the
+cloud coder. The loop stops by the existing rule: the attempt budget per run, and
+across heads `pr_remediate.remediation_stalled` (2 reviewed heads in a row without
+beating the best score of panels approved, then lowest confidence) with at most
+5 rounds, then a consolidated rework, then a human.
+
 ## Key commands / handlers
 
 - **Closed-issue recurrence:** a failed GitHub reopen is reported as failure and remains retryable; no recurrence comment is posted.
@@ -458,3 +487,10 @@ an explicitly empty value still clears it.
 - **The test-regression check honours `repo_tests` too (`check_test_regressions._detect_test_cmd`)** — it keeps its own copy of the command-detection logic so the module stays importable from a lightweight scan context without dragging in fix_engine's LLM/GitHub stack, but that copy had only `verify_fix`'s **Priority 3** filesystem heuristic and not its **Priority 2** `config["repo_tests"]` lookup. Three fleet repos (`lm`, `cs`, `kvm`) have no root `requirements.txt`/`pyproject.toml`/`package.json`/`go.mod`/`Makefile`, so detection returned `None` and the check logged `no recognized test framework in this repo` and skipped — **silently disabling regression checking on `lm`, the largest repo in the fleet, even though an explicit per-component command was configured for it and `verify_fix` was using it**. The lookup now runs first, matches the full `owner/repo` and the bare repo name, and happens **before** `os.listdir`, so a configured command survives an unlistable path. A non-dict `repo_tests` degrades to the heuristic rather than raising: this is a best-effort check that must never break PR review. The skip reason stays honest — `cs` and `kvm` still report no framework, because they genuinely have neither.
 
 **LM pool for PR summaries.** In Settings, select the monitored repositories that may delegate advisory summaries to Lab Manager. LM must also allow each repository and bind it to an approved AppBuilder identity and tenant. An opted-in request can wait up to roughly 16 minutes for CPU inference; if LM is unavailable, AB omits the summary rather than retrying with its own provider. Review panels and verdicts still run through the normal AB path.
+
+### Replaying old work on the local models
+
+`scripts/lm_replay.py cases.jsonl --tenant <t> --token <admin token>` runs on the
+hub host and sends each saved prompt (`{id, task, prompt, expected_verdict}`)
+through LM's loopback `/admin/ops/llm-complete`, then reports how often the local
+model's verdict matches the recorded cloud verdict. It uses no cloud tokens.
