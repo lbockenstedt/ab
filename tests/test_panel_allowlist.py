@@ -22,13 +22,13 @@ _PANEL_NAMES = {
     "_reviewer_name", "_reviewer_vote", "_extract_reviewer_verdict",
     "_has_verdict_key", "_canon_verdict_keys", "_balanced_brace_span",
     "_is_local_provider", "_cloud_frontier_fallback", "_progress",
-    "_resolve_builder", "_review_ladder", "_review_policy",
+    "_resolve_builder", "_review_ladder", "_review_policy", "_lm_review_filters",
     "_build_critique_reviews", "_ladder_result", "_run_review_ladder",
 }
 _PANEL_ASSIGNS = {
     "_REVIEW_PANEL_MAX", "_REVIEW_PANEL_MIN", "DEFAULT_PANEL_ALLOWLIST",
     "_REVIEWER_RETRY_NOTE", "SKIP_CONFIDENCE_THRESHOLD",
-    "MODEL_POLICY_FILE", "_REVIEW_PASS_FLOOR",
+    "MODEL_POLICY_FILE", "_REVIEW_PASS_FLOOR", "_LM_REVIEW_PASSES",
 }
 
 
