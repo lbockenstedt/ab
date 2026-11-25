@@ -24,13 +24,14 @@ _FIX_NAMES = {
     "_review_policy",
     "_resolve_builder",
     "_review_ladder",
+    "_lm_review_filters",
     "_build_critique_reviews",
     "_ladder_result",
     "_run_review_ladder",
 }
 
 # Assignments we need from fix_engine.py.
-_FIX_ASSIGNS = {"MODEL_POLICY_FILE", "_REVIEW_PASS_FLOOR"}
+_FIX_ASSIGNS = {"MODEL_POLICY_FILE", "_REVIEW_PASS_FLOOR", "_LM_REVIEW_PASSES"}
 
 
 class _NoLog:
@@ -301,3 +302,23 @@ def test_pr_fix_names_its_builder_to_the_ladder(ns, builder, frontier):
     calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and getattr(c.func, "id", "") == "review_fix"]
     assert calls and all(any(k.arg == "builder_key" for k in c.keywords) for c in calls)
     assert ns["_review_ladder"]({}, builder_key=("provider", "", builder))["frontier"]["model"] == frontier
+
+
+def test_lm_passes_seat_before_cloud_filters_and_can_be_turned_off(ns):
+    """Qwen then DeepSeek seat ahead of the cloud filter; an empty lm_llm_tasks removes them."""
+    seats = ns["_review_ladder"]({})["filters"]
+    assert [c["model"] for c in seats] == ["lm:review", "lm:review_deep", "mai-code-2-flash"]
+    assert ns["_review_ladder"]({"lm_llm_tasks": {}})["filters"][0]["model"] == "mai-code-2-flash"
+    only_qwen = ns["_review_ladder"]({"lm_llm_tasks": {"review": "review"}})["filters"]
+    assert [c["model"] for c in only_qwen][0] == "lm:review"
+    assert len(only_qwen) == 2
+
+
+def test_lm_filter_reject_never_reaches_the_frontier(ns):
+    """A Qwen Reject goes back to the coder without paying for DeepSeek or the frontier."""
+    seats = [{"name": "qwen", "candidate": {"provider": "lm"}},
+             {"name": "deep", "candidate": {"provider": "lm"}},
+             {"name": "sol", "candidate": _cand("gpt-5.6-sol")}]
+    review_one, asked = _runner({"qwen": ({"verdict": "Reject", "confidence": 0.8}, None)})
+    result = ns["_run_review_ladder"](seats, review_one, 0.9)
+    assert asked == ["qwen"] and result["ladder_stage"] == "filter"

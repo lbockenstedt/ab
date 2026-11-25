@@ -224,6 +224,23 @@ Where the climb happens:
   the critique, as before. The Opus-only last turn and the premium turn bar
   the lower rungs, so the ladder treats them as used.
 
+## Local models through LM
+
+AB tries the LM-hosted local models before any cloud provider, over the mTLS
+`LLM_COMPLETE` hub request. The map is `lm_llm_tasks` (`{ab_task: lm_task}`);
+the default routes `triage`, `identify_files` and `classify` to `scout`,
+`log_review` and `log_analysis` to `summary`, `pr_summary` to `pr_summary` and
+the fix generator (`fix`) to `coding`. An empty map turns it off. Only
+prompt-only calls go to LM (no tools, no native checkout, no message list). A
+hub that does not allow the task, or has no capacity, answers an error and AB
+continues with its normal providers. The hub owns the tenant and task allowlist
+(`llm_ab_work`, see `docs/llm.md` in lm).
+
+The review ladder seats two LM passes ahead of the cloud filter: `review`
+(Qwen), then `review_deep` (DeepSeek). A Reject from either returns the findings to
+the coder and skips the later seats; an unavailable pass is skipped. Only the
+cloud frontier reviewer's Approve at the pass confidence passes a panel.
+
 ## Key commands / handlers
 
 - **Closed-issue recurrence:** a failed GitHub reopen is reported as failure and remains retryable; no recurrence comment is posted.

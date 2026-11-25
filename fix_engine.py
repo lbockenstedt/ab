@@ -1585,7 +1585,7 @@ def analyze_issue(issue):
         reqs = LlmRequirements(complexity="trivial", needs_structured_output=True,
                                min_context_tokens=len(prompt) // 4)
         res = call_llm(prompt, system_prompt="You are a triage bot. Only return a JSON object.",
-                       requirements=reqs)
+                       requirements=reqs, lm_task="triage")
         # Pull the JSON object out of the reply and read its fields.
         import re
         match = re.search(r'\{.*\}', res, re.DOTALL)
@@ -1951,7 +1951,7 @@ def identify_files_to_fix(repo_path, issue_body, error_context=None, retarget=Fa
                 reqs, complexity="medium",
                 exclude_models=stage_models.exclusions(_cfg, "diag_identify", reqs.exclude_models))
         res = call_llm(prompt, system_prompt="You are a repository analyzer. Only return a JSON array of paths.",
-                       requirements=reqs)
+                       requirements=reqs, lm_task="identify_files")
         llm_files = _first_json_array_of_strings(res or "") or []
     except Exception as e:
         # Log the error (quieter for cooldowns).
@@ -2685,6 +2685,13 @@ def _run_reviewer_turn(prompt, system_prompt, reviewer_candidate, task_id, repo,
             raise err if isinstance(err, Exception) else Exception(str(err))
         return result
 
+    # LM seats are prompt-only: no tools, and a miss raises so the seat counts as failed.
+    if provider == "lm":
+        text = llm_client.lm_complete(reviewer_candidate["lm_task"], prompt, system_prompt,
+                                      {"lm_llm_tasks": {reviewer_candidate["lm_task"]: reviewer_candidate["lm_task"]}})
+        if text is None:
+            raise RuntimeError("LM review pass %s unavailable" % reviewer_candidate["lm_task"])
+        return text
     # claude_cli with a checkout: use its own native read/search tools and the JSON schema.
     if is_claude_cli and repo_checkout_path:
         native_prompt = prompt + (
@@ -3469,6 +3476,20 @@ def _select_review_panel(config, builder_n=None, builder_key=None, max_reviewers
     return panel
 
 
+# Local review passes ahead of the cloud ladder: Qwen first, then DeepSeek.
+_LM_REVIEW_PASSES = (("review", "Qwen"), ("review_deep", "DeepSeek"))
+
+
+def _lm_review_filters(config):
+    """Seats for the LM-hosted review passes the config maps, in order (Qwen, then DeepSeek)."""
+    mapping = (config or {}).get("lm_llm_tasks")
+    if not isinstance(mapping, dict):
+        mapping = {"review": "review", "review_deep": "review_deep"}
+    return [{"key": "lm|%s" % task, "provider": "lm", "model": "lm:%s" % task,
+             "label": label, "lm_task": mapping[task], "available": True}
+            for task, label in _LM_REVIEW_PASSES if mapping.get(task)]
+
+
 def _review_ladder(config, builder_n=None, builder_key=None):
     """The review ladder panel from MODEL_POLICY_FILE, or ``None`` (use existing panel).
 
@@ -3500,7 +3521,7 @@ def _review_ladder(config, builder_n=None, builder_key=None):
     else:
         frontier_id = str(frontier.get("other_author", ""))
     # Select filter candidates: first matching candidate for each ladder id.
-    filters = []
+    filters = _lm_review_filters(config)
     for lid in policy.get("ladder", []):
         lid = str(lid)
         for c in candidates:
@@ -4893,7 +4914,7 @@ def apply_ai_fix(repo_path, issue_body, error_context=None, task_id=None, files_
                         repo_checkout_path=repo_path if _native else None,
                         enable_native_tools=_native,
                         json_schema=_FIX_GENERATION_JSON_SCHEMA,
-                        requirements=requirements, used_model_out=used_model_out)
+                        requirements=requirements, used_model_out=used_model_out, lm_task="fix")
     except (llm_client.LlmHumanEscalationNeeded, llm_client.LLMCreditExhausted):
         # Typed control-flow signals from the picker must reach the fix loop's
         # dedicated handlers with their type intact. Wrapping them in a bare
