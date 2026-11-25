@@ -24,13 +24,15 @@ _FIX_NAMES = {
     "_review_policy",
     "_resolve_builder",
     "_review_ladder",
+    "_lm_review_filters",
     "_build_critique_reviews",
     "_ladder_result",
     "_run_review_ladder",
+    "_frontier_rework_local",
 }
 
 # Assignments we need from fix_engine.py.
-_FIX_ASSIGNS = {"MODEL_POLICY_FILE", "_REVIEW_PASS_FLOOR"}
+_FIX_ASSIGNS = {"MODEL_POLICY_FILE", "_REVIEW_PASS_FLOOR", "_LM_REVIEW_PASSES"}
 
 
 class _NoLog:
@@ -301,3 +303,48 @@ def test_pr_fix_names_its_builder_to_the_ladder(ns, builder, frontier):
     calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and getattr(c.func, "id", "") == "review_fix"]
     assert calls and all(any(k.arg == "builder_key" for k in c.keywords) for c in calls)
     assert ns["_review_ladder"]({}, builder_key=("provider", "", builder))["frontier"]["model"] == frontier
+
+
+def test_lm_passes_seat_before_cloud_filters_and_can_be_turned_off(ns):
+    """Qwen then DeepSeek seat ahead of the cloud filter; an empty lm_llm_tasks removes them."""
+    seats = ns["_review_ladder"]({})["filters"]
+    assert [c["model"] for c in seats] == ["lm:review", "lm:review_deep", "mai-code-2-flash"]
+    assert ns["_review_ladder"]({"lm_llm_tasks": {}})["filters"][0]["model"] == "mai-code-2-flash"
+    only_qwen = ns["_review_ladder"]({"lm_llm_tasks": {"review": "review"}})["filters"]
+    assert [c["model"] for c in only_qwen][0] == "lm:review"
+    assert len(only_qwen) == 2
+
+
+def test_lm_filter_reject_never_reaches_the_frontier(ns):
+    """A Qwen Reject goes back to the coder without paying for DeepSeek or the frontier."""
+    seats = [{"name": "qwen", "candidate": {"provider": "lm"}},
+             {"name": "deep", "candidate": {"provider": "lm"}},
+             {"name": "sol", "candidate": _cand("gpt-5.6-sol")}]
+    review_one, asked = _runner({"qwen": ({"verdict": "Reject", "confidence": 0.8}, None)})
+    result = ns["_run_review_ladder"](seats, review_one, 0.9)
+    assert asked == ["qwen"] and result["ladder_stage"] == "filter"
+
+
+def test_frontier_findings_go_to_the_local_coder_first(ns):
+    """A frontier reject sends the findings to the local coder once; a filter
+    reject, a first attempt, or an already-local builder does not."""
+    f = ns["_frontier_rework_local"]
+    frontier = {"kind": "review_rejected", "stage": "frontier"}
+    assert f(frontier, {"provider": "claude"}) is True
+    assert f(frontier, {}) is True
+    # Already written by the local coder: the next try climbs to the cloud.
+    assert f(frontier, {"provider": "lm"}) is False
+    # A local filter seat rejected it, or it failed for another reason.
+    assert f({"kind": "review_rejected", "stage": "filter"}, {}) is False
+    assert f({"kind": "qa_failed"}, {}) is False
+    assert f({}, None) is False
+
+
+def test_apply_ai_fix_tries_lm_before_the_cloud_when_local_first():
+    """apply_ai_fix asks lm_complete('fix') first only when local_first is set."""
+    src = open("fix_engine.py", encoding="utf-8").read()
+    body = src[src.index("def apply_ai_fix("):]
+    body = body[:body.index("\ndef ", 10)]
+    assert "local_first=False" in body
+    assert body.index("if local_first:") < body.index("return call_llm(")
+    assert 'llm_client.lm_complete("fix"' in body
