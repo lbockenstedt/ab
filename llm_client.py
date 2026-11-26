@@ -324,7 +324,7 @@ def _copilot_api_token(gh_token):
 
 
 #: Pool tasks an entry may use as its model (the hub's AppBuilder work rule must allow each).
-LM_POOL_TASKS = ("scout", "summary", "pr_summary", "coding", "review", "review_deep")
+LM_POOL_TASKS = ("scout", "summary", "pr_summary", "coding", "reasoning", "review", "review_deep")
 
 
 def _is_lm_pool(provider):
@@ -3580,7 +3580,7 @@ DEFAULT_LM_TASKS = {
 }
 
 
-LM_PROMPT_MAX_BYTES = 60000  # the hub rejects prompts over 65536 bytes as invalid_request
+LM_PROMPT_MAX_BYTES = 160000  # the hub rejects prompts over 192 KiB; this leaves room in the 64k-token context for the reply
 
 
 def _fit_lm_prompt(prompt):

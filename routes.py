@@ -29,7 +29,9 @@ def _model_stage_rows(config, model_options):
     for key, (cfg_key, default, label, help_) in stage_models.STAGES.items():
         rows.append({"stage": key, "field": f"model_stage_{key}", "label": label, "help": help_,
                      "value": ", ".join(stage_models.patterns(config, key)),
-                     "default": ", ".join(default), "models": model_options})
+                     "default": ", ".join(default), "models": model_options,
+                     "suited": stage_models.SUITED.get(key, ""),
+                     "ladder": stage_models.ladder(config, key)})
     return rows
 
 
