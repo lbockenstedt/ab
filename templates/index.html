@@ -533,7 +533,6 @@
             <span class="text-slate-300 select-none">|</span>
             <span class="text-[10px] uppercase tracking-wide text-slate-400 select-none">Models</span>
             <button type="button" title="Providers, API keys and the model list" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM Providers</button>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-local-llm" onclick="settingsTab('sec-local-llm')">Local LLM</button>
             <button type="button" title="Model Registry — the capability and cost rules that rank every enabled endpoint. Edit each rule with labelled dropdowns instead of raw JSON." class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-model-registry" onclick="settingsTab('sec-model-registry')">Model Registry</button>
             <button type="button" title="Which models are tried first, and the reserved premium models" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-model-policy" onclick="settingsTab('sec-model-policy')">Model Policy</button>
             <span class="text-slate-300 select-none">|</span>
@@ -1757,135 +1756,7 @@
                         </div>
 </details>
 
-                                            <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
-                        </div>
-                    </section>
-
-                    <!-- Model Registry (capability & cost rules) ----------------
-                         Its own tab because the rule schema is wide: 3 identity
-                         fields, 4 ranking fields over 3 closed vocabularies, and
-                         6 capability booleans. Rendered as one card per rule with
-                         a labelled control for every field, so nothing has to be
-                         typed from memory. The JSON textarea is still the form
-                         field that posts (name="model_registry_json") -- the
-                         cards write into it on every change, and it stays
-                         reachable under "Advanced" so an existing JSON workflow
-                         keeps working. -->
-                    <section id="sec-model-registry" data-settings-section hidden>
-                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-sliders-h text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">Model Registry &mdash; Capability &amp; Cost Rules</h4>
-                            <span id="registry-rule-count" class="ml-auto text-xs text-slate-500"></span>
-                        </div>
-                        <p class="text-xs text-slate-500 mb-4">
-                            Routing is capability/cost-aware: there are no fixed provider slots. Every <b>enabled</b> endpoint
-                            (Settings &rarr; LLM &rarr; Step 2) is ranked per call by the rules below &mdash; which model can do how hard
-                            a job, at what cost tier, with which capabilities. The <b>most specific</b> <span class="font-mono">match</span>
-                            glob wins, so a rule for <span class="font-mono">claude-opus-*</span> beats a catch-all <span class="font-mono">*</span>
-                            for the same provider. Changes here are not live until you press <b>Save</b>.
-                        </p>
-
-                        {% if registry_unclassified %}
-                        <div class="mb-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
-                            <b>{{ registry_unclassified|length }} unclassified model(s)</b> were auto-discovered but match no curated rule
-                            (cost tier <span class="font-mono">unknown</span> &mdash; admitted only as a last resort). Add a rule for each to control how it is used:
-                            <div class="mt-2 flex flex-wrap gap-2">
-                                {% for u in registry_unclassified %}
-                                <button type="button" title="Add a curated rule for {{ u.provider }} / {{ u.model }} prefilled with safe defaults, then tune it below" onclick="promoteRegistryStub('{{ u.provider }}', '{{ u.model }}')" class="px-2 py-1 rounded-full bg-white border border-amber-300 hover:bg-amber-100 font-mono text-xs">+ {{ u.provider }} / {{ u.model }}</button>
-                                {% endfor %}
-                            </div>
-                        </div>
-                        {% endif %}
-
-                        <div id="registry-parse-error" hidden class="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs"></div>
-
-                        <!-- Toolbar -->
-                        <div class="flex flex-wrap items-center gap-2 mb-3">
-                            <button type="button" title="Append a new empty rule with safe defaults (cheap / medium / streaming) to the bottom of the list" onclick="abRegAdd()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-plus mr-1"></i>Add rule</button>
-                            <button type="button" title="Upsert free-tier catch-all rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" onclick="registrySetLocalFree()" class="px-3 py-1.5 rounded-full text-xs btn-sec">Set local providers free</button>
-                            <button type="button" title="Expand every rule card so all fields are visible" onclick="abRegExpandAll(true)" class="px-3 py-1.5 rounded-full text-xs btn-sec">Expand all</button>
-                            <button type="button" title="Collapse every rule card back to its one-line summary" onclick="abRegExpandAll(false)" class="px-3 py-1.5 rounded-full text-xs btn-sec">Collapse all</button>
-                            <input id="registry-filter" type="search" placeholder="Filter by provider, match or label&hellip;" title="Show only rules whose provider, match glob, label or id contains this text. Filtering never changes what is saved." oninput="abRegRender()" class="ml-auto w-64 p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-brand">
-                        </div>
-
-                        <!-- Suggestions only: `list` on a text input keeps a
-                             custom provider typeable, unlike a closed dropdown. -->
-                        <datalist id="ab-reg-providers">
-                            <option value="anthropic"></option>
-                            <option value="claude_cli"></option>
-                            <option value="copilot"></option>
-                            <option value="google"></option>
-                            <option value="groq"></option>
-                            <option value="lmstudio"></option>
-                            <option value="lm_pool"></option>
-                            <option value="ollama"></option>
-                            <option value="ollama2"></option>
-                            <option value="ollama_cloud"></option>
-                            <option value="openai"></option>
-                            <option value="openrouter"></option>
-                        </datalist>
-
-                        <!-- One card per rule, rendered by abRegRender() -->
-                        <div id="registry-cards" class="space-y-2"></div>
-
-                        <!-- Advanced: the raw JSON that actually posts. -->
-                        <div class="mt-4">
-                            <a href="javascript:void(0)" onclick="abRegToggleJson()" id="registry-json-toggle" class="text-xs font-bold text-primary-text hover:underline">&#9656; Advanced &mdash; raw JSON</a>
-                        </div>
-                        <div id="registry-json-box" hidden class="mt-2">
-                            <p class="text-xs text-slate-500 mb-2">This is the value that posts. The cards above rewrite it on every change; edit it directly and press <b>Apply JSON to editor</b> to pull your changes back into the cards. A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span> and <span class="font-mono">match</span>. Invalid JSON is rejected on save and the previous value is kept.</p>
-                            <textarea id="model_registry_json" name="model_registry_json" rows="14" spellcheck="false" title="The raw model-registry rule list, as JSON. Normally maintained by the cards above." class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">{{ registry_rules_json }}</textarea>
-                            <button type="button" title="Re-parse the JSON above and rebuild the rule cards from it. Use after editing the JSON by hand." onclick="abRegApplyJson()" class="mt-2 px-3 py-1.5 rounded-full text-xs btn-sec">Apply JSON to editor</button>
-                        </div>
-
-                        <!-- Effective merged registry (read-only) -->
-                        <p class="text-xs font-bold text-slate-500 mt-6 mb-2">Effective registry (preview &mdash; as last saved)</p>
-                        <p class="text-xs text-slate-500 mb-2">Curated rules merged with auto-discovered models, with <span class="font-mono">speed</span> and <span class="font-mono">rank</span> resolved through their fallbacks. This reflects the <b>saved</b> config, so it updates after you press Save and the page reloads.</p>
-                        <div class="overflow-x-auto border border-slate-200 rounded-lg">
-                            <table class="w-full text-xs">
-                                <thead class="bg-slate-50 text-slate-500"><tr>
-                                    <th class="px-2 py-1 text-left">Provider</th><th class="px-2 py-1 text-left">Match</th>
-                                    <th class="px-2 py-1 text-left">Cost</th><th class="px-2 py-1 text-left">Max</th>
-                                    <th class="px-2 py-1 text-right">Context</th>
-                                    <th class="px-2 py-1 text-left" title="Declared speed class — the cold-start prior for latency-sensitive routing (chat). Measured tok/s still breaks ties inside a class.">Speed</th>
-                                    <th class="px-2 py-1 text-right" title="Relative strength WITHIN a cost tier (0-100). Orders demanding work (complexity=large, prefer_capable) — never filters.">Rank</th>
-                                    <th class="px-2 py-1 text-center">Tools</th>
-                                    <th class="px-2 py-1 text-center">Agentic</th><th class="px-2 py-1 text-center">Struct</th>
-                                    <th class="px-2 py-1 text-center">Batch</th><th class="px-2 py-1 text-left">Source</th>
-                                </tr></thead>
-                                <tbody>
-                                    {% for r in registry_preview %}
-                                    <tr class="border-t border-slate-100 {{ 'opacity-40' if r.enabled == False else '' }}">
-                                        <td class="px-2 py-1 text-slate-600">{{ r.provider }}</td>
-                                        <td class="px-2 py-1 font-mono text-slate-500">{{ r.match }}</td>
-                                        <td class="px-2 py-1">{{ r.cost_tier }}</td>
-                                        <td class="px-2 py-1">{{ r.max_complexity }}</td>
-                                        <td class="px-2 py-1 text-right">{{ r.context_window }}</td>
-                                        <td class="px-2 py-1">{{ r.speed_tier }}</td>
-                                        <td class="px-2 py-1 text-right tabular-nums">{{ r.capability_rank }}</td>
-                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_tools else '' }}</td>
-                                        <td class="px-2 py-1 text-center">{{ '✓' if r.native_agentic_tools else '' }}</td>
-                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_structured_output else '' }}</td>
-                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_batch else '' }}</td>
-                                        <td class="px-2 py-1"><span class="text-xs px-1.5 py-0.5 rounded {{ 'bg-emerald-100 text-emerald-700' if r.source == 'curated' else 'bg-slate-100 text-slate-500' }}">{{ r.source }}</span></td>
-                                    </tr>
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <div class="flex justify-end pt-6 mt-2">
-                            <button type="button" title="Persist the registry (and every other settings tab) to config" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
-                        </div>
-                    </section>
-
-                    <!-- Local LLM (CPU-only) Setup -->
-                    <section id="sec-local-llm" data-settings-section hidden>
-                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
-                            <i class="fas fa-microchip text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">Local LLM (CPU-only) Setup</h4>
-                        </div>
+<div class="mt-8 pt-6 border-t border-slate-200"><h4 class="text-sm font-bold text-slate-500 mb-3"><i class="fas fa-microchip mr-2"></i>Local LLM (CPU-only)</h4>
 <details class="mb-4 border border-slate-200 rounded-lg p-3"><summary class="cursor-pointer text-sm font-bold text-slate-600">Install &amp; set up Ollama</summary>
                         <p class="text-xs text-slate-500 mb-4">
                             One click installs <strong>Ollama</strong> (if missing), pulls a local CPU model,
@@ -2025,10 +1896,130 @@
                         </div>
 </details>
 
+</div>
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
                     </section>
+
+                    <!-- Model Registry (capability & cost rules) ----------------
+                         Its own tab because the rule schema is wide: 3 identity
+                         fields, 4 ranking fields over 3 closed vocabularies, and
+                         6 capability booleans. Rendered as one card per rule with
+                         a labelled control for every field, so nothing has to be
+                         typed from memory. The JSON textarea is still the form
+                         field that posts (name="model_registry_json") -- the
+                         cards write into it on every change, and it stays
+                         reachable under "Advanced" so an existing JSON workflow
+                         keeps working. -->
+                    <section id="sec-model-registry" data-settings-section hidden>
+                        <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
+                            <i class="fas fa-sliders-h text-slate-500"></i>
+                            <h4 class="text-sm font-bold text-slate-500">Model Registry &mdash; Capability &amp; Cost Rules</h4>
+                            <span id="registry-rule-count" class="ml-auto text-xs text-slate-500"></span>
+                        </div>
+                        <p class="text-xs text-slate-500 mb-4">
+                            Routing is capability/cost-aware: there are no fixed provider slots. Every <b>enabled</b> endpoint
+                            (Settings &rarr; LLM &rarr; Step 2) is ranked per call by the rules below &mdash; which model can do how hard
+                            a job, at what cost tier, with which capabilities. The <b>most specific</b> <span class="font-mono">match</span>
+                            glob wins, so a rule for <span class="font-mono">claude-opus-*</span> beats a catch-all <span class="font-mono">*</span>
+                            for the same provider. Changes here are not live until you press <b>Save</b>.
+                        </p>
+
+                        {% if registry_unclassified %}
+                        <div class="mb-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+                            <b>{{ registry_unclassified|length }} unclassified model(s)</b> were auto-discovered but match no curated rule
+                            (cost tier <span class="font-mono">unknown</span> &mdash; admitted only as a last resort). Add a rule for each to control how it is used:
+                            <div class="mt-2 flex flex-wrap gap-2">
+                                {% for u in registry_unclassified %}
+                                <button type="button" title="Add a curated rule for {{ u.provider }} / {{ u.model }} prefilled with safe defaults, then tune it below" onclick="promoteRegistryStub('{{ u.provider }}', '{{ u.model }}')" class="px-2 py-1 rounded-full bg-white border border-amber-300 hover:bg-amber-100 font-mono text-xs">+ {{ u.provider }} / {{ u.model }}</button>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <div id="registry-parse-error" hidden class="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs"></div>
+
+                        <!-- Toolbar -->
+                        <div class="flex flex-wrap items-center gap-2 mb-3">
+                            <button type="button" title="Append a new empty rule with safe defaults (cheap / medium / streaming) to the bottom of the list" onclick="abRegAdd()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand"><i class="fas fa-plus mr-1"></i>Add rule</button>
+                            <button type="button" title="Upsert free-tier catch-all rules for the self-hosted providers ollama, ollama2 and lmstudio so your local CPU and GPU models classify as free" onclick="registrySetLocalFree()" class="px-3 py-1.5 rounded-full text-xs btn-sec">Set local providers free</button>
+                            <button type="button" title="Expand every rule card so all fields are visible" onclick="abRegExpandAll(true)" class="px-3 py-1.5 rounded-full text-xs btn-sec">Expand all</button>
+                            <button type="button" title="Collapse every rule card back to its one-line summary" onclick="abRegExpandAll(false)" class="px-3 py-1.5 rounded-full text-xs btn-sec">Collapse all</button>
+                            <input id="registry-filter" type="search" placeholder="Filter by provider, match or label&hellip;" title="Show only rules whose provider, match glob, label or id contains this text. Filtering never changes what is saved." oninput="abRegRender()" class="ml-auto w-64 p-2 rounded border border-slate-300 text-xs outline-none focus:ring-2 focus:ring-brand">
+                        </div>
+
+                        <!-- Suggestions only: `list` on a text input keeps a
+                             custom provider typeable, unlike a closed dropdown. -->
+                        <datalist id="ab-reg-providers">
+                            <option value="anthropic"></option>
+                            <option value="claude_cli"></option>
+                            <option value="copilot"></option>
+                            <option value="google"></option>
+                            <option value="groq"></option>
+                            <option value="lmstudio"></option>
+                            <option value="lm_pool"></option>
+                            <option value="ollama"></option>
+                            <option value="ollama2"></option>
+                            <option value="ollama_cloud"></option>
+                            <option value="openai"></option>
+                            <option value="openrouter"></option>
+                        </datalist>
+
+                        <!-- One card per rule, rendered by abRegRender() -->
+                        <div id="registry-cards" class="space-y-2"></div>
+
+                        <!-- Advanced: the raw JSON that actually posts. -->
+                        <div class="mt-4">
+                            <a href="javascript:void(0)" onclick="abRegToggleJson()" id="registry-json-toggle" class="text-xs font-bold text-primary-text hover:underline">&#9656; Advanced &mdash; raw JSON</a>
+                        </div>
+                        <div id="registry-json-box" hidden class="mt-2">
+                            <p class="text-xs text-slate-500 mb-2">This is the value that posts. The cards above rewrite it on every change; edit it directly and press <b>Apply JSON to editor</b> to pull your changes back into the cards. A JSON list; each rule needs at least <span class="font-mono">id</span>, <span class="font-mono">provider</span> and <span class="font-mono">match</span>. Invalid JSON is rejected on save and the previous value is kept.</p>
+                            <textarea id="model_registry_json" name="model_registry_json" rows="14" spellcheck="false" title="The raw model-registry rule list, as JSON. Normally maintained by the cards above." class="w-full p-2 font-mono text-xs rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">{{ registry_rules_json }}</textarea>
+                            <button type="button" title="Re-parse the JSON above and rebuild the rule cards from it. Use after editing the JSON by hand." onclick="abRegApplyJson()" class="mt-2 px-3 py-1.5 rounded-full text-xs btn-sec">Apply JSON to editor</button>
+                        </div>
+
+                        <!-- Effective merged registry (read-only) -->
+                        <p class="text-xs font-bold text-slate-500 mt-6 mb-2">Effective registry (preview &mdash; as last saved)</p>
+                        <p class="text-xs text-slate-500 mb-2">Curated rules merged with auto-discovered models, with <span class="font-mono">speed</span> and <span class="font-mono">rank</span> resolved through their fallbacks. This reflects the <b>saved</b> config, so it updates after you press Save and the page reloads.</p>
+                        <div class="overflow-x-auto border border-slate-200 rounded-lg">
+                            <table class="w-full text-xs">
+                                <thead class="bg-slate-50 text-slate-500"><tr>
+                                    <th class="px-2 py-1 text-left">Provider</th><th class="px-2 py-1 text-left">Match</th>
+                                    <th class="px-2 py-1 text-left">Cost</th><th class="px-2 py-1 text-left">Max</th>
+                                    <th class="px-2 py-1 text-right">Context</th>
+                                    <th class="px-2 py-1 text-left" title="Declared speed class — the cold-start prior for latency-sensitive routing (chat). Measured tok/s still breaks ties inside a class.">Speed</th>
+                                    <th class="px-2 py-1 text-right" title="Relative strength WITHIN a cost tier (0-100). Orders demanding work (complexity=large, prefer_capable) — never filters.">Rank</th>
+                                    <th class="px-2 py-1 text-center">Tools</th>
+                                    <th class="px-2 py-1 text-center">Agentic</th><th class="px-2 py-1 text-center">Struct</th>
+                                    <th class="px-2 py-1 text-center">Batch</th><th class="px-2 py-1 text-left">Source</th>
+                                </tr></thead>
+                                <tbody>
+                                    {% for r in registry_preview %}
+                                    <tr class="border-t border-slate-100 {{ 'opacity-40' if r.enabled == False else '' }}">
+                                        <td class="px-2 py-1 text-slate-600">{{ r.provider }}</td>
+                                        <td class="px-2 py-1 font-mono text-slate-500">{{ r.match }}</td>
+                                        <td class="px-2 py-1">{{ r.cost_tier }}</td>
+                                        <td class="px-2 py-1">{{ r.max_complexity }}</td>
+                                        <td class="px-2 py-1 text-right">{{ r.context_window }}</td>
+                                        <td class="px-2 py-1">{{ r.speed_tier }}</td>
+                                        <td class="px-2 py-1 text-right tabular-nums">{{ r.capability_rank }}</td>
+                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_tools else '' }}</td>
+                                        <td class="px-2 py-1 text-center">{{ '✓' if r.native_agentic_tools else '' }}</td>
+                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_structured_output else '' }}</td>
+                                        <td class="px-2 py-1 text-center">{{ '✓' if r.supports_batch else '' }}</td>
+                                        <td class="px-2 py-1"><span class="text-xs px-1.5 py-0.5 rounded {{ 'bg-emerald-100 text-emerald-700' if r.source == 'curated' else 'bg-slate-100 text-slate-500' }}">{{ r.source }}</span></td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" title="Persist the registry (and every other settings tab) to config" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
+                        </div>
+                    </section>
+
 
                     <!-- 3. QA & Verification -->
                     <section id="sec-qa" data-settings-section hidden>
