@@ -69,6 +69,7 @@ def _load_fetch_models():
         "GOOGLE_BASE_URL": "https://generativelanguage.googleapis.com",
         "ANTHROPIC_API_VERSION": "2023-06-01",
         "_is_lmstudio": lambda p: False,
+        "_is_lm_pool": lambda p: False,
         "_is_ollama": lambda p: False,
         "logger": _NoLog(),
     }

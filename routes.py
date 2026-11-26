@@ -3084,6 +3084,7 @@ async def settings_page(request: Request):
     _curated, _mr_claude_paid = _registry.reclassify_claude_cli_paid(_curated)
     _curated, _mr_claude_models = _registry.upgrade_claude_cli_model_rules(_curated)
     _curated, _mr_copilot_models = _registry.upgrade_copilot_model_rules(_curated)
+    _curated, _mr_pool = _registry.upgrade_lm_pool_rule(_curated)
     _curated, _mr_oc_models = _registry.upgrade_ollama_cloud_model_rules(_curated)
     _curated, _mr_oc_tools = _registry.enable_ollama_cloud_tools(_curated)
     _curated, _mr_or_router = _registry.upgrade_openrouter_free_router_rule(_curated)
@@ -3659,6 +3660,8 @@ async def save_settings(request: Request):
             config_data["model_registry"], _ = _registry_save.upgrade_claude_cli_model_rules(
                 config_data["model_registry"])
             config_data["model_registry"], _ = _registry_save.upgrade_copilot_model_rules(
+                config_data["model_registry"])
+            config_data["model_registry"], _ = _registry_save.upgrade_lm_pool_rule(
                 config_data["model_registry"])
             config_data["model_registry"], _ = _registry_save.upgrade_ollama_cloud_model_rules(
                 config_data["model_registry"])
@@ -4304,6 +4307,7 @@ async def test_llm_entry(entry_id: str):
     # Need a model and, for most providers, a key.
     _eid, provider, api_key, model, base_url = match
     no_key_needed = (llm_client._is_ollama(provider) or llm_client._is_lmstudio(provider)
+                     or llm_client._is_lm_pool(provider)
                      or (provider or "").lower().strip() == "claude_cli")
     if not model or (not api_key and not no_key_needed):
         return JSONResponse(status_code=400, content={"error": "entry is missing a model or credential"})
