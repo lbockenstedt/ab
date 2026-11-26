@@ -69,6 +69,6 @@ def test_pool_only_waits_then_raises_and_never_returns_none():
 
 def test_oversized_prompt_is_trimmed_to_the_hub_limit():
     client = _Client({"status": "SUCCESS", "text": "ok"})
-    _load(client)[0]("identify_files", "H" + "x" * 200000 + "T", None, {})
+    _load(client)[0]("identify_files", "H" + "x" * 400000 + "T", None, {})
     sent = client.sent[0][1]["prompt"]
-    assert len(sent.encode()) < 65536 and sent.startswith("H") and sent.endswith("T")
+    assert len(sent.encode()) < 192 * 1024 and sent.startswith("H") and sent.endswith("T")

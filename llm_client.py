@@ -3580,7 +3580,7 @@ DEFAULT_LM_TASKS = {
 }
 
 
-LM_PROMPT_MAX_BYTES = 60000  # the hub rejects prompts over 65536 bytes as invalid_request
+LM_PROMPT_MAX_BYTES = 160000  # the hub rejects prompts over 192 KiB; this leaves room in the 64k-token context for the reply
 
 
 def _fit_lm_prompt(prompt):
