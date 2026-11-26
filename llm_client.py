@@ -17,6 +17,7 @@ _llm_cb_snapshot/_provider_credit_cb_snapshot). llm_client therefore cannot bind
 call time, by which point main has re-exported app_state's `state`).
 """
 import collections
+import contextlib
 import json
 import os
 import random
@@ -1283,7 +1284,8 @@ def _get_category_semaphore(pool_name):
         if sem is None:
             try:
                 cfg = load_config()
-                max_conc = int(cfg.get("LLM_MAX_CONCURRENT", 1))
+                max_conc = int(cfg.get("LM_POOL_MAX_CONCURRENT", 6) if pool_name == "PICKER_POOL"
+                               else cfg.get("LLM_MAX_CONCURRENT", 1))
             except Exception:
                 max_conc = 1
             sem = threading.Semaphore(max(1, max_conc))
@@ -3282,7 +3284,8 @@ def _try_candidate(candidate, messages, tools, effective_stream, task_id, config
                                           candidate["base_url"], candidate["api_key"])
     mk = candidate["key"]
     # One call per model at a time; record what is running, then call it.
-    with _model_lock(mk):
+    # LM-pool calls skip the per-model lock: the hub queues and balances its workers.
+    with (contextlib.nullcontext() if (provider or "").lower().strip() == "lm_pool" else _model_lock(mk)):
         try:
             main.state["active_llm"] = model
             main.state["active_llm_slot"] = "picker"
@@ -3479,7 +3482,9 @@ def _call_llm_with_requirements(reqs, prompt, system_prompt, messages, tools, st
         agentic_repo_max_chars = 12000
 
     # Limit concurrent picker calls.
-    sem = _get_category_semaphore("PICKER")
+    # A chain made only of LM-pool entries has its own, wider limit (one slot per worker).
+    sem = _get_category_semaphore(
+        "PICKER_POOL" if chain and all((c.get("provider") or "").lower().strip() == "lm_pool" for c in chain) else "PICKER")
     sem.acquire()
     try:
         # Try each candidate in order.
