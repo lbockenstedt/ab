@@ -324,7 +324,7 @@ def _copilot_api_token(gh_token):
 
 
 #: Pool tasks an entry may use as its model (the hub's AppBuilder work rule must allow each).
-LM_POOL_TASKS = ("scout", "summary", "pr_summary", "coding", "review", "review_deep")
+LM_POOL_TASKS = ("scout", "summary", "pr_summary", "coding", "reasoning", "review", "review_deep")
 
 
 def _is_lm_pool(provider):
