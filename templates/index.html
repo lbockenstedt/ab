@@ -2936,6 +2936,17 @@
                                 <label class="text-sm font-medium text-slate-600" for="{{ st.field }}">{{ st.label }}</label>
                                 <input type="text" id="{{ st.field }}" name="{{ st.field }}" value="{{ st.value }}" title="{{ st.help }}" placeholder="{{ st.default }}" class="w-full p-2 text-xs rounded-lg border border-slate-300 outline-none focus:ring-1 focus:ring-brand">
                                 <p class="text-xs text-slate-500">{{ st.help }} Default: <code>{{ st.default }}</code>.</p>
+                                <p class="text-xs text-slate-500">{{ st.suited }}</p>
+                                <table class="w-full text-left text-xs rounded-lg border border-slate-200 overflow-hidden" title="The picker tries free local models first, then cheap, then frontier. A model is skipped when it is down or out of credit.">
+                                    <thead class="bg-slate-50 text-slate-500"><tr><th class="px-3 py-1.5 font-medium">Tried</th><th class="px-3 py-1.5 font-medium">Model</th><th class="px-3 py-1.5 font-medium">Where</th><th class="px-3 py-1.5 font-medium">Cost tier</th></tr></thead>
+                                    <tbody class="divide-y divide-slate-100">
+                                        {% for r in st.ladder %}
+                                        <tr><td class="px-3 py-1">{{ r.order }}</td><td class="px-3 py-1 font-mono">{{ r.model }}</td><td class="px-3 py-1">{{ r.where }}</td><td class="px-3 py-1">{{ r.tier }}</td></tr>
+                                        {% else %}
+                                        <tr><td colspan="4" class="px-3 py-1 text-amber-700">No configured model matches this list, so the normal pool is used.</td></tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
                                 {% if st.models %}
                                 <div class="flex flex-wrap gap-1">
                                     {% for m in st.models %}

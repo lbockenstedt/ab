@@ -20,16 +20,53 @@ DIAGNOSTIC_MARKER = "verdict: `health-check`"
 # stage key -> (config key, default patterns, label, help)
 STAGES: Dict[str, Tuple[str, Tuple[str, ...], str, str]] = {
     "diag_identify": (
-        "diagnostic_identify_models", ("claude-sonnet-5.5*", "claude-opus-5*", "claude-opus-6*"),
+        "diagnostic_identify_models",
+        ("scout", "claude-sonnet-5.5*", "claude-opus-5*", "claude-opus-6*"),
         "Diagnostic issues: find the files",
         "Models allowed to decide which files a health-check finding points at. The default "
         "ordinary file-finding step uses the cheapest capable model, which can pick the wrong repo."),
     "diag_fix": (
-        "diagnostic_fix_models", ("claude-opus-5*", "claude-opus-6*"),
+        "diagnostic_fix_models", ("coding", "claude-opus-5*", "claude-opus-6*"),
         "Diagnostic issues: write the fix",
         "Models allowed to write the first fix attempt for a health-check finding (root cause "
         "spans hub, spokes and feeders). Ordinary issues keep the normal fix ladder."),
 }
+
+
+# Pool tasks (free, local) and the stage each suits; shown next to the stage so the
+# operator knows what to add. A pool entry's model is its task name.
+SUITED = {
+    "diag_identify": "Best: scout (Qwen 3.8, read-only search). Cloud: Sonnet, Opus.",
+    "diag_fix": "Best: coding (Qwen 3.6 coder). Cloud: Opus-class only. Add reasoning (DeepSeek R1, slow) only to a stage that needs it.",
+}
+
+
+def ladder(config: Dict[str, Any], stage: str) -> list:
+    """The configured models this stage may use, in the order the picker tries them.
+
+    The picker is cost-first: free (local) models, then cheap, then frontier;
+    within a tier, the order of the patterns. A model that is down or has no
+    credit is skipped at call time and is not shown as such here."""
+    try:
+        import llm_client
+        import model_registry
+        cands = llm_client._enumerate_candidates(config)
+    except Exception as e:  # noqa: BLE001 - a settings page must render without it
+        logger.debug("stage_models: could not enumerate candidates: %s", e)
+        return []
+    pats = patterns(config, stage)
+    rows = []
+    for c in cands:
+        if not _allowed(c.get("model"), pats):
+            continue
+        tier = (c.get("caps") or {}).get("cost_tier", "unknown")
+        m = str(c.get("model") or "").lower().split("/")[-1]
+        idx = next(i for i, p in enumerate(pats) if fnmatch.fnmatchcase(m, p))
+        rows.append((model_registry.COST_TIER_RANK.get(tier, 99), idx, {
+            "model": c.get("model"), "provider": c.get("provider"), "tier": tier,
+            "where": "Local (free)" if model_registry.is_local_provider(c.get("provider")) else "Cloud"}))
+    rows.sort(key=lambda r: r[:2])
+    return [dict(r[2], order=n) for n, r in enumerate(rows, 1)]
 
 
 def is_diagnostic(issue_body: Any) -> bool:
