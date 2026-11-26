@@ -528,8 +528,8 @@
     <div class="hpe-subnav flex-none">
         <div class="ab-wrap px-6 flex gap-4 text-sm overflow-x-auto items-center">
             <span class="text-[10px] uppercase tracking-wide text-slate-400 select-none">Connect</span>
-            <button type="button" class="sub-nav-item active py-2.5 whitespace-nowrap select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub</button>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in (SSO)</button>
+            <button type="button" class="sub-nav-item active py-2.5 whitespace-nowrap select-none" data-tab="sec-github" onclick="settingsTab('sec-github')">GitHub &amp; Hub</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-sso" onclick="settingsTab('sec-sso')">Sign-in &amp; Users</button>
             <span class="text-slate-300 select-none">|</span>
             <span class="text-[10px] uppercase tracking-wide text-slate-400 select-none">Models</span>
             <button type="button" title="Providers, API keys and the model list" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-llm" onclick="settingsTab('sec-llm')">LLM Providers</button>
@@ -538,7 +538,7 @@
             <button type="button" title="Which models are tried first, and the reserved premium models" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-model-policy" onclick="settingsTab('sec-model-policy')">Model Policy</button>
             <span class="text-slate-300 select-none">|</span>
             <span class="text-[10px] uppercase tracking-wide text-slate-400 select-none">Pipeline</span>
-            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Scheduler</button>
+            <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-scheduler" onclick="settingsTab('sec-scheduler')">Schedule &amp; Limits</button>
             <button type="button" title="PR pre-review and verification" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-qa" onclick="settingsTab('sec-qa')">PR Review</button>
             <button type="button" title="Fixing, labels, hub agent and deployment" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-automation" onclick="settingsTab('sec-automation')">Fix &amp; Deploy</button>
             <button type="button" class="sub-nav-item py-2.5 whitespace-nowrap select-none" data-tab="sec-feature-drive" onclick="settingsTab('sec-feature-drive')">Feature Auto-Drive</button>
@@ -1308,7 +1308,7 @@
                     <section id="sec-github" data-settings-section>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-github text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">GitHub & Repository Core</h4>
+                            <h4 class="text-sm font-bold text-slate-500">GitHub, Repositories &amp; Hub</h4>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
@@ -1415,6 +1415,53 @@
                                 <input type="text" name="self_diagnosis_repo" value="{{ settings.self_diagnosis_repo }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. lbockenstedt/ab">
                             </div>
                                                     </div>
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Hub connection</label>
+                            <p class="text-xs text-slate-500">How this AppBuilder reaches the Lab Manager hub.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Hub WebUI URL (approvals + status fallback)</label>
+                                <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="http://your-hub:8000">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Hub WebSocket URL</label>
+                                <input type="text" name="HUB_WS_URL" value="{{ settings.HUB_WS_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="ws://your-hub:8765 (derived from Hub WebUI URL if blank)">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Hub Agent ID</label>
+                                <input type="text" name="HUB_AGENT_ID" value="{{ settings.HUB_AGENT_ID or 'ab' }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="ab">
+                            </div>
+                            </div>
+                        <!-- Hub Agent status / approval panel (AppBuilder authenticates to the
+                             Hub as a WebSocket agent — zero-touch onboarding, admin approval,
+                             then signed requests for logs + update triggers). -->
+                        <div class="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="text-sm font-semibold text-slate-700">Hub Agent</span>
+                                <span id="hub-agent-badge" class="text-xs font-bold px-2 py-0.5 rounded-full"
+                                      data-status="{{ state.hub_agent_status }}">
+                                    {{ state.hub_agent_status }}
+                                </span>
+                            </div>
+                            <div id="hub-agent-message" class="text-xs text-slate-500 mb-2">{{ state.hub_agent_message }}</div>
+                            <div class="flex items-center gap-2">
+                                <button type="button" onclick="hubAgentReregister()"
+                                        class="px-3 py-1 text-xs btn-primary rounded-full font-bold">Re-register</button>
+                                <button type="button" onclick="hubAgentRefresh()"
+                                        class="px-3 py-1 text-xs btn-sec rounded-full font-bold">Refresh</button>
+                            </div>
+                            <p class="text-xs text-slate-500 mt-2">
+                                Approve <code class="bg-slate-100 px-1 rounded">ab</code> in the Hub WebUI → Setup → Spoke Approvals
+                                {% if settings.HUB_QUERY_URL %}at <a href="{{ settings.HUB_QUERY_URL }}" target="_blank" class="text-primary-text underline">{{ settings.HUB_QUERY_URL }}</a>{% endif %}.
+                                The session key is exchanged automatically after approval — zero-touch.
+                            </p>
+                        </div>
+                        </div>
+
+
+                        <div class="flex justify-end pt-6 mt-2">
+                            <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
+                        </div>
                     </section>
 
                     <!-- 2. LLM Configuration -->
@@ -1441,6 +1488,7 @@
                         </div>
 
                         <!-- Step A: Credentials Vault -->
+<details class="mb-4 border border-slate-200 rounded-lg p-3"><summary class="cursor-pointer text-sm font-bold text-slate-600">Credential vault</summary>
                         <div class="mb-6">
                             <p class="text-xs font-bold text-slate-500 mb-3">Step 1 — API Credentials</p>
                             {# The list grew long once every provider rendered unconditionally. Now only providers already in use (a saved credential/base_url, or referenced by an entry) show by default; the rest are added on demand from the picker below. #}
@@ -1543,8 +1591,10 @@
                                 {% endfor %}
                             </div>
                         </div>
+</details>
 
                         <!-- Step B: LLM Entries -->
+<details class="mb-4 border border-slate-200 rounded-lg p-3"><summary class="cursor-pointer text-sm font-bold text-slate-600">LLM endpoints</summary>
                         <div class="mb-6">
                             <div class="flex items-center justify-between mb-3">
                                 <p class="text-xs font-bold text-slate-500">Step 2 — Provider / Model Entries</p>
@@ -1642,6 +1692,7 @@
                                 {% endfor %}
                             </div>
                         </div>
+</details>
 
                         <!-- Step C: Model Registry -- now a tab of its own.
                              The rules carry 14 fields across 4 value vocabularies,
@@ -1658,6 +1709,7 @@
                             {% endif %}
                         </div>
 
+<details class="mb-4 border border-slate-200 rounded-lg p-3"><summary class="cursor-pointer text-sm font-bold text-slate-600">Timeouts, spend gate &amp; fix/review ladders</summary>
                         <!-- Timeout -->
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                             <div class="space-y-2">
@@ -1690,6 +1742,21 @@
                             <div class="text-xs font-medium text-slate-700 mb-1" title="Every charged PR fix attempt, by the model that wrote it. 'After review' counts retries fed by the reviewer panel's critique. Cost is the attempt's paid-model estimate (ai_spend).">Fix results by model (last 30 days)</div>
                             <div id="fix-outcomes-table" class="text-xs text-slate-500">Loading…</div>
                         </div>
+</details>
+<details class="mb-4 border border-slate-200 rounded-lg p-3"><summary class="cursor-pointer text-sm font-bold text-slate-600">Claude CLI</summary>
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Claude CLI</label>
+                            <p class="text-xs text-slate-500">Used by the agentic fix step.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                                                        <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Claude CLI binary path</label>
+                                <input type="text" name="claude_binary" value="{{ settings.claude_binary or '' }}" placeholder="auto-detect (leave blank)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                <span class="text-xs text-slate-500">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
+                            </div>
+                            </div>
+                        </div>
+</details>
+
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
@@ -1819,6 +1886,7 @@
                             <i class="fas fa-microchip text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500">Local LLM (CPU-only) Setup</h4>
                         </div>
+<details class="mb-4 border border-slate-200 rounded-lg p-3"><summary class="cursor-pointer text-sm font-bold text-slate-600">Install &amp; set up Ollama</summary>
                         <p class="text-xs text-slate-500 mb-4">
                             One click installs <strong>Ollama</strong> (if missing), pulls a local CPU model,
                             applies CPU tuning (a systemd override + a context-tuned model), restarts the
@@ -1863,8 +1931,10 @@
                             <div id="local-llm-setup-status-line" class="font-medium text-slate-200 mb-2"></div>
                             <pre id="local-llm-setup-log" class="whitespace-pre-wrap break-all text-xs text-green-400 max-h-80 overflow-y-auto font-mono"></pre>
                         </div>
+</details>
 
                         <!-- Manage Models: list / pull / delete on any ollama endpoint -->
+<details class="mb-4 border border-slate-200 rounded-lg p-3"><summary class="cursor-pointer text-sm font-bold text-slate-600">Manage Ollama models</summary>
                         <div class="mt-8 pt-6 border-t border-slate-200">
                             <h4 class="text-sm font-bold text-slate-500 mb-1">Manage Ollama Models</h4>
                             <p class="text-xs text-slate-500 mb-3">List, pull, and remove models on an Ollama endpoint. Point it at your local box (default) or a remote one (e.g. the M4) via the Endpoint field.</p>
@@ -1914,6 +1984,46 @@
                                 <pre id="mm-pull-log" class="whitespace-pre-wrap break-all text-xs text-green-400 max-h-56 overflow-y-auto font-mono"></pre>
                             </div>
                         </div>
+
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Model loading &amp; runtime</label>
+                            <p class="text-xs text-slate-500">How Ollama loads and runs models, and whether scans wait for them.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                            <div class="space-y-2">
+                                <label class="flex items-center gap-2 text-sm font-medium text-slate-600">
+                                    <input type="checkbox" name="gate_scans_on_model_preload" value="1" {{ 'checked' if settings.gate_scans_on_model_preload else '' }} class="w-4 h-4 accent-brand">
+                                    Hold scans until models are loaded
+                                </label>
+                                <span class="text-xs text-slate-500">Ollama serialises requests, so a scan that starts first puts a multi-minute CPU build in the single slot and the preload queues <b>behind</b> it — models go resident long after the work that needed them. On by default.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max wait for model residency (s)</label>
+                                <input type="number" name="model_gate_max_wait_s" value="{{ settings.model_gate_max_wait_s if settings.model_gate_max_wait_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                <span class="text-xs text-slate-500">Cap on the above, so a preload that can never succeed cannot wedge scanning. On timeout AppBuilder proceeds and logs a warning. Default 3600.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Ollama model-load timeout (s)</label>
+                                <input type="number" name="ollama_preload_timeout_s" value="{{ settings.ollama_preload_timeout_s if settings.ollama_preload_timeout_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                <span class="text-xs text-slate-500">How long a model may take to become <b>resident</b> (preload), separate from inference timeout. A cold load is disk&nbsp;→&nbsp;RAM plus a num_ctx-sized KV allocation, so on a CPU-only box a 14B at 32k can take well over 15&nbsp;min. Default 3600. Raise this rather than lowering num_ctx.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Ollama context window (num_ctx)</label>
+                                <input type="number" name="ollama_num_ctx" value="{{ settings.ollama_num_ctx if settings.ollama_num_ctx is not none else 32768 }}" min="2048" step="1024" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                <span class="text-xs text-slate-500">Ollama prompt context size — prevents "prompt longer than context length" 400s. Default 32768; raise for very large fixes.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Ollama CPU threads (num_thread)</label>
+                                <input type="number" name="ollama_num_thread" value="{{ settings.ollama_num_thread if settings.ollama_num_thread is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                <span class="text-xs text-slate-500">CPU threads for ollama inference. 0 = ollama default (~physical cores). Set to your allocated core count to speed big models.</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Ollama max loaded models</label>
+                                <input type="number" name="ollama_max_loaded_models" value="{{ settings.ollama_max_loaded_models if settings.ollama_max_loaded_models is not none else 3 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                <span class="text-xs text-slate-500">OLLAMA_MAX_LOADED_MODELS — models kept resident at once. Set ≥ your ensemble size. Applied by running Local LLM Setup (writes ollama's systemd env).</span>
+                            </div>
+                            </div>
+                        </div>
+</details>
 
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
@@ -1989,74 +2099,10 @@
                                 <label class="text-sm font-medium text-slate-600">Global QA Test Command <span class="text-xs text-slate-500">fallback</span></label>
                                 <input type="text" name="QA_TEST_COMMAND" value="{{ settings.QA_TEST_COMMAND }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="e.g. pytest tests/target_repo">
                             </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Log Analysis interval (minutes)</label>
-                                <input type="number" name="log_analysis_interval_min" value="{{ settings.log_analysis_interval_min if settings.log_analysis_interval_min is not none else 30 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-500">How far back Log Analysis looks + how often the idle snapshot refreshes (default 30).</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Startup grace (seconds)</label>
-                                <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 300 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-500">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
-                            </div>
                             <!-- col-span-2, matching the parent md:grid-cols-2. It was
                                  col-span-3: a child spanning 3 tracks in a 2-track grid makes
                                  the browser add an implicit column, which distorts every track
                                  and squeezes the whole section into a narrow left-hand column. -->
-                            <div class="space-y-2 col-span-1 md:col-span-2 border-t border-slate-200 pt-4 mt-2">
-                                <div class="flex items-center justify-between">
-                                    <label class="text-sm font-medium text-slate-600">User Accounts <span class="text-slate-500 font-normal">(every account has full admin access)</span></label>
-                                    <button type="button" onclick="loadAuthUsers()" class="btn-sec px-3 py-1 rounded-full font-bold text-xs">Refresh</button>
-                                </div>
-                                <div id="auth-users-list" class="text-xs text-slate-500 italic">Not loaded.</div>
-                                <div class="grid grid-cols-1 md:grid-cols-3 gap-2 pt-2">
-                                    <input type="text" id="auth-new-user" placeholder="new username" autocomplete="off" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
-                                    <input type="password" id="auth-new-pass" placeholder="password (min 8 chars)" autocomplete="new-password" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
-                                    <div class="flex gap-2">
-                                        <button type="button" onclick="authCreateUser()" class="btn-primary flex-1 py-2 rounded font-bold text-xs">Add user</button>
-                                        <button type="button" onclick="authSetPassword()" class="btn-sec flex-1 py-2 rounded font-bold text-xs" title="Set the password for an EXISTING user with the name above">Set password</button>
-                                    </div>
-                                </div>
-                                <span id="auth-users-msg" class="text-xs"></span>
-                                <span class="text-xs text-slate-500 block">These act immediately — they are not part of the Save below. Locked out? From a shell on this host: <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; auth.set_password('user','newpass')"</code></span>
-                            </div>
-                                                        <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Claude CLI binary path</label>
-                                <input type="text" name="claude_binary" value="{{ settings.claude_binary or '' }}" placeholder="auto-detect (leave blank)" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-500">Absolute path to the <span class="font-mono">claude</span> binary. Blank auto-detects: PATH first, then the usual install dirs. Set this when the CLI slot reports "not found" despite Claude Code being installed — the service runs as its own user with systemd's minimal PATH, so a binary that resolves in your shell can be invisible here. Find it with <span class="font-mono">command -v claude</span>.</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="flex items-center gap-2 text-sm font-medium text-slate-600">
-                                    <input type="checkbox" name="gate_scans_on_model_preload" value="1" {{ 'checked' if settings.gate_scans_on_model_preload else '' }} class="w-4 h-4 accent-brand">
-                                    Hold scans until models are loaded
-                                </label>
-                                <span class="text-xs text-slate-500">Ollama serialises requests, so a scan that starts first puts a multi-minute CPU build in the single slot and the preload queues <b>behind</b> it — models go resident long after the work that needed them. On by default.</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Max wait for model residency (s)</label>
-                                <input type="number" name="model_gate_max_wait_s" value="{{ settings.model_gate_max_wait_s if settings.model_gate_max_wait_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-500">Cap on the above, so a preload that can never succeed cannot wedge scanning. On timeout AppBuilder proceeds and logs a warning. Default 3600.</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Ollama model-load timeout (s)</label>
-                                <input type="number" name="ollama_preload_timeout_s" value="{{ settings.ollama_preload_timeout_s if settings.ollama_preload_timeout_s is not none else 3600 }}" min="60" step="60" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-500">How long a model may take to become <b>resident</b> (preload), separate from inference timeout. A cold load is disk&nbsp;→&nbsp;RAM plus a num_ctx-sized KV allocation, so on a CPU-only box a 14B at 32k can take well over 15&nbsp;min. Default 3600. Raise this rather than lowering num_ctx.</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Ollama context window (num_ctx)</label>
-                                <input type="number" name="ollama_num_ctx" value="{{ settings.ollama_num_ctx if settings.ollama_num_ctx is not none else 32768 }}" min="2048" step="1024" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-500">Ollama prompt context size — prevents "prompt longer than context length" 400s. Default 32768; raise for very large fixes.</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Ollama CPU threads (num_thread)</label>
-                                <input type="number" name="ollama_num_thread" value="{{ settings.ollama_num_thread if settings.ollama_num_thread is not none else 0 }}" min="0" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-500">CPU threads for ollama inference. 0 = ollama default (~physical cores). Set to your allocated core count to speed big models.</span>
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Ollama max loaded models</label>
-                                <input type="number" name="ollama_max_loaded_models" value="{{ settings.ollama_max_loaded_models if settings.ollama_max_loaded_models is not none else 3 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                                <span class="text-xs text-slate-500">OLLAMA_MAX_LOADED_MODELS — models kept resident at once. Set ≥ your ensemble size. Applied by running Local LLM Setup (writes ollama's systemd env).</span>
-                            </div>
                             <div class="space-y-2 col-span-1 md:col-span-2">
                                 <label class="text-sm font-medium text-slate-600">Per-Repo Test Commands (repo:cmd, repo:cmd)</label>
                                 <textarea name="repo_tests" rows="2" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="my-org/repo1:npm test, my-org/repo2:pytest tests/core">{{ settings.repo_tests_str }}</textarea>
@@ -2073,44 +2119,6 @@
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-robot text-slate-500"></i>
                             <h4 class="text-sm font-bold text-slate-500">Fix &amp; Deploy</h4>
-                        </div>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Hub WebUI URL (approvals + status fallback)</label>
-                                <input type="text" name="HUB_QUERY_URL" value="{{ settings.HUB_QUERY_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="http://your-hub:8000">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Hub WebSocket URL</label>
-                                <input type="text" name="HUB_WS_URL" value="{{ settings.HUB_WS_URL }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="ws://your-hub:8765 (derived from Hub WebUI URL if blank)">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Hub Agent ID</label>
-                                <input type="text" name="HUB_AGENT_ID" value="{{ settings.HUB_AGENT_ID or 'ab' }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand" placeholder="ab">
-                            </div>
-                        </div>
-                        <!-- Hub Agent status / approval panel (AppBuilder authenticates to the
-                             Hub as a WebSocket agent — zero-touch onboarding, admin approval,
-                             then signed requests for logs + update triggers). -->
-                        <div class="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
-                            <div class="flex items-center justify-between mb-2">
-                                <span class="text-sm font-semibold text-slate-700">Hub Agent</span>
-                                <span id="hub-agent-badge" class="text-xs font-bold px-2 py-0.5 rounded-full"
-                                      data-status="{{ state.hub_agent_status }}">
-                                    {{ state.hub_agent_status }}
-                                </span>
-                            </div>
-                            <div id="hub-agent-message" class="text-xs text-slate-500 mb-2">{{ state.hub_agent_message }}</div>
-                            <div class="flex items-center gap-2">
-                                <button type="button" onclick="hubAgentReregister()"
-                                        class="px-3 py-1 text-xs btn-primary rounded-full font-bold">Re-register</button>
-                                <button type="button" onclick="hubAgentRefresh()"
-                                        class="px-3 py-1 text-xs btn-sec rounded-full font-bold">Refresh</button>
-                            </div>
-                            <p class="text-xs text-slate-500 mt-2">
-                                Approve <code class="bg-slate-100 px-1 rounded">ab</code> in the Hub WebUI → Setup → Spoke Approvals
-                                {% if settings.HUB_QUERY_URL %}at <a href="{{ settings.HUB_QUERY_URL }}" target="_blank" class="text-primary-text underline">{{ settings.HUB_QUERY_URL }}</a>{% endif %}.
-                                The session key is exchanged automatically after approval — zero-touch.
-                            </p>
                         </div>
         <!-- Project skills (skills_loader.py) — the repo-committed recipes
              (add-simulation, dual-copy-guard, ...) AppBuilder follows for fix/
@@ -2229,32 +2237,12 @@
                                 </select>
                             </div>
                             <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Max Concurrent Fixes</label>
-                                <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600" title="A SEPARATE gate from Max Concurrent Fixes, applied PER POOL: this many jobs can run at once in Code, a SEPARATE this-many in Log, and a separate this-many in Review — not one shared total. Within a pool, each provider slot runs one job at a time; a busy slot is skipped for the next free one, and if every slot in the pool is busy the call waits and retries rather than failing.">Max Concurrent LLM Calls <span class="text-slate-500 font-normal">(per pool — Code / Log / Review each get this many, independently)</span></label>
-                                <input type="number" name="LLM_MAX_CONCURRENT" value="{{ settings.LLM_MAX_CONCURRENT }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600">Max Issues Per Cycle <span class="text-slate-500 font-normal">(per repo — rest defer to next scan)</span></label>
-                                <input type="number" name="MAX_ISSUES_PER_CYCLE" value="{{ settings.MAX_ISSUES_PER_CYCLE }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                            </div>
-                            <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600">Prod Verification Days</label>
                                 <input type="number" name="PROD_VERIFICATION_DAYS" value="{{ settings.PROD_VERIFICATION_DAYS }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                             <div class="space-y-2">
                                 <label class="text-sm font-medium text-slate-600" title="A hub-escalated error filed within this many hours of a deploy lists the commits that just shipped and is labelled regression-suspect. 0 turns it off.">Post-Deploy Watch (hours)</label>
                                 <input type="number" name="post_deploy_window_h" value="{{ settings.post_deploy_window_h }}" min="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600" title="A failed or non-actionable issue whose error comes back is re-run once per this many hours, with the previous review feedback.">Failed Issue Retry (hours)</label>
-                                <input type="number" name="failed_retry_hours" value="{{ settings.failed_retry_hours }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
-                            </div>
-                            <div class="space-y-2">
-                                <label class="text-sm font-medium text-slate-600" title="Automatic re-runs before the issue is labelled ab-needs-human. 0 turns automatic retries off.">Failed Issue Max Retries</label>
-                                <input type="number" name="failed_retry_max" value="{{ settings.failed_retry_max }}" min="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
                             </div>
                         </div>
                         <div class="space-y-2 pt-6">
@@ -2293,7 +2281,7 @@
                     <section id="sec-sso" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fab fa-microsoft text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">Microsoft Entra Sign-in (SSO)</h4>
+                            <h4 class="text-sm font-bold text-slate-500">Sign-in: Microsoft Entra (SSO) and local users</h4>
                         </div>
                         <p class="text-xs text-slate-500 mb-2">
                             Lets people sign in with their Microsoft work account instead of a local
@@ -2362,6 +2350,30 @@
                                 <p class="text-xs text-slate-500">A certificate is preferred. Leaving this blank never wipes the stored secret.</p>
                             </div>
                         </div>
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">User accounts</label>
+                            <p class="text-xs text-slate-500">Local accounts for signing in without SSO.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                            <div class="space-y-2 col-span-1 md:col-span-2 border-t border-slate-200 pt-4 mt-2">
+                                <div class="flex items-center justify-between">
+                                    <label class="text-sm font-medium text-slate-600">User Accounts <span class="text-slate-500 font-normal">(every account has full admin access)</span></label>
+                                    <button type="button" onclick="loadAuthUsers()" class="btn-sec px-3 py-1 rounded-full font-bold text-xs">Refresh</button>
+                                </div>
+                                <div id="auth-users-list" class="text-xs text-slate-500 italic">Not loaded.</div>
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-2 pt-2">
+                                    <input type="text" id="auth-new-user" placeholder="new username" autocomplete="off" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                    <input type="password" id="auth-new-pass" placeholder="password (min 8 chars)" autocomplete="new-password" class="p-2 text-sm rounded border border-slate-300 outline-none focus:ring-2 focus:ring-brand">
+                                    <div class="flex gap-2">
+                                        <button type="button" onclick="authCreateUser()" class="btn-primary flex-1 py-2 rounded font-bold text-xs">Add user</button>
+                                        <button type="button" onclick="authSetPassword()" class="btn-sec flex-1 py-2 rounded font-bold text-xs" title="Set the password for an EXISTING user with the name above">Set password</button>
+                                    </div>
+                                </div>
+                                <span id="auth-users-msg" class="text-xs"></span>
+                                <span class="text-xs text-slate-500 block">These act immediately — they are not part of the Save below. Locked out? From a shell on this host: <code class="bg-slate-100 px-1 rounded">python3 -c "import sys; sys.path.insert(0,'/opt/ab'); import auth; auth.set_password('user','newpass')"</code></span>
+                            </div>
+                            </div>
+                        </div>
+
                         <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveOidcConfig(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save SSO settings</button>
                         </div>
@@ -2480,6 +2492,23 @@
                                 {% endif %}
                             </div>
                         </div>
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Log analysis &amp; startup</label>
+                            <p class="text-xs text-slate-500">How often logs are analysed and how long scans wait after a boot.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Log Analysis interval (minutes)</label>
+                                <input type="number" name="log_analysis_interval_min" value="{{ settings.log_analysis_interval_min if settings.log_analysis_interval_min is not none else 30 }}" min="1" step="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                <span class="text-xs text-slate-500">How far back Log Analysis looks + how often the idle snapshot refreshes (default 30).</span>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Startup grace (seconds)</label>
+                                <input type="number" name="startup_grace_seconds" value="{{ settings.startup_grace_seconds if settings.startup_grace_seconds is not none else 300 }}" min="0" step="15" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                                <span class="text-xs text-slate-500">Hold scans/LLM work this long after boot so ollama + services come up (avoids 404s + model reload). Default 300; 0 = off.</span>
+                            </div>
+                            </div>
+                        </div>
+
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
@@ -2605,7 +2634,7 @@
                     <section id="sec-scheduler" data-settings-section hidden>
                         <div class="flex items-center gap-2 mb-4 pb-2 border-b border-slate-200">
                             <i class="fas fa-clock text-slate-500"></i>
-                            <h4 class="text-sm font-bold text-slate-500">Scheduler</h4>
+                            <h4 class="text-sm font-bold text-slate-500">Schedule &amp; Limits</h4>
                         </div>
 
                         <!-- Live status widget -->
@@ -2713,6 +2742,33 @@
                                 <p class="text-xs text-slate-500">Default 3600s (1 hour). Used only during the configured work hours; otherwise the Off-Hours interval above applies.</p>
                             </div>
                         </div>
+                        <div class="space-y-2 mt-6 pt-4 border-t border-slate-200">
+                            <label class="text-sm font-semibold text-slate-700">Throughput &amp; retries</label>
+                            <p class="text-xs text-slate-500">How much work runs at once and when a failed issue is retried.</p>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max Concurrent Fixes</label>
+                                <input type="number" name="MAX_CONCURRENT_FIXES" value="{{ settings.MAX_CONCURRENT_FIXES }}" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600" title="A SEPARATE gate from Max Concurrent Fixes, applied PER POOL: this many jobs can run at once in Code, a SEPARATE this-many in Log, and a separate this-many in Review — not one shared total. Within a pool, each provider slot runs one job at a time; a busy slot is skipped for the next free one, and if every slot in the pool is busy the call waits and retries rather than failing.">Max Concurrent LLM Calls <span class="text-slate-500 font-normal">(per pool — Code / Log / Review each get this many, independently)</span></label>
+                                <input type="number" name="LLM_MAX_CONCURRENT" value="{{ settings.LLM_MAX_CONCURRENT }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600">Max Issues Per Cycle <span class="text-slate-500 font-normal">(per repo — rest defer to next scan)</span></label>
+                                <input type="number" name="MAX_ISSUES_PER_CYCLE" value="{{ settings.MAX_ISSUES_PER_CYCLE }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600" title="A failed or non-actionable issue whose error comes back is re-run once per this many hours, with the previous review feedback.">Failed Issue Retry (hours)</label>
+                                <input type="number" name="failed_retry_hours" value="{{ settings.failed_retry_hours }}" min="1" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-sm font-medium text-slate-600" title="Automatic re-runs before the issue is labelled ab-needs-human. 0 turns automatic retries off.">Failed Issue Max Retries</label>
+                                <input type="number" name="failed_retry_max" value="{{ settings.failed_retry_max }}" min="0" class="w-full p-2 rounded-lg outline-none focus:ring-2 focus:ring-brand">
+                            </div>
+                            </div>
+                        </div>
+
                                             <div class="flex justify-end pt-6 mt-2">
                             <button type="button" onclick="saveSettingsAjax(this)" class="px-6 py-2 rounded-full text-sm font-bold btn-primary">Save</button>
                         </div>
