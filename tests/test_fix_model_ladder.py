@@ -17,7 +17,7 @@ import types
 
 import pytest
 
-_FIX_NAMES = {"_model_allowed", "_ladder_models", "_ladder_exclusions"}
+_FIX_NAMES = {"_model_allowed", "_csv_models", "_ladder_models", "_ladder_exclusions"}
 _FIX_ASSIGNS = {"MODEL_POLICY_FILE"}
 
 
@@ -212,3 +212,9 @@ def test_explicit_provider_restriction_skips_the_ladder():
     body = src[head:src.index("\ndef ", head + 1)]
     gate = body[body.index("_ladder = None"):body.index("_ladder_exclusions(config")]
     assert "not requirements.restrict" in gate and "not requirements.pin_key" in gate
+
+
+def test_fix_ladder_models_setting_overrides_the_policy():
+    """FIX_LADDER_MODELS, when set, is the coding ladder (deduplicated, in order)."""
+    ns = _load(lambda cfg: [])
+    assert ns["_ladder_models"]({"FIX_LADDER_MODELS": "x, y x"}) == ("x", "y")

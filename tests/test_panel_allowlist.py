@@ -22,7 +22,7 @@ _PANEL_NAMES = {
     "_reviewer_name", "_reviewer_vote", "_extract_reviewer_verdict",
     "_has_verdict_key", "_canon_verdict_keys", "_balanced_brace_span",
     "_is_local_provider", "_cloud_frontier_fallback", "_progress",
-    "_resolve_builder", "_review_ladder", "_review_policy", "_lm_review_filters",
+    "_resolve_builder", "_review_ladder", "_review_policy", "_csv_models", "_lm_review_filters",
     "_build_critique_reviews", "_ladder_result", "_run_review_ladder",
 }
 _PANEL_ASSIGNS = {

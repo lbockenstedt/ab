@@ -2965,8 +2965,17 @@ def _fix_allowlist(config):
 MODEL_POLICY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".github", "model-policy.json")
 
 
-def _ladder_models():
-    """The coding ladder's model ids from MODEL_POLICY_FILE, in order; () when the file is missing or unreadable."""
+def _csv_models(value):
+    """Model ids from a comma/space separated Settings value, in order, without repeats."""
+    return tuple(dict.fromkeys(m.strip() for m in re.split(r"[,\s]+", str(value or "")) if m.strip()))
+
+
+def _ladder_models(config=None):
+    """The coding ladder's model ids, in order: the Settings override (FIX_LADDER_MODELS)
+    when set, else MODEL_POLICY_FILE; () when neither is usable."""
+    override = _csv_models((config or {}).get("FIX_LADDER_MODELS"))
+    if override:
+        return override
     try:
         with open(MODEL_POLICY_FILE, encoding="utf-8") as f:
             data = json.load(f)
@@ -2979,18 +2988,31 @@ def _ladder_models():
 _REVIEW_PASS_FLOOR = 0.90
 
 
-def _review_policy():
-    """The ``review`` section from MODEL_POLICY_FILE, or ``{}`` on any error.
-
-    Reads the review ladder, pass_confidence, and frontier model ids.
-    Mirrors the try/except pattern of ``_ladder_models``.
-    """
+def _review_policy(config=None):
+    """The ``review`` section from MODEL_POLICY_FILE (``{}`` on any error), with the
+    Settings overrides applied: REVIEW_LADDER_MODELS, REVIEW_FRONTIER_FOR_CLAUDE,
+    REVIEW_FRONTIER_FOR_OTHER and REVIEW_PASS_CONFIDENCE. A blank override keeps the
+    file's value, so new models are swapped in from the UI without a release."""
     try:
         with open(MODEL_POLICY_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        return dict(data.get("review", {}))
+        policy = dict(data.get("review", {}))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return {}
+        policy = {}
+    cfg = config or {}
+    ladder = _csv_models(cfg.get("REVIEW_LADDER_MODELS"))
+    if ladder:
+        policy["ladder"] = list(ladder)
+    frontier = dict(policy.get("frontier") or {})
+    for key, name in (("anthropic_author", "REVIEW_FRONTIER_FOR_CLAUDE"),
+                      ("other_author", "REVIEW_FRONTIER_FOR_OTHER")):
+        if str(cfg.get(name) or "").strip():
+            frontier[key] = str(cfg[name]).strip()
+    if frontier:
+        policy["frontier"] = frontier
+    if str(cfg.get("REVIEW_PASS_CONFIDENCE") or "").strip():
+        policy["pass_confidence"] = cfg["REVIEW_PASS_CONFIDENCE"]
+    return policy
 
 
 def _ladder_exclusions(config, existing=()):
@@ -3008,7 +3030,7 @@ def _ladder_exclusions(config, existing=()):
     # Knob off, or no policy file: nothing to climb.
     if not (config or {}).get("FIX_MODEL_LADDER", True):
         return None
-    models = _ladder_models()
+    models = _ladder_models(config)
     if not models:
         return None
     # Enumeration failure must never block fixing; fall back to the cost-first picker.
@@ -3513,7 +3535,7 @@ def _review_ladder(config, builder_n=None, builder_key=None):
     if not (config or {}).get("REVIEW_MODEL_LADDER", True):
         return None
     # Read the review policy from the model-policy file.
-    policy = _review_policy()
+    policy = _review_policy(config)
     frontier = policy.get("frontier")
     if not isinstance(frontier, dict):
         return None
