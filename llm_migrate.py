@@ -189,6 +189,12 @@ def upgrade_registry(config, *, log=None):
         log.info("LLM registry: added per-model copilot capability rules %s "
                     "(Opus/Sonnet/GPT-5=frontier, Haiku/GPT-4/mini=cheap).",
                     _added_copilot)
+    # Add the LM worker-pool rule.
+    _topped, _added_pool = model_registry.upgrade_lm_pool_rule(config["model_registry"])
+    if _added_pool:
+        config["model_registry"] = _topped
+        changed = True
+        log.info("LLM registry: added the LM worker-pool rule %s.", _added_pool)
     # Add the OpenRouter free router rule.
     _topped, _added_router = model_registry.upgrade_openrouter_free_router_rule(config["model_registry"])
     if _added_router:

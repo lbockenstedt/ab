@@ -206,6 +206,7 @@ def _wire_dispatch(ns):
     ns["_is_copilot"] = lambda p: p == "copilot"
     ns["_is_ollama"] = lambda p: p == "ollama"
     ns["_is_lmstudio"] = lambda p: p == "lmstudio"
+    ns["_is_lm_pool"] = lambda p: p == "lm_pool"
     ns["_normalize_lmstudio_url"] = lambda u: u or "http://127.0.0.1:1234/v1"
     ns["OPENROUTER_BASE_URL"] = "https://openrouter.ai/api/v1"
     ns["OPENROUTER_HEADERS"] = {}
