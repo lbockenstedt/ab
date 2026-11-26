@@ -56,6 +56,8 @@ DEFAULTS = {
 # on a spoke command inside the request (self-update, autorack, exec,
 # dhcp-diagnostics), and no user page uses it (lm#1747, lm#1866, lm#1889, lm#1891).
 _SLOW_ROUTE_EXEMPT_PREFIX = "/admin/ops/"
+# LLM worker commands run model inference or pull multi-GB models on CPU, taking minutes by design.
+_SLOW_COMMAND_EXEMPT_PREFIX = "LLM_"
 
 # Command prefix -> MODULE_TYPE_REPO key (log_scan) of the repo that owns it.
 _PREFIX_MODULE = {
@@ -230,6 +232,8 @@ def evaluate(report: Optional[Dict[str, Any]], log_lines: List[str],
                  f"avg {r['avg_s']}s, max {r['max_s']}s"],
                 f"`{r['key']}` is slow for users."))
     for r in perf.get("commands") or []:
+        if r["key"].startswith(_SLOW_COMMAND_EXEMPT_PREFIX):
+            continue
         if (r["slow"] >= c["hc_slow_command_min_hits"]
                 and 100.0 * r["slow"] / max(r["count"], 1) >= c["hc_slow_command_pct"]):
             out.append(_finding(
