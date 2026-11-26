@@ -3580,13 +3580,28 @@ DEFAULT_LM_TASKS = {
 }
 
 
+LM_PROMPT_MAX_BYTES = 60000  # the hub rejects prompts over 65536 bytes as invalid_request
+
+
+def _fit_lm_prompt(prompt):
+    """Keep a prompt within the hub's size limit by dropping its middle (head and tail carry the task)."""
+    raw = prompt.encode("utf-8", errors="replace")
+    if len(raw) <= LM_PROMPT_MAX_BYTES:
+        return prompt
+    half = LM_PROMPT_MAX_BYTES // 2
+    logger.info("LM prompt of %d bytes trimmed to fit the pool limit", len(raw))
+    return (raw[:half].decode("utf-8", errors="ignore")
+            + "\n\n[... middle of the prompt omitted to fit the local model limit ...]\n\n"
+            + raw[-half:].decode("utf-8", errors="ignore"))
+
+
 def _lm_hub_request(task, prompt):
     """Send one LLM_COMPLETE job to the hub; return its reply dict, or None with no hub client."""
     from workers import _get_hub_agent_client
     client = _get_hub_agent_client()
     if not client:
         return None
-    return client.request_sync("LLM_COMPLETE", {"task": task, "prompt": prompt},
+    return client.request_sync("LLM_COMPLETE", {"task": task, "prompt": _fit_lm_prompt(prompt)},
                                timeout=LM_COMPLETE_TIMEOUT_S)
 
 
