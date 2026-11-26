@@ -4612,6 +4612,21 @@ def verify_already_resolved(repo_path, issue_body, config, task_id=None,
         return {}
 
 
+def _strip_repo_prefix(repo_root, filepath):
+    """Longest trailing part of `filepath` that is an existing file under `repo_root`, else None.
+
+    Only leading directories are dropped, so "lm/core/src/x.py" finds "core/src/x.py" but
+    nothing is guessed from the file name alone."""
+    parts = [s for s in str(filepath).replace("\\", "/").split("/") if s not in ("", ".")]
+    if ".." in parts:
+        return None
+    for i in range(1, len(parts)):
+        cand = "/".join(parts[i:])
+        if os.path.isfile(os.path.join(repo_root, cand)):
+            return cand
+    return None
+
+
 def _safe_repo_target(repo_root, filepath, what="apply fix"):
     """Resolve *filepath* under *repo_root*, rejecting absolute paths, ``..``
     traversal, and symlinks that escape the repo. Returns the absolute path or
@@ -5324,8 +5339,15 @@ def parse_and_apply(content, repo_path, *, feedback_out=None):
                 if not full_path:
                     continue
                 if not os.path.isfile(full_path):
-                    logger.error(f"Skipping edit: target file does not exist: {filepath!r}")
-                    continue
+                    # Local models often prefix the repo name ("lm/core/src/x.py"); retry
+                    # with the longest trailing path that exists in this checkout.
+                    _alt = _strip_repo_prefix(repo_root, filepath)
+                    _alt_full = _safe_repo_target(repo_root, _alt) if _alt else None
+                    if not _alt_full:
+                        logger.error(f"Skipping edit: target file does not exist: {filepath!r}")
+                        continue
+                    logger.info("Edit path %r not found; using %r", filepath, _alt)
+                    filepath, full_path = _alt, _alt_full
                 # Read each file once, keeping the original to compare against later.
                 if full_path not in file_contents:
                     try:
