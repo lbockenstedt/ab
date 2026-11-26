@@ -224,6 +224,10 @@ Where the climb happens:
   the critique, as before. The Opus-only last turn and the premium turn bar
   the lower rungs, so the ladder treats them as used.
 
+## Ask AI and the chat model
+
+The hub's **Ask AI** button relays each turn to AB as `HELP_ASK`, which runs as the chat agent: it follows the **chat model** pin (`chat_pin`, Settings → LLM Providers), whatever the turn's role. Pin it to the Sonnet endpoint to fix the model; with no pin AB picks by role as before.
+
 ## Local models through LM
 
 AB tries the LM-hosted local models before any cloud provider, over the mTLS
@@ -233,7 +237,7 @@ the default routes `triage`, `identify_files` and `classify` to `scout`,
 the fix generator (`fix`) to `coding`. An empty map turns it off. Only
 prompt-only calls go to LM (no tools, no native checkout, no message list). By
 default (`lm_pool_only`, true) these tasks never fall back to cloud: a busy or
-unreachable pool is retried every minute for `lm_pool_wait_s` (default 3600)
+unreachable pool is retried every `lm_pool_poll_s` seconds (default 15) for `lm_pool_wait_s` (default 3600); the hub itself queues a job for a busy worker (oldest first, up to its `llm_queue_wait_s`, default 600) before it answers `no_capacity`
 and then the call fails (`LmPoolUnavailable`); a hub that does not allow the
 task fails at once. A fix runs on the pool on every attempt, retries included.
 With `lm_pool_only` false, a miss continues with the normal providers. The hub owns the tenant and task allowlist

@@ -72,3 +72,22 @@ def test_oversized_prompt_is_trimmed_to_the_hub_limit():
     _load(client)[0]("identify_files", "H" + "x" * 400000 + "T", None, {})
     sent = client.sent[0][1]["prompt"]
     assert len(sent.encode()) < 192 * 1024 and sent.startswith("H") and sent.endswith("T")
+
+
+def test_busy_pool_is_retried_on_the_poll_interval_until_a_worker_frees():
+    """A busy pool is polled every lm_pool_poll_s (default 15s), not every minute, and the job
+    runs as soon as a worker answers."""
+    replies = [{"status": "ERROR", "code": "no_capacity"}] * 2 + [{"status": "SUCCESS", "text": "done"}]
+
+    class _Seq(_Client):
+        def request_sync(self, kind, data, timeout):
+            self.sent.append((kind, data))
+            return replies[len(self.sent) - 1]
+
+    for cfg, wait in (({}, 15.0), ({"lm_pool_poll_s": 5}, 5.0)):
+        client = _Seq(None)
+        fn, ns = _load(client)
+        sleeps = []
+        ns["time"].sleep = sleeps.append
+        assert fn("log_review", "p", "", cfg) == "done"
+        assert sleeps == [wait, wait] and len(client.sent) == 3
