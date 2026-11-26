@@ -13,10 +13,10 @@ def test_diagnostic_marker_detection():
 
 
 def test_patterns_default_override_and_blank(monkeypatch):
-    assert sm.patterns({}, "diag_fix") == ("claude-opus-5*", "claude-opus-6*")
+    assert sm.patterns({}, "diag_fix") == ("coding", "claude-opus-5*", "claude-opus-6*")
     assert sm.patterns({"diagnostic_fix_models": "gpt-7*, Claude-Opus-7*"}, "diag_fix") == (
         "gpt-7*", "claude-opus-7*")
-    assert sm.patterns({"diagnostic_fix_models": []}, "diag_fix") == ("claude-opus-5*", "claude-opus-6*")
+    assert sm.patterns({"diagnostic_fix_models": []}, "diag_fix")[0] == "coding"
 
 
 def test_exclusions_keep_only_matching_models(monkeypatch):
@@ -59,3 +59,14 @@ def test_a_model_tried_by_name_is_used_up(monkeypatch):
     monkeypatch.setattr(llm_client, "_enumerate_candidates",
                         lambda cfg: _cands("claude-haiku-4-5", "claude-sonnet-5.5", "claude-opus-5.1"))
     assert sm.exclusions({}, "diag_fix", ("claude-opus-5.1",)) == ("claude-opus-5.1",)
+
+
+def test_ladder_lists_local_models_before_cloud(monkeypatch):
+    c = lambda m, prov, tier: {"key": (prov, "", m), "model": m, "provider": prov, "caps": {"cost_tier": tier}}
+    monkeypatch.setattr(llm_client, "_enumerate_candidates", lambda cfg: [
+        c("claude-opus-5.5", "copilot", "frontier"), c("reasoning", "lm_pool", "free"),
+        c("coding", "lm_pool", "free"), c("gpt-4o", "copilot", "cheap")])
+    monkeypatch.setattr(sm, "patterns", lambda cfg, st: ("coding", "reasoning", "claude-opus-*"))
+    rows = sm.ladder({}, "diag_fix")
+    assert [r["model"] for r in rows] == ["coding", "reasoning", "claude-opus-5.5"]
+    assert [r["where"] for r in rows] == ["Local (free)", "Local (free)", "Cloud"]
