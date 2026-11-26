@@ -380,7 +380,7 @@ def _summarize_changes(pr, files, config, repo=None):
     # Call the LLM; any failure just skips the summary.
     try:
         out = call_llm(prompt, system_prompt=system, requirements=reqs,
-                       batch_kind="pr_summary", batch_context=batch_context)
+                       batch_kind="pr_summary", batch_context=batch_context, lm_task="pr_summary")
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: change-summary skipped (%s)", e)
         return ""
@@ -509,7 +509,7 @@ def _regenerate_pr_description(pr, files, critique, config, repo=None):
     reqs = LlmRequirements(complexity="medium", deprioritize_local=True,
                            min_context_tokens=len(prompt) // 4)
     try:
-        out = call_llm(prompt, system_prompt=system, requirements=reqs)
+        out = call_llm(prompt, system_prompt=system, requirements=reqs, lm_task="pr_summary")
     except Exception as e:  # noqa: BLE001
         logger.info("pr_review: description fix skipped (%s)", e)
         return ""

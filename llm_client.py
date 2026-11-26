@@ -3651,8 +3651,9 @@ def lm_complete(lm_task, prompt, system_prompt, config):
 
     The AB task maps through config["lm_llm_tasks"] ({ab_task: lm_task}); the hub
     decides the tenant and the allowed tasks from the AppBuilder client certificate.
-    With lm_pool_only (default) a busy or unreachable pool is retried until
-    config["lm_pool_wait_s"] (default 3600) passes, then LmPoolUnavailable is raised
+    With lm_pool_only (default) a busy or unreachable pool is retried every
+    config["lm_pool_poll_s"] seconds (default 15, so a freed worker is used within
+    seconds) until config["lm_pool_wait_s"] (default 3600) passes, then LmPoolUnavailable is raised
     so the caller never silently spends cloud tokens. A misconfigured hub
     (not_configured) raises at once, since waiting cannot fix it. With
     lm_pool_only off, any miss returns None and the normal chain runs.
@@ -3674,7 +3675,7 @@ def lm_complete(lm_task, prompt, system_prompt, config):
             return None
         if code == "not_configured" or time.monotonic() >= deadline:
             raise LmPoolUnavailable("LM pool %s unavailable: %s" % (target, code))
-        time.sleep(60)
+        time.sleep(max(1.0, float((config or {}).get("lm_pool_poll_s", 15))))
 
 
 def call_llm(prompt, system_prompt="You are a helpful AI assistant.", task_id=None, messages=None, tools=None, stream=None,
