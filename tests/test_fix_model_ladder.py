@@ -12,6 +12,7 @@ import ast
 import fnmatch
 import json
 import os
+import re
 import types
 
 import pytest
@@ -36,7 +37,7 @@ def _load(enumerate_fn):
                 getattr(t, "id", None) in _FIX_ASSIGNS for t in node.targets):
             segs.append(ast.get_source_segment(src, node))
     llm = types.SimpleNamespace(_enumerate_candidates=enumerate_fn)
-    ns = {"json": json, "os": os, "fnmatch": fnmatch, "logger": _NoLog(),
+    ns = {"json": json, "os": os, "re": re, "fnmatch": fnmatch, "logger": _NoLog(),
           "llm_client": llm, "__file__": os.path.abspath("fix_engine.py")}
     exec("\n\n".join(segs), ns)
     return ns
@@ -93,6 +94,23 @@ def test_missing_policy_or_knob_off_returns_none(ns, tmp_path, monkeypatch):
     assert ns["_ladder_exclusions"]({}) is None
     monkeypatch.setitem(ns, "MODEL_POLICY_FILE", str(tmp_path / "model-policy.json"))
     assert ns["_ladder_exclusions"]({"FIX_MODEL_LADDER": False}) is None
+
+
+def test_rung_falls_back_to_an_enabled_version_of_the_same_family(tmp_path, monkeypatch):
+    """With only claude-haiku-4.5 enabled, the haiku-5.5 rung seats it instead of jumping to sonnet;
+    an exact match still wins when present, and unrelated families never match."""
+    policy = tmp_path / "model-policy.json"
+    policy.write_text(json.dumps(LADDER), encoding="utf-8")
+    old_haiku = _cand("claude-haiku-4.5")
+    ns = _load(lambda cfg: [old_haiku, SONNET, OPUS, GPT])
+    monkeypatch.setitem(ns, "MODEL_POLICY_FILE", str(policy))
+    excl = ns["_ladder_exclusions"]({}, existing=())
+    assert old_haiku["key"] not in excl and SONNET["key"] in excl
+    excl = ns["_ladder_exclusions"]({}, existing=(old_haiku["key"],))
+    assert SONNET["key"] not in excl and old_haiku["key"] in excl
+    ns = _load(lambda cfg: [old_haiku, HAIKU, SONNET])
+    monkeypatch.setitem(ns, "MODEL_POLICY_FILE", str(policy))
+    assert HAIKU["key"] not in ns["_ladder_exclusions"]({}, existing=())
 
 
 def test_unconfigured_rung_is_skipped(tmp_path, monkeypatch):
